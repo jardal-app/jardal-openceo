@@ -1,0 +1,97 @@
+[accounts."admin@jardal.app"]
+header_name_es = "Jardal"
+header_name_en = "Jardal"
+signature_name = "Luis Diego Claros"
+signature_title_es = "Gerente Propietario"
+signature_title_en = "Owner"
+
+[accounts."ceo@jardal.app"]
+header_name_es = "Jardal"
+header_name_en = "Jardal"
+signature_name = "Andres Quiroga"
+signature_title_es = "Direccion General"
+signature_title_en = "Executive Management"
+
+[accounts."dev@jardal.app"]
+header_name_es = "Jardal"
+header_name_en = "Jardal"
+signature_name = "Mateo Vargas"
+signature_title_es = "Area de Desarrollo"
+signature_title_en = "Development"
+
+[accounts."marketing@jardal.app"]
+header_name_es = "Jardal"
+header_name_en = "Jardal"
+signature_name = "Valentina Perez"
+signature_title_es = "Area de Marketing"
+signature_title_en = "Marketing"
+
+[accounts."finance@jardal.app"]
+header_name_es = "Jardal"
+header_name_en = "Jardal"
+signature_name = "Natalia Guzman"
+signature_title_es = "Area de Finanzas"
+signature_title_en = "Finance"
+
+[accounts."finanzas@jardal.app"]
+header_name_es = "Jardal"
+header_name_en = "Jardal"
+signature_name = "Natalia Guzman"
+signature_title_es = "Area de Finanzas"
+signature_title_en = "Finance"
+
+[accounts."sales@jardal.app"]
+header_name_es = "Jardal"
+header_name_en = "Jardal"
+signature_name = "Sofia Mendoza"
+signature_title_es = "Area de Ventas"
+signature_title_en = "Sales"
+
+[accounts."ventas@jardal.app"]
+header_name_es = "Jardal"
+header_name_en = "Jardal"
+signature_name = "Valeria Ruiz"
+signature_title_es = "Area de Ventas"
+signature_title_en = "Sales"
+
+[accounts."media@jardal.app"]
+header_name_es = "Jardal"
+header_name_en = "Jardal"
+signature_name = "Luciana Flores"
+signature_title_es = "Media"
+signature_title_en = "Media"
+
+[accounts."hr@jardal.app"]
+header_name_es = "Jardal"
+header_name_en = "Jardal"
+signature_name = "Gabriela Nunez"
+signature_title_es = "Recursos Humanos"
+signature_title_en = "Human Resources"
+
+[accounts."pm@jardal.app"]
+header_name_es = "Jardal"
+header_name_en = "Jardal"
+signature_name = "Diego Rivera"
+signature_title_es = "Project Manager"
+signature_title_en = "Project Management"
+
+[accounts."legal@jardal.app"]
+header_name_es = "Jardal"
+header_name_en = "Jardal"
+signature_name = "Martina Alvarez"
+signature_title_es = "Area Legal"
+signature_title_en = "Legal"
+
+[accounts."support@jardal.app"]
+header_name_es = "Jardal"
+header_name_en = "Jardal"
+signature_name = "Javier Ortega"
+signature_title_es = "Soporte"
+signature_title_en = "Support"
+
+[accounts."soporte@jardal.app"]
+header_name_es = "Jardal"
+header_name_en = "Jardal"
+signature_name = "Javier Ortega"
+signature_title_es = "Soporte"
+signature_title_en = "Support"

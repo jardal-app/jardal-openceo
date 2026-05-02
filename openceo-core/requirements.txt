@@ -1,0 +1,20 @@
+# Shared runtime dependencies only.
+# Agent-specific packages live in openceo-core/agents/*/requirements.txt.
+fastapi==0.115.14
+uvicorn[standard]==0.35.0
+motor==3.7.1
+pydantic==2.11.7
+pydantic-settings==2.10.1
+python-dotenv==1.1.1
+PyYAML==6.0.2
+langgraph==0.6.7
+langchain-openai==0.3.31
+httpx==0.28.1
+fastmcp==2.14.5
+# Auth dependencies
+PyJWT==2.10.1
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+
+# R2 / S3 storage
+boto3>=1.34.0

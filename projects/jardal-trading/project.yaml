@@ -1,0 +1,59 @@
+project:
+  name: jardal-trading
+  repos:
+    - name: jardal-trading
+      local_path: /home/develop/development/Jardal/jardal-trading
+
+dev:
+  coding_tool: tier_s
+  coding_tier: auto
+  default_provider: claude
+  branch_pattern: "{session_id}-{slug}"
+  auto_push: false
+  create_pr: true
+  pr_body: auto
+  tier_s:
+    enabled: true
+    iterations: 2
+    timeout_minutes: 15
+    lead: claude
+    reviewers:
+      - codex
+      - gemini
+      - opencode
+    keep_sessions_alive: true
+    max_steps: 12
+
+  providers:
+    codex:
+      command: ["/home/develop/.npm-global/bin/codex", "--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5.4", "-c", "model_reasoning_effort=xhigh"]
+      cwd: /home/develop/development/Jardal/jardal-trading
+      env: {}
+
+    claude:
+      command: ["/home/develop/.local/bin/claude", "--dangerously-skip-permissions", "--model", "opus", "--effort", "high"]
+      cwd: /home/develop/development/Jardal/jardal-trading
+      env:
+        ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-4-6
+
+    gemini:
+      command: ["/home/develop/.npm-global/bin/gemini", "-m", "gemini-3.1-pro-preview"]
+      cwd: /home/develop/development/Jardal/jardal-trading
+      env: {}
+
+    opencode:
+      command: ["/home/develop/.opencode/bin/opencode", "-m", "deepseek/deepseek-reasoner"]
+      cwd: /home/develop/development/Jardal/jardal-trading
+      env: {}
+
+  qa:
+    playwright: skip
+    confidence_threshold: 0.90
+    max_retries: 2
+
+voice:
+  peer_programming:
+    enabled: true
+    require_project_selection: false
+
+notifications: []

@@ -1,0 +1,63 @@
+project:
+  name: melanyryr
+  repos:
+    - name: melanyryr
+      url: git@github-jardal:jardal-app/melanyryr.git
+      branch_base: develop
+      local_path: /home/develop/development/Jardal/melanyryr
+    - name: MelanyRyR_react
+      local_path: /home/develop/development/Jardal/melanyryr/MelanyRyR_react
+    - name: MelanyRyR_rest
+      local_path: /home/develop/development/Jardal/melanyryr/MelanyRyR_rest
+    - name: MelanyRyR_pwa
+      local_path: /home/develop/development/Jardal/melanyryr/MelanyRyR_pwa
+
+dev:
+  coding_tool: codex
+  coding_tier: auto
+  default_provider: codex
+  branch_pattern: "{session_id}-{slug}"
+  auto_push: false
+  create_pr: true
+  pr_body: auto
+
+  providers:
+    codex:
+      command: ["/home/develop/.npm-global/bin/codex", "--sandbox", "workspace-write", "-a", "never", "--no-alt-screen", "-m", "gpt-5.4", "-c", "model_reasoning_effort=xhigh"]
+      cwd: /home/develop/development/Jardal/melanyryr
+      env: {}
+
+    claude:
+      command: ["/home/develop/.local/bin/claude", "--dangerously-skip-permissions", "--model", "opus", "--effort", "high"]
+      cwd: /home/develop/development/Jardal/melanyryr
+      env:
+        ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-4-6
+
+    gemini:
+      command: ["/home/develop/.npm-global/bin/gemini", "-m", "gemini-3.1-pro-preview"]
+      cwd: /home/develop/development/Jardal/melanyryr
+      env: {}
+
+    kimi:
+      command: ["/home/develop/.local/bin/kimi"]
+      cwd: /home/develop/development/Jardal/melanyryr
+      env: {}
+
+    opencode:
+      command: ["/home/develop/.opencode/bin/opencode", "-m", "opencode-go/kimi-k2.6"]
+      cwd: /home/develop/development/Jardal/melanyryr
+      env: {}
+
+  review_base_url: https://dev.melanyryr.jardal.app
+
+  qa:
+    playwright: skip
+    confidence_threshold: 0.90
+    max_retries: 2
+
+voice:
+  peer_programming:
+    enabled: true
+    require_project_selection: false
+
+notifications: []

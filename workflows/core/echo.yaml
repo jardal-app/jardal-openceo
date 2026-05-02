@@ -1,0 +1,14 @@
+workflow: core.echo
+name: Echo Workflow
+agent: ceo
+description: Safe deterministic workflow used to validate YAML execution without side effects.
+auto_match: false
+triggers: []
+steps:
+  - id: echo
+    tool: core.echo
+    params:
+      task_id: "{{task.task_id}}"
+      title: "{{task.title}}"
+      payload: "{{task.params.payload}}"
+

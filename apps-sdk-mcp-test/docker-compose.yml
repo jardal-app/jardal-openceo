@@ -1,0 +1,59 @@
+services:
+  apps-sdk-mcp-test:
+    build:
+      context: ..
+      dockerfile: apps-sdk-mcp-test/Dockerfile
+    container_name: apps-sdk-mcp-test
+    restart: unless-stopped
+    environment:
+      PORT: "8787"
+      MCP_PATH: /mcp
+      MCP_TEST_NAME: openceo-chatgpt-connector
+      MCP_TEST_AUTH_MODE: optional
+      MCP_TEST_OAUTH_PROVIDER: embedded
+      MCP_TEST_OAUTH_AUTO_APPROVE: "true"
+      MCP_TEST_OAUTH_ACCESS_TOKEN_TTL_SECONDS: "2592000"
+      MCP_TEST_DATA_DIR: /data
+      OPENCEO_REPO_ROOT: /home/develop/development/Jardal/jardal-openceo
+      OPENCEO_PYTHON_BIN: python3
+      HOME: /home/develop
+      SMTP_HOST: mailserver
+      APP_PUBLIC_BASE_URL: https://mcp.openceo.jardal.app
+      MCP_TEST_OAUTH_SCOPES: connector.access
+      MCP_TEST_DEMO_USER_SUB: demo-user
+      MCP_TEST_DEMO_USER_EMAIL: demo@example.com
+      MCP_TEST_DEMO_USER_NAME: Demo User
+    volumes:
+      - apps-sdk-mcp-test-data:/data
+      - /home/develop/development:/home/develop/development
+      - /home/develop/.npm-global:/home/develop/.npm-global:ro
+      - /home/develop/.local:/home/develop/.local:ro
+      - /home/develop/.opencode:/home/develop/.opencode:ro
+      - /home/develop/.codex:/home/develop/.codex:ro
+      - /home/develop/.claude:/home/develop/.claude:ro
+      - /tmp:/tmp
+    networks:
+      - traefik-net
+      - jardal-internal-net
+      - jardal-mail-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.openceo-mcp-test.rule=Host(`mcp.openceo.jardal.app`)"
+      - "traefik.http.routers.openceo-mcp-test.entrypoints=websecure"
+      - "traefik.http.routers.openceo-mcp-test.tls.certresolver=jardal-resolver"
+      - "traefik.http.services.openceo-mcp-test.loadbalancer.server.port=8787"
+
+networks:
+  traefik-net:
+    external: true
+    name: traefik-net
+  jardal-internal-net:
+    external: true
+    name: jardal-internal-net
+  jardal-mail-net:
+    external: true
+    name: jardal-mail-net
+
+volumes:
+  apps-sdk-mcp-test-data:

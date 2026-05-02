@@ -1,0 +1,28 @@
+services:
+  openceo-react:
+    image: node:22-alpine
+    container_name: openceo-react
+    restart: unless-stopped
+    working_dir: /app
+    command: sh -c "npm install --include=dev && npm run dev"
+    env_file:
+      - .env
+    volumes:
+      - ./src:/app/src
+      - ./public:/app/public
+      - ./index.html:/app/index.html
+      - ./vite.config.js:/app/vite.config.js
+      - ./package.json:/app/package.json
+      - ./.env:/app/.env
+      - openceo_react_node_modules:/app/node_modules
+    expose:
+      - "3000"
+    networks:
+      - traefik-net
+
+volumes:
+  openceo_react_node_modules:
+
+networks:
+  traefik-net:
+    external: true

@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenCEO Core (Host Mode, no Docker)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/develop/development/Jardal/jardal-openceo
+ExecStart=/home/develop/development/Jardal/jardal-openceo/scripts/openceo-core-host-runner.sh
+Restart=always
+RestartSec=3
+Environment=OPENCEO_HOST_PORT=18765
+
+[Install]
+WantedBy=default.target

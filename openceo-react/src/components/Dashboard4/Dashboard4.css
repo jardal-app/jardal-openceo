@@ -1,0 +1,193 @@
+.dark-theme {
+    /* Colores de fondo */
+    --color-background: #121212;
+    /* Fondo principal */
+    --color-background-secondary: #1e1e1e;
+    /* Fondo secundario o de tarjetas/paneles */
+    --color-background-tertiary: #242424;
+    /* Fondo para barras de navegación o cabeceras */
+
+    /* Colores de texto */
+    --color-text-primary: #ffffff;
+    /* Texto principal */
+    --color-text-secondary: #b3b3b3;
+    /* Texto secundario o menos prominente */
+    --color-text-muted: #808080;
+    /* Texto con menor énfasis */
+
+    /* Colores para bordes y separadores */
+    --color-border: #333333;
+
+    /* Colores de estado, como errores, éxito, advertencia, etc. */
+    --color-error: #ff5555;
+    --color-success: #4caf50;
+    --color-warning: #ff9800;
+
+    /* Colores adicionales para links, botones, etc. */
+    --color-link: #bb86fc;
+    --color-button-background: #333333;
+    --color-button-text: #ffffff;
+
+    /* Aplicar colores a elementos generales */
+    body {
+        background-color: var(--color-background);
+        color: var(--color-text-primary);
+    }
+
+    a {
+        color: var(--color-link);
+    }
+
+    .button {
+        background-color: var(--color-button-background);
+        color: var(--color-button-text);
+    }
+
+    /* Agrega estilos adicionales según necesites */
+}
+
+
+
+@media print {
+    .no-print {
+        display: none;
+    }
+}
+
+.dashboard4-shell {
+    background-color: var(--oceo-black);
+    color: var(--oceo-text-1);
+    min-height: 100vh;
+    position: relative;
+    isolation: isolate;
+}
+
+.dashboard4-shell::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(900px at 12% 8%, rgba(46, 134, 230, 0.16), transparent 58%),
+        radial-gradient(700px at 88% 18%, rgba(74, 85, 104, 0.22), transparent 60%),
+        repeating-linear-gradient(90deg, rgba(74, 85, 104, 0.18) 0 1px, transparent 1px 160px),
+        repeating-linear-gradient(180deg, rgba(74, 85, 104, 0.16) 0 1px, transparent 1px 160px);
+    opacity: 0.85;
+    pointer-events: none;
+    z-index: 0;
+}
+
+.dashboard4-shell > * {
+    position: relative;
+    z-index: 1;
+}
+
+.dashboard4-shell > .no-print {
+    z-index: 30;
+}
+
+.dashboard4-shell > .dashboard4-content {
+    position: relative;
+    z-index: 10;
+}
+
+.dashboard4-topbar {
+    position: relative;
+    overflow: visible;
+    background: rgba(10, 10, 10, 0.8);
+    border-bottom: 1px solid rgba(46, 134, 230, 0.16);
+    box-shadow: 0 1px 0 rgba(46, 134, 230, 0.08), 0 10px 30px -28px rgba(0, 0, 0, 0.8);
+}
+
+.dashboard4-topbar::after {
+    content: "";
+    position: absolute;
+    bottom: -1px;
+    left: -60%;
+    width: 60%;
+    height: 2px;
+    background: linear-gradient(90deg, transparent 0%, rgba(46, 134, 230, 0.65) 40%, rgba(46, 134, 230, 0.95) 50%, rgba(46, 134, 230, 0.65) 60%, transparent 100%);
+    box-shadow: 0 0 12px rgba(46, 134, 230, 0.7);
+    opacity: 0;
+    transform: translateX(0) scaleX(0.6);
+    animation: dashboard4-scan 4.2s ease-in-out infinite;
+    pointer-events: none;
+}
+
+
+.dashboard4-panel {
+    background: var(--oceo-panel);
+    border: 1px solid rgba(46,134,230,0.18);
+    box-shadow: 0 30px 60px -45px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(46, 134, 230, 0.12);
+    position: relative;
+    z-index: 1;
+}
+
+.dashboard4-shell .side-menu {
+    background: linear-gradient(180deg, #0b0f14 0%, var(--oceo-black) 100%);
+    border-right: none;
+    box-shadow: 0 20px 50px -30px rgba(0, 0, 0, 0.85), 10px 0 18px -16px rgba(46, 134, 230, 0.22);
+}
+
+.dashboard4-shell .side-menu .border-top-right,
+.dashboard4-shell .side-menu .border-top-right-sub,
+.dashboard4-shell .side-menu .border-top-right-sub2 {
+    border-color: rgba(46,134,230,0.18);
+}
+
+.dashboard4-shell .side-menu .degraded-background {
+    background: linear-gradient(to bottom, transparent, rgba(46, 134, 230, 0.12));
+}
+
+
+.dashboard4-shell .side-menu a {
+    color: inherit;
+}
+
+.dashboard4-shell .side-menu .submenu a {
+    color: inherit;
+}
+
+.dashboard4-avatar {
+    border: 1px solid rgba(46, 134, 230, 0.4);
+    box-shadow: 0 0 0 1px rgba(46, 134, 230, 0.12);
+}
+
+@keyframes dashboard4-scan {
+    0% {
+        transform: translateX(0) scaleX(0.6);
+        opacity: 0;
+    }
+    35% {
+        transform: translateX(160%) scaleX(0.75);
+        opacity: 0.9;
+    }
+    45% {
+        transform: translateX(160%) scaleX(0.75);
+        opacity: 0.85;
+    }
+    65% {
+        transform: translateX(0) scaleX(0.75);
+        opacity: 0.9;
+    }
+    80% {
+        transform: translateX(0) scaleX(0.6);
+        opacity: 0;
+    }
+    100% {
+        transform: translateX(0) scaleX(0.6);
+        opacity: 0;
+    }
+}
+
+/* Dropdown del menú de perfil - asegurar que esté por encima del panel */
+.dashboard4-topbar {
+    z-index: 2;
+}
+
+@keyframes shrink {
+    from { width: 100%; }
+    to { width: 0%; }
+}
+
+.animate-\[shrink\_5s_linear_forwards\] {
+    animation: shrink 5s linear forwards;
+}

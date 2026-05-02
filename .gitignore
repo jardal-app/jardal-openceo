@@ -1,0 +1,49 @@
+# Local agent/runtime state
+.claude/
+.codex/
+.opencode/
+.runtime/
+.venv/
+.mcp.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Node / frontend builds
+node_modules/
+dist/
+build/
+.parcel-cache/
+
+# Android / Gradle
+.gradle/
+.idea/
+local.properties
+*.apk
+*.aab
+
+# Environment and secrets
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.finance.local.example
+
+# Certificates / keys
+*.key
+*.pem
+*.p12
+*.jks
+*.keystore
+acme.json
+
+# Logs / temp
+*.log
+tmp/
+
+# Misc local artifacts
+0.112.0

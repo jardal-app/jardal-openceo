@@ -1,0 +1,85 @@
+services:
+  token:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openceo-voice-token
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    command: ["python", "token_server.py"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - jardal-internal-net
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.openceo-voice-token-api-prod.rule=Host(`voice.openceo.jardal.app`) && PathPrefix(`/api/voice`)"
+      - "traefik.http.routers.openceo-voice-token-api-prod.entrypoints=websecure"
+      - "traefik.http.routers.openceo-voice-token-api-prod.tls.certresolver=jardal-resolver"
+      - "traefik.http.routers.openceo-voice-token-api-prod.priority=110"
+      - "traefik.http.routers.openceo-voice-token-health-prod.rule=Host(`voice.openceo.jardal.app`) && Path(`/health`)"
+      - "traefik.http.routers.openceo-voice-token-health-prod.entrypoints=websecure"
+      - "traefik.http.routers.openceo-voice-token-health-prod.tls.certresolver=jardal-resolver"
+      - "traefik.http.routers.openceo-voice-token-health-prod.priority=110"
+      - "traefik.http.services.openceo-voice-token-prod.loadbalancer.server.port=8000"
+
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: openceo-livekit
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    command:
+      - --config
+      - /etc/livekit/livekit.yaml
+      - --node-ip
+      - ${LIVEKIT_NODE_IP}
+      - --udp-port
+      - ${LIVEKIT_ICE_UDP_PORT}
+    volumes:
+      - ./livekit.yaml:/etc/livekit/livekit.yaml:ro
+    networks:
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-net"
+      - "traefik.http.routers.openceo-livekit-prod.rule=Host(`voice.openceo.jardal.app`)"
+      - "traefik.http.routers.openceo-livekit-prod.entrypoints=websecure"
+      - "traefik.http.routers.openceo-livekit-prod.tls.certresolver=jardal-resolver"
+      - "traefik.http.routers.openceo-livekit-prod.priority=10"
+      - "traefik.http.services.openceo-livekit-prod.loadbalancer.server.port=7880"
+      - "traefik.tcp.routers.openceo-livekit-rtc-tcp.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.openceo-livekit-rtc-tcp.entrypoints=livekit-tcp"
+      - "traefik.tcp.services.openceo-livekit-rtc-tcp.loadbalancer.server.port=7881"
+      - "traefik.udp.routers.openceo-livekit-rtc-udp.entrypoints=livekit-udp"
+      - "traefik.udp.services.openceo-livekit-rtc-udp.loadbalancer.server.port=7882"
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openceo-voice-agent
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    command: ["python", "agent.py", "start"]
+    profiles:
+      - agent
+    networks:
+      - jardal-internal-net
+    depends_on:
+      - livekit
+
+networks:
+  jardal-internal-net:
+    external: true
+  traefik-net:
+    external: true

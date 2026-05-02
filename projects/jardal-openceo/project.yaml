@@ -1,0 +1,67 @@
+project:
+  name: jardal-openceo
+  repos:
+    - name: openceo
+      url: git@github.com:Jardal/jardal-openceo.git
+      branch_base: main
+      local_path: /home/develop/development/Jardal/jardal-openceo
+
+dev:
+  coding_tool: codex
+  coding_tier: auto
+  default_provider: codex
+  branch_pattern: "{session_id}-{slug}"
+  auto_push: false
+  create_pr: true
+  pr_body: auto
+
+  providers:
+    codex:
+      command: ["/home/develop/.npm-global/bin/codex", "--sandbox", "workspace-write", "-a", "never", "--no-alt-screen", "-m", "gpt-5.4", "-c", "model_reasoning_effort=xhigh"]
+      cwd: /home/develop/development/Jardal/jardal-openceo
+      env: {}
+
+    claude:
+      command: ["/home/develop/.local/bin/claude", "--dangerously-skip-permissions", "--model", "opus", "--effort", "high"]
+      cwd: /home/develop/development/Jardal/jardal-openceo
+      env:
+        ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-4-6
+
+    gemini:
+      command: ["/home/develop/.npm-global/bin/gemini", "-m", "gemini-3.1-pro-preview"]
+      cwd: /home/develop/development/Jardal/jardal-openceo
+      env: {}
+
+    opencode:
+      command: ["/home/develop/.opencode/bin/opencode", "-m", "deepseek/deepseek-reasoner"]
+      cwd: /home/develop/development/Jardal/jardal-openceo
+      env: {}
+
+  qa:
+    playwright: skip
+    confidence_threshold: 0.90
+    max_retries: 2
+
+voice:
+  peer_programming:
+    enabled: true
+    require_project_selection: false
+
+finance:
+  workflows:
+    - id: pago_elfec_house
+      name: Pago Elfec House
+      aliases:
+        - Pago Luz Casa
+      triggers:
+        - pago elfec house
+        - pago luz casa
+        - pagar luz casa
+        - elfec house
+        - elfec casa
+        - pago luz house
+      handler: elfec_house_payment
+      expected_row_label: House
+      stop_before_card: true
+
+notifications: []

@@ -1,0 +1,2 @@
+# Marketing skill-specific Python dependencies.
+# No agent-local packages are required yet.

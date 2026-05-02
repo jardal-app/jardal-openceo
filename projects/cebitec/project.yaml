@@ -1,0 +1,42 @@
+project:
+  name: cebitec
+  repos:
+    - name: cebitec
+      local_path: /home/develop/development/DigitalInnovations/CEBITEC
+
+dev:
+  coding_tier: auto
+  default_provider: codex
+  branch_pattern: "{session_id}-{slug}"
+  auto_push: false
+  create_pr: true
+  pr_body: auto
+
+  providers:
+    codex:
+      command: ["/home/develop/.npm-global/bin/codex", "--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5.4", "-c", "model_reasoning_effort=xhigh"]
+      cwd: /home/develop/development/DigitalInnovations/CEBITEC
+      env: {}
+
+    claude:
+      command: ["/home/develop/.local/bin/claude", "--dangerously-skip-permissions", "--model", "opus", "--effort", "high"]
+      cwd: /home/develop/development/DigitalInnovations/CEBITEC
+      env:
+        ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-4-6
+
+    opencode:
+      command: ["/home/develop/.opencode/bin/opencode", "-m", "deepseek/deepseek-reasoner"]
+      cwd: /home/develop/development/DigitalInnovations/CEBITEC
+      env: {}
+
+  qa:
+    playwright: skip
+    confidence_threshold: 0.90
+    max_retries: 2
+
+voice:
+  peer_programming:
+    enabled: true
+    require_project_selection: false
+
+notifications: []

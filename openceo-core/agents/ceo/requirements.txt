@@ -1,0 +1,2 @@
+# CEO skill-specific Python dependencies.
+# Shared runtime dependencies such as langchain-openai live in openceo-core/requirements.txt.

@@ -1,0 +1,21 @@
+workflow: finance.pago_elfec_house
+name: Pago Elfec House
+agent: finance
+description: Runs the existing deterministic ELFEC House payment practice flow.
+auto_match: true
+triggers:
+  - pago elfec house
+  - pago luz casa
+  - pagar luz casa
+  - elfec house
+  - elfec casa
+steps:
+  - id: run_payment_practice
+    tool: finance.pago_elfec_house
+    params:
+      workflow:
+        id: pago_elfec_house
+        name: Pago Elfec House
+        handler: elfec_house_payment
+        expected_row_label: House
+        stop_before_card: true

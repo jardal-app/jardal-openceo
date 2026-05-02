@@ -1,0 +1,15 @@
+{
+  "name": "apps-sdk-mcp-test",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "inspect": "npx @modelcontextprotocol/inspector@latest --server-url http://127.0.0.1:8787/mcp --transport http",
+    "smoke": "node scripts/smoke.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.2.2",
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "jose": "^6.1.0"
+  }
+}

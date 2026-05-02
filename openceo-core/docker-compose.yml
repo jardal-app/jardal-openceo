@@ -1,0 +1,51 @@
+services:
+  openceo-core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openceo-core
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - ENV=production
+      - WORKFLOWS_DIR=/app/workflows
+      - KIMI_SHARE_DIR=/home/ceouser/.kimi
+      - PROJECT_CONTEXTS_DIR=/app/.runtime/project-context
+    working_dir: /app
+    command: python main.py
+    expose:
+      - "8000"
+    networks:
+      - traefik-net
+      - jardal-internal-net
+    volumes:
+      - ../.runtime:/app/.runtime
+      - ../projects:/app/projects:ro
+      - ../workflows:/app/workflows:ro
+      - /home/develop/.codex:/home/ceouser/.codex:ro
+      - /home/develop/.claude:/home/ceouser/.claude:ro
+      # Repositories for dev agent git operations
+      - /home/develop/development/Jardal/jardal-openceo:/home/develop/development/Jardal/jardal-openceo
+      - /home/develop/development/Jardal/melanyryr:/home/develop/development/Jardal/melanyryr
+      # OpenCode CLI binary + config (needs RW for DB/session writes)
+      - /home/develop/.opencode:/home/ceouser/.opencode
+      - /home/develop/.config/opencode:/home/ceouser/.config/opencode
+      # OpenCode data (SQLite DB + session diffs — must be RW and shared with host web UI)
+      - /home/develop/.local/share/opencode:/home/ceouser/.local/share/opencode
+      # Kimi CLI (uv venv + python interpreter + config)
+      - /home/develop/.local/bin:/home/develop/.local/bin:ro
+      - /home/develop/.local/share/uv/tools/kimi-cli:/home/develop/.local/share/uv/tools/kimi-cli:ro
+      - /home/develop/.local/share/uv/python/cpython-3.13.1-linux-x86_64-gnu:/home/develop/.local/share/uv/python/cpython-3.13.1-linux-x86_64-gnu:ro
+      - /home/develop/.kimi:/home/ceouser/.kimi
+      # SSH keys for git operations (GitHub auth)
+      - /home/develop/.ssh:/home/ceouser/.ssh:ro
+      # GitHub CLI (gh) for PR discovery
+      - /usr/bin/gh:/usr/bin/gh:ro
+      - /home/develop/.config/gh:/home/ceouser/.config/gh:ro
+
+networks:
+  traefik-net:
+    external: true
+  jardal-internal-net:
+    external: true

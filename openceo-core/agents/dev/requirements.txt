@@ -1,0 +1,2 @@
+# Dev skill-specific Python dependencies.
+libtmux>=0.37.0

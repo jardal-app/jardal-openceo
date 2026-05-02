@@ -1,0 +1,32 @@
+{
+  "name": "openceo-react",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@gsap/react": "^2.1.2",
+    "@headlessui/react": "^2.2.9",
+    "@heroicons/react": "^2.2.0",
+    "axios": "^1.12.2",
+    "framer-motion": "^12.23.26",
+    "gsap": "^3.14.2",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-hook-form": "^7.63.0",
+    "react-router-dom": "^7.12.0",
+    "sweetalert2": "^11.23.0",
+    "zustand": "^5.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/forms": "^0.5.11",
+    "@tailwindcss/vite": "^4.2.2",
+    "@vitejs/plugin-react": "^5.2.0",
+    "tailwindcss": "^4.1.18",
+    "vite": "^7.3.2"
+  }
+}

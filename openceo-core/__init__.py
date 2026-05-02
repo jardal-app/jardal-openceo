@@ -1,0 +1,1 @@
+"""OpenCEO core package."""
