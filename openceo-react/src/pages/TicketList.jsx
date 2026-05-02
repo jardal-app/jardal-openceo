@@ -313,9 +313,6 @@ export default function TicketList() {
                       {ticket.qa_review_required && ticket.qa_review_state === 'pending' && (
                         <span className="status-badge badge-warning ml-1">QA</span>
                       )}
-                      {ticket.phase === 'client_signoff' && ticket.status === 'waiting' && (
-                        <span className="status-badge badge-client ml-1">Cliente</span>
-                      )}
                     </td>
                     <td>
                       <span className={`status-badge ${priorityColors[ticket.priority] || 'badge-neutral'}`}>
