@@ -589,6 +589,83 @@
   color: var(--oceo-text-3);
 }
 
+.client-dashboard-page .section-header {
+  margin-bottom: 1.25rem;
+}
+
+.client-stats-grid {
+  margin-bottom: 1rem;
+}
+
+.client-ticket-sections {
+  display: grid;
+  gap: 1rem;
+}
+
+.client-ticket-section {
+  padding-bottom: 1rem;
+}
+
+.client-ticket-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.client-ticket-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.05rem;
+  border-radius: 14px;
+  border: 1px solid rgba(46, 134, 230, 0.12);
+  background: rgba(11, 15, 20, 0.38);
+  color: inherit;
+  text-decoration: none;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.client-ticket-card:hover {
+  background: rgba(46, 134, 230, 0.08);
+  border-color: rgba(46, 134, 230, 0.22);
+  transform: translateY(-1px);
+}
+
+.client-ticket-card-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.client-ticket-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.client-ticket-card-title {
+  margin: 0;
+  font-size: 0.98rem;
+  font-weight: 600;
+  color: var(--oceo-text-1);
+  line-height: 1.35;
+}
+
+.client-ticket-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.client-ticket-empty {
+  min-height: 160px;
+}
+
 /* Recent Tickets */
 .recent-section {
   padding-bottom: 0.5rem;

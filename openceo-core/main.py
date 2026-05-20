@@ -545,8 +545,38 @@ async def get_task(
 
 
 @app.patch("/api/tasks/{task_id}")
-async def patch_task(task_id: str, payload: TaskPatchRequest) -> dict:
-    task = await task_service.patch_task(task_id, payload.model_dump(exclude_none=True))
+async def patch_task(
+    task_id: str,
+    payload: TaskPatchRequest,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    task = await task_service.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    updates = payload.model_dump(exclude_none=True)
+    update_keys = set(updates.keys())
+
+    if not current_user.is_admin:
+        involved = task.get("involved_user_ids") or []
+        if current_user.user_id not in involved:
+            raise HTTPException(status_code=403, detail="Access denied")
+        if current_user.is_client and not task.get("client_visible"):
+            raise HTTPException(status_code=403, detail="Access denied")
+
+        user_permissions = set(current_user.all_permissions or [])
+        if current_user.is_client:
+            if not update_keys or not update_keys.issubset({"client_evidence"}):
+                raise HTTPException(status_code=403, detail="Access denied")
+        elif "write_tickets" in user_permissions:
+            pass
+        elif "qa_review" in user_permissions:
+            if not update_keys or not update_keys.issubset({"qa_evidence", "params"}):
+                raise HTTPException(status_code=403, detail="Access denied")
+        else:
+            raise HTTPException(status_code=403, detail="Access denied")
+
+    task = await task_service.patch_task(task_id, updates)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     return task

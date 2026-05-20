@@ -84,6 +84,7 @@ const MenuItem = ({ item, isExpanded, store }) => {
                                     <React.Fragment key={child.href}>
                                         {
                                             store.checkPermissions(child?.permissions) &&
+                                            !(store.user?.is_client && child.href === '/dashboard/review') &&
                                             <>
                                                 <Link className={"flex items-center p-2 cursor-alias text-slate-200 " + (verifyRuta(child) ? 'rounded-l-full bg-slate-800/70' : '')} to={child.href}>
                                                     <Icon name={child.icon} className="h-5 w-5 mr-2 text-slate-200 border-r-2 border-slate-700/80 rounded-full" />

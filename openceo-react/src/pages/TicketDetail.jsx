@@ -1,5 +1,5 @@
 import { useContext, useEffect, useRef, useState } from 'react'
-import { useParams, Link, useLocation } from 'react-router-dom'
+import { useParams, Link, useLocation, useNavigate } from 'react-router-dom'
 import { useGSAP } from '@gsap/react'
 import gsap from 'gsap'
 import {
@@ -32,6 +32,7 @@ import client from '@/api'
 import { StoreContext } from '@/context/store'
 import { swalError } from '@/utils/swalError'
 import { swalConfirm } from '@/utils/swalConfirm'
+import Swal from 'sweetalert2'
 import FilesUpload from '@/components/FilesUpload'
 
 const statusLabels = {
@@ -111,27 +112,30 @@ function cleanupSwalBackdrops() {
 export default function TicketDetail() {
   const { id } = useParams()
   const location = useLocation()
+  const navigate = useNavigate()
   const store = useContext(StoreContext)
   const [ticket, setTicket] = useState(null)
   const [reviews, setReviews] = useState([])
   const [loading, setLoading] = useState(true)
   const [savingEvidence, setSavingEvidence] = useState(false)
   const [openingSession, setOpeningSession] = useState(false)
-  const [error, setError] = useState(null)
-  const [activeTab, setActiveTab] = useState('details')
   const [qaEvidence, setQaEvidence] = useState([])
+  const [clientEvidence, setClientEvidence] = useState([])
   const [qaReviewLinks, setQaReviewLinks] = useState([])
   const [newLink, setNewLink] = useState('')
   const [usersMap, setUsersMap] = useState({})
+  const [requestingChanges, setRequestingChanges] = useState(false)
+  const [requestChangesComment, setRequestChangesComment] = useState('')
   const filesUploadRef = useRef(null)
+  const clientFilesUploadRef = useRef(null)
   const containerRef = useRef(null)
-  const backHref = typeof location.state?.from === 'string' ? location.state.from : '/dashboard/tickets/list'
-  const backLabel = backHref === '/dashboard/inicio' ? 'Volver al dashboard' : 'Volver a tickets'
-
   const isClient = store.user?.is_client === true
+  const backHref = typeof location.state?.from === 'string'
+    ? location.state.from
+    : (isClient ? '/dashboard/inicio' : '/dashboard/tickets/list')
+  const backLabel = backHref === '/dashboard/inicio' ? 'Volver al dashboard' : 'Volver a tickets'
   const isAdmin = store.user?.is_admin === true
   const isQA = store.checkPermissions(['qa_review']) && !isClient
-  const canViewTechnical = !isClient && !isQA
 
   const prefersReducedMotion = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
 
@@ -170,8 +174,10 @@ export default function TicketDetail() {
       setTicket(data)
       setReviews(reviewsRes.data)
       setQaEvidence(data.qa_evidence || [])
+      setClientEvidence(data.client_evidence || [])
       setQaReviewLinks(Array.isArray(data.params?.review_links) ? data.params.review_links.filter(Boolean) : [])
       filesUploadRef.current?.resetCommitted?.(data.qa_evidence || [])
+      clientFilesUploadRef.current?.resetCommitted?.(data.client_evidence || [])
     } catch { /* silent */ } finally { setLoading(false) }
   }
 
@@ -189,38 +195,10 @@ export default function TicketDetail() {
         action: 'approve',
         comment: 'Aprobado desde el panel web',
       })
-      loadTicket()
-    } catch (err) {
-      await swalError(err)
-    }
-  }
-
-  const handleReject = async () => {
-    const confirmed = await swalConfirm({
-      title: '¿Rechazar?',
-      text: 'Esta acción rechaza la fase actual.',
-      icon: 'warning',
-      confirmText: 'Rechazar',
-      cancelText: 'Cancelar',
-    })
-    if (!confirmed) return
-    try {
-      await client.post(`/api/tasks/${id}/phase-action`, {
-        action: 'request_changes',
-        comment: 'Rechazado desde el panel web',
-      })
-      loadTicket()
-    } catch (err) {
-      await swalError(err)
-    }
-  }
-
-  const handleQAApprove = async () => {
-    try {
-      await client.post(`/api/tasks/${id}/phase-action`, {
-        action: 'approve',
-        comment: 'Aprobado desde el panel web',
-      })
+      if (isClient) {
+        navigate('/dashboard/inicio', { replace: true })
+        return
+      }
       loadTicket()
     } catch (err) {
       await swalError(err)
@@ -244,17 +222,51 @@ export default function TicketDetail() {
     }
   }
 
-  const handlePhaseRequestChanges = async () => {
-    const comment = window.prompt('Describe los cambios requeridos:')
-    if (!comment?.trim()) return
+  const handlePhaseRequestChanges = () => {
+    setRequestingChanges(true)
+  }
+
+  const handleCancelRequestChanges = () => {
+    setRequestingChanges(false)
+    setRequestChangesComment('')
+  }
+
+  const handleSubmitRequestChanges = async () => {
+    const comment = requestChangesComment.trim()
+    if (!comment) {
+      await Swal.fire({
+        title: 'Faltan observaciones',
+        text: 'Escribe al menos una observación antes de enviar.',
+        icon: 'warning',
+        confirmButtonText: 'Entendido',
+      })
+      return
+    }
+    setSavingEvidence(true)
+    let evidenceSaved = false
     try {
+      const savedEvidence = await persistClientEvidence()
+      evidenceSaved = true
       await client.post(`/api/tasks/${id}/phase-action`, {
         action: 'request_changes',
-        comment: comment.trim(),
+        comment,
+        attachments: savedEvidence,
+        metadata: { client_evidence_count: savedEvidence.length },
       })
-      loadTicket()
+      setRequestingChanges(false)
+      setRequestChangesComment('')
+      if (isClient) {
+        navigate('/dashboard/inicio', { replace: true })
+        return
+      }
+      await loadTicket()
     } catch (err) {
+      if (evidenceSaved) {
+        await loadTicket()
+      }
       await swalError(err)
+    } finally {
+      setSavingEvidence(false)
     }
   }
 
@@ -279,6 +291,29 @@ export default function TicketDetail() {
 
     setQaEvidence(prepared.urls)
     await filesUploadRef.current?.finalizePreparedSave?.(prepared)
+    return prepared.urls
+  }
+
+  const persistClientEvidence = async () => {
+    const prepared = await clientFilesUploadRef.current?.prepareSave?.() || {
+      urls: clientEvidence,
+      uploadedKeys: [],
+      removedKeys: [],
+    }
+
+    try {
+      await client.patch(`/api/tasks/${id}`, {
+        client_evidence: prepared.urls,
+      })
+    } catch (err) {
+      try {
+        await clientFilesUploadRef.current?.rollbackPreparedSave?.(prepared.uploadedKeys)
+      } catch { /* silent */ }
+      throw err
+    }
+
+    setClientEvidence(prepared.urls)
+    await clientFilesUploadRef.current?.finalizePreparedSave?.(prepared)
     return prepared.urls
   }
 
@@ -312,6 +347,48 @@ export default function TicketDetail() {
       await client.post(`/api/tasks/${id}/phase-action`, {
         action: 'approve',
         comment: 'Aprobado desde el panel web',
+      })
+      await loadTicket()
+    } catch (err) {
+      if (evidenceSaved) {
+        await loadTicket()
+      }
+      await swalError(err)
+    } finally {
+      setSavingEvidence(false)
+    }
+  }
+
+  const handleSaveClientEvidence = async () => {
+    setSavingEvidence(true)
+    try {
+      await persistClientEvidence()
+      await loadTicket()
+    } catch (err) {
+      await swalError(err)
+    } finally {
+      setSavingEvidence(false)
+    }
+  }
+
+  const handleSaveClientAndApprove = async () => {
+    const confirmed = await swalConfirm({
+      title: '¿Guardar y aprobar?',
+      text: 'Esta acción guarda tu evidencia y aprueba el ticket.',
+      icon: 'warning',
+      confirmText: 'Sí, guardar y aprobar',
+      cancelText: 'Cancelar',
+    })
+    if (!confirmed) return
+
+    setSavingEvidence(true)
+    let evidenceSaved = false
+    try {
+      await persistClientEvidence()
+      evidenceSaved = true
+      await client.post(`/api/tasks/${id}/phase-action`, {
+        action: 'approve',
+        comment: 'Aprobado por el cliente desde el detalle del ticket',
       })
       await loadTicket()
     } catch (err) {
@@ -417,23 +494,41 @@ export default function TicketDetail() {
     )
   }
 
-  const devEvidence = ticket.params?.evidence || []
-  const clientEvidence = ticket.client_evidence || []
-  const attachments = ticket.attachments || []
-  const rawReviewLinks = Array.isArray(ticket.params?.review_links) ? ticket.params.review_links.filter(Boolean) : []
-  const fallbackReviewUrl = ticket.params?.test_url || ticket.params?.client_review_url || ticket.client_review_url || ''
-  const reviewLinks = rawReviewLinks.length > 0
-    ? rawReviewLinks
-    : (fallbackReviewUrl ? [fallbackReviewUrl] : [])
   const pmTicket = ticket.params?.pm_ticket || {}
+  const devEvidence = ticket.params?.evidence || []
+  const attachments = ticket.attachments || []
+  const rawReviewLinks = Array.isArray(ticket.params?.review_links)
+    ? ticket.params.review_links.filter(Boolean)
+    : (typeof ticket.params?.review_links === 'string' && ticket.params.review_links.trim()
+      ? [ticket.params.review_links.trim()]
+      : [])
+  const fallbackReviewLinks = [
+    ticket.params?.test_url,
+    ticket.params?.client_review_url,
+    ticket.params?.review_url,
+    ticket.params?.external_url,
+    ticket.client_review_url,
+    ticket.review_url,
+    ticket.external_url,
+    pmTicket.external_url,
+  ].filter(Boolean)
+  const reviewLinks = rawReviewLinks.length > 0
+    ? [...new Set(rawReviewLinks)]
+    : [...new Set(fallbackReviewLinks)]
   const acceptanceCriteria = pmTicket.acceptance_criteria || []
   const clientDesc = ticket.client_description || pmTicket.description || ticket.description || ''
-  const hasClientContent = clientDesc || acceptanceCriteria.length > 0
 
   // Resolve required permission for current workflow phase
   const currentPhase = (ticket.workflow_phases || []).find(p => p.key === ticket.phase)
   const phasePermission = currentPhase?.permission || null
-  const canActOnPhase = ticket.status === 'waiting' && phasePermission && store.checkPermissions([phasePermission])
+  const canClientActOnPhase = isClient
+    && ticket.client_visible === true
+    && ticket.status === 'waiting'
+    && ticket.phase === 'client_signoff'
+    && store.checkPermissions(['client_review'])
+  const canActOnPhase = isClient
+    ? canClientActOnPhase
+    : (ticket.status === 'waiting' && phasePermission && store.checkPermissions([phasePermission]))
 
   // ─── CLIENT VIEW ──────────────────────────────────────────────
   if (isClient) {
@@ -463,18 +558,6 @@ export default function TicketDetail() {
                 {ticket.project || 'Sin proyecto'}
               </span>
             </div>
-            {canActOnPhase && (
-              <div className="approval-bar-header">
-                <button onClick={handleApprove} className="btn-success">
-                  <CheckCircleIcon className="w-4 h-4" />
-                  Aprobar
-                </button>
-                <button onClick={handleReject} className="btn-danger">
-                  <XCircleIcon className="w-4 h-4" />
-                  Solicitar cambios
-                </button>
-              </div>
-            )}
           </div>
         </div>
 
@@ -515,16 +598,6 @@ export default function TicketDetail() {
               Información
             </h2>
             <dl className="info-list">
-              <div className="info-row">
-                <dt className="info-label">Creado</dt>
-                <dd className="info-value">{formatDate(ticket.created_at)}</dd>
-              </div>
-              {ticket.completed_at && (
-                <div className="info-row">
-                  <dt className="info-label">Completado</dt>
-                  <dd className="info-value">{formatDate(ticket.completed_at)}</dd>
-                </div>
-              )}
               {pmTicket.priority && (
                 <div className="info-row">
                   <dt className="info-label">Prioridad</dt>
@@ -574,6 +647,69 @@ export default function TicketDetail() {
 
         {/* Attachments */}
         <MediaGrid urls={attachments} title="Archivos adjuntos" icon={LinkIcon} />
+
+        {canActOnPhase && requestingChanges && (
+          <div className="detail-section card-oceo">
+            <h2 className="section-title">
+              <PhotoIcon className="w-4 h-4" />
+              Evidencia del cliente
+            </h2>
+            <p className="text-sm text-oceo-text-3 mb-3">Adjunta fotos o videos para ilustrar los cambios necesarios.</p>
+            <FilesUpload
+              ref={clientFilesUploadRef}
+              value={clientEvidence}
+              onChange={setClientEvidence}
+              accept="image/*,video/*"
+              maxFiles={10}
+              maxSizeMB={50}
+              disabled={savingEvidence}
+            />
+          </div>
+        )}
+
+        {canActOnPhase && requestingChanges && (
+          <div className="detail-section card-oceo">
+            <h2 className="section-title">
+              <PencilIcon className="w-4 h-4" />
+              Observaciones
+            </h2>
+            <textarea
+              value={requestChangesComment}
+              onChange={(e) => setRequestChangesComment(e.target.value)}
+              placeholder="Describe los cambios necesarios..."
+              className="input-oceo w-full min-h-[120px] resize-y"
+              disabled={savingEvidence}
+            />
+          </div>
+        )}
+
+        {canActOnPhase && (
+          <div className="detail-section action-bar flex justify-end gap-3">
+            {requestingChanges ? (
+              <>
+                <button onClick={handleCancelRequestChanges} disabled={savingEvidence} className="btn-secondary">
+                  <XMarkIcon className="w-5 h-5" />
+                  Cancelar
+                </button>
+                <button onClick={handleSubmitRequestChanges} disabled={savingEvidence} className="btn-primary">
+                  <XCircleIcon className="w-5 h-5" />
+                  {savingEvidence ? 'Enviando…' : 'Enviar solicitud'}
+                </button>
+              </>
+            ) : (
+              <>
+                <button onClick={handlePhaseRequestChanges} disabled={savingEvidence} className="btn-danger">
+                  <XCircleIcon className="w-5 h-5" />
+                  Solicitar cambios
+                </button>
+                <button onClick={handleApprove} disabled={savingEvidence} className="btn-success">
+                  <CheckCircleIcon className="w-5 h-5" />
+                  Aprobar
+                </button>
+              </>
+            )}
+          </div>
+        )}
 
       </div>
     )

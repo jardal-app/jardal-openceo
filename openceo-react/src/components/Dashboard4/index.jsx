@@ -36,6 +36,7 @@ export default function Dashboard4() {
     const menuOffset = 8;
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
     const currentUser = store?.user || {};
+    const isClient = currentUser?.is_client === true;
     const userDisplayName = resolveUserDisplayName(currentUser);
     const userInitial = userDisplayName.charAt(0).toUpperCase() || 'A';
     const toasts = store?.toasts || [];
@@ -43,6 +44,7 @@ export default function Dashboard4() {
     const [projects, setProjects] = useState([]);
 
     useEffect(() => {
+      if (isClient) return;
       client.get('/api/projects').then((res) => {
         const data = res.data || []
         setProjects(data)
@@ -53,7 +55,7 @@ export default function Dashboard4() {
           }
         }
       }).catch(() => {})
-    }, [])
+    }, [isClient])
 
     useEffect(() => {
         if (toasts.length > 0) {
@@ -78,29 +80,38 @@ export default function Dashboard4() {
     return (
         <>
             <div className="dashboard4-shell min-h-screen flex overflow-hidden max-w-screen mx-auto bg-black text-slate-100">
-                <div className="no-print">
-                    <SideMenu navigation={navigation} adminNavigation={adminNavigation} store={store} mobileOpen={mobileMenuOpen} setMobileOpen={setMobileMenuOpen} />
-                </div>
+                {!isClient && (
+                    <div className="no-print">
+                        <SideMenu navigation={navigation} adminNavigation={adminNavigation} store={store} mobileOpen={mobileMenuOpen} setMobileOpen={setMobileMenuOpen} />
+                    </div>
+                )}
                 <div className="dashboard4-content flex flex-1 flex-col overflow-hidden">
                     <div className="dashboard4-topbar no-print border-b border-oceo-blue-400/20 bg-black/70 backdrop-blur pb-0">
                         <div className="px-3 sm:px-6 2xl:px-10">
 
                             <div className="relative flex h-16 items-center justify-between border-b border-oceo-blue-400/10">
                                 <div className="flex items-center gap-2 lg:hidden">
-                                    <button
-                                        type="button"
-                                        className="rounded-md border border-oceo-blue-400/30 bg-black/60 p-2 text-slate-200 transition hover:border-oceo-blue-400/60 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-oceo-blue-400/40 focus:ring-offset-0"
-                                        onClick={() => setMobileMenuOpen(true)}
-                                    >
-                                        <Bars3Icon className="h-5 w-5 text-oceo-blue-400" aria-hidden="true" />
-                                    </button>
+                                    {!isClient && (
+                                        <button
+                                            type="button"
+                                            className="rounded-md border border-oceo-blue-400/30 bg-black/60 p-2 text-slate-200 transition hover:border-oceo-blue-400/60 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-oceo-blue-400/40 focus:ring-offset-0"
+                                            onClick={() => setMobileMenuOpen(true)}
+                                        >
+                                            <Bars3Icon className="h-5 w-5 text-oceo-blue-400" aria-hidden="true" />
+                                        </button>
+                                    )}
+                                    {isClient && (
+                                        <span className="text-oceo-blue-400 font-bold text-sm tracking-wider" style={{ fontFamily: 'var(--font-brand)' }}>
+                                            OpenCEO
+                                        </span>
+                                    )}
                                 </div>
                                 <div className="w-full flex items-center justify-end">
                                     <div className="w-full flex justify-end items-center gap-3">
                                          {/* Brand + Project Selector */}
                                          <div className="hidden lg:flex items-center gap-3 mr-auto">
                                              <span className="text-oceo-blue-400 font-bold text-sm tracking-wider" style={{ fontFamily: 'var(--font-brand)' }}>OpenCEO</span>
-                                             {projects.length > 0 && (
+                                             {!isClient && projects.length > 0 && (
                                                <select
                                                  value={store.selectedProject || ''}
                                                  onChange={(e) => store.setProject(e.target.value)}
@@ -114,6 +125,7 @@ export default function Dashboard4() {
                                                </select>
                                              )}
                                          </div>
+                                        {!isClient && (
                                         <div className="relative">
                                             <button
                                                 type="button"
@@ -155,6 +167,7 @@ export default function Dashboard4() {
                                                 </div>
                                             )}
                                         </div>
+                                        )}
                                         {/* Profile dropdown */}
                                         <Menu as="div" className="relative ml-3">
                                             {({ open: menuOpen }) => {

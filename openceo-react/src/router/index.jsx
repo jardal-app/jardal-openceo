@@ -16,8 +16,6 @@ const Dashboard = lazy(() => import('@/pages/Dashboard'))
 const TicketList = lazy(() => import('@/pages/TicketList'))
 const TicketDetail = lazy(() => import('@/pages/TicketDetail'))
 const TicketForm = lazy(() => import('@/pages/TicketForm'))
-const ClientReview = lazy(() => import('@/pages/ClientReview'))
-
 const UserList = lazy(() => import('@/pages/admin/UserList'))
 const UserForm = lazy(() => import('@/pages/admin/UserForm'))
 const GroupList = lazy(() => import('@/pages/admin/GroupList'))
@@ -77,7 +75,7 @@ const router = createBrowserRouter([
           { path: 'tickets/create', element: <Page Component={TicketForm} permissions={['write_tickets']} /> },
           { path: 'tickets/update/:id', element: <Page Component={TicketForm} permissions={['write_tickets']} /> },
           { path: 'tickets/:id', element: <Page Component={TicketDetail} permissions={['read_tickets']} /> },
-          { path: 'review', element: <Page Component={ClientReview} permissions={['client_review']} /> },
+          { path: 'review', element: <Navigate to="/dashboard/inicio" replace /> },
 
           { path: 'admin/users/list', element: <Page Component={UserList} permissions={['manage_users']} /> },
           { path: 'admin/users/create', element: <Page Component={UserForm} permissions={['manage_users']} /> },

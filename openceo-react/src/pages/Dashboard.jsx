@@ -44,6 +44,16 @@ function formatShortDate(dateStr) {
   })
 }
 
+function getClientTicketState(ticket) {
+  if (ticket.status === 'completed') {
+    return { key: 'completed', label: 'Completado', color: 'badge-success' }
+  }
+  if (ticket.status === 'waiting' && ticket.phase === 'client_signoff') {
+    return { key: 'waiting_review', label: 'En espera de revisión', color: 'badge-client' }
+  }
+  return { key: 'in_progress', label: 'En proceso', color: 'badge-active' }
+}
+
 export default function Dashboard() {
   const store = useContext(StoreContext)
   const location = useLocation()
@@ -60,6 +70,7 @@ export default function Dashboard() {
   const [recentTickets, setRecentTickets] = useState([])
   const [qaPendingTickets, setQaPendingTickets] = useState([])
   const [qaClientTickets, setQaClientTickets] = useState([])
+  const [clientTickets, setClientTickets] = useState([])
   const [loading, setLoading] = useState(true)
 
   const prefersReducedMotion = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
@@ -73,15 +84,40 @@ export default function Dashboard() {
       gsap.from('.recent-ticket, .qa-stream-ticket', { x: -20, opacity: 0, stagger: 0.06, duration: 0.35, delay: 0.3, ease: 'power2.out' })
     })
     return () => ctx.revert()
-  }, [prefersReducedMotion, isQAHome, recentTickets, qaPendingTickets, qaClientTickets])
+  }, [prefersReducedMotion, isQAHome, isClient, recentTickets, qaPendingTickets, qaClientTickets, clientTickets])
 
   useEffect(() => {
     loadDashboard()
-  }, [store.selectedProject, isQAHome])
+  }, [store.selectedProject, isQAHome, isClient])
 
   const loadDashboard = async () => {
     setLoading(true)
     try {
+      if (isClient) {
+        const response = await client.get('/api/tasks', { params: { limit: 500 } })
+        const rows = Array.isArray(response.data) ? response.data : []
+        const derived = rows.reduce((acc, ticket) => {
+          const state = getClientTicketState(ticket).key
+          if (state === 'waiting_review') acc.clientWaiting += 1
+          else if (state === 'completed') acc.completed += 1
+          else acc.inProgress += 1
+          return acc
+        }, { inProgress: 0, clientWaiting: 0, completed: 0 })
+
+        setStats({
+          total: rows.length,
+          inReview: 0,
+          clientWaiting: derived.clientWaiting,
+          completed: derived.completed,
+        })
+        setClientTickets(rows)
+        setRecentTickets([])
+        setQaPendingTickets([])
+        setQaClientTickets([])
+        setLoading(false)
+        return
+      }
+
       const projectParams = store.selectedProject ? { project: store.selectedProject } : {}
 
       const requests = [
@@ -125,10 +161,12 @@ export default function Dashboard() {
         setQaPendingTickets(Array.isArray(responses[1]?.data) ? responses[1].data : [])
         setQaClientTickets(Array.isArray(responses[2]?.data) ? responses[2].data : [])
         setRecentTickets([])
+        setClientTickets([])
       } else {
         setRecentTickets(Array.isArray(responses[1]?.data) ? responses[1].data : [])
         setQaPendingTickets([])
         setQaClientTickets([])
+        setClientTickets([])
       }
     } catch {
       /* silent */
@@ -180,6 +218,30 @@ export default function Dashboard() {
     </div>
   )
 
+  const clientSections = [
+    {
+      key: 'waiting_review',
+      title: 'En espera de revisión',
+      badgeClass: 'badge-client',
+      tickets: clientTickets.filter((ticket) => getClientTicketState(ticket).key === 'waiting_review'),
+      emptyText: 'No hay tickets esperando tu revisión.',
+    },
+    {
+      key: 'in_progress',
+      title: 'En proceso',
+      badgeClass: 'badge-active',
+      tickets: clientTickets.filter((ticket) => getClientTicketState(ticket).key === 'in_progress'),
+      emptyText: 'No hay tickets en proceso.',
+    },
+    {
+      key: 'completed',
+      title: 'Completados',
+      badgeClass: 'badge-success',
+      tickets: clientTickets.filter((ticket) => getClientTicketState(ticket).key === 'completed'),
+      emptyText: 'Todavía no hay tickets completados.',
+    },
+  ]
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -193,6 +255,109 @@ export default function Dashboard() {
   const qaProgress = qaProgressBase > 0
     ? Math.round(((stats.clientWaiting + stats.completed) / qaProgressBase) * 100)
     : 0
+
+  if (isClient) {
+    return (
+      <div className="dashboard-page client-dashboard-page">
+        <div className="section-header">
+          <div>
+            <h1 className="dashboard-title">Tus tickets</h1>
+            <p className="dashboard-subtitle">Todo tu seguimiento en una sola vista.</p>
+          </div>
+        </div>
+
+        <div className="stats-grid client-stats-grid">
+          <div className="stat-card card-oceo">
+            <div className="stat-icon-wrap" style={{ background: 'rgba(46,134,230,0.15)' }}>
+              <TicketIcon className="stat-icon" style={{ color: 'var(--oceo-blue-400)' }} />
+            </div>
+            <div className="stat-content">
+              <p className="stat-value">{stats.total}</p>
+              <p className="stat-label">Total</p>
+            </div>
+          </div>
+
+          <div className="stat-card card-oceo">
+            <div className="stat-icon-wrap" style={{ background: 'rgba(168,85,247,0.14)' }}>
+              <EyeIcon className="stat-icon" style={{ color: '#c084fc' }} />
+            </div>
+            <div className="stat-content">
+              <p className="stat-value">{stats.clientWaiting}</p>
+              <p className="stat-label">En espera de revisión</p>
+            </div>
+          </div>
+
+          <div className="stat-card card-oceo">
+            <div className="stat-icon-wrap" style={{ background: 'rgba(46,134,230,0.12)' }}>
+              <UserIcon className="stat-icon" style={{ color: 'var(--oceo-blue-300)' }} />
+            </div>
+            <div className="stat-content">
+              <p className="stat-value">{clientSections[1].tickets.length}</p>
+              <p className="stat-label">En proceso</p>
+            </div>
+          </div>
+
+          <div className="stat-card card-oceo">
+            <div className="stat-icon-wrap" style={{ background: 'rgba(18,185,129,0.15)' }}>
+              <CheckCircleIcon className="stat-icon" style={{ color: 'var(--oceo-success)' }} />
+            </div>
+            <div className="stat-content">
+              <p className="stat-value">{stats.completed}</p>
+              <p className="stat-label">Completados</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="client-ticket-sections">
+          {clientSections.map((section) => (
+            <section key={section.key} className="card-oceo client-ticket-section">
+              <div className="section-header-inner">
+                <h2>{section.title}</h2>
+                <span className={`status-badge ${section.badgeClass}`}>{section.tickets.length}</span>
+              </div>
+
+              {section.tickets.length === 0 ? (
+                <div className="empty-state client-ticket-empty">
+                  <TicketIcon className="w-10 h-10" style={{ color: 'var(--oceo-text-3)' }} />
+                  <p>{section.emptyText}</p>
+                </div>
+              ) : (
+                <div className="client-ticket-list">
+                  {section.tickets.map((ticket) => {
+                    const state = getClientTicketState(ticket)
+                    return (
+                      <Link
+                        key={ticket.task_id}
+                        to={`/dashboard/tickets/${ticket.task_id}`}
+                        state={detailBackState}
+                        className="client-ticket-card"
+                      >
+                        <div className="client-ticket-card-main">
+                          <div className="client-ticket-card-top">
+                            <code className="ticket-id">
+                              {ticket.ticket_number != null ? `#${ticket.ticket_number}` : ticket.task_id.slice(0, 8)}
+                            </code>
+                            <span className={`status-badge ${state.color}`}>{state.label}</span>
+                          </div>
+                          <p className="client-ticket-card-title">{ticket.title}</p>
+                          {ticket.project && (
+                            <div className="client-ticket-card-meta">
+                              <span className="project-badge">{ticket.project}</span>
+                            </div>
+                          )}
+                        </div>
+                        <ArrowRightIcon className="w-4 h-4 qa-stream-arrow" />
+                      </Link>
+                    )
+                  })}
+                </div>
+              )}
+            </section>
+          ))}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="dashboard-page">

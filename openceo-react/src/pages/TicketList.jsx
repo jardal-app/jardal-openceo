@@ -1,5 +1,5 @@
 import { useContext, useEffect, useState } from 'react'
-import { Link, useLocation } from 'react-router-dom'
+import { Link, Navigate, useLocation } from 'react-router-dom'
 import { useGSAP } from '@gsap/react'
 import gsap from 'gsap'
 import {
@@ -106,6 +106,16 @@ function getEngineInfo(ticket) {
   return { label: '—', color: 'badge-neutral' }
 }
 
+function getClientStatusInfo(ticket) {
+  if (ticket.status === 'completed') {
+    return { key: 'completed', label: 'Completado', color: 'badge-success' }
+  }
+  if (ticket.status === 'waiting' && ticket.phase === 'client_signoff') {
+    return { key: 'waiting_review', label: 'En espera de revisión', color: 'badge-client' }
+  }
+  return { key: 'in_progress', label: 'En proceso', color: 'badge-active' }
+}
+
 export default function TicketList() {
   const store = useContext(StoreContext)
   const location = useLocation()
@@ -125,6 +135,7 @@ export default function TicketList() {
 
   const prefersReducedMotion = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
   const detailBackState = { from: location.pathname }
+  const isClient = store.user?.is_client === true
 
   useGSAP(() => {
     if (prefersReducedMotion) return
@@ -156,9 +167,15 @@ export default function TicketList() {
   }
 
   const filtered = tickets.filter((t) => {
-    if (filterStatus && t.status !== filterStatus) return false
+    if (filterStatus) {
+      if (isClient) {
+        if (getClientStatusInfo(t).key !== filterStatus) return false
+      } else if (t.status !== filterStatus) {
+        return false
+      }
+    }
     if (filterProject && !t.project?.toLowerCase().includes(filterProject.toLowerCase())) return false
-    if (filterQAPending) {
+    if (!isClient && filterQAPending) {
       const isQAPhase = t.phase === 'qa_review' && t.status === 'waiting'
       const isQAPending = t.qa_review_required && t.qa_review_state === 'pending'
       if (!isQAPhase && !isQAPending) return false
@@ -172,6 +189,10 @@ export default function TicketList() {
   const formatDate = (dateStr) => {
     if (!dateStr) return '—'
     return new Date(dateStr).toLocaleDateString('es-MX', { day: '2-digit', month: 'short', year: 'numeric' })
+  }
+
+  if (isClient) {
+    return <Navigate to="/dashboard/inicio" replace />
   }
 
   if (loading) {
@@ -188,7 +209,7 @@ export default function TicketList() {
       <div className="section-header">
         <div>
           <h1 className="dashboard-title">Tickets</h1>
-          <p className="dashboard-subtitle">Gestión y seguimiento de tareas</p>
+          <p className="dashboard-subtitle">{isClient ? 'Seguimiento de tus tickets' : 'Gestión y seguimiento de tareas'}</p>
         </div>
         <div className="dashboard-header-actions">
           <span className="results-count">{filtered.length} resultado{filtered.length !== 1 ? 's' : ''}</span>
@@ -229,13 +250,23 @@ export default function TicketList() {
                 className="input-oceo input-sm"
               >
                 <option value="">Todos</option>
-                <option value="queued">En cola</option>
-                <option value="in_progress">En progreso</option>
-                <option value="completed">Completado</option>
-                <option value="failed">Fallido</option>
-                <option value="waiting">Esperando</option>
-                <option value="escalated">Escalado</option>
-                <option value="interrupted">Interrumpido</option>
+                {isClient ? (
+                  <>
+                    <option value="in_progress">En proceso</option>
+                    <option value="waiting_review">En espera de revisión</option>
+                    <option value="completed">Completado</option>
+                  </>
+                ) : (
+                  <>
+                    <option value="queued">En cola</option>
+                    <option value="in_progress">En progreso</option>
+                    <option value="completed">Completado</option>
+                    <option value="failed">Fallido</option>
+                    <option value="waiting">Esperando</option>
+                    <option value="escalated">Escalado</option>
+                    <option value="interrupted">Interrumpido</option>
+                  </>
+                )}
               </select>
             </div>
 
@@ -253,15 +284,17 @@ export default function TicketList() {
               </div>
             </div>
 
-            <div className="filter-field">
-              <label className="filter-label">QA</label>
-              <button
-                onClick={() => { setFilterQAPending((v) => !v); setPage(1) }}
-                className={`btn-sm w-full ${filterQAPending ? 'btn-primary' : 'btn-secondary'}`}
-              >
-                {filterQAPending ? 'Pendiente QA ✓' : 'Pendiente QA'}
-              </button>
-            </div>
+            {!isClient && (
+              <div className="filter-field">
+                <label className="filter-label">QA</label>
+                <button
+                  onClick={() => { setFilterQAPending((v) => !v); setPage(1) }}
+                  className={`btn-sm w-full ${filterQAPending ? 'btn-primary' : 'btn-secondary'}`}
+                >
+                  {filterQAPending ? 'Pendiente QA ✓' : 'Pendiente QA'}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -275,18 +308,18 @@ export default function TicketList() {
                 <th>Ticket</th>
                 <th>Título</th>
                 <th>Estado</th>
-                <th>Prioridad</th>
-                <th>Engine</th>
-                <th>Fase</th>
+                {!isClient && <th>Prioridad</th>}
+                {!isClient && <th>Engine</th>}
+                {!isClient && <th>Fase</th>}
                 <th>Proyecto</th>
-                <th>Fecha</th>
+                {!isClient && <th>Fecha</th>}
                 <th>Acciones</th>
               </tr>
             </thead>
             <tbody>
               {paginated.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="empty-cell">
+                  <td colSpan={isClient ? 5 : 9} className="empty-cell">
                     <div className="empty-state">
                       <TicketIcon className="w-10 h-10" style={{ color: 'var(--oceo-text-3)' }} />
                       <p>No se encontraron tickets</p>
@@ -307,34 +340,49 @@ export default function TicketList() {
                       </Link>
                     </td>
                     <td>
-                      <span className={`status-badge ${statusColors[ticket.status] || 'badge-active'}`}>
-                        {statusLabels[ticket.status] || ticket.status}
-                      </span>
-                      {ticket.qa_review_required && ticket.qa_review_state === 'pending' && (
-                        <span className="status-badge badge-warning ml-1">QA</span>
+                      {isClient ? (
+                        (() => {
+                          const clientStatus = getClientStatusInfo(ticket)
+                          return <span className={`status-badge ${clientStatus.color}`}>{clientStatus.label}</span>
+                        })()
+                      ) : (
+                        <>
+                          <span className={`status-badge ${statusColors[ticket.status] || 'badge-active'}`}>
+                            {statusLabels[ticket.status] || ticket.status}
+                          </span>
+                          {ticket.qa_review_required && ticket.qa_review_state === 'pending' && (
+                            <span className="status-badge badge-warning ml-1">QA</span>
+                          )}
+                        </>
                       )}
                     </td>
-                    <td>
-                      <span className={`status-badge ${priorityColors[ticket.priority] || 'badge-neutral'}`}>
-                        {priorityLabels[ticket.priority] || ticket.priority || '—'}
-                      </span>
-                    </td>
-                    <td>
-                      {(() => {
-                        const engine = getEngineInfo(ticket)
-                        return <span className={`status-badge ${engine.color}`}>{engine.label}</span>
-                      })()}
-                    </td>
-                    <td>
-                      {ticket.phase ? (
-                        (() => {
-                          const phase = getPhaseInfo(ticket)
-                          return <span className={`status-badge ${phase.color}`}>{phase.label}</span>
-                        })()
-                      ) : '—'}
-                    </td>
+                    {!isClient && (
+                      <td>
+                        <span className={`status-badge ${priorityColors[ticket.priority] || 'badge-neutral'}`}>
+                          {priorityLabels[ticket.priority] || ticket.priority || '—'}
+                        </span>
+                      </td>
+                    )}
+                    {!isClient && (
+                      <td>
+                        {(() => {
+                          const engine = getEngineInfo(ticket)
+                          return <span className={`status-badge ${engine.color}`}>{engine.label}</span>
+                        })()}
+                      </td>
+                    )}
+                    {!isClient && (
+                      <td>
+                        {ticket.phase ? (
+                          (() => {
+                            const phase = getPhaseInfo(ticket)
+                            return <span className={`status-badge ${phase.color}`}>{phase.label}</span>
+                          })()
+                        ) : '—'}
+                      </td>
+                    )}
                     <td className="project-cell">{ticket.project || '—'}</td>
-                    <td className="date-cell">{formatDate(ticket.created_at)}</td>
+                    {!isClient && <td className="date-cell">{formatDate(ticket.created_at)}</td>}
                     <td>
                       <OptionsCRUD
                         viewHref={`/dashboard/tickets/${ticket.task_id}`}
