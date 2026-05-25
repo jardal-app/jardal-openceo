@@ -111,6 +111,10 @@ class ConfigLoader:
                         "builder":         {"provider": "claude", "command": [], "env": {}},
                         "gemini_reviewer": {"provider": "gemini", "command": [], "env": {}},
                     },
+                    "opencode_reviewers": [
+                        {"label": "kimi26", "model": "opencode-go/kimi-k2.6"},
+                        {"label": "qwen36", "model": "opencode-go/qwen3.6-plus"},
+                    ],
                 },
                 "providers": {
                     "codex": {

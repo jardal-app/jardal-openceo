@@ -17,6 +17,11 @@ dev:
     review_rounds: 2
     max_plans: 15
     timeout_minutes: 15
+    opencode_reviewers:
+      - label: kimi26
+        model: opencode-go/kimi-k2.6
+      - label: qwen36
+        model: opencode-go/qwen3.6-plus
     roles:
       planner:
         provider: claude

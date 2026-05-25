@@ -1,271 +1,318 @@
-TASK: Implement ChatGPT MCP Orchestrator Tools for OpenCEO
+TASK: Add 2 extra OpenCode reviewers (Kimi K2.6 + Qwen 3.6 Plus) to Tier S code-review rounds
 
-CONTEXT:
-Read README.md and STATUS.md completely before writing any code.
-There is already a working MCP server implemented in this repo,
-connected to ChatGPT via Apps SDK. Find it, read it completely,
-and understand exactly how it is structured, how tools are registered,
-and how it connects to the rest of openceo-core. Do not assume paths,
-mount points, or patterns — derive everything from the actual code.
-Then read openceo-core/router.py, openceo-core/agents/pm/session.py,
-openceo-core/agents/secretary/session.py,
-openceo-core/agents/finance/session.py,
-openceo-core/dev_session_service.py.
-Do not write a single line of code before reading all of these.
+RESUMEN (ES):
+Hoy Tier S corre 3 reviewers en paralelo reusando sesiones tmux (clauded, codexf,
+gemini). Queremos sumar 2 reviewers MÁS usando OpenCode Go: Kimi K2.6 y Qwen 3.6 Plus.
+OpenCode NO usa tmux: corre one-shot como en Tier 3 (`opencode run --format json -m <model>`).
+Los 5 reviewers corren al mismo tiempo. Sus archivos REVIEW se pasan al builder (claudep)
+en la ronda de fixes. La decisión de modelos (Kimi 2.6 + Qwen 3.6 Plus) viene del deep-research
+del usuario; NO se investigaron benchmarks adicionales en esta tarea.
 
----
+================================================================================
+CONTEXT — READ FIRST
+================================================================================
+Read these files completely before writing any code. Do not assume patterns —
+derive everything from the actual code.
 
-ARCHITECTURAL PRINCIPLE — TWO SEPARATE PATHS:
+- openceo-core/agents/dev/consensus.py        (Tier S orchestrator — main change)
+- openceo-core/agents/dev/opencode_run.py      (build_run_command — reuse it)
+- openceo-core/agents/dev/opencode_models.py   (apply_opencode_model_override — reuse it)
+- openceo-core/agents/dev/opencode_paths.py    (normalize_opencode_command — reuse it)
+- openceo-core/agents/dev/session.py           (see _step_opencode for the one-shot pattern)
+- openceo-core/agents/dev/opencode_session_manager.py (see how OPENCODE_GO_API_KEY is injected)
+- openceo-core/config_loader.py                (tier_s defaults, _merge_with_defaults)
+- openceo-core/settings.py                     (model slugs + OPENCODE_GO_API_KEY already exist)
+- projects/jardal-trading/project.yaml         (the live tier_s project)
 
-Path A: ChatGPT + MCP
-  - ChatGPT is the intelligence layer: routing, parameter extraction,
-    content processing, approval loops
-  - OpenCEO is the execution layer: deterministic, no LLM involved
-  - ChatGPT calls OpenCEO only when it has everything ready to execute
+DO NOT MODIFY (README is the single source of truth for architecture and is READ-ONLY):
+- README.md, tmux_runtime.py, router.py, graph.py, any agent session file other than
+  consensus.py, and the live opencode one-shot path in session.py (`_step_opencode`).
 
-Path B: OpenWebUI + DeepSeek + LiveKit
-  - DeepSeek handles routing fallback inside router.py
-  - All existing extraction engines and internal flows work as today
-  - Nothing in this path is modified by this task
+================================================================================
+ARCHITECTURAL DECISION — WHY ONE-SHOT, NOT TMUX
+================================================================================
+The 3 existing Tier S reviewers reuse PERSISTENT tmux sessions (planner /
+plan-reviewer / gemini-reviewer) because those CLIs are interactive REPLs.
+OpenCode is fundamentally stateless/one-shot: every `opencode run` is a fresh
+subprocess. This is exactly how Tier 3 already runs it (session.py `_step_opencode`).
 
-These paths are mutually exclusive per request. A workflow exposed
-in the MCP for Path A must account for the fact that ChatGPT has
-already done any intelligence work before calling execute_workflow.
-OpenCEO must never redo work that ChatGPT already did. When designing
-each workflow's MCP interface, ask: "what has ChatGPT already processed
-before this call arrives?" and expose the appropriate direct-execution
-variant, not the AI-extraction variant.
+Therefore the 2 new reviewers:
+- MUST run as one-shot subprocesses (`asyncio.create_subprocess_exec`), NOT tmux.
+- MUST NOT be added to `ensure_project_sessions()` / `close_project()` /
+  `get_live_output()` (they have no persistent session to manage).
+- Run concurrently with the 3 tmux reviewers in the SAME `asyncio.gather`.
 
-This principle applies to every current and future workflow.
-Document it as an architectural comment at the top of the MCP tools
-file so every future developer understands it before adding new tools.
+REVIEWER MAP (conceptual numbering the user asked for):
+- Reviewer 1 = clauded   (claude,  reuses planner session)        — existing
+- Reviewer 2 = codexf    (codex,   reuses plan-reviewer session)  — existing
+- Reviewer 3 = gemini    (gemini,  reuses gemini-reviewer session)— existing
+- Reviewer 4 = kimi26    (opencode-go/kimi-k2.6,   one-shot)      — NEW
+- Reviewer 5 = qwen36    (opencode-go/qwen3.6-plus, one-shot)     — NEW
+A 6th reviewer later is trivial: append one tuple to the config list (see below).
 
----
+Review file naming keeps the existing descriptive convention:
+  .tier-s/REVIEW-kimi26-{p}-{round}.md
+  .tier-s/REVIEW-qwen36-{p}-{round}.md
+Last line of each file must be exactly: REVIEW_DONE_{p}_{round}_{label}
+(same contract the tmux reviewers already use).
 
-PART 1 — ADD TOOLS TO THE EXISTING MCP SERVER
+================================================================================
+PART 1 — consensus.py  (the core change)
+================================================================================
 
-Do not create new routes, new mount points, or new MCP server instances.
-Read the existing MCP implementation and add the following tools
-following exactly the same pattern already established in that code.
+1.1 IMPORTS (top of file)
+Add:
+  import os
+  from .opencode_models import apply_opencode_model_override
+  from .opencode_paths import normalize_opencode_command
+  from .opencode_run import build_run_command
+(`asyncio`, `logging`, `DevProvider` are already imported.)
 
-All tool descriptions must be SHORT. Every token in a tool description
-is sent on every ChatGPT request and consumes subscription quota.
+1.2 NEW CONSTANT  (after `_REVIEW_LABELS`)
+  # OpenCode one-shot reviewers (no tmux). (label, opencode model slug)
+  # Default set; override via dev.tier_s.opencode_reviewers in project.yaml.
+  # An explicit empty list in config disables OpenCode reviewers.
+  _DEFAULT_OPENCODE_REVIEWERS: tuple[tuple[str, str], ...] = (
+      ("kimi26", "opencode-go/kimi-k2.6"),
+      ("qwen36", "opencode-go/qwen3.6-plus"),
+  )
 
---- TOOL 1: get_company_context ---
+1.3 _normalized_config()  — parse opencode_reviewers
+Inside `_normalized_config`, after the roles loop, parse the new key. Semantics:
+- key ABSENT            -> use _DEFAULT_OPENCODE_REVIEWERS (both reviewers on)
+- key present as []     -> disabled (no OpenCode reviewers)
+- key present as list   -> use the provided [{label, model}, ...]
 
-get_company_context() -> dict
+  raw_oc = tier_s_cfg.get("opencode_reviewers", None)
+  if raw_oc is None:
+      opencode_reviewers = list(_DEFAULT_OPENCODE_REVIEWERS)
+  elif isinstance(raw_oc, list):
+      opencode_reviewers = []
+      for item in raw_oc:
+          if isinstance(item, dict):
+              label = str(item.get("label", "")).strip()
+              model = str(item.get("model", "")).strip()
+              if label and model:
+                  opencode_reviewers.append((label, model))
+  else:
+      opencode_reviewers = list(_DEFAULT_OPENCODE_REVIEWERS)
 
-Returns the complete agent and workflow catalog in a single call.
-ChatGPT calls this once per conversation and caches the result.
+Add to the returned dict:  "opencode_reviewers": opencode_reviewers
 
-Build dynamically by reading all projects/*/project.yaml files
-and hardcoded schema for agents whose workflows live in code not YAML.
+1.4 _run_review_round()  — launch tmux + opencode reviewers in parallel
+This method currently (a) deletes stale review files for `_REVIEW_LABELS`,
+(b) builds tmux review tasks, (c) gathers, (d) warns if ok_count < 3.
+Change it to ALSO handle the opencode reviewers. Pass the raw `config` in so the
+opencode command can be resolved (see 1.5). Update the call site (see 1.7).
 
-For each workflow include:
-- name
-- description (one line)
-- params: each param with type, required bool, and allowed values if enum
-- execution_mode: "sync" | "async"
-- requires_approval: true | false
-  Mark requires_approval=true for any workflow that is irreversible
-  or has real-world consequences (payments, emails, external writes).
+  - Stale cleanup: also unlink paths.review(label, p, round_) for each
+    (label, _model) in cfg["opencode_reviewers"].
+  - Build opencode tasks:
+        oc_reviewers = cfg["opencode_reviewers"]
+        api_key = self._settings.OPENCODE_GO_API_KEY or os.environ.get("OPENCODE_GO_API_KEY", "")
+        if oc_reviewers and not api_key:
+            logger.warning("OpenCode reviewers configured but OPENCODE_GO_API_KEY is empty; skipping them")
+            oc_reviewers = []
+        oc_tasks = [
+            self._one_opencode_review(label, model, p, round_, paths, cfg, config)
+            for label, model in oc_reviewers
+        ]
+  - tmux_tasks stays as today (built from _REVIEW_LABELS).
+  - results = await asyncio.gather(*tmux_tasks, *oc_tasks, return_exceptions=True)
+  - ok_count = sum(1 for r in results if r is True)
+  - expected = len(_REVIEW_LABELS) + len(oc_reviewers)
+  - if ok_count < expected: logger.warning("Review round %d sub-plan %d: %d/%d reviewers completed",
+        round_, p, ok_count, expected)
+  - return ok_count
 
-Expose ALL currently operational workflows read from README.md and
-STATUS.md. For pm, expose two variants:
-- create_tickets: receives pre-structured tickets array,
-  writes directly to Notion. This is the workflow for Path A.
-- extract_and_create_tickets: receives raw text, runs AI extraction
-  inside OpenCEO. Mark with note: "Path B only. In ChatGPT path
-  always use create_tickets."
+1.5 NEW METHOD — _one_opencode_review()
+One-shot OpenCode reviewer. Reuses _resolve_command (already supports
+DevProvider.OPENCODE), the model override helper, and build_run_command.
+Success = the REVIEW file ends with the expected signal (same rule as tmux
+reviewers via _review_file_done). Never raises; returns bool.
 
-Return structure:
-{
-  "agents": {
-    "{agent_name}": {
-      "description": "...",
-      "workflows": {
-        "{workflow_name}": {
-          "description": "...",
-          "execution_mode": "sync|async",
-          "requires_approval": true|false,
-          "params": {
-            "{param_name}": {
-              "type": "string|array|boolean",
-              "required": true|false,
-              "enum": [...] | null,
-              "note": "..." | null
-            }
-          }
-        }
-      }
-    }
+  async def _one_opencode_review(
+      self,
+      reviewer_label: str,
+      model: str,
+      p: int,
+      round_: int,
+      paths: _TierSPaths,
+      cfg: dict[str, Any],
+      config: dict[str, Any],
+  ) -> bool:
+      rpath = paths.review(reviewer_label, p, round_)
+      expected_signal = f"REVIEW_DONE_{p}_{round_}_{reviewer_label}"
+      try:
+          base_command, env_vars, cwd = self._resolve_command(DevProvider.OPENCODE, config)
+          base_command = apply_opencode_model_override(base_command, model)
+          base_command = normalize_opencode_command(base_command)
+          argv = build_run_command(
+              base_command=base_command,
+              prompt=self._code_reviewer_prompt(reviewer_label, p, round_, paths),
+              cwd=cwd,
+              title=f"tier-s review {reviewer_label} p{p} r{round_}",
+              agent_name="build",
+          )
+          env = {**os.environ, **env_vars}
+          api_key = self._settings.OPENCODE_GO_API_KEY or os.environ.get("OPENCODE_GO_API_KEY", "")
+          if api_key:
+              env["OPENCODE_GO_API_KEY"] = api_key
+
+          process = await asyncio.create_subprocess_exec(
+              *argv,
+              stdin=asyncio.subprocess.DEVNULL,
+              stdout=asyncio.subprocess.PIPE,
+              stderr=asyncio.subprocess.PIPE,
+              cwd=cwd,
+              env=env,
+          )
+          try:
+              await asyncio.wait_for(process.communicate(), timeout=cfg["timeout_seconds"])
+          except asyncio.TimeoutError:
+              try:
+                  process.kill()
+                  await process.wait()
+              except Exception:
+                  pass
+              logger.warning("OpenCode reviewer %s timed out (sub-plan %d round %d)",
+                             reviewer_label, p, round_)
+              # If the file was already written with the signal, still count it.
+              return self._review_file_done(rpath, expected_signal)
+
+          return self._review_file_done(rpath, expected_signal)
+      except Exception:
+          logger.warning("OpenCode reviewer %s failed (sub-plan %d round %d)",
+                         reviewer_label, p, round_, exc_info=True)
+          return False
+
+NOTE: `_resolve_command` already returns (command, env_vars, cwd) for
+DevProvider.OPENCODE using dev.providers.opencode.command (or OPENCODE_CLI_PATH +
+OPENCODE_DEFAULT_ARGS). `build_run_command` produces:
+  opencode run --format json -m <model> --dir <cwd> --title <t> --agent build <prompt>
+The model override is applied BEFORE build_run_command so `-m` carries the
+per-reviewer model. Reviewers only WRITE the REVIEW markdown file; the prompt
+(reused from _code_reviewer_prompt) already forbids modifying source code.
+
+1.6 _builder_fix_prompt()  — feed the new review files to the builder (claudep)
+The builder must read ALL review files, including the 2 OpenCode ones.
+Pass the opencode reviewer list into the prompt builder.
+
+  - Change _run_builder_fix to call:
+        self._builder_fix_prompt(p, round_, paths, cfg["opencode_reviewers"])
+  - Change the signature/body:
+        def _builder_fix_prompt(self, p, round_, paths, opencode_reviewers):
+            labels = [label for label, _ in _REVIEW_LABELS] + [label for label, _ in opencode_reviewers]
+            review_files = [f"{_TIER_S_DIR}/REVIEW-{label}-{p}-{round_}.md" for label in labels]
+            file_list = "\n".join(f"- {f} (if exists)" for f in review_files)
+            ... (rest of the prompt unchanged)
+  The "(if exists)" wording already makes missing files tolerable, so a reviewer
+  that failed/timed out does NOT block the fix round.
+
+1.7 CALL SITE — _execute_impl()
+Update the review-round call to thread `config` through:
+  reviews_done = await self._run_review_round(sessions, p, r, paths, cfg, progress, config)
+(Adjust _run_review_round signature to accept `config`.)
+
+================================================================================
+PART 2 — config_loader.py  (defaults + merge sanity)
+================================================================================
+In `_merge_with_defaults`, add `opencode_reviewers` to the default tier_s block
+so the shape is documented and discoverable:
+
+  "tier_s": {
+      "review_rounds": 2,
+      "max_plans": 15,
+      "timeout_minutes": 15,
+      "roles": { ... unchanged ... },
+      "opencode_reviewers": [
+          {"label": "kimi26", "model": "opencode-go/kimi-k2.6"},
+          {"label": "qwen36", "model": "opencode-go/qwen3.6-plus"},
+      ],
   },
-  "active_projects": [...]
-}
 
---- TOOL 2: get_user_context ---
+VERIFY THE MERGE SEMANTICS: confirm whether `_merge_with_defaults` deep-merges or
+shallow-merges nested dicts/lists. The single source of truth for the default
+must remain `_normalized_config` (key-absent -> _DEFAULT_OPENCODE_REVIEWERS).
+Make sure a project that sets its own `opencode_reviewers` list is NOT silently
+overridden by the defaults, and that an explicit `[]` in a project still reaches
+`_normalized_config` as `[]` (disabled), not replaced by the default. If the
+merge would clobber an explicit list, fix the merge or keep the default ONLY in
+`_normalized_config` and drop it from config_loader.
 
-get_user_context(user_id: str = "owner") -> dict
+================================================================================
+PART 3 — projects/jardal-trading/project.yaml  (the live tier_s project)
+================================================================================
+Under `dev.tier_s:` add:
 
-Reads from MongoDB user_context collection.
-Returns active project, active dev session state, and any running
-background jobs for the current user.
+    opencode_reviewers:
+      - label: kimi26
+        model: opencode-go/kimi-k2.6
+      - label: qwen36
+        model: opencode-go/qwen3.6-plus
 
-{
-  "active_project": "string | null",
-  "active_dev_session": {
-    "session_name": "string",
-    "provider": "string",
-    "status": "string"
-  } | null,
-  "background_jobs": [
-    {
-      "task_id": "string",
-      "agent": "string",
-      "workflow": "string",
-      "status": "string",
-      "started_at": "ISO datetime"
-    }
-  ]
-}
+The existing `dev.providers.opencode` block already points at the right CLI
+(/home/develop/.opencode/bin/opencode); the per-reviewer model override replaces
+its `-m` value at runtime, so the model in that block is irrelevant for reviews.
 
---- TOOL 3: execute_workflow ---
+================================================================================
+PART 4 — Environment prerequisite
+================================================================================
+OpenCode Go needs `OPENCODE_GO_API_KEY`. It is read from settings
+(settings.OPENCODE_GO_API_KEY, falls back to the process env). Confirm it is set
+in `.env` / the host-mode environment, exactly like the QA path
+(opencode_session_manager.py) already does. If it is empty, the orchestrator
+skips the OpenCode reviewers with a warning (Part 1.4) and Tier S still completes
+with the 3 tmux reviewers — it must NOT crash.
 
-execute_workflow(agent: str, workflow: str, params: dict,
-                 user_id: str = "owner") -> dict
+================================================================================
+PART 5 — Tests
+================================================================================
+Add tests/test_tier_s_opencode_reviewers.py covering:
+- _normalized_config: key absent -> 2 default reviewers; explicit [] -> disabled;
+  custom list -> parsed verbatim; malformed items dropped.
+- _builder_fix_prompt: output lists REVIEW-kimi26-... and REVIEW-qwen36-... plus
+  the 3 existing tmux review files, all with "(if exists)".
+- argv construction: apply_opencode_model_override + build_run_command yields a
+  command containing `run`, `--format`, `json`, `-m`, `opencode-go/kimi-k2.6`,
+  `--agent`, `build` (mirror the style of tests/test_opencode_runner.py; mock the
+  subprocess — do not actually call the CLI).
+- _run_review_round expected-count math: ok_count threshold is
+  len(_REVIEW_LABELS) + len(opencode_reviewers) (not hardcoded 3).
+Run: source .venv/bin/activate (or .venv/bin/python -m pytest) and run the dev
+test suite (test_opencode_runner.py, test_dev_session_markers.py, the new file).
 
-Executes the specified workflow. Agent and workflow are already
-resolved by ChatGPT before this call arrives.
-Bypasses router.py and graph.py entirely — no LLM routing.
-Calls directly into the appropriate existing service layer function.
+================================================================================
+ACCEPTANCE CRITERIA
+================================================================================
+1. A Tier S review round launches 5 reviewers in parallel: 3 tmux + 2 OpenCode
+   one-shot (Kimi K2.6 + Qwen 3.6 Plus).
+2. Each OpenCode reviewer writes .tier-s/REVIEW-<label>-<p>-<round>.md ending in
+   REVIEW_DONE_<p>_<round>_<label>; no tmux session is created for them.
+3. The builder fix round reads all 5 review files (existing 3 + new 2).
+4. With OPENCODE_GO_API_KEY unset, Tier S completes using the 3 tmux reviewers and
+   logs a warning — no crash.
+5. A failed/timed-out OpenCode reviewer is tolerated (counts as not-ok, "(if
+   exists)" keeps the fix round running).
+6. Setting opencode_reviewers: [] in a project disables both; adding a 3rd tuple
+   adds a 6th reviewer with no other code change.
+7. New + existing dev tests pass.
 
-For each workflow, call the correct existing service function.
-Read the service files to find the right function to call —
-do not duplicate logic, do not reimplement anything.
-
-For pm.create_tickets:
-  Validate each ticket has at least a title.
-  Call notion batch creation directly from tools/notion.py.
-  Return {"created": N, "failed": M}
-
-For async workflows return {"task_id": "...", "status": "running"}.
-For sync workflows return the result directly.
-
---- TOOL 4: get_task_status ---
-
-get_task_status(task_id: str) -> dict
-
-Reads from MongoDB tasks collection.
-{
-  "task_id": "string",
-  "status": "queued|running|completed|failed",
-  "agent": "string",
-  "workflow": "string",
-  "summary": "string | null",
-  "result": {} | null,
-  "created_at": "ISO datetime",
-  "updated_at": "ISO datetime"
-}
-
----
-
-PART 2 — UI WIDGETS
-
-Add a widget only when a required param is missing AND the valid options
-form a bounded list. In that case render a minimal inline form with
-a dropdown or radio group and a Submit button. This replaces one
-round-trip message.
-
-Rules:
-- If the missing param is free-text: ask in plain text, no widget
-- If all params are present in the message: no widget
-- For confirmations of irreversible actions: plain text, no widget
-- For content review of any kind: conversational plain text, no widget
-
-Implement widgets as self-contained HTML returned under a "widget_html"
-key in the tool response. No external dependencies. Under 50 lines
-of inline HTML+CSS.
-
----
-
-PART 3 — CHATGPT SYSTEM PROMPT
-
-Create: openceo-core/agents/ceo/chatgpt_system_prompt.md
-
-This is the system prompt to paste into the ChatGPT Apps SDK config.
-Make it self-contained. Write it to produce deterministic CEO behavior.
-
-STARTUP:
-On the first message of every conversation, call get_user_context()
-and get_company_context(). Cache both. Do not call them again unless
-the user asks to refresh.
-
-REQUEST HANDLING:
-1. Identify agent and workflow from the catalog.
-2. Determine required params.
-3. If you can process the user's input yourself to produce a required
-   param (structured data, extracted content, assembled payload),
-   do that processing first before asking the user for anything.
-4. Ask only for params you genuinely cannot derive from the input.
-5. For workflows with requires_approval=true, present a summary of
-   what you are about to execute and wait for explicit user
-   confirmation before calling execute_workflow.
-6. For read operations and status checks, execute immediately.
-7. For async workflows, confirm the task is running and tell the user
-   to ask for status when they want an update.
-
-INTELLIGENCE BEFORE EXECUTION:
-You are the intelligence layer. OpenCEO is the execution layer.
-If the user provides content that needs to be processed, structured,
-or transformed before it can be sent to OpenCEO, do that processing
-yourself before calling any tool. Only call execute_workflow when
-the payload is fully ready and confirmed. This applies to every
-workflow, not just specific ones.
-
-APPROVAL LOOPS:
-For workflows marked requires_approval=true, always show the user
-what you are about to send and wait for explicit confirmation.
-For workflows with large or complex payloads, present a summary,
-allow the user to give corrections in natural language, apply them
-in the conversation, and only call execute_workflow when the user
-explicitly confirms. This is always conversational — no widgets.
-
-TRANSPARENCY:
-If the user asks where you are sending something or which tool you
-are using, explain exactly: agent, workflow, and params.
-
-LANGUAGE:
-Respond in the same language the user writes in.
-
-SCOPE:
-Do not handle workflows not present in get_company_context output.
-If a workflow does not exist, say so clearly.
-
----
-
-PART 4 — README UPDATE
-
-Add section: "## ChatGPT MCP Orchestrator"
-
-Document:
-- The two-path architecture and why the paths never mix
-- The intelligence-before-execution principle
-- The approval loop rule for requires_approval=true workflows
-- The direct vs extraction principle for PM and why it generalizes
-  to any workflow where ChatGPT can pre-process the payload
-- The 4 tools: what each does and when ChatGPT calls each
-- Reference to openceo-core/agents/ceo/chatgpt_system_prompt.md
-
----
+================================================================================
+OUT OF SCOPE / NOTES
+================================================================================
+- Model choice (Kimi K2.6 + Qwen 3.6 Plus) is fixed per the user's deep-research.
+  Do NOT swap models or fabricate benchmark numbers.
+- OpenCode reviewers won't appear in get_live_output()/dev_session_service tmux
+  regex (no persistent session) — their progress is the REVIEW file + the
+  orchestrator's progress() messages. Live-tailing the REVIEW file is a possible
+  future nicety, not part of this task.
+- README.md is read-only; do not edit it. If desired, note the change in
+  STATUS.md / PENDINGS.md only.
 
 FILES TO MODIFY OR CREATE:
-- MODIFY: existing MCP server file (find it, read it, add tools to it)
-- CREATE: openceo-core/agents/ceo/chatgpt_system_prompt.md
-- MODIFY: README.md
-
-DO NOT MODIFY:
-router.py, graph.py, dev_session_service.py, tmux_runtime.py,
-consensus.py, any agent session files, tools/notion.py,
-tools/email_sender.py, or any other existing file not listed above.
-All new tools must call into existing service functions only.
-No logic duplication.
+- MODIFY: openceo-core/agents/dev/consensus.py
+- MODIFY: openceo-core/config_loader.py
+- MODIFY: projects/jardal-trading/project.yaml
+- CREATE: tests/test_tier_s_opencode_reviewers.py
+- VERIFY: .env has OPENCODE_GO_API_KEY (no code change, just confirm)

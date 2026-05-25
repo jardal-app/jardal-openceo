@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import shlex
 from dataclasses import dataclass
@@ -13,6 +14,9 @@ from rate_monitor import RateMonitor
 from settings import Settings
 from state import DevProvider
 
+from .opencode_models import apply_opencode_model_override
+from .opencode_paths import normalize_opencode_command
+from .opencode_run import build_run_command
 from .tmux_runtime import TmuxRuntime, TmuxTurnResult
 
 logger = logging.getLogger(__name__)
@@ -36,6 +40,14 @@ _REVIEW_LABELS: tuple[tuple[str, str], ...] = (
     ("clauded", _ROLE_PLANNER),
     ("codexf", _ROLE_PLAN_REVIEWER),
     ("gemini", _ROLE_GEMINI_REVIEWER),
+)
+
+# OpenCode one-shot reviewers (no tmux). (label, opencode model slug)
+# Default set; override via dev.tier_s.opencode_reviewers in project.yaml.
+# An explicit empty list in config disables OpenCode reviewers.
+_DEFAULT_OPENCODE_REVIEWERS: tuple[tuple[str, str], ...] = (
+    ("kimi26", "opencode-go/kimi-k2.6"),
+    ("qwen36", "opencode-go/qwen3.6-plus"),
 )
 
 
@@ -186,7 +198,7 @@ class CriticalConsensusOrchestrator:
 
             for r in range(1, cfg["review_rounds"] + 1):
                 await progress(f"Review round {r}/{cfg['review_rounds']} para sub-plan {p}.")
-                reviews_done = await self._run_review_round(sessions, p, r, paths, cfg, progress)
+                reviews_done = await self._run_review_round(sessions, p, r, paths, cfg, progress, config)
                 total_reviews += reviews_done
 
                 await progress(f"Builder aplicando fixes del round {r} para sub-plan {p}.")
@@ -342,11 +354,26 @@ class CriticalConsensusOrchestrator:
                 "env": role_cfg.get("env", {}) or {},
             }
 
+        raw_oc = tier_s_cfg.get("opencode_reviewers", None)
+        if raw_oc is None:
+            opencode_reviewers = list(_DEFAULT_OPENCODE_REVIEWERS)
+        elif isinstance(raw_oc, list):
+            opencode_reviewers = []
+            for item in raw_oc:
+                if isinstance(item, dict):
+                    label = str(item.get("label", "")).strip()
+                    model = str(item.get("model", "")).strip()
+                    if label and model:
+                        opencode_reviewers.append((label, model))
+        else:
+            opencode_reviewers = list(_DEFAULT_OPENCODE_REVIEWERS)
+
         return {
             "roles": roles,
             "review_rounds": review_rounds,
             "max_plans": max_plans,
             "timeout_seconds": timeout_seconds,
+            "opencode_reviewers": opencode_reviewers,
         }
 
     @staticmethod
@@ -601,10 +628,15 @@ class CriticalConsensusOrchestrator:
         paths: _TierSPaths,
         cfg: dict[str, Any],
         progress: Callable[[str], Awaitable[None]],
+        config: dict[str, Any] | None = None,
     ) -> int:
         # Delete any stale review files for this round
         for reviewer_label, _session_role in _REVIEW_LABELS:
             rpath = paths.review(reviewer_label, p, round_)
+            if rpath.exists():
+                rpath.unlink()
+        for label, _model in cfg["opencode_reviewers"]:
+            rpath = paths.review(label, p, round_)
             if rpath.exists():
                 rpath.unlink()
 
@@ -625,14 +657,26 @@ class CriticalConsensusOrchestrator:
                 logger.warning("Reviewer %s round %d sub-plan %d failed", reviewer_label, round_, p, exc_info=True)
                 return False
 
-        tasks = [
+        tmux_tasks = [
             _one_review(reviewer_label, session_role)
             for reviewer_label, session_role in _REVIEW_LABELS
         ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        oc_reviewers = cfg["opencode_reviewers"]
+        api_key = self._settings.OPENCODE_GO_API_KEY or os.environ.get("OPENCODE_GO_API_KEY", "")
+        if oc_reviewers and not api_key:
+            logger.warning("OpenCode reviewers configured but OPENCODE_GO_API_KEY is empty; skipping them")
+            oc_reviewers = []
+        oc_tasks = [
+            self._one_opencode_review(label, model, p, round_, paths, cfg, config or {})
+            for label, model in oc_reviewers
+        ]
+
+        results = await asyncio.gather(*tmux_tasks, *oc_tasks, return_exceptions=True)
         ok_count = sum(1 for r in results if r is True)
-        if ok_count < 3:
-            logger.warning("Review round %d sub-plan %d: %d/3 reviewers completed", round_, p, ok_count)
+        expected = len(_REVIEW_LABELS) + len(oc_reviewers)
+        if ok_count < expected:
+            logger.warning("Review round %d sub-plan %d: %d/%d reviewers completed", round_, p, ok_count, expected)
         return ok_count
 
     def _code_reviewer_prompt(self, reviewer_label: str, p: int, round_: int, paths: _TierSPaths) -> str:
@@ -671,14 +715,15 @@ class CriticalConsensusOrchestrator:
             participant=sessions[_ROLE_BUILDER],
             config=None,
             repo_path=None,
-            prompt=self._builder_fix_prompt(p, round_, paths),
+            prompt=self._builder_fix_prompt(p, round_, paths, cfg["opencode_reviewers"]),
             timeout=cfg["timeout_seconds"],
             completion_check=lambda: self._read_signal(paths.status_path) == f"FIX_DONE_{p}_{round_}",
         )
         return turn
 
-    def _builder_fix_prompt(self, p: int, round_: int, paths: _TierSPaths) -> str:
-        review_files = [_TIER_S_DIR + "/REVIEW-" + label + f"-{p}-{round_}.md" for label, _ in _REVIEW_LABELS]
+    def _builder_fix_prompt(self, p: int, round_: int, paths: _TierSPaths, opencode_reviewers: list | None = None) -> str:
+        labels = [label for label, _ in _REVIEW_LABELS] + [label for label, _ in (opencode_reviewers or [])]
+        review_files = [f"{_TIER_S_DIR}/REVIEW-{label}-{p}-{round_}.md" for label in labels]
         file_list = "\n".join(f"- {f} (if exists)" for f in review_files)
         return (
             f"Reviewers finished round {round_} for sub-plan {p}.\n\n"
@@ -695,6 +740,60 @@ class CriticalConsensusOrchestrator:
             return False
         content = rpath.read_text(encoding="utf-8", errors="replace").strip()
         return content.endswith(expected_signal)
+
+    async def _one_opencode_review(
+        self,
+        reviewer_label: str,
+        model: str,
+        p: int,
+        round_: int,
+        paths: _TierSPaths,
+        cfg: dict[str, Any],
+        config: dict[str, Any],
+    ) -> bool:
+        rpath = paths.review(reviewer_label, p, round_)
+        expected_signal = f"REVIEW_DONE_{p}_{round_}_{reviewer_label}"
+        try:
+            base_command, env_vars, cwd = self._resolve_command(DevProvider.OPENCODE, config)
+            base_command = apply_opencode_model_override(base_command, model)
+            base_command = normalize_opencode_command(base_command)
+            argv = build_run_command(
+                base_command=base_command,
+                prompt=self._code_reviewer_prompt(reviewer_label, p, round_, paths),
+                cwd=cwd,
+                title=f"tier-s review {reviewer_label} p{p} r{round_}",
+                agent_name="build",
+            )
+            env = {**os.environ, **env_vars}
+            api_key = self._settings.OPENCODE_GO_API_KEY or os.environ.get("OPENCODE_GO_API_KEY", "")
+            if api_key:
+                env["OPENCODE_GO_API_KEY"] = api_key
+
+            process = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+                env=env,
+            )
+            try:
+                await asyncio.wait_for(process.communicate(), timeout=cfg["timeout_seconds"])
+            except asyncio.TimeoutError:
+                try:
+                    process.kill()
+                    await process.wait()
+                except Exception:
+                    pass
+                logger.warning("OpenCode reviewer %s timed out (sub-plan %d round %d)",
+                               reviewer_label, p, round_)
+                return self._review_file_done(rpath, expected_signal)
+
+            return self._review_file_done(rpath, expected_signal)
+        except Exception:
+            logger.warning("OpenCode reviewer %s failed (sub-plan %d round %d)",
+                           reviewer_label, p, round_, exc_info=True)
+            return False
 
     # ------------------------------------------------------------------
     # Phase E — Finalize
