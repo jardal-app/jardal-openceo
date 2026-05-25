@@ -53,7 +53,7 @@ _ANY_FINAL_MARKED_BLOCK_RE = re.compile(
 )
 
 _CONSENSUS_TMUX_SESSION_RE = re.compile(
-    r"^dev-(?P<project>.+)-(?P<role>claude|codex|gemini|opencode|glm)$",
+    r"^dev-(?P<project>.+)-(?P<role>planner|plan-reviewer|builder|gemini-reviewer)$",
     flags=re.IGNORECASE,
 )
 
@@ -136,10 +136,9 @@ class DevSessionService:
                     tmux_name = lead.tmux_session_name
                     provider = lead.provider
                     session_doc.metadata["execution_mode"] = "tier_s"
-                    session_doc.metadata["execution_mode_legacy"] = "critical_consensus"
                     session_doc.metadata["consensus"] = {
-                        "lead": lead.role,
-                        "reviewers": [reviewer.role for reviewer in reviewers],
+                        "lead": "planner",
+                        "reviewers": ["plan-reviewer", "builder", "gemini-reviewer"],
                     }
                 except Exception as exc:
                     logger.error("Failed to start Tier S for '%s': %s", project, exc)
@@ -190,7 +189,7 @@ class DevSessionService:
                     f"Sesión tmux '{tmux_name}' creada. "
                     f"Provider: {provider.value}. "
                     + (
-                        "Modo: tier_s. Claude lidera y reviewers en paralelo."
+                        "Modo: tier_s. Planner (clauded) → Plan reviewer (codexf) → Builder (claudep) → 3 reviewers × 2 rondas."
                         if consensus_mode
                         else "Esperando instrucciones."
                     )
@@ -438,7 +437,7 @@ class DevSessionService:
             if project in consensus_projects:
                 continue
             self._tmux.close_session(
-                project=f"consensus::{project}::{role}",
+                project=f"tier_s::{project}::{role}",
                 tmux_session_name=session_name,
             )
             logger.info("Runtime cleanup: killed orphan Tier S tmux session '%s'", session_name)
@@ -1219,8 +1218,7 @@ class DevSessionService:
         if not isinstance(metadata, dict):
             return False
         mode = str(metadata.get("execution_mode") or "").strip().lower()
-        legacy_mode = str(metadata.get("execution_mode_legacy") or "").strip().lower()
-        return mode in {"tier_s", "critical_consensus"} or legacy_mode == "critical_consensus"
+        return mode == "tier_s"
 
     def _resolve_provider(self, session: dict[str, Any], config: dict[str, Any]) -> DevProvider:
         requested = DevProvider(session.get("provider", DevProvider.AUTO.value))
@@ -1228,20 +1226,15 @@ class DevSessionService:
             return requested
 
         if self._is_consensus_enabled(config):
-            tier_cfg = (
-                (config.get("dev", {}).get("tier_s", {}) or {})
-                or (config.get("dev", {}).get("critical_consensus", {}) or {})
-            )
-            lead = str(
-                tier_cfg.get("lead", "claude")
-            ).strip().lower()
+            tier_cfg = (config.get("dev", {}).get("tier_s", {}) or {})
+            roles = tier_cfg.get("roles", {}) or {}
+            planner_cfg = roles.get("planner", {}) or {}
+            lead = str(planner_cfg.get("provider", "claude")).strip().lower()
             if lead in DevProvider._value2member_map_:
                 return DevProvider(lead)
             return DevProvider.CLAUDE
 
         configured_tool = str(config.get("dev", {}).get("coding_tool", "auto")).strip().lower()
-        if configured_tool == "critical_consensus":
-            configured_tool = "tier_s"
         if configured_tool in DevProvider._value2member_map_ and configured_tool != DevProvider.AUTO.value:
             return DevProvider(configured_tool)
 

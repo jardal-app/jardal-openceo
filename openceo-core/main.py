@@ -129,7 +129,7 @@ scheduler = WaitingTaskScheduler(
     task_service=task_service,
     dev_session_service=dev_session_service,
 )
-internal_mcp = build_internal_mcp_mount(settings)
+internal_mcp = build_internal_mcp_mount(settings, task_service)
 global_mcp = build_global_mcp_mount(settings)
 _PM_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
@@ -3374,8 +3374,7 @@ def _session_runtime_name(session: dict[str, object]) -> str:
     metadata = session.get("metadata") or {}
     if isinstance(metadata, dict):
         mode = str(metadata.get("execution_mode") or "").strip().lower()
-        legacy_mode = str(metadata.get("execution_mode_legacy") or "").strip().lower()
-        if mode in {"tier_s", "critical_consensus"} or legacy_mode == "critical_consensus":
+        if mode == "tier_s":
             return "tier_s"
     return str(session.get("provider") or "auto")
 

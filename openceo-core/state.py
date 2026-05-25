@@ -31,6 +31,8 @@ class TaskSource(str, Enum):
     VOICE = "voice"
     WHATSAPP = "whatsapp"
     API = "api"
+    ENTREVISTA = "entrevista"
+    SPILLOVER = "spillover"
 
 
 class TaskPriority(str, Enum):
@@ -120,7 +122,6 @@ class CodingTool(str, Enum):
     OPENCODE = "opencode"
     KIMI = "kimi"
     TIER_S = "tier_s"
-    CRITICAL_CONSENSUS = "critical_consensus"
 
 
 class DevProvider(str, Enum):
@@ -195,6 +196,7 @@ class TaskCreateRequest(BaseModel):
     approval_required: bool = False
     approval_state: ApprovalState | None = None
     qa_review_required: bool = False
+    tags: list[str] | None = None
     created_by: str | None = None
     autorun: bool = True
 
@@ -251,6 +253,7 @@ class TaskDocument(BaseModel):
     qa_reviewer_id: Optional[str] = None
     qa_session_id: Optional[str] = None
     qa_evidence: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
     # Audit trail
     history: list[TaskHistoryEntry] = Field(default_factory=list)
 
@@ -539,6 +542,8 @@ class GraphState(TypedDict, total=False):
 def make_task_document(payload: TaskCreateRequest) -> TaskDocument:
     data = payload.model_dump()
     approval_required = bool(data.get("approval_required"))
+    if data.get("tags") is None:
+        data["tags"] = []
     if data.get("approval_state") is None:
         data["approval_state"] = ApprovalState.PENDING if approval_required else ApprovalState.NOT_REQUIRED
     qa_review_required = bool(data.get("qa_review_required"))

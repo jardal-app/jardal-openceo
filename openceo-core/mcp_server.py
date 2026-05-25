@@ -9,7 +9,7 @@ from typing import Any
 
 from settings import Settings
 from tools.cloudflare import CloudflareDNSManager
-from tools.notion import NotionTicketManager
+from state import TaskCreateRequest, TaskPriority, TaskSource
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ class MountedMCPServer:
             self.app.set_inner_app(None)
 
 
-def build_internal_mcp_mount(settings: Settings) -> MountedMCPServer | None:
+def build_internal_mcp_mount(settings: Settings, task_service: "TaskService") -> MountedMCPServer | None:
     """Build the internal MCP — all tools (infra + OpenCEO-specific). Used by OpenCEO tmux sessions."""
     if not settings.MCP_SERVER_ENABLED:
         return None
@@ -61,7 +61,7 @@ def build_internal_mcp_mount(settings: Settings) -> MountedMCPServer | None:
         settings=settings,
         path=_normalize_path(settings.MCP_SERVER_PATH),
         name="OpenCEO Internal MCP",
-        register_fn=_register_all_tools,
+        register_fn=lambda s, st: _register_all_tools(s, st, task_service),
     )
 
 
@@ -169,11 +169,34 @@ def _register_infra_tools(server: FastMCP, settings: Settings) -> tuple[str, ...
     return ("manage_dns_check_or_create",)
 
 
-def _register_openceo_tools(server: FastMCP, settings: Settings) -> tuple[str, ...]:
-    """OpenCEO-specific tools (Notion tickets). Never exposed globally."""
-    notion = NotionTicketManager(settings)
+def _register_openceo_tools(server: FastMCP, settings: Settings, task_service: "TaskService") -> tuple[str, ...]:
+    """OpenCEO-specific tools (ticket CRUD via MongoDB). Never exposed globally."""
 
-    def notion_create_ticket(
+    def _map_priority(priority: str | None) -> TaskPriority:
+        try:
+            return TaskPriority(priority.strip().lower()) if priority else TaskPriority.MEDIUM
+        except ValueError:
+            return TaskPriority.MEDIUM
+
+    def _map_source(source: str | None) -> TaskSource:
+        try:
+            return TaskSource(source.strip().lower()) if source else TaskSource.API
+        except ValueError:
+            return TaskSource.API
+
+    def _build_params(ticket_type: str | None, due_date: str | None, external_url: str | None, status: str | None) -> dict[str, Any] | None:
+        params: dict[str, Any] = {}
+        if ticket_type:
+            params["ticket_type"] = ticket_type
+        if due_date:
+            params["due_date"] = due_date
+        if external_url:
+            params["external_url"] = external_url
+        if status:
+            params["initial_status"] = status
+        return params if params else None
+
+    async def openceo_create_ticket(
         title: str,
         description: str = "",
         project: str | None = None,
@@ -186,39 +209,86 @@ def _register_openceo_tools(server: FastMCP, settings: Settings) -> tuple[str, .
         due_date: str | None = None,
         external_url: str | None = None,
     ) -> dict[str, Any]:
-        return notion.create_ticket(
+        req = TaskCreateRequest(
             title=title,
             description=description,
             project=project,
-            priority=priority,
-            status=status,
-            ticket_type=ticket_type,
-            source=source,
+            priority=_map_priority(priority),
+            source=_map_source(source),
             source_id=source_id,
             tags=tags,
-            due_date=due_date,
-            external_url=external_url,
+            params=_build_params(ticket_type, due_date, external_url, status),
         )
+        try:
+            result = await task_service.create_task(req)
+            return {"ok": True, "task_id": result.get("task_id"), "task": result}
+        except Exception as exc:
+            return {"ok": False, "status": "error", "message": str(exc)}
 
-    def notion_create_tickets_batch(tickets: str) -> dict[str, Any]:
-        parsed = json.loads(tickets)
+    async def openceo_create_tickets_batch(tickets: str) -> dict[str, Any]:
+        try:
+            parsed = json.loads(tickets)
+        except json.JSONDecodeError as exc:
+            return {"ok": False, "status": "invalid_input", "message": f"tickets no es JSON valido: {exc}"}
         if not isinstance(parsed, list):
             return {"ok": False, "status": "invalid_input", "message": "Se espera JSON array."}
-        return notion.create_tickets_batch(tickets=parsed)
 
-    def notion_create_pm_tickets_batch(
+        results: list[dict[str, Any]] = []
+        created = 0
+        failed = 0
+        for item in parsed:
+            if not isinstance(item, dict) or not item.get("title"):
+                failed += 1
+                results.append({"ok": False, "status": "invalid", "message": "Falta title"})
+                continue
+            try:
+                req = TaskCreateRequest(
+                    title=item.get("title", ""),
+                    description=item.get("description", ""),
+                    project=item.get("project"),
+                    priority=_map_priority(item.get("priority")),
+                    source=_map_source(item.get("source")),
+                    source_id=item.get("source_id"),
+                    tags=item.get("tags"),
+                    params=_build_params(
+                        item.get("ticket_type"),
+                        item.get("due_date"),
+                        item.get("external_url"),
+                        item.get("status"),
+                    ),
+                )
+                result = await task_service.create_task(req)
+                created += 1
+                results.append({"ok": True, "task_id": result.get("task_id"), "task": result})
+            except Exception as exc:
+                failed += 1
+                results.append({"ok": False, "status": "error", "message": str(exc)})
+        return {"ok": True, "created_count": created, "failed_count": failed, "results": results}
+
+    async def openceo_create_pm_tickets_batch(
         project: str,
         source_id: str,
         tickets: str,
-        source: str = "entrevista",
+        source: str = "spillover",
     ) -> dict[str, Any]:
         normalized_project = str(project or "").strip()
         normalized_source_id = str(source_id or "").strip()
-        normalized_source = str(source or "").strip() or "entrevista"
+        normalized_source = str(source or "").strip() or "spillover"
         if not normalized_project:
             return {"ok": False, "status": "invalid_input", "message": "project es obligatorio."}
         if not normalized_source_id:
             return {"ok": False, "status": "invalid_input", "message": "source_id es obligatorio."}
+
+        # Anti-loop: el padre no puede ser ya un spillover
+        parent = await task_service.get_task(normalized_source_id)
+        if parent:
+            parent_tags = parent.get("tags") or []
+            if any(t.startswith("spillover_from:") for t in parent_tags):
+                return {
+                    "ok": False,
+                    "status": "anti_loop",
+                    "message": f"Ticket {normalized_source_id} ya es un spillover. No se permite nested spillover.",
+                }
 
         try:
             parsed = json.loads(tickets)
@@ -227,40 +297,70 @@ def _register_openceo_tools(server: FastMCP, settings: Settings) -> tuple[str, .
         if not isinstance(parsed, list):
             return {"ok": False, "status": "invalid_input", "message": "Se espera JSON array."}
 
-        hydrated: list[dict[str, Any]] = []
+        mapped_source = _map_source(normalized_source)
+        results: list[dict[str, Any]] = []
+        created = 0
+        failed = 0
         for item in parsed:
             if not isinstance(item, dict):
-                hydrated.append({"title": ""})
+                failed += 1
+                results.append({"ok": False, "status": "invalid", "message": "Item no es dict"})
                 continue
-            ticket = dict(item)
-            ticket["project"] = normalized_project
-            ticket["source"] = normalized_source
-            ticket["source_id"] = normalized_source_id
-            hydrated.append(ticket)
-        return notion.create_tickets_batch(tickets=hydrated)
+            title = str(item.get("title") or "").strip()
+            if not title:
+                failed += 1
+                results.append({"ok": False, "status": "invalid", "message": "Falta title"})
+                continue
+            try:
+                child_tags = list(item.get("tags") or [])
+                spillover_tag = f"spillover_from:{normalized_source_id}"
+                if spillover_tag not in child_tags:
+                    child_tags.append(spillover_tag)
+                req = TaskCreateRequest(
+                    title=title,
+                    description=item.get("description", ""),
+                    project=normalized_project,
+                    priority=_map_priority(item.get("priority")),
+                    source=mapped_source,
+                    source_id=normalized_source_id,
+                    tags=child_tags if child_tags else None,
+                    params=_build_params(
+                        item.get("ticket_type"),
+                        item.get("due_date"),
+                        item.get("external_url"),
+                        item.get("status"),
+                    ),
+                )
+                result = await task_service.create_task(req)
+                created += 1
+                results.append({"ok": True, "task_id": result.get("task_id"), "task": result})
+            except Exception as exc:
+                failed += 1
+                results.append({"ok": False, "status": "error", "message": str(exc)})
+        return {"ok": True, "created_count": created, "failed_count": failed, "results": results}
 
     server.tool(
-        notion_create_ticket,
-        name="notion_create_ticket",
-        description="Crea 1 ticket en Notion. Requiere: title. Opcionales: description, project, priority, status, ticket_type, source, source_id, tags, due_date, external_url.",
+        openceo_create_ticket,
+        name="openceo_create_ticket",
+        description="Crea un ticket en OpenCEO (MongoDB). El sync a Notion se dispara automaticamente. Requiere: title. Opcionales: description, project, priority, status, ticket_type, source, source_id, tags, due_date, external_url.",
     )
     server.tool(
-        notion_create_tickets_batch,
-        name="notion_create_tickets_batch",
-        description='Crea varios tickets en Notion en un lote. Entrada: JSON array de objetos con al menos "title". Max 50. Mismos campos que notion_create_ticket.',
+        openceo_create_tickets_batch,
+        name="openceo_create_tickets_batch",
+        description='Crea varios tickets en OpenCEO en un lote. Entrada: JSON array de objetos con al menos "title". Max 50.',
     )
     server.tool(
-        notion_create_pm_tickets_batch,
-        name="notion_create_pm_tickets_batch",
-        description='Crea varios tickets PM en Notion y fuerza project/source/source_id para todo el lote. Requiere: project, source_id, tickets (JSON array con title y opcionales description, priority, tags, ticket_type, due_date, external_url).',
+        openceo_create_pm_tickets_batch,
+        name="openceo_create_pm_tickets_batch",
+        description='Crea tickets derivados (spillover/entrevista) desde un ticket padre. Fuerza project/source/source_id para todo el lote. Requiere: project, source_id, tickets (JSON array con title y opcionales description, priority, tags, ticket_type, due_date, external_url).',
     )
-    return ("notion_create_ticket", "notion_create_tickets_batch", "notion_create_pm_tickets_batch")
+    return ("openceo_create_ticket", "openceo_create_tickets_batch", "openceo_create_pm_tickets_batch")
 
 
-def _register_all_tools(server: FastMCP, settings: Settings) -> tuple[str, ...]:
+def _register_all_tools(server: FastMCP, settings: Settings, task_service: "TaskService") -> tuple[str, ...]:
     """Internal MCP: infra + OpenCEO-specific tools."""
     infra = _register_infra_tools(server, settings)
-    openceo = _register_openceo_tools(server, settings)
+    openceo = _register_openceo_tools(server, settings, task_service)
     return infra + openceo
 
 

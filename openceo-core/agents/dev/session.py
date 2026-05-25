@@ -95,7 +95,7 @@ class DevSessionManager:
             )
 
         configured_tool = self._configured_tool(dev_cfg)
-        if configured_tool in {CodingTool.TIER_S, CodingTool.CRITICAL_CONSENSUS}:
+        if configured_tool == CodingTool.TIER_S:
             return await self._run_critical_consensus(task, project_config, tier, qa_cfg)
 
         if task_tool:
@@ -272,11 +272,17 @@ class DevSessionManager:
         async def noop_progress(_: str) -> None:
             return None
 
+        task_id = task.get("task_id") or task.get("_id")
+        tags = task.get("tags") or []
+        is_spillover = any(tag.startswith("spillover_from:") for tag in tags)
+
         result = await self._consensus.execute(
             project=str(task.get("project") or "default"),
             instruction=prompt,
             config=config,
             progress=noop_progress,
+            task_id=task_id,
+            is_spillover=is_spillover,
         )
         if not result.ok:
             detail = result.error or result.summary
@@ -578,8 +584,6 @@ class DevSessionManager:
             return None
         if value == "claude-code":
             value = "claude"
-        if value == "critical_consensus":
-            value = "tier_s"
         if value in CodingTool._value2member_map_:
             return CodingTool(value)
         return None

@@ -125,7 +125,7 @@ export default function TicketList() {
   const [filterProject, setFilterProject] = useState('')
   const [filterQAPending, setFilterQAPending] = useState(false)
   const [page, setPage] = useState(1)
-  const [itemsPerPage, setItemsPerPage] = useState(10)
+  const [itemsPerPage, setItemsPerPage] = useState(50)
   const [showFilters, setShowFilters] = useState(true)
 
   const handleItemsPerPageChange = (value) => {

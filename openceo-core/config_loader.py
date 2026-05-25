@@ -102,22 +102,15 @@ class ConfigLoader:
                 "create_pr": True,
                 "pr_body": "empty",
                 "tier_s": {
-                    "enabled": False,
-                    "iterations": 2,
+                    "review_rounds": 2,
+                    "max_plans": 15,
                     "timeout_minutes": 15,
-                    "lead": "claude",
-                    "reviewers": ["codex", "gemini", "opencode"],
-                    "keep_sessions_alive": True,
-                    "max_steps": 12,
-                },
-                "critical_consensus": {
-                    "enabled": False,
-                    "iterations": 2,
-                    "timeout_minutes": 15,
-                    "lead": "claude",
-                    "reviewers": ["codex", "gemini", "opencode"],
-                    "keep_sessions_alive": True,
-                    "max_steps": 12,
+                    "roles": {
+                        "planner":         {"provider": "claude", "command": [], "env": {}},
+                        "plan_reviewer":   {"provider": "codex",  "command": [], "env": {}},
+                        "builder":         {"provider": "claude", "command": [], "env": {}},
+                        "gemini_reviewer": {"provider": "gemini", "command": [], "env": {}},
+                    },
                 },
                 "providers": {
                     "codex": {
@@ -257,23 +250,7 @@ class ConfigLoader:
             },
             "notifications": [],
         }
-        merged = _deep_merge(defaults, cfg)
-        dev_cfg = merged.get("dev")
-        raw_dev_cfg = cfg.get("dev") if isinstance(cfg.get("dev"), dict) else {}
-        if isinstance(dev_cfg, dict):
-            tier_s_cfg = dev_cfg.get("tier_s")
-            legacy_cfg = dev_cfg.get("critical_consensus")
-            raw_has_tier_s = "tier_s" in raw_dev_cfg
-            raw_has_legacy = "critical_consensus" in raw_dev_cfg
-            if isinstance(tier_s_cfg, dict) and isinstance(legacy_cfg, dict):
-                if raw_has_tier_s and not raw_has_legacy:
-                    dev_cfg["critical_consensus"] = _deep_merge(legacy_cfg, tier_s_cfg)
-                elif raw_has_legacy and not raw_has_tier_s:
-                    dev_cfg["tier_s"] = _deep_merge(tier_s_cfg, legacy_cfg)
-                else:
-                    dev_cfg["tier_s"] = _deep_merge(legacy_cfg, tier_s_cfg)
-                    dev_cfg["critical_consensus"] = _deep_merge(tier_s_cfg, legacy_cfg)
-        return merged
+        return _deep_merge(defaults, cfg)
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

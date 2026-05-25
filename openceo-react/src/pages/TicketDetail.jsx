@@ -642,6 +642,24 @@ export default function TicketDetail() {
         {/* Client evidence */}
         <MediaGrid urls={clientEvidence} title="Mis observaciones" icon={PhotoIcon} />
 
+        {/* Client phase rejections (text observations) */}
+        {ticket.params?.phase_rejections?.length > 0 && (
+          <div className="detail-section card-oceo">
+            <h2 className="section-title"><ExclamationTriangleIcon className="w-4 h-4" /> Observaciones del cliente</h2>
+            <div className="reviews-list">
+              {ticket.params.phase_rejections.map((rej, idx) => (
+                <div key={idx} className="review-item">
+                  <div className="review-header">
+                    <span className="status-badge badge-danger">Rechazado</span>
+                    <span className="review-meta">{formatDate(rej.created_at)}</span>
+                  </div>
+                  {rej.comment && <p className="review-comment">{rej.comment}</p>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Dev evidence */}
         <MediaGrid urls={devEvidence} title="Resultado del desarrollo" icon={PhotoIcon} />
 
@@ -979,6 +997,24 @@ export default function TicketDetail() {
 
       {/* Client evidence */}
       <MediaGrid urls={clientEvidence} title="Observaciones del cliente" icon={PhotoIcon} />
+
+      {/* Client phase rejections (text observations) */}
+      {ticket.params?.phase_rejections?.length > 0 && (
+        <div className="detail-section card-oceo">
+          <h2 className="section-title"><ExclamationTriangleIcon className="w-4 h-4" /> Observaciones del cliente</h2>
+          <div className="reviews-list">
+            {ticket.params.phase_rejections.map((rej, idx) => (
+              <div key={idx} className="review-item">
+                <div className="review-header">
+                  <span className="status-badge badge-danger">Rechazado</span>
+                  <span className="review-meta">{formatDate(rej.created_at)}</span>
+                </div>
+                {rej.comment && <p className="review-comment">{rej.comment}</p>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Attachments */}
       <MediaGrid urls={attachments} title="Archivos adjuntos" icon={LinkIcon} />

@@ -400,7 +400,7 @@ class RateMonitor:
             used_slots = 0
             for t in active_tickets:
                 tool = t.get("coding_tool", "")
-                if tool in ("tier_s", "critical_consensus"):
+                if tool == "tier_s":
                     used_slots += self._settings.RATE_TIER_S_WEIGHT
                 else:
                     used_slots += self._settings.RATE_NORMAL_WEIGHT
@@ -408,7 +408,7 @@ class RateMonitor:
             ticket_tool = ticket.get("coding_tool", "")
             needed = (
                 self._settings.RATE_TIER_S_WEIGHT
-                if ticket_tool in ("tier_s", "critical_consensus")
+                if ticket_tool == "tier_s"
                 else self._settings.RATE_NORMAL_WEIGHT
             )
             if used_slots + needed > self._settings.RATE_MAX_CONCURRENT_TICKETS:
@@ -418,7 +418,7 @@ class RateMonitor:
         # 2. Provider limits
         ticket_tool = ticket.get("coding_tool", "")
         providers_to_check: list[str] = []
-        if ticket_tool in ("tier_s", "critical_consensus"):
+        if ticket_tool == "tier_s":
             providers_to_check = ["claude", "codex"]
         elif ticket_tool in ("codex", "claude"):
             providers_to_check = [ticket_tool]
@@ -444,7 +444,7 @@ class RateMonitor:
     async def on_ticket_completed(self, ticket: dict[str, Any]) -> None:
         """Refresh limits after a ticket finishes. Called by task_service."""
         tool = ticket.get("coding_tool", "")
-        if tool in ("tier_s", "critical_consensus"):
+        if tool == "tier_s":
             await self.refresh_status("claude")
             await self.refresh_status("codex")
         elif tool in ("codex", "claude"):

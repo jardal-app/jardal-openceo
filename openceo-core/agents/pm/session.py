@@ -66,7 +66,7 @@ _CLI_PROMPT_TEMPLATE = """\
 Eres un PM experto. Tu tarea: leer la entrevista/requerimiento de abajo, \
 fragmentarla en tickets accionables de desarrollo y crearlos en Notion.
 
-USA la herramienta MCP `notion_create_pm_tickets_batch` para crear todos los tickets de una vez.
+USA la herramienta MCP `openceo_create_pm_tickets_batch` para crear todos los tickets de una vez.
 Pasa estos parámetros fijos a la herramienta:
 - project: "{project}"
 - source_id: "{source_id}"
@@ -280,7 +280,7 @@ class PMSessionManager:
         """Extract tickets using Claude/Codex in headless subprocess mode.
 
         The subprocess extracts tickets via LLM and invokes the MCP tool
-        `notion_create_pm_tickets_batch`. We parse the structured output
+        `openceo_create_pm_tickets_batch`. We parse the structured output
         (results JSON from the MCP tool) to build MongoDB tasks.
         """
         if self._config_loader is None:
