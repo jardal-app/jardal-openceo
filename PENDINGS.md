@@ -252,3 +252,32 @@ Actualmente existen DOS sistemas paralelos para workflows:
   3. El QA aprueba → el workflow YAML continúa desde el siguiente step
   4. El CEO en autodiscovery puede proponer workflows con aprobaciones humanas intermedias
   5. Cero duplicación de estado entre `workflow_runs` y `task` phases
+
+---
+
+## TICKET-019: Auto-discovery automático — quitar el flag explícito obligatorio
+- **Componente**: `openceo-core/workflow_service.py`, `openceo-core/task_service.py`
+- **Prioridad**: Alta (el comportamiento actual contradice la visión de orquestación autónoma)
+- **Relacionado**: TICKET-009 (Discovery Engine), TICKET-012 (CEO Discovery tiers 0-1.5)
+
+### Problema (comportamiento actual incorrecto)
+
+Hoy el auto-discovery **NO es automático**: solo se dispara si el ticket trae un flag explícito. En `workflow_service.py:826`, `_should_start_discovery()` retorna `True` únicamente si están presentes `params.discover_workflow`, `params.workflow_discovery`, o un workflow ref explícito. Por eso `run_for_task()` (línea 184-193), cuando **no** encuentra un workflow cristalizado que matchee y **no** hay flag, retorna `None` y la tarea cae directo al graph (CEO router → agente) sin pasar nunca por discovery. El discovery queda inalcanzable salvo que alguien sepa setear el flag a mano.
+
+### Comportamiento deseado
+
+Cuando entra una tarea, el sistema debe:
+1. Intentar resolverla con un **workflow conocido** (cristalizado / registry) — igual que hoy.
+2. Si **ningún** workflow conocido matchea, entrar **automáticamente** a auto-discovery (sin flag) para empezar a construir su propio camino: descubrir qué agentes/tools combinar, generar el YAML candidato, e incluso identificar/crear tools nuevos que falten (se cruza con BLOCKED_TOOL de TICKET-010).
+3. El flag explícito pasa a ser, como mucho, un **override** para forzar o saltar discovery — no el requisito para activarlo.
+
+### Notas / cuidado al implementar
+- Revisar la interacción con el fallback actual al graph para no romper tickets que hoy se resuelven bien con un agente directo (p.ej. un ticket de código que va al Dev). Hace falta un **guard** que distinga "tarea sin ruta conocida → discovery" de "tarea que el CEO ya sabe rutear a un agente → directo".
+- Definir el criterio de "no hay workflow conocido" y evitar entrar en discovery en tareas triviales.
+- Esto encaja con la lógica de tiers 0-1.5 de TICKET-012 (keywords → registry → unión → fragmentación → discovery como último recurso).
+
+### Criterio de aceptación
+- Una tarea sin workflow cristalizado que matchee entra a auto-discovery automáticamente, **sin** flag `discover_workflow`.
+- El flag explícito funciona como override (forzar o saltar discovery), no como disparador único.
+- Tareas con workflow conocido siguen ejecutándolo directamente (no entran a discovery).
+- Existe un guard que evita discovery innecesario cuando la tarea ya tiene ruta clara (workflow conocido o agente directo).

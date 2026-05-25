@@ -46,6 +46,17 @@ const PRIORITIES = [
   { value: 'critical', label: 'Crítica' },
 ]
 
+const CODING_TOOLS = [
+  { value: '',         label: 'Auto (el sistema decide)' },
+  { value: 'tier_s',   label: 'Tier S · Consensus (Planner + Builder + 3 reviewers)' },
+  { value: 'codex',    label: 'Codex' },
+  { value: 'claude',   label: 'Claude' },
+  { value: 'gemini',   label: 'Gemini' },
+  { value: 'opencode', label: 'OpenCode' },
+  { value: 'kimi',     label: 'Kimi' },
+  { value: 'glm',      label: 'GLM' },
+]
+
 export default function TicketForm() {
   const navigate = useNavigate()
   const { id } = useParams()
@@ -65,6 +76,7 @@ export default function TicketForm() {
     agent_hint: '',
     workflow_key: '',
     priority: 'medium',
+    coding_tool: '',
     approval_required: false,
     autorun: true,
   })
@@ -113,6 +125,7 @@ export default function TicketForm() {
         agent_hint: t.agent_hint || '',
         workflow_key: t.workflow_key || '',
         priority: t.priority || 'medium',
+        coding_tool: t.coding_tool || '',
         approval_required: t.approval_required || false,
         autorun: t.autorun ?? true,
       })
@@ -136,6 +149,7 @@ export default function TicketForm() {
         agent_hint: form.agent_hint || null,
         workflow_key: form.workflow_key || null,
         priority: form.priority,
+        coding_tool: form.coding_tool || null,
         approval_required: form.approval_required,
         autorun: form.autorun,
       }
@@ -308,6 +322,29 @@ export default function TicketForm() {
                   <option key={key} value={key}>{key}</option>
                 ))}
               </select>
+            </div>
+
+            <div className="form-field">
+              <label className="form-label" htmlFor="coding_tool">
+                <BoltIcon className="w-3.5 h-3.5" />
+                Herramienta de código
+              </label>
+              <select
+                id="coding_tool"
+                value={form.coding_tool}
+                onChange={e => setForm({ ...form, coding_tool: e.target.value })}
+                className="input-oceo"
+              >
+                {CODING_TOOLS.map(t => (
+                  <option key={t.value} value={t.value}>{t.label}</option>
+                ))}
+              </select>
+              {form.coding_tool === 'tier_s' && (
+                <p className="form-hint" style={{ color: 'var(--oceo-text-3)', fontSize: '0.75rem', marginTop: '0.25rem' }}>
+                  Tier S corre un consenso multi-modelo (más lento y costoso): Planner → Plan Reviewer →
+                  Builder → 3 reviewers × 2 rondas. Úsalo para tickets grandes o críticos.
+                </p>
+              )}
             </div>
 
             <div className="form-field">

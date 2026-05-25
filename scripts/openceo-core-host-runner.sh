@@ -34,4 +34,5 @@ export PROJECTS_DIR="${PROJECTS_DIR:-$ROOT_DIR/projects}"
 export PYTHONUNBUFFERED=1
 
 cd "$APP_DIR"
+"$VENV_PY" "$ROOT_DIR/scripts/sync-mcp-config.py" || echo "WARN: MCP config sync failed"
 exec "$VENV_PY" main.py

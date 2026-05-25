@@ -95,13 +95,21 @@ class DevSessionManager:
             )
 
         configured_tool = self._configured_tool(dev_cfg)
-        if configured_tool == CodingTool.TIER_S:
+
+        # Ticket-level coding_tool overrides project config.
+        effective_tool: CodingTool | None = None
+        if task_tool:
+            try:
+                effective_tool = CodingTool(task_tool)
+            except ValueError:
+                effective_tool = None
+        if effective_tool is None:
+            effective_tool = configured_tool
+
+        if effective_tool == CodingTool.TIER_S:
             return await self._run_critical_consensus(task, project_config, tier, qa_cfg)
 
-        if task_tool:
-            tool = CodingTool(task_tool)
-        else:
-            tool = configured_tool or self._tool_for_tier(tier)
+        tool = effective_tool or self._tool_for_tier(tier)
 
         output = DevExecutionOutput(
             status=TaskStatus.IN_PROGRESS,

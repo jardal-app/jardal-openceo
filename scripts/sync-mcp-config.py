@@ -26,7 +26,7 @@ from settings import get_settings
 from mcp_server import build_mcp_provider_config
 
 TARGETS = [
-    Path.home() / ".claude" / ".claude.json",
+    Path.home() / ".claude.json",
     Path.home() / ".claude-deepseek" / ".claude.json",
 ]
 
