@@ -199,6 +199,8 @@ class TaskCreateRequest(BaseModel):
     tags: list[str] | None = None
     created_by: str | None = None
     autorun: bool = True
+    coding_tier: CodingTier | None = None
+    coding_tool: CodingTool | None = None
 
 
 class TaskDocument(BaseModel):
@@ -340,6 +342,8 @@ class TaskPatchRequest(BaseModel):
     approval_state: ApprovalState | None = None
     updated_by: str | None = None
     params: dict[str, Any] | None = None
+    coding_tier: CodingTier | None = None
+    coding_tool: CodingTool | None = None
 
 
 class TaskWorkflowApplyRequest(BaseModel):
