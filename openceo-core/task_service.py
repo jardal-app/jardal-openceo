@@ -123,24 +123,28 @@ class TaskService:
         self._enqueue_notion_mirror(created)
 
         if self._settings.TASK_AUTORUN and payload.autorun:
-            if self._rate_monitor is not None:
-                can, resume_at = await self._maybe_gate_launch(created)
-                if not can:
-                    logger.info(
-                        "Rate limit gate: ticket %s queued until %s",
-                        created["task_id"],
-                        resume_at,
-                    )
-                    await self._repo.patch_task(
-                        created["task_id"],
-                        {
-                            "status": TaskStatus.QUEUED.value,
-                            "waiting_reason": "rate_limit_queued",
-                            "resume_at": resume_at,
-                        },
-                    )
-                    return created
-            asyncio.create_task(self.run_task(created["task_id"]))
+            try:
+                if self._rate_monitor is not None:
+                    can, resume_at = await self._maybe_gate_launch(created)
+                    if not can:
+                        logger.info(
+                            "Rate limit gate: ticket %s queued until %s",
+                            created["task_id"],
+                            resume_at,
+                        )
+                        await self._repo.patch_task(
+                            created["task_id"],
+                            {
+                                "status": TaskStatus.QUEUED.value,
+                                "waiting_reason": "rate_limit_queued",
+                                "resume_at": resume_at,
+                            },
+                        )
+                        return created
+                asyncio.create_task(self.run_task(created["task_id"]))
+            except Exception:
+                logger.exception("Rate monitor gate failed for ticket %s — launching anyway", created["task_id"])
+                asyncio.create_task(self.run_task(created["task_id"]))
 
         return created
 
