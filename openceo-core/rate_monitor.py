@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -130,11 +131,16 @@ class RateMonitor:
         except Exception:
             pass
 
-        # Determine the command to launch
+        # Monitor sessions need interactive REPLs so slash commands
+        # (/usage, /status) work. DEFAULT_ARGS may contain -p for
+        # batch dev sessions — strip it and use interactive-only flags.
         if provider == "codex":
-            cmd = f"{self._settings.CODEX_CLI_PATH} {self._settings.CODEX_DEFAULT_ARGS}"
+            path = self._settings.CODEX_CLI_PATH
+            # Start interactive; never pass -p/--print
+            cmd = f"{path} --dangerously-bypass-approvals-and-sandbox"
         elif provider == "claude":
-            cmd = f"{self._settings.CLAUDE_CODE_PATH} {self._settings.CLAUDE_DEFAULT_ARGS}"
+            path = self._settings.CLAUDE_CODE_PATH
+            cmd = f"{path} --dangerously-skip-permissions"
         else:
             raise ValueError(f"No monitor support for provider: {provider}")
 
@@ -142,12 +148,16 @@ class RateMonitor:
         pane = session.active_window.active_pane
         pane.send_keys(cmd, enter=True)
         logger.info("Created rate-monitor tmux session '%s'", name)
+        # Let the CLI finish booting before we send slash commands
+        time.sleep(5)
         return session
 
     def _send_to_monitor(self, provider: str, text: str) -> None:
         session = self._get_or_create_monitor_session(provider)
         pane = session.active_window.active_pane
         pane.send_keys(text, enter=True)
+        # Give the CLI a moment to process the slash command
+        time.sleep(2)
 
     def _capture_monitor(self, provider: str, lines: int = 80) -> str:
         name = self._monitor_session_name(provider)
