@@ -17,6 +17,16 @@ services:
     command: python main.py
     expose:
       - "8000"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.openceo-core-web.rule=Host(`api.openceo.jardal.app`)"
+      - "traefik.http.routers.openceo-core-web.entrypoints=web"
+      - "traefik.http.routers.openceo-core-websecure.rule=Host(`api.openceo.jardal.app`)"
+      - "traefik.http.routers.openceo-core-websecure.entrypoints=websecure"
+      - "traefik.http.routers.openceo-core-websecure.tls=true"
+      - "traefik.http.routers.openceo-core-websecure.tls.certresolver=jardal-resolver"
+      - "traefik.http.services.openceo-core.loadbalancer.server.port=8000"
+      - "traefik.http.services.openceo-core.loadbalancer.passhostheader=true"
     networks:
       - traefik-net
       - jardal-internal-net
