@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 # System deps: git, Node.js 20 (for claude-code + codex CLI), ssh
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl git openssh-client ca-certificates gnupg \
+        curl git openssh-client ca-certificates gnupg tmux \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
         | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
