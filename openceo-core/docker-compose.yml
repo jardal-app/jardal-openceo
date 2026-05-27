@@ -9,6 +9,7 @@ services:
       - .env
     environment:
       - ENV=production
+      - OPENCEO_PORT=8000
       - WORKFLOWS_DIR=/app/workflows
       - KIMI_SHARE_DIR=/home/ceouser/.kimi
       - PROJECT_CONTEXTS_DIR=/app/.runtime/project-context
