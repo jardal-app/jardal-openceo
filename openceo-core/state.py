@@ -548,6 +548,10 @@ def make_task_document(payload: TaskCreateRequest) -> TaskDocument:
     approval_required = bool(data.get("approval_required"))
     if data.get("tags") is None:
         data["tags"] = []
+    if data.get("workflow_phases") is None:
+        data.pop("workflow_phases", None)
+    if data.get("phase_assignments") is None:
+        data.pop("phase_assignments", None)
     if data.get("approval_state") is None:
         data["approval_state"] = ApprovalState.PENDING if approval_required else ApprovalState.NOT_REQUIRED
     qa_review_required = bool(data.get("qa_review_required"))
