@@ -164,7 +164,7 @@ def _register_infra_tools(server: FastMCP, settings: Settings) -> tuple[str, ...
     server.tool(
         manage_dns_check_or_create,
         name="manage_dns_check_or_create",
-        description="DNS: crea/verifica A record en Cloudflare. Usar antes de deploy con Traefik.",
+        description="DNS: create/verify A record in Cloudflare. Use before deploying with Traefik.",
     )
     return ("manage_dns_check_or_create",)
 
@@ -346,17 +346,17 @@ def _register_openceo_tools(server: FastMCP, settings: Settings, task_service: "
     server.tool(
         openceo_create_ticket,
         name="openceo_create_ticket",
-        description="Crea un ticket en OpenCEO (MongoDB). El sync a Notion se dispara automaticamente. Requiere: title. Opcionales: description, project, priority, status, ticket_type, source, source_id, tags, due_date, external_url.",
+        description="Create a ticket in OpenCEO (MongoDB). Notion sync triggers automatically. Required: title. Optional: description, project, priority, status, ticket_type, source, source_id, tags, due_date, external_url, coding_tool, coding_tier.",
     )
     server.tool(
         openceo_create_tickets_batch,
         name="openceo_create_tickets_batch",
-        description='Crea varios tickets en OpenCEO en un lote. Entrada: JSON array de objetos con al menos "title". Max 50.',
+        description='Batch-create tickets in OpenCEO. Input: JSON array of objects with at least "title". Max 50.',
     )
     server.tool(
         openceo_create_pm_tickets_batch,
         name="openceo_create_pm_tickets_batch",
-        description='Crea tickets derivados (spillover/entrevista) desde un ticket padre. Fuerza project/source/source_id para todo el lote. Requiere: project, source_id, tickets (JSON array con title y opcionales description, priority, tags, ticket_type, due_date, external_url).',
+        description='Create child tickets (spillover/interview) from a parent ticket. Forces project/source/source_id across the batch. Required: project, source_id, tickets (JSON array with title and optional description, priority, tags, ticket_type, due_date, external_url).',
     )
     return ("openceo_create_ticket", "openceo_create_tickets_batch", "openceo_create_pm_tickets_batch")
 
