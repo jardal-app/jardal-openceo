@@ -9,7 +9,7 @@ from typing import Any
 
 from settings import Settings
 from tools.cloudflare import CloudflareDNSManager
-from state import TaskCreateRequest, TaskPriority, TaskSource
+from state import CodingTier, CodingTool, TaskCreateRequest, TaskPriority, TaskSource
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +208,8 @@ def _register_openceo_tools(server: FastMCP, settings: Settings, task_service: "
         tags: list[str] | None = None,
         due_date: str | None = None,
         external_url: str | None = None,
+        coding_tool: str | None = None,
+        coding_tier: str | None = None,
     ) -> dict[str, Any]:
         req = TaskCreateRequest(
             title=title,
@@ -218,6 +220,8 @@ def _register_openceo_tools(server: FastMCP, settings: Settings, task_service: "
             source_id=source_id,
             tags=tags,
             params=_build_params(ticket_type, due_date, external_url, status),
+            coding_tool=CodingTool(coding_tool) if coding_tool else None,
+            coding_tier=CodingTier(coding_tier) if coding_tier else None,
         )
         try:
             result = await task_service.create_task(req)
