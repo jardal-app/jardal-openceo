@@ -792,6 +792,11 @@ class TmuxRuntime:
             return False
 
         if "openai codex" in content.lower() and status_line_found:
+            # Codex shows the banner before the model finishes loading.
+            # The model line is inside the TUI frame: │ model: loading ...
+            # Wait until it shows an actual model name, not "loading".
+            if _codex_model_line_loading(content):
+                return False
             return True
 
         lowered = content.lower()
@@ -799,6 +804,17 @@ class TmuxRuntime:
             return True
 
         return False
+
+
+def _codex_model_line_loading(content: str) -> bool:
+    """Codex TUI shows its banner before the model finishes loading.
+
+    The model line inside the TUI frame looks like:
+        │ model:       loading   /model to change                  │   ← still loading
+        │ model:       gpt-5.5 xhigh   /model to change            │   ← ready
+    """
+    return bool(re.search(r"│\s*model:\s+loading\s", content))
+
 
     @staticmethod
     def _is_codex_update_prompt(content: str) -> bool:
