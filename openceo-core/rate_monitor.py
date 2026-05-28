@@ -42,7 +42,11 @@ _CODEX_RESETS_WEEKLY_RE = re.compile(
 
 # Claude /usage  – e.g. "██████████… 55% used"
 _CLAUDE_USED_RE = re.compile(r"(\d+)%\s+used", re.IGNORECASE)
-_CLAUDE_RESETS_RE = re.compile(r"Resets\s+(\d{1,2}(?:am|pm))\s*\(UTC\)", re.IGNORECASE)
+# Resets line can be "Resets 6pm (UTC)" or "Resets May 31, 5pm (UTC)"
+_CLAUDE_RESETS_RE = re.compile(
+    r"Resets\s+.*?(\d{1,2}(?::\d{2})?(?:am|pm))\s*\(UTC\)",
+    re.IGNORECASE,
+)
 
 # Codex session-id from /status output:  "Session: <uuid>"
 _CODEX_SESSION_ID_RE = re.compile(r"Session:\s*([0-9a-f-]{36})", re.IGNORECASE)
@@ -294,19 +298,20 @@ class RateMonitor:
 
     @staticmethod
     def _claude_time_to_utc(ampm_str: str, now: datetime) -> datetime:
-        """Claude shows reset time in UTC like '4am' or '2pm'."""
+        """Claude shows reset time in UTC like '6pm' or '6:20pm'."""
         try:
             ampm_str = ampm_str.strip().lower()
-            m = re.match(r"(\d{1,2})(am|pm)", ampm_str)
+            m = re.match(r"(\d{1,2})(?::(\d{2}))?(am|pm)", ampm_str)
             if not m:
                 return now + timedelta(hours=5)
             hour = int(m.group(1))
-            is_pm = m.group(2) == "pm"
+            minute = int(m.group(2)) if m.group(2) else 0
+            is_pm = m.group(3) == "pm"
             if is_pm and hour != 12:
                 hour += 12
             elif not is_pm and hour == 12:
                 hour = 0
-            candidate = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+            candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             if candidate <= now:
                 candidate += timedelta(days=1)
             return candidate
