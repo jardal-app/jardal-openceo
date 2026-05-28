@@ -134,10 +134,13 @@ class RateMonitor:
         # Monitor sessions need interactive REPLs so slash commands
         # (/usage, /status) work. DEFAULT_ARGS may contain -p for
         # batch dev sessions — strip it and use interactive-only flags.
+        # Codex: disable MCP servers (-c overrides config.toml) — the
+        # monitor only needs the built-in /status command, and the
+        # openceo-global MCP adds ~40s to boot time.
         if provider == "codex":
             path = self._settings.CODEX_CLI_PATH
-            # Start interactive; never pass -p/--print
             cmd = f"{path} --dangerously-bypass-approvals-and-sandbox"
+            cmd += " -c 'mcp_servers={}'"
         elif provider == "claude":
             path = self._settings.CLAUDE_CODE_PATH
             cmd = f"{path} --dangerously-skip-permissions"
@@ -149,8 +152,8 @@ class RateMonitor:
         pane.send_keys(cmd, enter=True)
         logger.info("Created rate-monitor tmux session '%s'", name)
         # Let the CLI finish booting before we send slash commands.
-        # Codex MCP servers take ~40-50s; Claude initializes in ~5-8s.
-        boot_wait = 45 if provider == "codex" else 8
+        # Codex model loading takes ~25-30s even without MCP servers.
+        boot_wait = 30 if provider == "codex" else 8
         time.sleep(boot_wait)
         return session
 
