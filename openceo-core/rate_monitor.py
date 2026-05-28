@@ -148,8 +148,10 @@ class RateMonitor:
         pane = session.active_window.active_pane
         pane.send_keys(cmd, enter=True)
         logger.info("Created rate-monitor tmux session '%s'", name)
-        # Let the CLI finish booting before we send slash commands
-        time.sleep(5)
+        # Let the CLI finish booting before we send slash commands.
+        # Codex MCP servers take ~40-50s; Claude initializes in ~5-8s.
+        boot_wait = 45 if provider == "codex" else 8
+        time.sleep(boot_wait)
         return session
 
     def _send_to_monitor(self, provider: str, text: str) -> None:
@@ -157,7 +159,7 @@ class RateMonitor:
         pane = session.active_window.active_pane
         pane.send_keys(text, enter=True)
         # Give the CLI a moment to process the slash command
-        time.sleep(2)
+        time.sleep(3)
 
     def _capture_monitor(self, provider: str, lines: int = 80) -> str:
         name = self._monitor_session_name(provider)
