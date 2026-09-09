@@ -9,12 +9,15 @@ import {
   ChevronRightIcon,
   TicketIcon,
   PlusIcon,
+  ViewColumnsIcon,
+  TableCellsIcon,
 } from '@heroicons/react/24/outline'
 import client from '@/api'
 import { StoreContext } from '@/context/store'
 import OptionsCRUD from '@/components/OptionsCRUD'
 import { PermissionCheck } from '@/components/PermissionCheck'
 import { swalError } from '@/utils/swalError'
+import KanbanBoard from '@/components/KanbanBoard'
 
 const statusLabels = {
   queued: 'Queued',
@@ -119,10 +122,12 @@ function getClientStatusInfo(ticket) {
 export default function TicketList() {
   const store = useContext(StoreContext)
   const location = useLocation()
+  const [viewMode, setViewMode] = useState(() => localStorage.getItem('ticketViewMode') || 'kanban')
   const [tickets, setTickets] = useState([])
   const [loading, setLoading] = useState(true)
   const [filterStatus, setFilterStatus] = useState('')
   const [filterProject, setFilterProject] = useState('')
+  const [filterAgent, setFilterAgent] = useState('')
   const [filterQAPending, setFilterQAPending] = useState(false)
   const [page, setPage] = useState(1)
   const [itemsPerPage, setItemsPerPage] = useState(50)
@@ -175,6 +180,7 @@ export default function TicketList() {
       }
     }
     if (filterProject && !t.project?.toLowerCase().includes(filterProject.toLowerCase())) return false
+    if (filterAgent && (t.agent || t.agent_hint || '').toLowerCase() !== filterAgent.toLowerCase()) return false
     if (!isClient && filterQAPending) {
       const isQAPhase = t.phase === 'qa_review' && t.status === 'waiting'
       const isQAPending = t.qa_review_required && t.qa_review_state === 'pending'
@@ -212,23 +218,56 @@ export default function TicketList() {
           <p className="dashboard-subtitle">{isClient ? 'Seguimiento de tus tickets' : 'Gestión y seguimiento de tareas'}</p>
         </div>
         <div className="dashboard-header-actions">
-          <span className="results-count">{filtered.length} resultado{filtered.length !== 1 ? 's' : ''}</span>
-          <select
-            value={itemsPerPage}
-            onChange={(e) => handleItemsPerPageChange(e.target.value)}
-            className="input-oceo input-sm"
-            style={{ width: 90 }}
-          >
-            <option value={10}>10 / pág</option>
-            <option value={50}>50 / pág</option>
-            <option value={100}>100 / pág</option>
-            <option value={200}>200 / pág</option>
-            <option value={500}>500 / pág</option>
-          </select>
-          <button onClick={() => setShowFilters(!showFilters)} className="btn-secondary btn-sm">
-            <FunnelIcon className="w-4 h-4" />
-            {showFilters ? 'Ocultar filtros' : 'Filtros'}
-          </button>
+          {/* View Switcher */}
+          <div className="kanban-mode-switcher">
+            <button
+              type="button"
+              className={`kanban-mode-btn ${viewMode === 'kanban' ? 'active' : ''}`}
+              onClick={() => {
+                setViewMode('kanban')
+                localStorage.setItem('ticketViewMode', 'kanban')
+              }}
+              title="Vista Kanban"
+            >
+              <ViewColumnsIcon className="w-4 h-4" />
+              Kanban
+            </button>
+            <button
+              type="button"
+              className={`kanban-mode-btn ${viewMode === 'table' ? 'active' : ''}`}
+              onClick={() => {
+                setViewMode('table')
+                localStorage.setItem('ticketViewMode', 'table')
+              }}
+              title="Vista Tabla"
+            >
+              <TableCellsIcon className="w-4 h-4" />
+              Tabla
+            </button>
+          </div>
+
+          {viewMode === 'table' && (
+            <>
+              <span className="results-count">{filtered.length} resultado{filtered.length !== 1 ? 's' : ''}</span>
+              <select
+                value={itemsPerPage}
+                onChange={(e) => handleItemsPerPageChange(e.target.value)}
+                className="input-oceo input-sm"
+                style={{ width: 90 }}
+              >
+                <option value={10}>10 / pág</option>
+                <option value={50}>50 / pág</option>
+                <option value={100}>100 / pág</option>
+                <option value={200}>200 / pág</option>
+                <option value={500}>500 / pág</option>
+              </select>
+              <button onClick={() => setShowFilters(!showFilters)} className="btn-secondary btn-sm">
+                <FunnelIcon className="w-4 h-4" />
+                {showFilters ? 'Ocultar filtros' : 'Filtros'}
+              </button>
+            </>
+          )}
+
           <PermissionCheck perms={['write_tickets']}>
             <Link to="/dashboard/tickets/create" className="btn-primary btn-sm">
               <PlusIcon className="w-4 h-4" />
@@ -238,69 +277,96 @@ export default function TicketList() {
         </div>
       </div>
 
-      {/* Filters */}
-      {showFilters && (
-        <div className="card-oceo filters-card">
-          <div className="filters-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', maxWidth: 600 }}>
-            <div className="filter-field">
-              <label className="filter-label">Estado</label>
-              <select
-                value={filterStatus}
-                onChange={(e) => { setFilterStatus(e.target.value); setPage(1) }}
-                className="input-oceo input-sm"
-              >
-                <option value="">Todos</option>
-                {isClient ? (
-                  <>
-                    <option value="in_progress">En proceso</option>
-                    <option value="waiting_review">En espera de revisión</option>
-                    <option value="completed">Completado</option>
-                  </>
-                ) : (
-                  <>
-                    <option value="queued">En cola</option>
-                    <option value="in_progress">En progreso</option>
-                    <option value="completed">Completado</option>
-                    <option value="failed">Fallido</option>
-                    <option value="waiting">Esperando</option>
-                    <option value="escalated">Escalado</option>
-                    <option value="interrupted">Interrumpido</option>
-                  </>
+      {/* Main View: Kanban or Table */}
+      {viewMode === 'kanban' ? (
+        <KanbanBoard
+          tickets={tickets}
+          loading={loading}
+          onRefresh={loadTickets}
+          hideViewSwitcher={true}
+          initialView="kanban"
+        />
+      ) : (
+        <>
+          {/* Filters for Table */}
+          {showFilters && (
+            <div className="card-oceo filters-card" style={{ marginBottom: '1.25rem' }}>
+              <div className="filters-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', maxWidth: 800 }}>
+                <div className="filter-field">
+                  <label className="filter-label">Estado</label>
+                  <select
+                    value={filterStatus}
+                    onChange={(e) => { setFilterStatus(e.target.value); setPage(1) }}
+                    className="input-oceo input-sm"
+                  >
+                    <option value="">Todos</option>
+                    {isClient ? (
+                      <>
+                        <option value="in_progress">En proceso</option>
+                        <option value="waiting_review">En espera de revisión</option>
+                        <option value="completed">Completado</option>
+                      </>
+                    ) : (
+                      <>
+                        <option value="queued">En cola</option>
+                        <option value="in_progress">En progreso</option>
+                        <option value="completed">Completado</option>
+                        <option value="failed">Fallido</option>
+                        <option value="waiting">Esperando</option>
+                        <option value="escalated">Escalado</option>
+                        <option value="interrupted">Interrumpido</option>
+                      </>
+                    )}
+                  </select>
+                </div>
+
+                <div className="filter-field">
+                  <label className="filter-label">Agente</label>
+                  <select
+                    value={filterAgent}
+                    onChange={(e) => { setFilterAgent(e.target.value); setPage(1) }}
+                    className="input-oceo input-sm"
+                  >
+                    <option value="">Todos los agentes</option>
+                    <option value="dev">Dev</option>
+                    <option value="finance">Finanzas</option>
+                    <option value="secretary">Secretaría</option>
+                    <option value="pm">PM</option>
+                    <option value="ceo">CEO</option>
+                  </select>
+                </div>
+
+                <div className="filter-field">
+                  <label className="filter-label">Proyecto</label>
+                  <div className="input-icon-wrap">
+                    <MagnifyingGlassIcon className="input-icon" />
+                    <input
+                      type="text"
+                      value={filterProject}
+                      onChange={(e) => { setFilterProject(e.target.value); setPage(1) }}
+                      placeholder="Buscar proyecto..."
+                      className="input-oceo input-sm input-with-icon"
+                    />
+                  </div>
+                </div>
+
+                {!isClient && (
+                  <div className="filter-field">
+                    <label className="filter-label">QA</label>
+                    <button
+                      onClick={() => { setFilterQAPending((v) => !v); setPage(1) }}
+                      className={`btn-sm w-full ${filterQAPending ? 'btn-primary' : 'btn-secondary'}`}
+                    >
+                      {filterQAPending ? 'Pendiente QA ✓' : 'Pendiente QA'}
+                    </button>
+                  </div>
                 )}
-              </select>
-            </div>
-
-            <div className="filter-field">
-              <label className="filter-label">Proyecto</label>
-              <div className="input-icon-wrap">
-                <MagnifyingGlassIcon className="input-icon" />
-                <input
-                  type="text"
-                  value={filterProject}
-                  onChange={(e) => { setFilterProject(e.target.value); setPage(1) }}
-                  placeholder="Buscar proyecto..."
-                  className="input-oceo input-sm input-with-icon"
-                />
               </div>
             </div>
+          )}
 
-            {!isClient && (
-              <div className="filter-field">
-                <label className="filter-label">QA</label>
-                <button
-                  onClick={() => { setFilterQAPending((v) => !v); setPage(1) }}
-                  className={`btn-sm w-full ${filterQAPending ? 'btn-primary' : 'btn-secondary'}`}
-                >
-                  {filterQAPending ? 'Pendiente QA ✓' : 'Pendiente QA'}
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Table */}
-      <div className="card-oceo table-card">
+          {/* Table */}
+          <div className="card-oceo table-card">
         <div className="table-wrap">
           <table className="data-table">
             <thead>
@@ -429,6 +495,8 @@ export default function TicketList() {
           </div>
         )}
       </div>
+        </>
+      )}
     </div>
   )
 }

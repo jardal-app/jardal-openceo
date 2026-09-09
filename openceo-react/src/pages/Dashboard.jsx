@@ -11,9 +11,15 @@ import {
   ChartBarIcon,
   BoltIcon,
   ClipboardDocumentCheckIcon,
+  ClockIcon,
+  ExclamationTriangleIcon,
+  PlusIcon,
+  InboxStackIcon,
 } from '@heroicons/react/24/outline'
 import client from '@/api'
 import { StoreContext } from '@/context/store'
+import KanbanBoard from '@/components/KanbanBoard'
+import { PermissionCheck } from '@/components/PermissionCheck'
 
 const statusLabels = {
   queued: 'En cola',
@@ -63,10 +69,14 @@ export default function Dashboard() {
 
   const [stats, setStats] = useState({
     total: 0,
+    inProgress: 0,
+    queued: 0,
     inReview: 0,
     clientWaiting: 0,
     completed: 0,
+    failed: 0,
   })
+  const [allTickets, setAllTickets] = useState([])
   const [recentTickets, setRecentTickets] = useState([])
   const [qaPendingTickets, setQaPendingTickets] = useState([])
   const [qaClientTickets, setQaClientTickets] = useState([])
@@ -78,13 +88,12 @@ export default function Dashboard() {
   useGSAP(() => {
     if (prefersReducedMotion) return
     const ctx = gsap.context(() => {
-      gsap.from('.stat-card', { y: 20, opacity: 0, stagger: 0.1, duration: 0.5, ease: 'power2.out' })
+      gsap.from('.stat-card', { y: 20, opacity: 0, stagger: 0.08, duration: 0.45, ease: 'power2.out' })
       gsap.from('.section-header', { y: -10, opacity: 0, duration: 0.4, ease: 'power2.out' })
       gsap.from('.completion-card, .qa-stream-card', { y: 16, opacity: 0, stagger: 0.1, duration: 0.45, delay: 0.15, ease: 'power2.out' })
-      gsap.from('.recent-ticket, .qa-stream-ticket', { x: -20, opacity: 0, stagger: 0.06, duration: 0.35, delay: 0.3, ease: 'power2.out' })
     })
     return () => ctx.revert()
-  }, [prefersReducedMotion, isQAHome, isClient, recentTickets, qaPendingTickets, qaClientTickets, clientTickets])
+  }, [prefersReducedMotion, isQAHome, isClient, allTickets])
 
   useEffect(() => {
     loadDashboard()
@@ -106,11 +115,15 @@ export default function Dashboard() {
 
         setStats({
           total: rows.length,
+          inProgress: derived.inProgress,
+          queued: 0,
           inReview: 0,
           clientWaiting: derived.clientWaiting,
           completed: derived.completed,
+          failed: 0,
         })
         setClientTickets(rows)
+        setAllTickets(rows)
         setRecentTickets([])
         setQaPendingTickets([])
         setQaClientTickets([])
@@ -122,6 +135,7 @@ export default function Dashboard() {
 
       const requests = [
         client.get('/api/tasks/stats', { params: projectParams }),
+        client.get('/api/tasks', { params: { ...projectParams, limit: 500 } }),
       ]
 
       if (isQAHome) {
@@ -139,31 +153,42 @@ export default function Dashboard() {
             limit: 4,
           }),
         )
-      } else {
-        requests.push(
-          client.get('/api/tasks', {
-            params: { ...projectParams, limit: 5 },
-          }),
-        )
       }
 
       const responses = await Promise.all(requests)
       const statsResponse = responses[0]
+      const tasksResponse = responses[1]
+      const rows = Array.isArray(tasksResponse?.data) ? tasksResponse.data : []
+
+      setAllTickets(rows)
+
+      const counts = rows.reduce((acc, t) => {
+        acc.total++
+        if (t.status === 'in_progress') acc.inProgress++
+        else if (t.status === 'queued') acc.queued++
+        else if (t.status === 'waiting') acc.waiting++
+        else if (t.status === 'completed') acc.completed++
+        else if (['failed', 'escalated', 'interrupted'].includes(t.status)) acc.failed++
+        return acc
+      }, { total: 0, inProgress: 0, queued: 0, waiting: 0, completed: 0, failed: 0 })
 
       setStats({
-        total: statsResponse.data?.total || 0,
-        inReview: statsResponse.data?.in_review || 0,
+        total: statsResponse.data?.total || counts.total,
+        inProgress: counts.inProgress,
+        queued: counts.queued,
+        inReview: statsResponse.data?.in_review || counts.waiting,
         clientWaiting: statsResponse.data?.client_waiting || 0,
-        completed: statsResponse.data?.completed || 0,
+        completed: statsResponse.data?.completed || counts.completed,
+        failed: counts.failed,
       })
 
       if (isQAHome) {
-        setQaPendingTickets(Array.isArray(responses[1]?.data) ? responses[1].data : [])
-        setQaClientTickets(Array.isArray(responses[2]?.data) ? responses[2].data : [])
+        setQaPendingTickets(Array.isArray(responses[2]?.data) ? responses[2].data : [])
+        setQaClientTickets(Array.isArray(responses[3]?.data) ? responses[3].data : [])
         setRecentTickets([])
         setClientTickets([])
       } else {
-        setRecentTickets(Array.isArray(responses[1]?.data) ? responses[1].data : [])
+        setRecentTickets(rows.slice(0, 5))
         setQaPendingTickets([])
         setQaClientTickets([])
         setClientTickets([])
@@ -363,25 +388,42 @@ export default function Dashboard() {
     <div className="dashboard-page">
       <div className="section-header">
         <div>
-          <h1 className="dashboard-title">Dashboard</h1>
-          <p className="dashboard-subtitle">Resumen general del sistema</p>
+          <h1 className="dashboard-title">Centro de Operaciones</h1>
+          <p className="dashboard-subtitle">Monitoreo en tiempo real de agentes, flujos y estado de tareas</p>
         </div>
         <div className="dashboard-header-actions">
+          <PermissionCheck perms={['write_tickets']}>
+            <Link to="/dashboard/tickets/create" className="btn-primary btn-sm">
+              <PlusIcon className="w-4 h-4" />
+              Nuevo Ticket
+            </Link>
+          </PermissionCheck>
           <Link to="/dashboard/tickets/list" className="btn-secondary btn-sm">
             <TicketIcon className="w-4 h-4" />
-            Ver Tickets
+            Tabla de Tickets
           </Link>
         </div>
       </div>
 
-      <div className="stats-grid">
+      {/* Stats Cards Grid - 6 Key Indicators */}
+      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))' }}>
         <div className="stat-card card-oceo">
           <div className="stat-icon-wrap" style={{ background: 'rgba(46,134,230,0.15)' }}>
-            <TicketIcon className="stat-icon" style={{ color: 'var(--oceo-blue-400)' }} />
+            <InboxStackIcon className="stat-icon" style={{ color: 'var(--oceo-blue-400)' }} />
           </div>
           <div className="stat-content">
             <p className="stat-value">{stats.total}</p>
-            <p className="stat-label">Total Tickets</p>
+            <p className="stat-label">Total Tareas</p>
+          </div>
+        </div>
+
+        <div className="stat-card card-oceo">
+          <div className="stat-icon-wrap" style={{ background: 'rgba(46,134,230,0.15)' }}>
+            <BoltIcon className="stat-icon" style={{ color: 'var(--oceo-blue-300)' }} />
+          </div>
+          <div className="stat-content">
+            <p className="stat-value">{stats.inProgress}</p>
+            <p className="stat-label">En Progreso</p>
           </div>
         </div>
 
@@ -391,17 +433,17 @@ export default function Dashboard() {
           </div>
           <div className="stat-content">
             <p className="stat-value">{stats.inReview}</p>
-            <p className="stat-label">{isQAHome ? 'Pendientes QA' : 'En Revisión'}</p>
+            <p className="stat-label">{isQAHome ? 'Pendientes QA' : 'En Espera / Rev.'}</p>
           </div>
         </div>
 
         <div className="stat-card card-oceo">
-          <div className="stat-icon-wrap" style={{ background: 'rgba(20,184,166,0.15)' }}>
-            <UserIcon className="stat-icon" style={{ color: '#2dd4bf' }} />
+          <div className="stat-icon-wrap" style={{ background: 'rgba(245,165,36,0.12)' }}>
+            <ClockIcon className="stat-icon" style={{ color: '#fbbf24' }} />
           </div>
           <div className="stat-content">
-            <p className="stat-value">{stats.clientWaiting}</p>
-            <p className="stat-label">Esperando Cliente</p>
+            <p className="stat-value">{stats.queued}</p>
+            <p className="stat-label">En Cola</p>
           </div>
         </div>
 
@@ -411,105 +453,65 @@ export default function Dashboard() {
           </div>
           <div className="stat-content">
             <p className="stat-value">{stats.completed}</p>
-            <p className="stat-label">Completados</p>
+            <p className="stat-label">Completadas</p>
+          </div>
+        </div>
+
+        <div className="stat-card card-oceo">
+          <div className="stat-icon-wrap" style={{ background: 'rgba(240,68,82,0.15)' }}>
+            <ExclamationTriangleIcon className="stat-icon" style={{ color: 'var(--oceo-danger)' }} />
+          </div>
+          <div className="stat-content">
+            <p className="stat-value">{stats.failed}</p>
+            <p className="stat-label">Fallidos / Atención</p>
           </div>
         </div>
       </div>
 
-      {isQAHome ? (
-        <>
-          <div className="card-oceo completion-card">
-            <div className="completion-header">
-              <ChartBarIcon className="w-5 h-5" style={{ color: 'var(--oceo-blue-400)' }} />
-              <h3>Avance QA</h3>
-            </div>
-            <div className="completion-bar-wrap">
-              <div className="completion-bar">
-                <div className="completion-bar-fill" style={{ width: `${qaProgress}%` }} />
-              </div>
-              <span className="completion-percentage">{qaProgress}%</span>
-            </div>
+      {/* Completion bar */}
+      <div className="card-oceo completion-card" style={{ marginBottom: '1.25rem' }}>
+        <div className="completion-header">
+          <ChartBarIcon className="w-5 h-5" style={{ color: 'var(--oceo-blue-400)' }} />
+          <h3>Tasa de Completitud</h3>
+        </div>
+        <div className="completion-bar-wrap">
+          <div className="completion-bar">
+            <div className="completion-bar-fill" style={{ width: `${completionRate}%` }} />
           </div>
+          <span className="completion-percentage">{completionRate}%</span>
+        </div>
+      </div>
 
-          <div className="qa-stream-grid">
-            {renderQaStream({
-              title: 'Pendientes QA',
-              icon: ClipboardDocumentCheckIcon,
-              tickets: qaPendingTickets,
-              emptyText: 'Sin tickets',
-              badgeClass: 'badge-warning',
-              badgeLabel: 'QA',
-            })}
-
-            {renderQaStream({
-              title: 'Esperando Cliente',
-              icon: UserIcon,
-              tickets: qaClientTickets,
-              emptyText: 'Sin tickets',
-              badgeClass: 'badge-client',
-              badgeLabel: 'Cliente',
-            })}
-          </div>
-        </>
-      ) : (
-        <>
-          <div className="card-oceo completion-card">
-            <div className="completion-header">
-              <ChartBarIcon className="w-5 h-5" style={{ color: 'var(--oceo-blue-400)' }} />
-              <h3>Tasa de Completitud</h3>
-            </div>
-            <div className="completion-bar-wrap">
-              <div className="completion-bar">
-                <div className="completion-bar-fill" style={{ width: `${completionRate}%` }} />
-              </div>
-              <span className="completion-percentage">{completionRate}%</span>
-            </div>
-          </div>
-
-          <div className="card-oceo recent-section">
-            <div className="section-header-inner">
-              <div className="flex items-center gap-2">
-                <BoltIcon className="w-5 h-5" style={{ color: 'var(--oceo-blue-400)' }} />
-                <h2>Tickets Recientes</h2>
-              </div>
-              <Link to="/dashboard/tickets/list" className="section-link">
-                Ver todos
-                <ArrowRightIcon className="w-4 h-4" />
-              </Link>
-            </div>
-
-            {recentTickets.length === 0 ? (
-              <div className="empty-state">
-                <TicketIcon className="w-12 h-12" style={{ color: 'var(--oceo-text-3)' }} />
-                <p>No hay tickets aún</p>
-              </div>
-            ) : (
-              <div className="recent-list">
-                {recentTickets.map((ticket) => (
-                  <Link
-                    key={ticket.task_id}
-                    to={`/dashboard/tickets/${ticket.task_id}`}
-                    state={detailBackState}
-                    className="recent-ticket"
-                  >
-                    <div className="recent-ticket-info">
-                      <p className="recent-ticket-title">
-                        {ticket.ticket_number != null ? `#${ticket.ticket_number} — ` : ''}{ticket.title}
-                      </p>
-                      <p className="recent-ticket-meta">
-                        {ticket.project || 'Sin proyecto'} · {formatShortDate(ticket.created_at)}
-                      </p>
-                    </div>
-                    <span className={`status-badge ${statusColors[ticket.status] || 'badge-active'}`}>
-                      {statusLabels[ticket.status] || ticket.status}
-                    </span>
-                  </Link>
-                ))}
-              </div>
-            )}
-          </div>
-        </>
+      {/* QA Stream if isQAHome */}
+      {isQAHome && (
+        <div className="qa-stream-grid" style={{ marginBottom: '1.5rem' }}>
+          {renderQaStream({
+            title: 'Pendientes QA',
+            icon: ClipboardDocumentCheckIcon,
+            tickets: qaPendingTickets,
+            emptyText: 'Sin tickets pendientes',
+            badgeClass: 'badge-warning',
+            badgeLabel: 'QA',
+          })}
+          {renderQaStream({
+            title: 'Esperando Cliente',
+            icon: UserIcon,
+            tickets: qaClientTickets,
+            emptyText: 'Sin tickets esperando cliente',
+            badgeClass: 'badge-client',
+            badgeLabel: 'Cliente',
+          })}
+        </div>
       )}
+
+      {/* Interactive Kanban Board */}
+      <KanbanBoard
+        tickets={allTickets}
+        loading={loading}
+        onRefresh={loadDashboard}
+        initialView="kanban"
+        initialGroupBy="status"
+      />
     </div>
   )
 }
