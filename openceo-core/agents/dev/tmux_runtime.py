@@ -24,7 +24,7 @@ _DEFAULT_PROMPT_PATTERNS: dict[str, re.Pattern[str]] = {
     "claude": re.compile(r"(>\s*$|›\s*$|❯\s*$|\$\s*$|claude.*>\s*$)", re.MULTILINE),
     "codex": re.compile(r"(>\s*$|›\s*$|❯\s*$|\$\s*$|codex.*>\s*$)", re.MULTILINE),
     "gemini": re.compile(
-        r"(^\s*[›❯>]\s+Type your message\b.*$|^\s*/model\s+gemini[^\n]*$|>\s*$|›\s*$|❯\s*$|\$\s*$|gemini.*>\s*$)",
+        r"(^\s*[›❯>]\s+Type your message\b.*$|^\s*/model\s+gemini[^\n]*$|\?\s+for\s+shortcuts|>\s*$|›\s*$|❯\s*$|\$\s*$|gemini.*>\s*$)",
         re.MULTILINE | re.IGNORECASE,
     ),
     "opencode": re.compile(
@@ -187,6 +187,7 @@ class TmuxRuntime:
         completion_marker_begin: str | None = None,
         completion_marker_end: str | None = None,
         completion_check: Callable[[], bool] | None = None,
+        tui_signal_patterns: list[re.Pattern[str]] | None = None,
     ) -> TmuxTurnResult:
         """Send text as keystrokes to the tmux pane and wait for deterministic completion.
 
@@ -234,7 +235,37 @@ class TmuxRuntime:
 
             current_content = self._capture_pane(pane)
 
-            # ---- Rate limit detection ----
+            # ---- Completion check (P3: checked FIRST, before rate-limit) ----
+            marker_found = bool(
+                completion_marker_begin
+                and completion_marker_end
+                and self._has_completion_block(
+                    current_content,
+                    begin_marker=completion_marker_begin,
+                    end_marker=completion_marker_end,
+                )
+            )
+            callback_satisfied = self._is_completion_check_satisfied(completion_check)
+
+            # P1 fallback: scan TUI pane for signal patterns when file is empty
+            tui_found = False
+            if not marker_found and not callback_satisfied and tui_signal_patterns:
+                tui_found = self._has_tui_signal(current_content, tui_signal_patterns)
+                if tui_found:
+                    logger.info(
+                        "TUI fallback: signal pattern matched in session '%s'",
+                        info.tmux_session_name,
+                    )
+
+            if marker_found or callback_satisfied or tui_found:
+                return TmuxTurnResult(
+                    ok=True,
+                    output=current_content,
+                    is_ready=True,
+                    completion_marker_found=marker_found,
+                )
+
+            # ---- Rate limit detection (P3: checked AFTER completion) ----
             provider_name = info.provider.value if info.provider else ""
             if provider_name in ("claude", "codex"):
                 rl = RateMonitor.detect_rate_limit(current_content, provider_name)
@@ -253,6 +284,7 @@ class TmuxRuntime:
                         completion_marker_begin=completion_marker_begin,
                         completion_marker_end=completion_marker_end,
                         completion_check=completion_check,
+                        tui_signal_patterns=tui_signal_patterns,
                     )
                     return result
 
@@ -275,24 +307,6 @@ class TmuxRuntime:
                     error=f"Process crash in {provider_name}; recovery failed",
                 )
 
-            marker_found = bool(
-                completion_marker_begin
-                and completion_marker_end
-                and self._has_completion_block(
-                    current_content,
-                    begin_marker=completion_marker_begin,
-                    end_marker=completion_marker_end,
-                )
-            )
-            callback_satisfied = self._is_completion_check_satisfied(completion_check)
-            if marker_found or callback_satisfied:
-                return TmuxTurnResult(
-                    ok=True,
-                    output=current_content,
-                    is_ready=True,
-                    completion_marker_found=marker_found,
-                )
-
         # Timeout — capture whatever is there
         final_content = self._capture_pane(pane)
         marker_found = bool(
@@ -306,10 +320,20 @@ class TmuxRuntime:
         )
         callback_satisfied = self._is_completion_check_satisfied(completion_check)
 
+        # P1 fallback on timeout: check TUI for signal patterns
+        tui_found = False
+        if not marker_found and not callback_satisfied and tui_signal_patterns:
+            tui_found = self._has_tui_signal(final_content, tui_signal_patterns)
+            if tui_found:
+                logger.info(
+                    "TUI fallback (timeout): signal pattern matched in session '%s'",
+                    info.tmux_session_name,
+                )
+
         return TmuxTurnResult(
             ok=True,
             output=final_content,
-            is_ready=marker_found or callback_satisfied,
+            is_ready=marker_found or callback_satisfied or tui_found,
             timed_out=True,
             completion_marker_found=marker_found,
         )
@@ -358,6 +382,7 @@ class TmuxRuntime:
         completion_marker_begin: str | None,
         completion_marker_end: str | None,
         completion_check: Callable[[], bool] | None,
+        tui_signal_patterns: list[re.Pattern[str]] | None = None,
     ) -> TmuxTurnResult:
         """Handle a rate-limit hit: select wait option, sleep, then resume."""
         provider = info.provider.value
@@ -405,6 +430,38 @@ class TmuxRuntime:
 
             current_content = self._capture_pane(pane)
 
+            # P3: completion check FIRST, before rate-limit re-check
+            marker_found = bool(
+                completion_marker_begin
+                and completion_marker_end
+                and self._has_completion_block(
+                    current_content,
+                    begin_marker=completion_marker_begin,
+                    end_marker=completion_marker_end,
+                )
+            )
+            callback_satisfied = self._is_completion_check_satisfied(completion_check)
+
+            # P1 fallback: scan TUI pane for signal patterns
+            tui_found = False
+            if not marker_found and not callback_satisfied and tui_signal_patterns:
+                tui_found = self._has_tui_signal(current_content, tui_signal_patterns)
+                if tui_found:
+                    logger.info(
+                        "TUI fallback (rate-limit resume): signal pattern matched in '%s'",
+                        info.tmux_session_name,
+                    )
+
+            if marker_found or callback_satisfied or tui_found:
+                return TmuxTurnResult(
+                    ok=True,
+                    output=current_content,
+                    is_ready=True,
+                    completion_marker_found=marker_found,
+                    rate_limited=True,
+                    rate_limit_info=detection,
+                )
+
             # Check for another rate limit (can happen again)
             rl2 = RateMonitor.detect_rate_limit(current_content, provider)
             if rl2 is not None:
@@ -418,33 +475,25 @@ class TmuxRuntime:
                     completion_marker_begin=completion_marker_begin,
                     completion_marker_end=completion_marker_end,
                     completion_check=completion_check,
-                )
-
-            marker_found = bool(
-                completion_marker_begin
-                and completion_marker_end
-                and self._has_completion_block(
-                    current_content,
-                    begin_marker=completion_marker_begin,
-                    end_marker=completion_marker_end,
-                )
-            )
-            callback_satisfied = self._is_completion_check_satisfied(completion_check)
-            if marker_found or callback_satisfied:
-                return TmuxTurnResult(
-                    ok=True,
-                    output=current_content,
-                    is_ready=True,
-                    completion_marker_found=marker_found,
-                    rate_limited=True,
-                    rate_limit_info=detection,
+                    tui_signal_patterns=tui_signal_patterns,
                 )
 
         final_content = self._capture_pane(pane)
+
+        # P1 fallback on timeout: check TUI for signal patterns
+        tui_found = False
+        if tui_signal_patterns:
+            tui_found = self._has_tui_signal(final_content, tui_signal_patterns)
+            if tui_found:
+                logger.info(
+                    "TUI fallback (rate-limit timeout): signal pattern matched in '%s'",
+                    info.tmux_session_name,
+                )
+
         return TmuxTurnResult(
             ok=True,
             output=final_content,
-            is_ready=False,
+            is_ready=tui_found,
             timed_out=True,
             rate_limited=True,
             rate_limit_info=detection,
@@ -550,7 +599,9 @@ class TmuxRuntime:
                 provider_banner_ready = (
                     ("openai codex" in lowered)
                     or ("claude" in lowered)
-                    or ("gemini" in lowered and "type your message or @path/to/file" in lowered)
+                    or ("antigravity" in lowered)
+                    or ("gemini" in lowered and ("type your message or @path/to/file" in lowered or "? for shortcuts" in lowered))
+                    or ("? for shortcuts" in lowered)
                     or ("ask anything..." in lowered and "/status" in lowered)
                 )
                 if provider_banner_ready and self._check_prompt_ready(content, info.prompt_pattern):
@@ -665,6 +716,99 @@ class TmuxRuntime:
         except Exception:
             return []
 
+    def list_all_host_sessions(self) -> list[dict[str, Any]]:
+        """List all tmux sessions on the host system with details and active pane content."""
+        results: list[dict[str, Any]] = []
+        try:
+            for s in self.server.sessions:
+                s_name = str(s.name)
+                is_openceo = s_name.startswith(_TMUX_PREFIX)
+                last_line = ""
+                window_count = 1
+                try:
+                    window_count = len(s.windows)
+                    pane = s.active_window.active_pane
+                    lines = pane.capture_pane()
+                    if lines:
+                        # Find last non-empty line
+                        for line in reversed(lines):
+                            if line.strip():
+                                last_line = line.strip()
+                                break
+                except Exception:
+                    pass
+                results.append(
+                    {
+                        "name": s_name,
+                        "windows": window_count,
+                        "is_openceo_dev": is_openceo,
+                        "attached": getattr(s, "attached", "0") != "0",
+                        "last_line": last_line,
+                    }
+                )
+        except Exception as exc:
+            logger.warning("Failed to list all host tmux sessions: %s", exc)
+        return results
+
+    def capture_pane_by_name(self, session_name: str, max_lines: int = 50) -> str | None:
+        """Capture the current pane content of any host tmux session."""
+        try:
+            for s in self.server.sessions:
+                if s.name == session_name:
+                    pane = s.active_window.active_pane
+                    lines = pane.capture_pane()
+                    if max_lines and len(lines) > max_lines:
+                        lines = lines[-max_lines:]
+                    return "\n".join(lines)
+        except Exception as exc:
+            logger.warning("Failed to capture pane for '%s': %s", session_name, exc)
+        return None
+
+    def send_keys_by_name(self, session_name: str, keys: str, enter: bool = True) -> bool:
+        """Send keystrokes into any host tmux session."""
+        try:
+            for s in self.server.sessions:
+                if s.name == session_name:
+                    pane = s.active_window.active_pane
+                    pane.send_keys(keys, enter=enter)
+                    return True
+        except Exception as exc:
+            logger.warning("Failed to send keys to '%s': %s", session_name, exc)
+        return False
+
+    def create_generic_session(
+        self,
+        session_name: str,
+        cwd: str | None = None,
+        command: str | None = None,
+    ) -> bool:
+        """Create a new tmux session on the host."""
+        try:
+            kwargs: dict[str, Any] = {
+                "session_name": session_name,
+                "attach": False,
+            }
+            if cwd and os.path.isdir(cwd):
+                kwargs["start_directory"] = cwd
+            if command:
+                kwargs["window_command"] = command
+            self.server.new_session(**kwargs)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to create generic tmux session '%s': %s", session_name, exc)
+            return False
+
+    def kill_by_name(self, session_name: str) -> bool:
+        """Kill any host tmux session by name."""
+        try:
+            for s in self.server.sessions:
+                if s.name == session_name:
+                    s.kill_session()
+                    return True
+        except Exception as exc:
+            logger.warning("Failed to kill tmux session '%s': %s", session_name, exc)
+        return False
+
     def reconcile(self, active_sessions_from_db: list[dict[str, Any]]) -> dict[str, str]:
         """On startup, reconcile tmux sessions with DB records.
 
@@ -772,7 +916,7 @@ class TmuxRuntime:
         """Heuristic for Codex/Claude TUI readiness when prompt includes placeholder text."""
         if not content.strip():
             return False
-        if re.search(r"\bworking\b|\besc to interrupt\b|\bstarting mcp\b", content, flags=re.IGNORECASE):
+        if re.search(r"\bworking\b|\besc to interrupt\b|\besc to cancel\b|\bgenerating\b|\bstarting mcp\b", content, flags=re.IGNORECASE):
             return False
 
         lines = [line.rstrip() for line in content.splitlines() if line.strip()]
@@ -795,26 +939,28 @@ class TmuxRuntime:
             # Codex shows the banner before the model finishes loading.
             # The model line is inside the TUI frame: │ model: loading ...
             # Wait until it shows an actual model name, not "loading".
-            if _codex_model_line_loading(content):
+            if TmuxRuntime._codex_model_line_loading(content):
                 return False
             return True
 
         lowered = content.lower()
+        if ("antigravity" in lowered or "gemini" in lowered) and "? for shortcuts" in lowered:
+            return True
+
         if "ask anything..." in lowered and "/status" in lowered and "tab agents" in lowered:
             return True
 
         return False
 
+    @staticmethod
+    def _codex_model_line_loading(content: str) -> bool:
+        """Codex TUI shows its banner before the model finishes loading.
 
-def _codex_model_line_loading(content: str) -> bool:
-    """Codex TUI shows its banner before the model finishes loading.
-
-    The model line inside the TUI frame looks like:
-        │ model:       loading   /model to change                  │   ← still loading
-        │ model:       gpt-5.5 xhigh   /model to change            │   ← ready
-    """
-    return bool(re.search(r"│\s*model:\s+loading\s", content))
-
+        The model line inside the TUI frame looks like:
+            │ model:       loading   /model to change                  │   ← still loading
+            │ model:       gpt-5.5 xhigh   /model to change            │   ← ready
+        """
+        return bool(re.search(r"│\s*model:\s+loading\s", content))
 
     @staticmethod
     def _is_codex_update_prompt(content: str) -> bool:
@@ -861,7 +1007,7 @@ def _codex_model_line_loading(content: str) -> bool:
         escaped = re.escape(text)
         if not re.search(rf"^\s*[›❯>]\s*{escaped}\s*$", content, flags=re.MULTILINE):
             return False
-        if re.search(r"\bworking\b|\besc to interrupt\b", content, flags=re.IGNORECASE):
+        if re.search(r"\bworking\b|\besc to interrupt\b|\besc to cancel\b|\bgenerating\b", content, flags=re.IGNORECASE):
             return False
         return True
 
@@ -968,3 +1114,18 @@ def _codex_model_line_loading(content: str) -> bool:
         except Exception as exc:
             logger.debug("Completion check failed: %s", exc)
             return False
+
+    @staticmethod
+    def _has_tui_signal(content: str, patterns: list[re.Pattern[str]] | None) -> bool:
+        """Check pane content for Tier-S signal patterns (P1 TUI fallback).
+
+        When an AI agent prints the completion signal to the TUI but does NOT
+        write it to the .tier-s/status file, this fallback detects the signal
+        in the captured pane content so the orchestrator can continue.
+        """
+        if not patterns or not content.strip():
+            return False
+        for pattern in patterns:
+            if pattern.search(content):
+                return True
+        return False

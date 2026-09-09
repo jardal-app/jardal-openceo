@@ -28,7 +28,7 @@ dev:
         ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-4-6
 
     gemini:
-      command: ["/home/develop/.npm-global/bin/gemini", "-m", "gemini-3.1-pro-preview"]
+      command: ["/home/develop/.local/bin/agyd"]
       cwd: /home/develop/development/Jardal/jardal-openceo
       env: {}
 

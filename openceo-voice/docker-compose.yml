@@ -70,11 +70,14 @@ services:
     restart: unless-stopped
     env_file:
       - ./.env
+    environment:
+      LIVEKIT_URL: "ws://openceo-livekit:7880"
     command: ["python", "agent.py", "start"]
     profiles:
       - agent
     networks:
       - jardal-internal-net
+      - traefik-net
     depends_on:
       - livekit
 

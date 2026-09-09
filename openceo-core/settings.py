@@ -21,19 +21,19 @@ class Settings(BaseSettings):
 
     # CEO routing LLM
     DEEPSEEK_API_KEY: str = ""
-    CEO_LLM_MODEL: str = "deepseek-chat"
+    CEO_LLM_MODEL: str = "deepseek-v4-flash"
     CEO_LLM_BASE_URL: str = "https://api.deepseek.com/v1"
 
     # Dev coding providers
     CODEX_CLI_PATH: str = "/home/develop/.npm-global/bin/codex"
     CLAUDE_CODE_PATH: str = "clauded"
-    GEMINI_CLI_PATH: str = "/home/develop/.npm-global/bin/gemini"
+    GEMINI_CLI_PATH: str = "/home/develop/.local/bin/agyd"
     OPENCODE_CLI_PATH: str = "/home/develop/.opencode/bin/opencode"
     GLM_CLI_PATH: str = "clauded"
 
     CODEX_DEFAULT_ARGS: str = "--dangerously-bypass-approvals-and-sandbox -m gpt-5.4 -c model_reasoning_effort=xhigh"
     CLAUDE_DEFAULT_ARGS: str = "--dangerously-skip-permissions --model opus --effort high"
-    GEMINI_DEFAULT_ARGS: str = "-m gemini-3.1-pro-preview"
+    GEMINI_DEFAULT_ARGS: str = ""
     OPENCODE_DEFAULT_ARGS: str = "-m opencode-go/kimi-k2.6"
     OPENCODE_GO_API_KEY: str = ""
     OPENCODE_MODEL_OVERRIDE: str = ""
@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     OPENCODE_GO_MODEL_MINIMAX_M25: str = "opencode-go/minimax-m2.5"
     OPENCODE_GO_MODEL_MINIMAX_M27: str = "opencode-go/minimax-m2.7"
     OPENCODE_GO_MODEL_MIMO_V25_PRO: str = "opencode-go/mimo-v2.5-pro"
-    OPENCODE_GO_MODEL_QWEN36_PLUS: str = "opencode-go/qwen3.6-plus"
+    OPENCODE_GO_MODEL_QWEN37_MAX: str = "opencode-go/qwen3.7-max"
     OPENCODE_GO_MODEL_DEEPSEEK_V4_PRO: str = "opencode-go/deepseek-v4-pro"
     GLM_DEFAULT_ARGS: str = "--dangerously-skip-permissions --model glm-4.5"
     KIMI_CLI_PATH: str = "kimi"
@@ -147,8 +147,8 @@ class Settings(BaseSettings):
 
     # Rate limit management
     RATE_MAX_CONCURRENT_TICKETS: int = 3
-    RATE_CODEX_RESERVE_5H: float = 0.20
-    RATE_CODEX_RESERVE_WEEKLY: float = 0.05
+    RATE_CODEX_RESERVE_5H: float = 0.0
+    RATE_CODEX_RESERVE_WEEKLY: float = 0.0
     RATE_CLAUDE_RESERVE_5H: float = 0.0
     RATE_CLAUDE_RESERVE_WEEKLY: float = 0.0
     RATE_TIER_S_WEIGHT: int = 3

@@ -30,6 +30,13 @@ _CONTEXT_FILENAME = "CONTEXT.md"  # repo root
 _TOTAL_PLANS_HEADER_RE = re.compile(r"^TOTAL_PLANS:\s*(\d+)\s*$", re.M)
 _PLAN_READY_RE = re.compile(r"^PLAN_READY_(\d+)$")
 
+# P1 TUI fallback signal patterns — detect signals printed to TUI but not persisted to file.
+# Anchored with ^...$ + re.MULTILINE so the signal must appear on its own line,
+# avoiding false positives from prompt text that mentions the signal name inline.
+_TUI_PLAN_READY_RE = re.compile(r"^PLAN_READY_\d+$", re.MULTILINE)
+_TUI_PLAN_REVIEWED_RE = re.compile(r"^PLAN_REVIEWED$", re.MULTILINE)
+_TUI_TICKET_COMPLETE_RE = re.compile(r"^TICKET_COMPLETE$", re.MULTILINE)
+
 _ROLE_PLANNER = "planner"
 _ROLE_PLAN_REVIEWER = "plan-reviewer"
 _ROLE_BUILDER = "builder"
@@ -47,7 +54,7 @@ _REVIEW_LABELS: tuple[tuple[str, str], ...] = (
 # An explicit empty list in config disables OpenCode reviewers.
 _DEFAULT_OPENCODE_REVIEWERS: tuple[tuple[str, str], ...] = (
     ("kimi26", "opencode-go/kimi-k2.6"),
-    ("qwen36", "opencode-go/qwen3.6-plus"),
+    ("qwen37", "opencode-go/qwen3.7-max"),
 )
 
 
@@ -214,14 +221,19 @@ class CriticalConsensusOrchestrator:
         finalize_turn = await self._run_finalize(sessions, paths, cfg, progress)
         finalize_signal = self._read_signal(paths.status_path)
         if finalize_signal != "TICKET_COMPLETE":
-            return ConsensusRunResult(
-                ok=False,
-                summary="Tier S finalizó con warning: el planner no marcó TICKET_COMPLETE. Revisar manualmente.",
-                last_output=finalize_turn.output.strip(),
-                steps_completed=n_plans,
-                reviews_received=total_reviews,
-                error=f"Finalize signal mismatch: {finalize_signal!r}",
-            )
+            # P1 fallback: check TUI output for TICKET_COMPLETE when file is empty
+            if _TUI_TICKET_COMPLETE_RE.search(finalize_turn.output):
+                logger.info("P1 fallback: TICKET_COMPLETE found in TUI output but not status file")
+                finalize_signal = "TICKET_COMPLETE"
+            else:
+                return ConsensusRunResult(
+                    ok=False,
+                    summary="Tier S finalizó con warning: el planner no marcó TICKET_COMPLETE. Revisar manualmente.",
+                    last_output=finalize_turn.output.strip(),
+                    steps_completed=n_plans,
+                    reviews_received=total_reviews,
+                    error=f"Finalize signal mismatch: {finalize_signal!r}",
+                )
 
         return ConsensusRunResult(
             ok=True,
@@ -467,9 +479,16 @@ class CriticalConsensusOrchestrator:
             prompt=self._planner_prompt(instruction, cfg["max_plans"], paths, task_id=task_id, is_spillover=is_spillover),
             timeout=cfg["timeout_seconds"],
             completion_check=lambda: bool(_PLAN_READY_RE.match(self._read_signal(paths.status_path))),
+            tui_signal_patterns=[_TUI_PLAN_READY_RE],
         )
         signal = self._read_signal(paths.status_path)
         match = _PLAN_READY_RE.match(signal)
+        if not match:
+            # P1 fallback: check TUI output for PLAN_READY_N when file is empty
+            tui_match = _TUI_PLAN_READY_RE.search(turn.output)
+            if tui_match:
+                match = tui_match
+                logger.info("P1 fallback: extracted '%s' from TUI output", tui_match.group(0))
         if match:
             return int(match.group(1)), turn
         return None, turn
@@ -541,6 +560,7 @@ class CriticalConsensusOrchestrator:
             prompt=self._plan_reviewer_prompt(paths),
             timeout=cfg["timeout_seconds"],
             completion_check=lambda: self._read_signal(paths.status_path) == "PLAN_REVIEWED",
+            tui_signal_patterns=[_TUI_PLAN_REVIEWED_RE],
         )
         signal = self._read_signal(paths.status_path)
         if signal != "PLAN_REVIEWED":
@@ -598,6 +618,9 @@ class CriticalConsensusOrchestrator:
                 self._read_signal(paths.status_path) == f"BUILD_DONE_{p}"
                 and paths.build_summary(p).exists()
             ),
+            tui_signal_patterns=[
+                re.compile(rf"^BUILD_DONE_{re.escape(str(p))}$", re.MULTILINE),
+            ],
         )
         return turn
 
@@ -651,6 +674,9 @@ class CriticalConsensusOrchestrator:
                     prompt=self._code_reviewer_prompt(reviewer_label, p, round_, paths),
                     timeout=cfg["timeout_seconds"],
                     completion_check=lambda rp=rpath, es=expected_signal: self._review_file_done(rp, es),
+                    tui_signal_patterns=[
+                        re.compile(rf"^{re.escape(expected_signal)}$", re.MULTILINE),
+                    ],
                 )
                 return turn.ok
             except Exception:
@@ -681,22 +707,39 @@ class CriticalConsensusOrchestrator:
 
     def _code_reviewer_prompt(self, reviewer_label: str, p: int, round_: int, paths: _TierSPaths) -> str:
         return (
-            f"You are a senior code reviewer ({reviewer_label}) in round {round_} for sub-plan {p}.\n\n"
-            f"1. Read {_TIER_S_DIR}/{_PLAN_FILENAME.split('/')[-1]} and understand sub-plan {p}.\n"
-            f"2. Read {_TIER_S_DIR}/BUILD_SUMMARY_{p}.md for implementation context — use its 'Files modified' "
-            f"section as the file list to review.\n"
-            f"3. Open and review the actual code changes with absolute rigor.\n"
-            f"4. Write your findings to {_TIER_S_DIR}/REVIEW-{reviewer_label}-{p}-{round_}.md.\n\n"
-            f"Review format:\n"
-            f"- Finding: [severity: critical/warning/suggestion] [path]:[line]\n"
-            f"  - Issue: [description]\n"
-            f"  - Why: [explanation]\n"
-            f"  - Fix: [recommendation]\n\n"
-            f"Rules:\n"
-            f"- Do not modify source code. You only read and review.\n"
-            f"- Be specific: cite exact lines, explain why it matters, suggest concrete fixes.\n"
-            f"- If the code is correct and clean, say so explicitly. Do not invent issues.\n"
-            f"- Focus on real problems: correctness, edge cases, error handling, security, performance.\n\n"
+            f"You are a unit code reviewer ({reviewer_label}) in round {round_} for sub-plan {p}.\n\n"
+            f"1. Read {_TIER_S_DIR}/BUILD_SUMMARY_{p}.md and note the exact files in 'Files modified'.\n"
+            f"2. Review ONLY those files. Do NOT explore the entire project.\n"
+            f"3. You may read files directly imported/required by the modified files to verify\n"
+            f"   integration correctness, but limit yourself to ONE hop — do not trace transitive deps.\n"
+            f"4. Do NOT run tests, type-checkers, linters, or any project-wide tooling.\n"
+            f"5. Write your findings to {_TIER_S_DIR}/REVIEW-{reviewer_label}-{p}-{round_}.md.\n\n"
+            f"Scope rules:\n"
+            f"- Only review files listed in BUILD_SUMMARY_{p}.md 'Files modified' section.\n"
+            f"- At most one hop: read direct imports of those files, but do NOT chase their deps further.\n"
+            f"- Do NOT run tests, type-checkers, linters, or any project-wide tooling.\n"
+            f"- Do NOT explore the repo structure or unrelated directories.\n"
+            f"- If the sub-plan touches 3 files, your review covers those 3 files + their direct imports.\n\n"
+            f"Output rules — CRITICAL for cost control:\n"
+            f"- Be concise but complete. Each finding must be actionable by the builder.\n"
+            f"- Use this exact one-line format per finding (no bullets, no paragraphs):\n"
+            f"  [CRITICAL] path:line — issue → fix\n"
+            f"  [WARN] path:line — issue → fix\n"
+            f"  [SUGGEST] path:line — issue → fix\n"
+            f"- One finding = one line. If a finding truly needs more context, add a second\n"
+            f"  indented line with the key detail, but only for critical/warn severity.\n"
+            f"- No code snippets. Reference the line number; the builder will read the file.\n"
+            f"- No narrative intros (no \"I reviewed...\", \"Looking at...\", \"The code does...\").\n"
+            f"- If the code has zero issues, write exactly: No findings.\n"
+            f"- Report only real problems. Do NOT pad with \"looks good but consider...\" fluff.\n"
+            f"- Be specific in the fix: \"use param query\" not \"improve security\".\n"
+            f"- Quality first: if a finding needs 2 lines to be clear, use 2 lines.\n"
+            f"  But 90% of findings should fit in 1 line.\n\n"
+            f"Focus on:\n"
+            f"- Correctness of the changed logic (wrong condition, off-by-one, null access).\n"
+            f"- Edge cases in modified functions (empty input, boundary values, race conditions).\n"
+            f"- Error handling gaps in new/changed code (missing try/catch, swallowed exceptions).\n"
+            f"- Integration breaks with directly imported modules (changed signature, missing arg).\n\n"
             f"The LAST LINE of {_TIER_S_DIR}/REVIEW-{reviewer_label}-{p}-{round_}.md must be exactly: REVIEW_DONE_{p}_{round_}_{reviewer_label}\n"
             f"Work inside {paths.dir.parent}."
         )
@@ -718,6 +761,9 @@ class CriticalConsensusOrchestrator:
             prompt=self._builder_fix_prompt(p, round_, paths, cfg["opencode_reviewers"]),
             timeout=cfg["timeout_seconds"],
             completion_check=lambda: self._read_signal(paths.status_path) == f"FIX_DONE_{p}_{round_}",
+            tui_signal_patterns=[
+                re.compile(rf"^FIX_DONE_{re.escape(str(p))}_{re.escape(str(round_))}$", re.MULTILINE),
+            ],
         )
         return turn
 
@@ -814,6 +860,7 @@ class CriticalConsensusOrchestrator:
             prompt=self._finalize_prompt(paths),
             timeout=cfg["timeout_seconds"],
             completion_check=lambda: self._read_signal(paths.status_path) == "TICKET_COMPLETE",
+            tui_signal_patterns=[_TUI_TICKET_COMPLETE_RE],
         )
         return turn
 
@@ -858,12 +905,14 @@ class CriticalConsensusOrchestrator:
         prompt: str,
         timeout: int,
         completion_check: Callable[[], bool] | None = None,
+        tui_signal_patterns: list[re.Pattern[str]] | None = None,
     ) -> TmuxTurnResult:
         return await self._tmux.send_instruction(
             participant.session_key,
             prompt,
             timeout=timeout,
             completion_check=completion_check,
+            tui_signal_patterns=tui_signal_patterns,
         )
 
     def _reset_signal_file(self, path: Path) -> None:

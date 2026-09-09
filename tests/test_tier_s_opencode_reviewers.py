@@ -78,7 +78,7 @@ class NormalizedConfigOpenCodeReviewersTests(unittest.TestCase):
         config = self._make_config({
             "opencode_reviewers": [
                 {"label": "kimi26", "model": "opencode-go/kimi-k2.6"},
-                {"label": "qwen36", "model": "opencode-go/qwen3.6-plus"},
+                {"label": "qwen37", "model": "opencode-go/qwen3.7-max"},
                 {"label": "third", "model": "opencode-go/third-model"},
             ],
         })
@@ -96,14 +96,14 @@ class BuilderFixPromptTests(unittest.TestCase):
         self.paths.dir.parent = "/tmp/repo"
 
     def test_includes_tmux_review_files_and_opencode_review_files(self) -> None:
-        opencode_reviewers = [("kimi26", "opencode-go/kimi-k2.6"), ("qwen36", "opencode-go/qwen3.6-plus")]
+        opencode_reviewers = [("kimi26", "opencode-go/kimi-k2.6"), ("qwen37", "opencode-go/qwen3.7-max")]
         prompt = self.orchestrator._builder_fix_prompt(1, 1, self.paths, opencode_reviewers)
 
         self.assertIn("REVIEW-clauded-1-1.md (if exists)", prompt)
         self.assertIn("REVIEW-codexf-1-1.md (if exists)", prompt)
         self.assertIn("REVIEW-gemini-1-1.md (if exists)", prompt)
         self.assertIn("REVIEW-kimi26-1-1.md (if exists)", prompt)
-        self.assertIn("REVIEW-qwen36-1-1.md (if exists)", prompt)
+        self.assertIn("REVIEW-qwen37-1-1.md (if exists)", prompt)
 
     def test_all_files_use_if_exists_wording(self) -> None:
         opencode_reviewers = [("kimi26", "opencode-go/kimi-k2.6")]
@@ -148,9 +148,9 @@ class OpenCodeReviewerArgvTests(unittest.TestCase):
 
     def test_model_override_replaces_existing_m_flag(self) -> None:
         base_command = ["/tmp/opencode", "--model", "opencode-go/kimi-k2.5"]
-        overridden = apply_opencode_model_override(base_command, "opencode-go/qwen3.6-plus")
+        overridden = apply_opencode_model_override(base_command, "opencode-go/qwen3.7-max")
         self.assertIn("--model", overridden)
-        self.assertIn("opencode-go/qwen3.6-plus", overridden)
+        self.assertIn("opencode-go/qwen3.7-max", overridden)
         self.assertNotIn("opencode-go/kimi-k2.5", overridden)
 
     def test_model_override_appended_when_no_model_flag(self) -> None:

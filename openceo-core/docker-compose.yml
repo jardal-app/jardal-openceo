@@ -12,6 +12,7 @@ services:
       - OPENCEO_PORT=8000
       - WORKFLOWS_DIR=/app/workflows
       - KIMI_SHARE_DIR=/home/ceouser/.kimi
+      - CODEX_HOME=/home/ceouser/.codex
       - PROJECT_CONTEXTS_DIR=/app/.runtime/project-context
     working_dir: /app
     command: python main.py
@@ -34,7 +35,8 @@ services:
       - ../.runtime:/app/.runtime
       - ../projects:/app/projects:ro
       - ../workflows:/app/workflows:ro
-      - /home/develop/.codex:/home/ceouser/.codex:ro
+      - /home/develop/.codex:/home/ceouser/.codex:rw
+      - /home/develop/.codex:/home/develop/.codex:ro
       - /home/develop/.claude:/home/ceouser/.claude:ro
       # Repositories for dev agent git operations
       - /home/develop/development/Jardal/jardal-openceo:/home/develop/development/Jardal/jardal-openceo

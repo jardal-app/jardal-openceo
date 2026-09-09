@@ -5,7 +5,7 @@ import json
 import logging
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from settings import Settings
 from tools.cloudflare import CloudflareDNSManager
@@ -37,6 +37,7 @@ class MountedMCPServer:
     internal_url: str
     bearer_token: str | None
     stateless_http: bool = False
+    json_response: bool = False
 
     @property
     def auth_enabled(self) -> bool:
@@ -44,7 +45,12 @@ class MountedMCPServer:
 
     @asynccontextmanager
     async def lifespan(self):
-        raw_app = self.server.http_app(path="/", transport=self.transport, stateless_http=self.stateless_http)
+        raw_app = self.server.http_app(
+            path="/",
+            transport=self.transport,
+            stateless_http=self.stateless_http,
+            json_response=self.json_response,
+        )
         self.app.set_inner_app(raw_app)
         try:
             async with _coerce_lifespan_context(raw_app.lifespan, raw_app):
@@ -62,6 +68,8 @@ def build_internal_mcp_mount(settings: Settings, task_service: "TaskService") ->
         path=_normalize_path(settings.MCP_SERVER_PATH),
         name="OpenCEO Internal MCP",
         register_fn=lambda s, st: _register_all_tools(s, st, task_service),
+        stateless_http=True,
+        json_response=True,
     )
 
 
@@ -75,8 +83,8 @@ def build_global_mcp_mount(settings: Settings) -> MountedMCPServer | None:
         name="OpenCEO Global MCP",
         register_fn=_register_infra_tools,
         transport="streamable-http",
-        stateless_http=True,
-        json_response=True,  # Enable JSON responses for Codex compatibility
+        stateless_http=False,
+        json_response=True,
     )
 
 
@@ -96,7 +104,7 @@ def _build_mcp(
     bearer_token = _resolve_bearer_token(settings)
     allowed_networks = _parse_allowed_networks(settings.MCP_SERVER_ALLOWED_IPS)
 
-    server = FastMCP(name, json_response=json_response)
+    server = FastMCP(name)
     tool_names = register_fn(server, settings)
 
     if bearer_token is None:
@@ -115,6 +123,7 @@ def _build_mcp(
         internal_url=_build_internal_url(settings, path),
         bearer_token=bearer_token,
         stateless_http=stateless_http,
+        json_response=json_response,
     )
 
 
@@ -200,16 +209,16 @@ def _register_openceo_tools(server: FastMCP, settings: Settings, task_service: "
         title: str,
         description: str = "",
         project: str | None = None,
-        priority: str | None = None,
-        status: str | None = None,
+        priority: Literal["low", "medium", "high", "critical"] | None = None,
+        status: Literal["queued", "in_progress", "completed", "failed", "escalated", "interrupted", "waiting"] | None = None,
         ticket_type: str | None = None,
-        source: str | None = None,
+        source: Literal["jira", "notion", "github", "telegram", "voice", "whatsapp", "api", "entrevista", "spillover"] | None = None,
         source_id: str | None = None,
         tags: list[str] | None = None,
         due_date: str | None = None,
         external_url: str | None = None,
-        coding_tool: str | None = None,
-        coding_tier: str | None = None,
+        coding_tool: Literal["codex", "claude", "glm", "gemini", "opencode", "kimi", "tier_s"] | None = None,
+        coding_tier: Literal["tier1", "tier2", "tier3", "tier4"] | None = None,
     ) -> dict[str, Any]:
         req = TaskCreateRequest(
             title=title,
@@ -273,7 +282,7 @@ def _register_openceo_tools(server: FastMCP, settings: Settings, task_service: "
         project: str,
         source_id: str,
         tickets: str,
-        source: str = "spillover",
+        source: Literal["jira", "notion", "github", "telegram", "voice", "whatsapp", "api", "entrevista", "spillover"] = "spillover",
     ) -> dict[str, Any]:
         normalized_project = str(project or "").strip()
         normalized_source_id = str(source_id or "").strip()
@@ -346,7 +355,7 @@ def _register_openceo_tools(server: FastMCP, settings: Settings, task_service: "
     server.tool(
         openceo_create_ticket,
         name="openceo_create_ticket",
-        description="Create a ticket in OpenCEO (MongoDB). Notion sync triggers automatically. Required: title. Optional: description, project, priority, status, ticket_type, source, source_id, tags, due_date, external_url, coding_tool, coding_tier.",
+        description="Create a ticket in OpenCEO (MongoDB). Notion sync triggers automatically. Required: title. Optional: description, project, priority (low/medium/high/critical), status (queued/in_progress/completed/failed/escalated/interrupted/waiting), ticket_type, source (jira/notion/github/telegram/voice/whatsapp/api/entrevista/spillover), source_id, tags, due_date, external_url, coding_tool (codex/claude/glm/gemini/opencode/kimi/tier_s), coding_tier (tier1/tier2/tier3/tier4).",
     )
     server.tool(
         openceo_create_tickets_batch,
@@ -356,7 +365,7 @@ def _register_openceo_tools(server: FastMCP, settings: Settings, task_service: "
     server.tool(
         openceo_create_pm_tickets_batch,
         name="openceo_create_pm_tickets_batch",
-        description='Create child tickets (spillover/interview) from a parent ticket. Forces project/source/source_id across the batch. Required: project, source_id, tickets (JSON array with title and optional description, priority, tags, ticket_type, due_date, external_url).',
+        description='Create child tickets (spillover/interview) from a parent ticket. Forces project/source/source_id across the batch. Required: project, source_id, tickets (JSON array with title and optional description, priority, tags, ticket_type, due_date, external_url). Optional: source (jira/notion/github/telegram/voice/whatsapp/api/entrevista/spillover, default "spillover").',
     )
     return ("openceo_create_ticket", "openceo_create_tickets_batch", "openceo_create_pm_tickets_batch")
 
@@ -451,7 +460,10 @@ class _InternalOnlyBearerWrapper:
             await _send_json_error(send, 403, "MCP interno disponible solo desde loopback.")
             return
 
-        if self._bearer_token:
+        # GET SSE streams (server→client notifications) may omit the
+        # Authorization header — rely on the IP allowlist above instead.
+        # POST/DELETE always require the Bearer token when one is configured.
+        if self._bearer_token and scope.get("method") != "GET":
             authorization = _decode_header(scope.get("headers", []), b"authorization")
             expected = f"Bearer {self._bearer_token}"
             if authorization != expected:

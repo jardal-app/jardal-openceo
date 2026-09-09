@@ -1687,19 +1687,19 @@ CLOUDFLARE_DNS_DEFAULT_TTL=1
 
 # CEO + secretary fallback LLM
 DEEPSEEK_API_KEY=
-CEO_LLM_MODEL=deepseek-chat
+CEO_LLM_MODEL=deepseek-v4-flash
 CEO_LLM_BASE_URL=https://api.deepseek.com/v1
 
 # Dev skill
 CODEX_CLI_PATH=/home/develop/.npm-global/bin/codex
 CLAUDE_CODE_PATH=clauded
-GEMINI_CLI_PATH=/home/develop/.npm-global/bin/gemini
+GEMINI_CLI_PATH=/home/develop/.local/bin/agyd
 OPENCODE_CLI_PATH=/home/develop/.opencode/bin/opencode
 GLM_CLI_PATH=clauded
 
 CODEX_DEFAULT_ARGS=--dangerously-bypass-approvals-and-sandbox -m gpt-5.4 -c model_reasoning_effort=xhigh
 CLAUDE_DEFAULT_ARGS=--dangerously-skip-permissions --model opus --effort high
-GEMINI_DEFAULT_ARGS=-m gemini-3.1-pro-preview
+GEMINI_DEFAULT_ARGS=
 OPENCODE_DEFAULT_ARGS=-m deepseek/deepseek-reasoner
 OPENCODE_GO_API_KEY=
 OPENCODE_MODEL_OVERRIDE=

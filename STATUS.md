@@ -2,8 +2,23 @@
 
 Resumen operativo corto del estado real del repo.
 
-## Estado actual (2026-04-27)
+## Estado actual (2026-09-09)
 
+- `Migración Gemini CLI -> Antigravity CLI (agyd)`: reemplazado en su totalidad el uso de `gemini -y` por `agyd` (`/home/develop/.local/bin/agyd`, wrapper con `--dangerously-skip-permissions`). Esto resuelve el bloqueo crítico P2 en `WriteFile` durante revisiones Tier S y turnos de código, operando de forma 100% autónoma.
+- `Configuración agyd sin --model`: `agyd` se configuró sin flag de modelo para que utilice su valor predeterminado del CLI (**Gemini 3.8 Flash · High**), garantizando arranque inmediato en `tmux` (<1s) y la versión más reciente con razonamiento alto.
+- `TmuxRuntime & Prompts de Antigravity`: ajustado el regex de prompt de `gemini` para detectar `? for shortcuts` y `>`, detección de banner de Antigravity CLI, y estados de generación (`Generating...`, `esc to cancel`) para evitar falsos positivos de turno completado.
+- `Proyectos y Providers`: actualizados `projects/jardal-trading/project.yaml` (`gemini_reviewer` en Tier S y `providers.gemini`), `projects/jardal-openceo/project.yaml`, `projects/melanyryr/project.yaml`, `openceo-core/settings.py` (`GEMINI_CLI_PATH=/home/develop/.local/bin/agyd`, `GEMINI_DEFAULT_ARGS=""`), `.env` y `.env.example`.
+- `Routing Natural OpenWebUI`: `openceo-core/main.py` ahora reconoce intenciones como `crea una sesión agy`, `crea una sesión agyd` o `crea una sesión gemini` para enrutar directamente al provider.
+- `UI Kanban Mission Control & Vistas Rápidas (openceo-react)`: implementado tablero Kanban completo en `openceo-react/src/components/KanbanBoard/index.jsx` integrado tanto en `Dashboard.jsx` (inicio/panel administrativo) como en `TicketList.jsx` (con switch dinámico Tabla/Kanban). Soporta 3 modos de agrupación de columnas (Por Estado, Por Agente: Dev/Finanzas/Secretaría/PM/CEO, y Por Workflow), buscador reactivo en tiempo real, filtros combinados por Proyecto, Agente, Workflow y Prioridad, badges estilizados con ADN Obsidian/DESIGN.md, y triggers rápidos de ejecución.
+- `API Task Filtering por Agente`: endpoints `GET /api/tasks` y `POST /api/tasks/search` en `openceo-core/main.py` ahora soportan filtrado directo por `agent` (evaluando `agent` y `agent_hint`).
+
+## Estado actual (2026-09-08)
+
+- `First Layer Gateway`: implementado en `openceo-core/first_layer.py` con el modelo oficial `deepseek-v4-flash`, resolviendo comprensión de contexto en lenguaje natural, foco de tickets y control de tmux sin falsos positivos de palabras clave
+- `Ticket Focus Workflow`: persistencia de ticket activo en `user_context` (`active_ticket_number`, `active_ticket_id`) + endpoints `/api/tasks/focus` + comandos conversacionales de voz ("vamos al ticket 49", "¿por qué falló?")
+- `Host Tmux Management`: soporte en `TmuxRuntime` para listar, capturar pane, inyectar teclas y crear sesiones para todos los tmux del host (`agentboard`, `business`, `investor`, `tr`, etc.) + endpoints REST `/api/tmux/sessions`
+- `Admin Dashboard (openceo-react)`: corregido 502 por drift de IP en Traefik; puerto 3000 mapeado a localhost en `docker-compose.yml` y Traefik configurado a `127.0.0.1:3000`; dashboard online en `https://dev.openceo.jardal.app` (200 OK)
+- `LiveKit Voice Agent`: corregido fallo de conexión a LiveKit (se añadió red `traefik-net` y URL interna `ws://openceo-livekit:7880`); agente de voz operativo y escuchando en puerto 8081
 - `Phase 1 (Core)`: completada
 - `Phase 2 (CEO + Dev Agent)`: completada
 - `Voice backend bridge`: base implementada en `openceo-voice/`
@@ -53,7 +68,7 @@ Resumen operativo corto del estado real del repo.
 ### `openceo-dev`
 
 - Default: conversación local en español, sin crear sesión automática
-- Activación explícita: `crea una sesión dev` o `crea una sesión codex|claude|glm|gemini|opencode`
+- Activación explícita: `crea una sesión dev` o `crea una sesión codex|claude|glm|gemini|agyd|opencode`
 - Con sesión activa + instrucción: responde al instante y ejecuta en segundo plano
 - Dentro de sesión enfocada, los únicos atajos locales de salida son `que respondio`, `que dijo` y `que salio`
 - Fuera del foco siguen existiendo preguntas naturales administrativas como `que sesiones hay activas`, `que proyectos hay`, `como va`, `ya termino`
@@ -148,7 +163,7 @@ Resumen operativo corto del estado real del repo.
 
 - Activo cuando `project.yaml` define `coding_tool: tier_s` y el usuario no fuerza provider
 - Proyecto con default actual: `jardal-trading`
-- Levanta 4 sesiones tmux: `dev-{project}-claude|codex|gemini|opencode`
+- Levanta 4 sesiones tmux: `dev-{project}-claude|codex|gemini|opencode` (el reviewer `gemini` corre `agyd` con `--dangerously-skip-permissions`, evitando diálogos de confirmación en escritura de archivos)
 - Claude lidera; reviewers escriben en `FEEDBACK-*.md`
 - El reviewer `opencode` sigue siendo un solo slot de Tier S, pero ya no usa el team runtime experimental
 - OpenCode corre 5 reviewers headless one-shot mediante `opencode run --agent build --model ... --format json`, con scheduler híbrido por tandas y compilación final separada

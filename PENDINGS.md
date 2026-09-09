@@ -281,3 +281,82 @@ Cuando entra una tarea, el sistema debe:
 - El flag explícito funciona como override (forzar o saltar discovery), no como disparador único.
 - Tareas con workflow conocido siguen ejecutándolo directamente (no entran a discovery).
 - Existe un guard que evita discovery innecesario cuando la tarea ya tiene ruta clara (workflow conocido o agente directo).
+
+---
+
+## TICKET-020: DeepSeek Direct First Layer Gateway & Adaptive Routing
+- **Componente**: `openceo-core/first_layer.py`, `openceo-core/main.py`
+- **Prioridad**: Alta (fase 1 implementada; fase 2 pendiente de optimización)
+- **Estado**: Base operativa implementada y validada en vivo.
+- **Descripción**: La primera capa de OpenCEO opera ahora mediante `FirstLayerGateway` con el modelo oficial `deepseek-v4-flash` (DeepSeek API 2026 oficial: `deepseek-v4-flash`, `deepseek-v4-pro`, `deepseek-v4-flash-vision-exp`), eliminando la dependencia de patrones regex frágiles (`_looks_like_pm_payload`, `_DEV_INSTRUCTION_PATTERNS`) que producían falsos positivos con verbos cotidianos ("haz", "crea", "roles", "login").
+  - **Fase 2 pendiente**:
+    1. Optimización de latencia: prompt caching en DeepSeek para fragmentos invariantes de configuración de proyectos.
+    2. Streaming incremental: cuando el router genera una respuesta conversacional larga, emitir los chunks vía SSE en vez de respuesta completa en bloque.
+    3. Descubrimiento dinámico de proyectos sin requerir reinicio del servicio cuando se añada un nuevo `project.yaml`.
+    4. Manejo de contexto masivo: si un proyecto tiene más de 50 tickets abiertos, usar un compactador de lista de tareas en el prompt del sistema.
+- **Criterio de aceptación**: El 100% de las instrucciones en lenguaje natural son interpretadas en contexto sin falsos positivos de palabras clave. Respuestas de voz inferiores a 2 segundos.
+
+---
+
+## TICKET-021: Mobile Walking & Voice Ticket Focus Workflow ("Caminar por la calle")
+- **Componente**: `openceo-core/db/mongo.py`, `openceo-core/main.py`, `openceo-voice`
+- **Prioridad**: Alta
+- **Estado**: Foco persistente y consultas contextuales operativas en Mongo y API.
+- **Descripción**: Permitir que el usuario camine por la calle con su teléfono y converse de forma completamente natural con todos sus tickets, manteniendo el foco en uno para trabajarlo, auditarlo o reintentarlo, y luego cambiar ágilmente a otro.
+  - **Capacidades ya activas**:
+    1. `set_active_ticket` / `get_active_ticket` en MongoDB `user_context`.
+    2. Comandos naturales de cambio de foco: "vamos al ticket 49", "enfoca el 48".
+    3. Preguntas con pronombres contextuales: "¿por qué falló?", "¿qué error tuvo?", "¿cómo va?".
+    4. Endpoints REST: `GET/POST/DELETE /api/tasks/focus`.
+  - **Extensiones pendientes de implementar**:
+    1. Consulta por voz de criterios de aceptación: "¿qué requisitos pide este ticket?".
+    2. Acciones de revisión por voz: "pásalo a QA con la nota: probado en staging", "aprueba el ticket para entrega a cliente".
+    3. Reejecución con selección de modelo o provider: "reintenta este ticket con opencode y modelo kimi" o "pásaselo a claude con opus".
+    4. Respuestas de audio cortas (pacing de voz): limitar los resúmenes hablados a 20-30 palabras directas para evitar saturación auditiva con auriculares.
+- **Criterio de aceptación**: El usuario puede auditar, avanzar y reintentar 5 tickets consecutivos en 5 minutos caminando en la calle únicamente usando comandos de voz en español.
+
+---
+
+## TICKET-022: Global Host Tmux Management from Mobile
+- **Componente**: `openceo-core/agents/dev/tmux_runtime.py`, `openceo-core/main.py`
+- **Prioridad**: Media
+- **Estado**: Métodos de control global y endpoints REST operativos.
+- **Descripción**: Permitir que el usuario controle desde su celular cualquier sesión de tmux que esté corriendo en la VM (no solo las sesiones `openceo-dev-`, sino también sesiones de trading, bots o agentes como `agentboard`, `business`, `investor`, `tr`).
+  - **Capacidades ya activas**:
+    1. `list_all_host_sessions()` en `TmuxRuntime` retorna todas las sesiones host con estado attached y última línea.
+    2. `capture_pane_by_name()` lee el buffer de cualquier sesión.
+    3. `send_keys_by_name()` inyecta comandos/teclas.
+    4. `create_generic_session()` abre una nueva sesión de tmux en cualquier directorio de la VM.
+    5. `kill_by_name()` cierra sesiones de forma remota.
+    6. Endpoints REST: `/api/tmux/sessions`, `/api/tmux/sessions/{name}/pane`, `/api/tmux/sessions/{name}/keys`, etc.
+  - **Extensiones pendientes**:
+    1. Watcher de salud de sesiones críticas: alerta proactiva por Telegram/WebSocket si una sesión tmux (ej. `tr` o `investor`) muere o entra en loop de crash.
+    2. Presets de comandos para móvil: "reinicia el bot en tr", "limpia la pantalla de business".
+- **Criterio de aceptación**: El usuario puede consultar qué está saliendo en cualquier tmux, mandar teclas o abrir una nueva sesión desde el móvil por voz o chat sin necesidad de abrir una terminal SSH.
+
+---
+
+## TICKET-023: Admin Panel (`openceo-react`) Mission Control Enhancements
+- **Componente**: `openceo-react` (Frontend React 19 + Tailwind v4 + Vite)
+- **Prioridad**: Media
+- **Estado**: URL `https://dev.openceo.jardal.app` restablecida (fix de IP drift en Traefik).
+- **Descripción**: El panel de administración tiene gestión completa de tickets, usuarios, grupos y revisiones QA/Cliente, pero carece de visibilidad sobre los procesos en vivo y el foco móvil:
+  - **Tareas a implementar**:
+    1. **Tab de Tmux Sessions / Terminal Monitor**: Nueva vista en el menú lateral para ver las sesiones tmux activas en la VM, previsualizar la pantalla del terminal en tiempo real (consumiendo `GET /api/tmux/sessions/{name}/pane`), enviar comandos y matar/crear sesiones desde la interfaz web.
+    2. **Widget de Foco Activo en Header**: Mostrar un indicador permanente en la barra superior con el ticket que el usuario tiene enfocado actualmente en su teléfono (ej: `Foco Móvil: #49 melanyryr [failed]`), con botón para cambiar de foco o ir al detalle del ticket.
+    3. **Optimización Responsive Mobile**: Adaptar las tablas de tickets (`TicketList.jsx`) y la tarjeta de acciones de fase (`TicketDetail.jsx`) para que no tengan desborde horizontal en pantallas de smartphones (< 420px), permitiendo realizar revisiones rápidas con una sola mano desde la calle.
+- **Criterio de aceptación**: El administrador puede abrir `dev.openceo.jardal.app` desde su teléfono, ver el terminal de cualquier sesión tmux sin SSH, y revisar qué ticket tiene en foco en ese instante.
+
+---
+
+## TICKET-024: Mobile App (`openceo-voice-android`) Unified Mode & Focus Badge
+- **Componente**: `openceo-voice-android` (Kotlin + Jetpack Compose + LiveKit Android SDK)
+- **Prioridad**: Media
+- **Estado**: Backend de voz `openceo-voice-agent` reparado y conectado a LiveKit.
+- **Descripción**: Adaptar la aplicación móvil de Android para una experiencia 100% de manos libres:
+  - **Tareas a implementar**:
+    1. **Modelo Unificado por Defecto**: Configurar el selector de modelo en `TokenExt.kt` para que use por defecto el modo unificado (`ceo`), el cual utiliza `FirstLayerGateway` y elimina la necesidad de que el usuario cambie manualmente entre `dev`, `ceo`, `pm` o `finance` en la pantalla del celular.
+    2. **Badge de Foco en Pantalla de Voz**: Mostrar un chip visual dinámico en `VoiceAssistantScreen.kt` con el ticket enfocado y el proyecto activo (`melanyryr · Ticket #49`).
+    3. **Reconexión WebRTC Resiliente**: Configurar LiveKit Android para reintentos transparentes cuando el usuario cambia entre cobertura Wi-Fi y datos móviles 4G/5G caminando por la calle, manteniendo el estado de la conversación.
+- **Criterio de aceptación**: La app Android se abre, se conecta con 1 tap al modo unificado, y muestra visualmente en pantalla el ticket y proyecto sobre el que se está conversando.
+

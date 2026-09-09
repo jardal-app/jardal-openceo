@@ -28,6 +28,7 @@ from config_loader import ConfigLoader
 from db.mongo import MongoRepository
 from dev_session_service import DevSessionService
 from events import RealtimeHub
+from first_layer import FirstLayerGateway
 from graph import OpenCEOGraph
 from integrations.openwebui_compat import (
     chat_response,
@@ -131,6 +132,13 @@ scheduler = WaitingTaskScheduler(
 )
 internal_mcp = build_internal_mcp_mount(settings, task_service)
 global_mcp = build_global_mcp_mount(settings)
+first_layer_gateway = FirstLayerGateway(
+    settings=settings,
+    repo=repo,
+    project_service=project_service,
+    dev_session_service=dev_session_service,
+    task_service=task_service,
+)
 _PM_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 
@@ -372,6 +380,7 @@ async def list_tasks(
     status: str | None = Query(default=None),
     phase: str | None = Query(default=None),
     workflow_key: str | None = Query(default=None),
+    agent: str | None = Query(default=None),
     current_user: UserDocument = Depends(get_current_user),
 ) -> list[dict]:
     """List tasks. Non-admin users only see tickets they are involved in."""
@@ -388,6 +397,8 @@ async def list_tasks(
         query["phase"] = phase
     if workflow_key:
         query["workflow_key"] = workflow_key
+    if agent:
+        query["$or"] = [{"agent": agent}, {"agent_hint": agent}]
 
     if not current_user.is_admin:
         query["involved_user_ids"] = current_user.user_id
@@ -507,7 +518,7 @@ async def search_tasks(
     """Search tasks with filters in request body."""
     query: dict[str, Any] = {}
 
-    for field in ("project", "status", "phase", "workflow_key", "qa_review_required", "qa_review_state", "client_visible"):
+    for field in ("project", "status", "phase", "workflow_key", "agent", "qa_review_required", "qa_review_state", "client_visible"):
         if field in body and body[field] is not None:
             query[field] = body[field]
 
@@ -524,7 +535,40 @@ async def search_tasks(
         for r in results:
             r["status_display"] = "Entregado" if r.get("status") == TaskStatus.COMPLETED.value else "En proceso"
 
-    return results
+# ------------------------- Ticket Focus Endpoints -------------------------
+
+
+@app.get("/api/tasks/focus")
+async def get_focused_ticket(user_id: str = Query(default="openwebui")):
+    """Get the currently focused ticket for a user."""
+    focus = await repo.get_active_ticket(user_id)
+    if not focus:
+        return {"focused": False, "ticket": None}
+    task = await repo.get_task(focus["task_id"])
+    return {"focused": True, "focus": focus, "task": task}
+
+
+@app.post("/api/tasks/{task_id_or_number}/focus")
+async def set_focused_ticket(task_id_or_number: str, user_id: str = Query(default="openwebui")):
+    """Set the focused ticket for a user by ticket number or task_id."""
+    task = None
+    if task_id_or_number.isdigit():
+        task = await repo.get_task_by_ticket_number(int(task_id_or_number))
+    if not task:
+        task = await repo.get_task(task_id_or_number)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    t_num = task.get("ticket_number", 0)
+    await repo.set_active_ticket(user_id=user_id, ticket_number=t_num, task_id=task["task_id"], project=task["project"])
+    return {"status": "ok", "focused_ticket": t_num, "project": task["project"]}
+
+
+@app.delete("/api/tasks/focus")
+async def clear_focused_ticket(user_id: str = Query(default="openwebui")):
+    """Clear the focused ticket for a user."""
+    await repo.clear_active_ticket(user_id)
+    return {"status": "ok", "focused": False}
 
 
 @app.get("/api/tasks/{task_id}")
@@ -1118,6 +1162,60 @@ async def voice_peer_programming(payload: VoicePeerProgrammingRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+# ------------------------- Host Tmux Endpoints -------------------------
+
+
+@app.get("/api/tmux/sessions")
+async def list_host_tmux_sessions():
+    """List all tmux sessions on the host system."""
+    return dev_session_service._tmux.list_all_host_sessions()
+
+
+@app.get("/api/tmux/sessions/{name}/pane")
+async def get_host_tmux_pane(name: str, lines: int = Query(default=50, ge=1, le=500)):
+    """Capture active pane content for a given tmux session."""
+    output = dev_session_service._tmux.capture_pane_by_name(name, max_lines=lines)
+    if output is None:
+        raise HTTPException(status_code=404, detail=f"Tmux session '{name}' not found")
+    return {"session": name, "output": output}
+
+
+@app.post("/api/tmux/sessions/{name}/keys")
+async def send_host_tmux_keys(name: str, payload: dict[str, Any]):
+    """Send keys to a host tmux session."""
+    keys = str(payload.get("keys") or "").strip()
+    enter = bool(payload.get("enter", True))
+    if not keys:
+        raise HTTPException(status_code=400, detail="Keys cannot be empty")
+    ok = dev_session_service._tmux.send_keys_by_name(name, keys, enter=enter)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Tmux session '{name}' not found")
+    return {"status": "ok", "session": name}
+
+
+@app.post("/api/tmux/sessions")
+async def create_host_tmux_session(payload: dict[str, Any]):
+    """Create a new tmux session on the host."""
+    name = str(payload.get("name") or "").strip()
+    cwd = payload.get("cwd")
+    command = payload.get("command")
+    if not name:
+        raise HTTPException(status_code=400, detail="Session name cannot be empty")
+    ok = dev_session_service._tmux.create_generic_session(name, cwd=cwd, command=command)
+    if not ok:
+        raise HTTPException(status_code=500, detail=f"Failed to create tmux session '{name}'")
+    return {"status": "ok", "session": name}
+
+
+@app.delete("/api/tmux/sessions/{name}")
+async def kill_host_tmux_session(name: str):
+    """Kill a host tmux session."""
+    ok = dev_session_service._tmux.kill_by_name(name)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Tmux session '{name}' not found")
+    return {"status": "ok", "session": name}
+
+
 # ------------------------- OpenAI compatibility -------------------------
 
 
@@ -1170,6 +1268,12 @@ async def chat_completions(payload: ChatCompletionRequest):
 
     if _is_openwebui_meta_prompt(message):
         return _maybe_stream(payload, _openwebui_meta_json_response(message), sanitize=False)
+
+    # --- First Layer Cognitive Gateway (DeepSeek): contextual intent, tickets, tmux, and natural Spanish ---
+    if not message.startswith("@") and settings.DEEPSEEK_API_KEY:
+        handled, response_text = await first_layer_gateway.process_turn(user_id, message, payload)
+        if handled:
+            return _maybe_stream(payload, response_text)
 
     # --- Direct agent models: bypass CEO routing entirely (zero extra tokens) ---
     direct_agent = _resolve_direct_agent(payload.model)
@@ -2424,6 +2528,8 @@ _MODEL_SET_PATTERNS = [
 _PROVIDER_CODEX_PATTERN = re.compile(r"\b(codex|gpt)\b", flags=re.IGNORECASE)
 _PROVIDER_CLAUDE_PATTERN = re.compile(r"\b(claude|clauded|sonnet|opus)\b", flags=re.IGNORECASE)
 _PROVIDER_GLM_PATTERN = re.compile(r"\b(glm)\b", flags=re.IGNORECASE)
+_PROVIDER_GEMINI_PATTERN = re.compile(r"\b(gemini|agyd?|antigravity)\b", flags=re.IGNORECASE)
+_PROVIDER_OPENCODE_PATTERN = re.compile(r"\b(opencode)\b", flags=re.IGNORECASE)
 _DEV_INSTRUCTION_PATTERNS = [
     re.compile(
         r"\b(haz|corrige|arregla|implementa|crea|actualiza|edita|refactoriza|ejecuta|escribe|pregunta|consulta|run|fix|build|test|deploy)\b",
@@ -2651,6 +2757,10 @@ def _extract_provider_from_text(text: str) -> DevProvider | None:
         return DevProvider.GLM
     if _PROVIDER_CLAUDE_PATTERN.search(text):
         return DevProvider.CLAUDE
+    if _PROVIDER_GEMINI_PATTERN.search(text):
+        return DevProvider.GEMINI
+    if _PROVIDER_OPENCODE_PATTERN.search(text):
+        return DevProvider.OPENCODE
     return None
 
 
@@ -3272,7 +3382,7 @@ def _build_dev_capabilities_text(
         f"Proyecto seleccionado: {selected_project}.",
         f"Sesiones abiertas: {len(sessions)}.",
         "Flujos disponibles:",
-        "- crear o reutilizar sesion por proyecto y provider (codex, claude, glm)",
+        "- crear o reutilizar sesion por proyecto y provider (codex, claude, agyd/gemini, opencode, glm)",
         "- ejecutar tickets críticos en modo tier_s cuando el proyecto lo tenga configurado",
         "- enviar instrucciones en segundo plano sin bloquear chat",
         "- consultar estado, salida, y panorama de todas las sesiones",

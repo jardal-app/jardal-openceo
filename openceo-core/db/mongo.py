@@ -160,6 +160,16 @@ class MongoRepository:
         row = await self.tasks.find_one({"task_id": task_id})
         return self._clean(row)
 
+    async def get_task_by_ticket_number(self, ticket_number: int, project: str | None = None) -> dict[str, Any] | None:
+        query: dict[str, Any] = {"ticket_number": ticket_number}
+        if project:
+            query["project"] = project
+        row = await self.tasks.find_one(query)
+        if not row and project:
+            # Fallback across projects if not found in current project
+            row = await self.tasks.find_one({"ticket_number": ticket_number})
+        return self._clean(row)
+
     async def list_tasks(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self.tasks.find({}, sort=[("created_at", -1)]).limit(limit)
         return [self._clean(row) async for row in rows]
@@ -478,6 +488,47 @@ class MongoRepository:
         session_id = str(row.get("active_dev_session_id")) if row.get("active_dev_session_id") else None
         project = str(row.get("active_dev_project")) if row.get("active_dev_project") else None
         return session_id, project
+
+    async def set_active_ticket(
+        self,
+        user_id: str,
+        ticket_number: int,
+        task_id: str,
+        project: str,
+    ) -> dict[str, Any]:
+        payload = {
+            "active_ticket_number": ticket_number,
+            "active_ticket_id": task_id,
+            "active_ticket_project": project,
+            "updated_at": datetime.now(timezone.utc),
+        }
+        await self.user_context.update_one({"user_id": user_id}, {"$set": payload}, upsert=True)
+        return payload
+
+    async def get_active_ticket(self, user_id: str) -> dict[str, Any] | None:
+        row = await self.user_context.find_one({"user_id": user_id})
+        if not row or not row.get("active_ticket_id"):
+            return None
+        return {
+            "ticket_number": row.get("active_ticket_number"),
+            "task_id": row.get("active_ticket_id"),
+            "project": row.get("active_ticket_project"),
+        }
+
+    async def clear_active_ticket(self, user_id: str) -> None:
+        await self.user_context.update_one(
+            {"user_id": user_id},
+            {
+                "$unset": {
+                    "active_ticket_number": "",
+                    "active_ticket_id": "",
+                    "active_ticket_project": "",
+                },
+                "$set": {
+                    "updated_at": datetime.now(timezone.utc),
+                },
+            },
+        )
 
     async def set_pm_state(self, user_id: str, state: dict[str, Any]) -> None:
         await self.user_context.update_one(

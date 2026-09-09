@@ -113,7 +113,7 @@ class ConfigLoader:
                     },
                     "opencode_reviewers": [
                         {"label": "kimi26", "model": "opencode-go/kimi-k2.6"},
-                        {"label": "qwen36", "model": "opencode-go/qwen3.6-plus"},
+                        {"label": "qwen37", "model": "opencode-go/qwen3.7-max"},
                     ],
                 },
                 "providers": {
