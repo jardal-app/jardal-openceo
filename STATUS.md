@@ -4,15 +4,30 @@ Resumen operativo corto del estado real del repo.
 
 ## Continuar aquí (traspaso a la próxima sesión)
 
-Estado al cerrar la sesión del **2026-09-20 (segunda sesión del día)**: Horizon **HZ-003 (delegación y dev móvil) implementada, probada y desplegada**. El servicio corre con el código nuevo (reiniciado y verificado: 16 rutas `/api/horizon/*`). Detalle de la implementación en la entrada "Estado actual (2026-09-20) — HZ-003" de abajo.
+Estado al cerrar la sesión del **2026-09-20 (segunda sesión del día)**: Horizon **HZ-003 (delegación y dev móvil) implementada, probada, desplegada y commiteada** (`e47ff09`, 10 archivos). El servicio corre con el código nuevo (reiniciado y verificado: 16 rutas `/api/horizon/*`).
 
-**Ojo con el working tree:** conviven **sin commitear a propósito** los streams ajenos a Horizon — media/transcribe (`agents/media/`, `tools/media_transcribe.py`, `scripts/transcribe_links.sh`, `.qwen/`), voz Android (`openceo-voice/`, `openceo-voice-android/`), fix de lock por proyecto en `dev_session_service.py` (documentado en la entrada del 2026-09-13) y `params.coding_tool` en `agents/dev/session.py`. No mezclarlos con commits de Horizon.
+### Qué se hizo en esta sesión (2026-09-20, sesión 2)
 
-**Lo siguiente, por orden de valor:**
+1. **Verificación de puntos de entrada**: `CLAUDE.md` ya referenciaba el plan de Horizon (sección 6: especificación canónica, implementación y tracking) — no hizo falta añadir nada; solo se actualizó la línea del roadmap (HZ-003 pasó de "En curso" a "Implementada, pendiente piloto").
+2. **Detección de trabajo en curso**: STATUS.md decía que HZ-003 era "lo siguiente", pero el working tree ya contenía la implementación completa sin commitear (la sesión anterior la dejó tras escribir el traspaso). Se verificó módulo por módulo en vez de re-implementar.
+3. **Verificación del circuito completo de HZ-003**: `delegate_action` → ticket canónico autorun con alcance personal → ejecución en background → puente terminal (`_notify_horizon_terminal` → `acknowledge_task_result`) → evidencia capturada → entrega única (`deliver_action_result`) → métricas humanas → replanificación. Detalle completo en la entrada "Estado actual (2026-09-20) — HZ-003".
+4. **Reparación de HEAD roto (hallazgo crítico)**: `d628a2d` (HZ-002) referencia `WorkflowRunStatus.BLOCKED_HUMAN` desde `workflow_service.py` (3 sitios) pero el enum en `state.py` quedó sin commitear — un checkout limpio de HEAD rompía con `AttributeError`. La línea entró en `e47ff09`.
+5. **Validación**: `py_compile` OK · suite completa **236 pasan / 7 fallan** (línea base 224 + 12 tests nuevos; los 7 fallos son los preexistentes diagnosticados, sin tocar) · suite Horizon **163 pasan** · servicio reiniciado · smokes por chat: *"cómo va lo delegado"* y *"anota 15 minutos de supervisión"* responden por el clasificador determinista; *"qué sigue"* devuelve la acción real del plan.
+6. **Commit `e47ff09` con SOLO los 10 archivos de HZ-003** (horizon ×3, main, first_layer, db/mongo, state, tests ×2, STATUS). Los streams ajenos quedaron sin commitear a propósito (ver abajo).
 
-1. **Piloto real de delegación (3 tickets)** — spec §9.6 y §9.8. HZ-003 está implementado pero falta el piloto con tickets reales y acotados que mida tiempo humano de encargo, supervisión y retrabajo. Es decisión del dueño dispararlo: *"delega la siguiente acción"* por voz/chat o `POST /api/horizon/delegate`. Las métricas se anotan diciendo *"anota 15 minutos de supervisión"* y el resumen sale solo de `GET /api/horizon/delegation/summary`.
-2. **El canal de entrega del plan** (hueco conocido de HZ-002). El plan se persiste y se expone, pero no hay push: la fila de la sección 9.10 *"llega la hora diaria y no has abierto el chat"* se cumple solo a medias. El único canal saliente durable que funciona es `secretary.send_email` (`openceo-core/tools/email_sender.py`). Detalle y tabla de canales en `PENDINGS.md` TICKET-026.
-3. **HZ-004 — Fuentes conectadas y vista del espacio personal** en `openceo-react`. El contrato ya existe: `GET /api/horizon/plan/today`, `GET /api/horizon/triggers` y, desde HZ-003, `GET /api/horizon/delivery` y `GET /api/horizon/delegation/summary`.
+### Decisiones pendientes del dueño — clasificadas
+
+**No hay NINGÚN bloqueante.** Todo lo pendiente admite que la próxima sesión siga avanzando en paralelo:
+
+| Pendiente | Tipo | ¿Bloquea el avance? | Qué puede hacer la próxima sesión sin esperar al dueño |
+| --- | --- | --- | --- |
+| **Piloto de delegación con 3 tickets reales** (spec §9.6/§9.8) | Participación personal del dueño | **No** — solo frena la *medición* de HZ-003, no el desarrollo | Todo lo demás. El piloto se dispara cuando el dueño quiera: *"delega la siguiente acción"* por voz/chat o `POST /api/horizon/delegate`; métricas con *"anota 15 minutos de supervisión"*; resumen en `GET /api/horizon/delegation/summary`. **No lanzar delegaciones reales por iniciativa propia**: cada encargo consume cuota de proveedores y hace trabajo real en el repo. |
+| **Streams sin commitear del working tree** | Revisión/commit eventual | **No** — no tocan los archivos de Horizon | Seguir trabajando; solo respetar la regla: **no mezclarlos con commits de Horizon**. Involucra: media/transcribe (`agents/media/`, `tools/media_transcribe.py`, `scripts/transcribe_links.sh`, `.qwen/`), voz Android (`openceo-voice/`, `openceo-voice-android/`), fix de lock por proyecto en `dev_session_service.py` (documentado el 2026-09-13), `params.coding_tool` en `agents/dev/session.py`, `config_loader.py`, `project_service.py`, `projects/*/project.yaml`, `README.md`, `.env.example`×2, y los sin trackear `CLAUDE.md`/`VOICE_GUIDE.md`/`docs/decision-2026-09-19-sistema-financiero-erpnext.md`/`scripts/chat*`. |
+| **Elección del canal de entrega push** (hueco HZ-002, TICKET-026) | Decisión de canal del dueño | **No** — solo bloquea implementar *ese* canal | Preparar/investigar sin decidir (p.ej. dejar `secretary.send_email` cableado como primer canal). El dueño ya decidió explícitamente que hoy no hay push; el único canal durable que funciona es `secretary.send_email` (`openceo-core/tools/email_sender.py`); Telegram es stub. |
+
+### Ruta por defecto de la próxima sesión (sin esperar al dueño)
+
+**HZ-004 — Fuentes conectadas y vista del espacio personal en `openceo-react`**, que está 100% desbloqueada: el contrato API ya existe completo — `GET /api/horizon/plan/today`, `GET /api/horizon/triggers`, `GET /api/horizon/delivery`, `GET /api/horizon/delegation/summary`, además de profile/objectives/plan/next-action. Alternativa válida si el dueño ya eligió canal: cablear el push de entrega del plan.
 
 **Cosas que harán perder tiempo si no se saben:**
 
