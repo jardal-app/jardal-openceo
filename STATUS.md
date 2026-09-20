@@ -2,6 +2,35 @@
 
 Resumen operativo corto del estado real del repo.
 
+## Continuar aquí (traspaso a la próxima sesión)
+
+Estado al cerrar la sesión del **2026-09-20**: Horizon fases 1 y 2 implementadas, verificadas contra Mongo real y desplegadas. Commit **`d628a2d`** en `main` (31 archivos). El servicio corre con el código nuevo (reiniciado y comprobado).
+
+**Lo siguiente, por orden de valor:**
+
+1. **HZ-003 — Delegación y dev móvil** (fase 3). Es el punto 6, el único que falta del criterio de aceptación de TICKET-026: encargar un ticket de alcance personal sobre las sesiones dev existentes, medir tiempo humano y retrabajo, y entregar el resultado una sola vez aunque el teléfono se desconecte. Se apoya en `dev_session_service` y en el puente reactivo que ya existe (`TaskService._notify_horizon_terminal` → `HorizonService.acknowledge_task_result`).
+2. **El canal de entrega del plan** (hueco conocido de HZ-002). El plan se persiste y se expone, pero no hay push: la fila de la sección 9.10 *"llega la hora diaria y no has abierto el chat"* se cumple solo a medias. El único canal saliente durable que funciona es `secretary.send_email` (`openceo-core/tools/email_sender.py`). Detalle y tabla de canales en `PENDINGS.md` TICKET-026.
+3. **HZ-004 — Fuentes conectadas y vista del espacio personal** en `openceo-react`. El contrato ya existe: `GET /api/horizon/plan/today`, `GET /api/horizon/triggers`.
+
+**Cosas que harán perder tiempo si no se saben:**
+
+- **Los tests necesitan el venv del root**: `./.venv/bin/python -m pytest tests/ -q`. `python3` pelado **no** sirve (le faltan fastapi y motor; da 8 errores de colección). Línea base al cerrar: **224 pasan / 7 fallan**; los 7 son preexistentes y están diagnosticados abajo. Los tests de Horizon solos: **151 pasan**.
+- **Trampa de `lifespan` en `main.py`**: `settings` se asigna dentro de la función (bloque de auth), así que es local a toda ella. Leer `settings.X` **antes** de esa asignación lanza `UnboundLocalError` y tumba el arranque — ya pasó una vez en esta sesión y `py_compile` no lo detecta. En ese bloque se usa `get_settings()` directamente.
+- **Escribir en `horizon_triggers` a mano no despierta el timer**, por diseño: no hay sondeo, así que solo lo despierta `enqueue()`. Un encolado externo espera al siguiente vencimiento o hasta `max_sleep` (1 h). Los caminos reales del código pasan todos por `enqueue()`.
+- **El motor YAML rechaza `llm_eval`** (`workflow_service.py`): cualquier `when` o `loop.condition` debe ser `python_eval`. Y `_resolve_value` convierte un parámetro ausente en `""`, no en `None` — leerlo como cero convertiría "no lo sé" en "día saturado".
+- **El dueño del espacio personal es único**: `HORIZON_OWNER_USER_ID` (`settings.py`), hoy `usr_8c9941ae0bc9` (admin). `HorizonService.owner_for()` es el único punto de resolución: la API usa el usuario autenticado, voz y chat el dueño configurado. No añadir otro camino.
+- **No hay que tocar los 7 tests que fallan**: no son de Horizon y su causa está diagnosticada abajo.
+
+**Cómo comprobar que sigue vivo:**
+
+```bash
+./scripts/openceo-core-host.sh status          # servicio arriba
+./.venv/bin/python -m pytest tests/test_horizon_*.py -q
+./scripts/chat.sh "hoy solo tengo 15 minutos"  # replanifica por capacidad
+./scripts/chat.sh "qué sigue"                  # acción principal + objetivo
+curl -s localhost:18765/openapi.json | grep -c '/horizon/'   # 11 rutas
+```
+
 ## Estado actual (2026-09-20)
 
 - `Horizon HZ-002 — Ciclo proactivo del CEO (Fase 2 de 5)`: implementada la fase que la especificación reclamaba en [`jardal-horizon/README.md`](file:///home/develop/development/Jardal/jardal-openceo/jardal-horizon/README.md) §9.2 punto 1 — *"Un prompt por sí solo no mantiene objetivos ni despierta por la mañana"*. Hasta ahora Horizon era **reactivo**: sólo respondía cuando el usuario hablaba.
