@@ -2203,3 +2203,244 @@
   text-align: center;
   gap: 0.5rem;
 }
+
+/* ═══════════════════════════════════════════
+   ESPACIO PERSONAL (Horizon)
+   ═══════════════════════════════════════════ */
+
+.personal-space-page {
+  padding: 0.75rem 1.5rem 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.horizon-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.horizon-grid {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+.horizon-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.horizon-card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  font-family: var(--font-brand);
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--oceo-text-1);
+}
+
+.horizon-subtitle {
+  margin: 0 0 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--oceo-text-3);
+}
+
+.horizon-mission-text {
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: var(--oceo-text-1);
+}
+
+.horizon-note {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--oceo-text-3);
+}
+
+.horizon-plan-message {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--oceo-text-2);
+}
+
+.horizon-metrics-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.5rem;
+}
+
+.horizon-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 5.5rem;
+}
+
+.horizon-metric-value {
+  font-family: var(--font-brand);
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--oceo-text-1);
+  line-height: 1.1;
+}
+
+.horizon-metric-label {
+  font-size: 0.65rem;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--oceo-text-3);
+}
+
+.horizon-growth {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid rgba(46, 134, 230, 0.25);
+  border-radius: 10px;
+  background: rgba(46, 134, 230, 0.06);
+  color: var(--oceo-text-1);
+  font-size: 0.85rem;
+}
+
+.horizon-voice {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 0.6rem;
+}
+
+.horizon-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.horizon-action-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--oceo-text-1);
+}
+
+.horizon-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.horizon-inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--oceo-stroke);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.horizon-inline-form .input-oceo {
+  flex: 1;
+  min-width: 8rem;
+}
+
+.horizon-stack-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.horizon-block-list,
+.horizon-plain-list,
+.horizon-milestone-list,
+.horizon-objective-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.horizon-block,
+.horizon-objective {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--oceo-stroke);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.horizon-block-label {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--oceo-text-1);
+}
+
+.horizon-block-meta {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--oceo-text-3);
+}
+
+.horizon-milestone-list {
+  margin-top: 0.5rem;
+  padding-left: 0.25rem;
+  border-left: 2px solid rgba(46, 134, 230, 0.25);
+}
+
+.horizon-milestone-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding-left: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--oceo-text-2);
+}
+
+.horizon-plain-list li {
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--oceo-text-2);
+}
+
+.horizon-subsection {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 0.6rem;
+}
+
+.horizon-delivery {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid rgba(18, 185, 129, 0.25);
+  border-radius: 10px;
+  background: rgba(18, 185, 129, 0.05);
+}
+
+@media (max-width: 1100px) {
+  .horizon-grid {
+    grid-template-columns: 1fr;
+  }
+}

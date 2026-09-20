@@ -10,4 +10,5 @@ export const PERMISSIONS = {
   MANAGE_PROJECTS: 'manage_projects',
   ADMIN_DASHBOARD: 'admin_dashboard',
   CLIENT_REVIEW: 'client_review',
+  PERSONAL_SPACE: 'personal_space',
 }

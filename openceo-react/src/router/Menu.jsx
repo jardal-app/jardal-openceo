@@ -1,5 +1,6 @@
 export var navigation = [
   { name: 'Inicio', icon: "HomeIcon", href: '/dashboard/inicio', permissions: ['admin_dashboard'] },
+  { name: 'Espacio Personal', icon: "SparklesIcon", href: '/dashboard/personal', permissions: ['personal_space'] },
   {
     name: 'Gestión',
     icon: "BriefcaseIcon",

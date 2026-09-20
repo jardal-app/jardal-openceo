@@ -13,6 +13,7 @@ import Dashboard4 from '../components/Dashboard4'
 
 // Pages
 const Dashboard = lazy(() => import('@/pages/Dashboard'))
+const PersonalSpace = lazy(() => import('@/pages/PersonalSpace'))
 const TicketList = lazy(() => import('@/pages/TicketList'))
 const TicketDetail = lazy(() => import('@/pages/TicketDetail'))
 const TicketForm = lazy(() => import('@/pages/TicketForm'))
@@ -71,6 +72,7 @@ const router = createBrowserRouter([
         children: [
           { index: true, element: <Navigate to="/dashboard/inicio" replace /> },
           { path: 'inicio', element: <Page Component={Dashboard} permissions={[]} /> },
+          { path: 'personal', element: <Page Component={PersonalSpace} permissions={['personal_space']} /> },
           { path: 'tickets/list', element: <Page Component={TicketList} permissions={['read_tickets']} /> },
           { path: 'tickets/create', element: <Page Component={TicketForm} permissions={['write_tickets']} /> },
           { path: 'tickets/update/:id', element: <Page Component={TicketForm} permissions={['write_tickets']} /> },

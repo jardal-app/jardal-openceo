@@ -45,6 +45,10 @@ def create_default_user_if_needed(db: Any) -> None:
     admin_permissions = [
         "read_tickets", "write_tickets", "approve_tickets", "reject_tickets", "review_tickets",
         "qa_review", "manage_users", "manage_groups", "manage_projects", "admin_dashboard", "client_review",
+        # Horizon: el espacio personal del CEO no se muestra a los empleados
+        # (seccion 9.3 y 9.10). El permiso solo gobierna la vista; el
+        # aislamiento real de los datos lo hace el filtro por usuario en la API.
+        "personal_space",
     ]
 
     if db.users.find_one({"username": admin_username}):
