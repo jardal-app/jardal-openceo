@@ -1,0 +1,14 @@
+workflow: ceo.horizon_daily
+name: Plan diario de Horizon
+agent: ceo
+description: >-
+  Prepara y persiste el plan del dia del espacio personal. Deterministico y sin
+  LLM, para que siga funcionando con el presupuesto de IA agotado (seccion 9.7).
+auto_match: false
+triggers: []
+steps:
+  - id: plan
+    tool: ceo.plan_day
+    params:
+      date: "{{task.params.horizon_date_key}}"
+      free_minutes: "{{task.params.horizon_free_minutes}}"

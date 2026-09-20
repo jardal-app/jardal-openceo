@@ -5,7 +5,9 @@ from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
+from horizon.privacy import mirror_exclusion_filter
 from settings import Settings
 from state import DevSessionStatus, TaskStatus
 
@@ -80,6 +82,43 @@ class MongoRepository:
     def projects(self):
         return self.db["projects"]
 
+    @property
+    def project_presets(self):
+        return self.db["project_presets"]
+
+    # ------------------------- Horizon (espacio personal) -------------------------
+    # Cada documento lleva user_id y su indice. El aislamiento no depende del
+    # nombre del proyecto: vive en el filtro por propietario y en el gate de
+    # privacidad de ``horizon.privacy``.
+
+    @property
+    def horizon_profile(self):
+        return self.db["horizon_profile"]
+
+    @property
+    def horizon_objectives(self):
+        return self.db["horizon_objectives"]
+
+    @property
+    def horizon_captures(self):
+        return self.db["horizon_captures"]
+
+    @property
+    def horizon_actions(self):
+        return self.db["horizon_actions"]
+
+    @property
+    def horizon_events(self):
+        return self.db["horizon_events"]
+
+    @property
+    def horizon_plans(self):
+        return self.db["horizon_plans"]
+
+    @property
+    def horizon_triggers(self):
+        return self.db["horizon_triggers"]
+
     async def ensure_indexes(self) -> None:
         await self.tasks.create_index([("task_id", ASCENDING)], unique=True)
         await self.tasks.create_index([("status", ASCENDING), ("resume_at", ASCENDING)])
@@ -150,6 +189,84 @@ class MongoRepository:
         # Projects index
         await self.projects.create_index([("name", ASCENDING)], unique=True)
 
+        # Presets index
+        await self.project_presets.create_index([("project", ASCENDING), ("name", ASCENDING)], unique=True)
+
+        # Horizon: el propietario encabeza todos los indices porque toda
+        # consulta del espacio personal filtra por user_id.
+        await self.horizon_profile.create_index([("user_id", ASCENDING)], unique=True)
+        await self.horizon_objectives.create_index(
+            [("user_id", ASCENDING), ("status", ASCENDING), ("priority", ASCENDING)],
+            name="idx_horizon_objectives_owner_status",
+        )
+        await self.horizon_objectives.create_index(
+            [("user_id", ASCENDING), ("source_key", ASCENDING)],
+            unique=True,
+            partialFilterExpression={"source_key": {"$type": "string"}},
+            name="idx_horizon_objectives_source_key",
+        )
+        await self.horizon_captures.create_index(
+            [("user_id", ASCENDING), ("captured_at", DESCENDING)],
+            name="idx_horizon_captures_owner_time",
+        )
+        # Deduplicacion de capturas: un pendiente repetido no crea trabajo dos veces.
+        await self.horizon_captures.create_index(
+            [("user_id", ASCENDING), ("dedupe_key", ASCENDING)],
+            unique=True,
+            name="idx_horizon_captures_dedupe",
+        )
+        await self.horizon_actions.create_index(
+            [("user_id", ASCENDING), ("status", ASCENDING), ("priority", ASCENDING)],
+            name="idx_horizon_actions_owner_status",
+        )
+        # Deduplicacion de eventos: repetir un recibo no duplica progreso.
+        await self.horizon_events.create_index(
+            [("user_id", ASCENDING), ("source_id", ASCENDING)],
+            unique=True,
+            name="idx_horizon_events_source",
+        )
+        await self.horizon_events.create_index(
+            [("user_id", ASCENDING), ("occurred_at", DESCENDING)],
+            name="idx_horizon_events_owner_time",
+        )
+
+        # Planes: el indice parcial es la garantia dura de que existe UNA sola
+        # version vigente por usuario (seccion 9.10). El indice por (user_id,
+        # version) es distinto: impide que dos escritores acunen la misma
+        # version. Ninguno de los dos basta solo.
+        await self.horizon_plans.create_index(
+            [("user_id", ASCENDING)],
+            unique=True,
+            partialFilterExpression={"is_current": True},
+            name="idx_horizon_plans_current",
+        )
+        await self.horizon_plans.create_index(
+            [("user_id", ASCENDING), ("version", ASCENDING)],
+            unique=True,
+            name="idx_horizon_plans_version",
+        )
+        await self.horizon_plans.create_index(
+            [("user_id", ASCENDING), ("date_key", DESCENDING), ("version", DESCENDING)],
+            name="idx_horizon_plans_owner_date",
+        )
+
+        # Disparadores: (status, next_run_at) es la unica consulta del timer, y
+        # la clave de deduplicacion impide que un evento repetido cree trabajo
+        # dos veces.
+        await self.horizon_triggers.create_index(
+            [("status", ASCENDING), ("next_run_at", ASCENDING)],
+            name="idx_horizon_triggers_due",
+        )
+        await self.horizon_triggers.create_index(
+            [("user_id", ASCENDING), ("dedupe_key", ASCENDING)],
+            unique=True,
+            name="idx_horizon_triggers_dedupe",
+        )
+        await self.horizon_triggers.create_index(
+            [("user_id", ASCENDING), ("created_at", DESCENDING)],
+            name="idx_horizon_triggers_owner_time",
+        )
+
     # ------------------------- tasks -------------------------
 
     async def create_task(self, doc: dict[str, Any]) -> dict[str, Any]:
@@ -182,6 +299,10 @@ class MongoRepository:
         query = {
             "source": {"$ne": "notion"},
             "post_actions_executed": {"$ne": "notion_mirror_created"},
+            # El espacio personal de Horizon nunca se proyecta a un espejo
+            # externo. Sin este filtro, el safety net de arranque publicaria
+            # datos privados en el primer reinicio del servicio.
+            **mirror_exclusion_filter(),
             "$or": [
                 {"params._mirrors.notion.page_id": {"$exists": False}},
                 {"params._mirrors.notion.page_id": ""},
@@ -591,6 +712,44 @@ class MongoRepository:
             {"$unset": {f"project_sessions.{project}": ""}},
         )
 
+    # ------------------------- pending preset (waiting for dictation) -------------------------
+
+    async def get_pending_preset(self, user_id: str) -> dict[str, Any] | None:
+        """Get pending preset waiting for dictation."""
+        row = await self.user_context.find_one({"user_id": user_id})
+        if not row:
+            return None
+        return row.get("pending_preset")
+
+    async def set_pending_preset(
+        self,
+        user_id: str,
+        preset_name: str,
+        session_name: str,
+        initial_prompt: str,
+        project: str,
+    ) -> None:
+        """Store pending preset waiting for continuation / dictation."""
+        doc = {
+            "name": preset_name,
+            "session_name": session_name,
+            "initial_prompt": initial_prompt,
+            "project": project,
+            "created_at": datetime.now(timezone.utc),
+        }
+        await self.user_context.update_one(
+            {"user_id": user_id},
+            {"$set": {"pending_preset": doc}},
+            upsert=True,
+        )
+
+    async def clear_pending_preset(self, user_id: str) -> None:
+        """Clear pending preset."""
+        await self.user_context.update_one(
+            {"user_id": user_id},
+            {"$unset": {"pending_preset": ""}},
+        )
+
     async def get_next_ticket_number(self) -> int:
         """Atomically increment and return the next ticket number."""
         result = await self.counters.find_one_and_update(
@@ -600,6 +759,456 @@ class MongoRepository:
             return_document=ReturnDocument.AFTER,
         )
         return int(result["seq"])
+
+    # ------------------------- project presets -------------------------
+
+    async def get_project_presets(self, project: str) -> list[dict[str, Any]]:
+        """Return all dynamic presets saved for a project in MongoDB."""
+        rows = self.project_presets.find({"project": project}, sort=[("name", 1)])
+        return [self._clean(r) async for r in rows]
+
+    async def save_project_preset(
+        self,
+        project: str,
+        name: str,
+        prompt: str = "",
+        cmd: str = "",
+        description: str = "",
+        tmux: bool = True,
+    ) -> dict[str, Any]:
+        """Upsert a project preset (prompt for dev tmux session)."""
+        prompt_val = (prompt or cmd).strip()
+        doc = {
+            "project": project,
+            "name": name.strip().lower(),
+            "prompt": prompt_val,
+            "cmd": prompt_val,
+            "description": description.strip(),
+            "tmux": bool(tmux),
+            "updated_at": datetime.now(timezone.utc),
+        }
+        await self.project_presets.update_one(
+            {"project": project, "name": doc["name"]},
+            {"$set": doc},
+            upsert=True,
+        )
+        row = await self.project_presets.find_one({"project": project, "name": doc["name"]})
+        return self._clean(row)
+
+    async def delete_project_preset(self, project: str, name: str) -> bool:
+        """Delete a project preset."""
+        res = await self.project_presets.delete_one({"project": project, "name": name.strip().lower()})
+        return res.deleted_count > 0
+
+    # ------------------------- open tasks helpers -------------------------
+
+    async def get_open_tasks_for_project(self, project: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Get active non-completed tasks for a project."""
+        query = {
+            "project": project,
+            "status": {"$in": ["queued", "in_progress", "waiting", "escalated"]},
+        }
+        rows = self.tasks.find(query, sort=[("created_at", -1)]).limit(limit)
+        return [self._clean(r) async for r in rows]
+
+    async def count_open_tasks_for_project(self, project: str) -> int:
+        """Count active non-completed tasks for a project."""
+        query = {
+            "project": project,
+            "status": {"$in": ["queued", "in_progress", "waiting", "escalated"]},
+        }
+        return await self.tasks.count_documents(query)
+
+    # ------------------------- Horizon (espacio personal) -------------------------
+    # Toda lectura y escritura filtra por user_id: es la unica barrera que
+    # separa el espacio personal del resto de la organizacion.
+
+    async def get_horizon_profile(self, user_id: str) -> dict[str, Any] | None:
+        row = await self.horizon_profile.find_one({"user_id": user_id})
+        return self._clean(row)
+
+    async def upsert_horizon_profile(self, doc: dict[str, Any]) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        payload = dict(doc)
+        payload.pop("_id", None)
+        # created_at solo puede vivir en $setOnInsert: Mongo rechaza el mismo
+        # campo en $set y $setOnInsert ("would create a conflict"). Asi la fecha
+        # de alta se fija una vez y una reimportacion no la reescribe.
+        payload.pop("created_at", None)
+        await self.horizon_profile.update_one(
+            {"user_id": payload["user_id"]},
+            {"$set": {**payload, "updated_at": now}, "$setOnInsert": {"created_at": now}},
+            upsert=True,
+        )
+        return await self.get_horizon_profile(payload["user_id"]) or payload
+
+    async def list_horizon_objectives(
+        self,
+        user_id: str,
+        *,
+        statuses: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        query: dict[str, Any] = {"user_id": user_id}
+        if statuses:
+            query["status"] = {"$in": statuses}
+        rows = self.horizon_objectives.find(query, sort=[("priority", ASCENDING)])
+        return [self._clean(row) async for row in rows]
+
+    async def get_horizon_objective_by_source_key(
+        self,
+        user_id: str,
+        source_key: str,
+    ) -> dict[str, Any] | None:
+        if not source_key:
+            return None
+        row = await self.horizon_objectives.find_one({"user_id": user_id, "source_key": source_key})
+        return self._clean(row)
+
+    async def upsert_horizon_objective(self, doc: dict[str, Any]) -> dict[str, Any]:
+        """Upsert por clave natural. La importacion nunca duplica objetivos."""
+        now = datetime.now(timezone.utc)
+        payload = dict(doc)
+        payload.pop("_id", None)
+        payload.pop("created_at", None)
+        key = {"user_id": payload["user_id"], "source_key": payload.get("source_key")}
+        await self.horizon_objectives.update_one(
+            key,
+            {"$set": {**payload, "updated_at": now}, "$setOnInsert": {"created_at": now}},
+            upsert=True,
+        )
+        row = await self.horizon_objectives.find_one(key)
+        return self._clean(row) or payload
+
+    async def update_horizon_milestone(
+        self,
+        *,
+        user_id: str,
+        objective_id: str,
+        milestone_id: str,
+        updates: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Actualiza un hito concreto preservando el resto del objetivo."""
+        now = datetime.now(timezone.utc)
+        set_fields = {f"milestones.$.{key}": value for key, value in updates.items()}
+        set_fields["updated_at"] = now
+        result = await self.horizon_objectives.update_one(
+            {
+                "user_id": user_id,
+                "objective_id": objective_id,
+                "milestones.milestone_id": milestone_id,
+            },
+            {"$set": set_fields},
+        )
+        if result.matched_count == 0:
+            return None
+        objective = await self.horizon_objectives.find_one(
+            {"user_id": user_id, "objective_id": objective_id}
+        )
+        clean = self._clean(objective)
+        if not clean:
+            return None
+        for milestone in clean.get("milestones") or []:
+            if str(milestone.get("milestone_id")) == milestone_id:
+                return milestone
+        return None
+
+    async def create_horizon_action(self, doc: dict[str, Any]) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        payload = dict(doc)
+        payload.pop("_id", None)
+        payload.setdefault("created_at", now)
+        payload["updated_at"] = now
+        await self.horizon_actions.insert_one(dict(payload))
+        return payload
+
+    async def list_horizon_actions(
+        self,
+        user_id: str,
+        *,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        query: dict[str, Any] = {"user_id": user_id}
+        if statuses:
+            query["status"] = {"$in": statuses}
+        rows = self.horizon_actions.find(query, sort=[("priority", ASCENDING)]).limit(limit)
+        return [self._clean(row) async for row in rows]
+
+    async def count_horizon_actions(self, user_id: str) -> int:
+        return await self.horizon_actions.count_documents({"user_id": user_id})
+
+    async def create_horizon_capture(self, doc: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(doc)
+        payload.pop("_id", None)
+        await self.horizon_captures.insert_one(dict(payload))
+        return payload
+
+    async def get_horizon_capture_by_dedupe_key(
+        self,
+        user_id: str,
+        dedupe_key: str,
+    ) -> dict[str, Any] | None:
+        row = await self.horizon_captures.find_one({"user_id": user_id, "dedupe_key": dedupe_key})
+        return self._clean(row)
+
+    async def list_horizon_captures(self, user_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self.horizon_captures.find(
+            {"user_id": user_id}, sort=[("captured_at", DESCENDING)]
+        ).limit(limit)
+        return [self._clean(row) async for row in rows]
+
+    async def create_horizon_event(self, doc: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(doc)
+        payload.pop("_id", None)
+        await self.horizon_events.insert_one(dict(payload))
+        return payload
+
+    async def get_horizon_event_by_source(
+        self,
+        user_id: str,
+        source_id: str,
+    ) -> dict[str, Any] | None:
+        row = await self.horizon_events.find_one({"user_id": user_id, "source_id": source_id})
+        return self._clean(row)
+
+    # ------------------------- Horizon: planes -------------------------
+
+    async def create_horizon_plan(self, doc: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(doc)
+        payload.pop("_id", None)
+        payload.setdefault("is_current", False)
+        await self.horizon_plans.insert_one(dict(payload))
+        return payload
+
+    async def get_horizon_plan(self, plan_id: str) -> dict[str, Any] | None:
+        row = await self.horizon_plans.find_one({"plan_id": plan_id})
+        return self._clean(row)
+
+    async def get_current_horizon_plan(self, user_id: str) -> dict[str, Any] | None:
+        """Devuelve el plan vigente, con respaldo por version.
+
+        Publicar es marcar-y-luego-insertar, asi que existe una ventana de
+        milisegundos sin ningun plan marcado (y permanente si el proceso muere
+        ahi). El respaldo por version mas alta cierra las dos: desde el lector,
+        siempre hay exactamente un plan vigente.
+        """
+        row = await self.horizon_plans.find_one({"user_id": user_id, "is_current": True})
+        if row is not None:
+            return self._clean(row)
+        fallback = await self.horizon_plans.find_one(
+            {"user_id": user_id}, sort=[("version", DESCENDING)]
+        )
+        return self._clean(fallback)
+
+    async def list_recent_horizon_plans(
+        self, user_id: str, limit: int = 2
+    ) -> list[dict[str, Any]]:
+        rows = (
+            self.horizon_plans.find({"user_id": user_id}, sort=[("version", DESCENDING)])
+            .limit(max(1, int(limit)))
+        )
+        return [self._clean(row) async for row in rows]
+
+    async def next_horizon_plan_version(self, user_id: str) -> int:
+        row = await self.horizon_plans.find_one(
+            {"user_id": user_id}, sort=[("version", DESCENDING)]
+        )
+        if not row:
+            return 1
+        return int(row.get("version") or 0) + 1
+
+    async def set_current_horizon_plan(
+        self, user_id: str, plan_id: str
+    ) -> dict[str, Any] | None:
+        """Marca un plan como vigente y retira el anterior.
+
+        El orden importa: primero se retira el vigente y despues se marca el
+        nuevo. Al reves, el indice unico parcial lanzaria ``DuplicateKeyError``
+        mientras el anterior siguiera marcado, y la excepcion seria el camino
+        normal en vez de la excepcion.
+        """
+        now = datetime.now(timezone.utc)
+        try:
+            await self.horizon_plans.update_many(
+                {"user_id": user_id, "is_current": True, "plan_id": {"$ne": plan_id}},
+                {"$set": {"is_current": False, "superseded_by": plan_id, "superseded_at": now}},
+            )
+            result = await self.horizon_plans.update_one(
+                {"user_id": user_id, "plan_id": plan_id},
+                {"$set": {"is_current": True, "superseded_by": None, "superseded_at": None}},
+            )
+        except DuplicateKeyError:
+            # Otro escritor gano la carrera. Lo obsoleto se descarta; que se
+            # recoloque es decision de quien publica, no de esta capa.
+            return None
+        if result.matched_count == 0:
+            return None
+        return await self.get_horizon_plan(plan_id)
+
+    async def patch_horizon_plan(
+        self, plan_id: str, updates: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        payload = dict(updates)
+        payload.pop("_id", None)
+        await self.horizon_plans.update_one({"plan_id": plan_id}, {"$set": payload})
+        return await self.get_horizon_plan(plan_id)
+
+    async def push_horizon_plan_aviso(
+        self, plan_id: str, aviso: dict[str, Any], *, keep: int = 20
+    ) -> dict[str, Any] | None:
+        """Agrega un aviso al plan, conservando solo los ultimos.
+
+        Es lo que permite resolver un "hecho" tardio contra la accion que se le
+        mostro al usuario, sin una tercera coleccion.
+        """
+        await self.horizon_plans.update_one(
+            {"plan_id": plan_id},
+            {"$push": {"avisos": {"$each": [dict(aviso)], "$slice": -abs(int(keep))}}},
+        )
+        return await self.get_horizon_plan(plan_id)
+
+    # ------------------------- Horizon: disparadores -------------------------
+
+    async def create_horizon_trigger(self, doc: dict[str, Any]) -> dict[str, Any] | None:
+        payload = dict(doc)
+        payload.pop("_id", None)
+        now = datetime.now(timezone.utc)
+        payload.setdefault("created_at", now)
+        payload["updated_at"] = now
+        try:
+            await self.horizon_triggers.insert_one(dict(payload))
+        except DuplicateKeyError:
+            # La clave natural ya existia: no es un error, es la deduplicacion
+            # haciendo su trabajo.
+            return None
+        return payload
+
+    async def get_horizon_trigger_by_dedupe(self, dedupe_key: str) -> dict[str, Any] | None:
+        row = await self.horizon_triggers.find_one({"dedupe_key": dedupe_key})
+        return self._clean(row)
+
+    async def list_due_horizon_triggers(
+        self, now: datetime, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        rows = (
+            self.horizon_triggers.find(
+                {"status": "pending", "next_run_at": {"$lte": now}},
+                sort=[("next_run_at", ASCENDING)],
+            ).limit(max(1, int(limit)))
+        )
+        return [self._clean(row) async for row in rows]
+
+    async def next_horizon_trigger_due_at(self) -> datetime | None:
+        rows = (
+            self.horizon_triggers.find({"status": "pending"}, sort=[("next_run_at", ASCENDING)])
+            .limit(1)
+        )
+        async for row in rows:
+            return row.get("next_run_at")
+        return None
+
+    async def mark_horizon_trigger_running(self, trigger_id: str) -> dict[str, Any] | None:
+        """Toma atomica del disparador. Devuelve None si otro ya lo tomo."""
+        now = datetime.now(timezone.utc)
+        row = await self.horizon_triggers.find_one_and_update(
+            {"trigger_id": trigger_id, "status": "pending"},
+            {"$set": {"status": "running", "started_at": now, "updated_at": now}},
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._clean(row)
+
+    async def patch_horizon_trigger(
+        self, trigger_id: str, updates: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        payload = dict(updates)
+        payload.pop("_id", None)
+        payload["updated_at"] = datetime.now(timezone.utc)
+        row = await self.horizon_triggers.find_one_and_update(
+            {"trigger_id": trigger_id},
+            {"$set": payload},
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._clean(row)
+
+    async def list_horizon_triggers(
+        self, user_id: str, *, statuses: list[str] | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        query: dict[str, Any] = {"user_id": user_id}
+        if statuses:
+            query["status"] = {"$in": statuses}
+        rows = (
+            self.horizon_triggers.find(query, sort=[("next_run_at", ASCENDING)])
+            .limit(max(1, int(limit)))
+        )
+        return [self._clean(row) async for row in rows]
+
+    async def recover_stale_horizon_triggers(self, cutoff: datetime) -> int:
+        """Devuelve a la cola lo que quedo a medias por una caida.
+
+        Un disparador en ``running`` mas viejo que el margen pertenece a un
+        proceso que ya no existe. Se reintenta con la espera creciente que
+        corresponda, o se declara si ya agoto sus intentos.
+        """
+        now = datetime.now(timezone.utc)
+        stale = self.horizon_triggers.find({"status": "running", "started_at": {"$lt": cutoff}})
+        recovered = 0
+        async for row in stale:
+            attempts = int(row.get("attempts") or 0) + 1
+            max_attempts = int(row.get("max_attempts") or 3)
+            exhausted = attempts >= max_attempts
+            await self.horizon_triggers.update_one(
+                {"trigger_id": row.get("trigger_id")},
+                {
+                    "$set": {
+                        "status": "failed" if exhausted else "pending",
+                        "attempts": attempts,
+                        "next_run_at": now,
+                        "last_error": "recovered_after_restart",
+                        "updated_at": now,
+                    }
+                },
+            )
+            recovered += 1
+        return recovered
+
+    async def expire_horizon_triggers(self, now: datetime) -> int:
+        """Descarta avisos obsoletos (seccion 9.7) en vez de ejecutarlos."""
+        result = await self.horizon_triggers.update_many(
+            {
+                "status": "pending",
+                "expires_at": {"$ne": None, "$lte": now},
+            },
+            {
+                "$set": {
+                    "status": "expired",
+                    "finished_at": now,
+                    "last_error": "expired_before_run",
+                    "updated_at": now,
+                }
+            },
+        )
+        return int(result.modified_count or 0)
+
+    # ------------------------- Horizon: acciones -------------------------
+
+    async def get_horizon_action_by_task_id(
+        self, user_id: str, task_id: str
+    ) -> dict[str, Any] | None:
+        row = await self.horizon_actions.find_one({"user_id": user_id, "task_id": task_id})
+        return self._clean(row)
+
+    async def patch_horizon_action(
+        self, action_id: str, updates: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        payload = dict(updates)
+        payload.pop("_id", None)
+        payload["updated_at"] = datetime.now(timezone.utc)
+        row = await self.horizon_actions.find_one_and_update(
+            {"action_id": action_id},
+            {"$set": payload},
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._clean(row)
 
     @staticmethod
     def _clean(doc: dict[str, Any] | None) -> dict[str, Any] | None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -72,6 +72,17 @@ from state import (
     UserDocument,
     VoicePeerProgrammingRequest,
 )
+from horizon.models import (
+    CaptureChannel,
+    CaptureKind as HorizonCaptureKind,
+    HorizonCaptureRequest,
+    HorizonImportRequest,
+    HorizonPlanRequest,
+    HorizonProgressRequest,
+    HorizonReviewRequest,
+)
+from horizon.triggers import HorizonScheduler, HorizonTriggerStore
+from horizon.service import HorizonService
 from task_service import TaskService
 from tools.notion import NotionTicketManager
 from workflow_service import WorkflowService
@@ -125,6 +136,7 @@ task_service = TaskService(
 )
 qa_review_service.set_task_service(task_service)
 pm_step_manager.set_task_service(task_service)
+workflow_service.set_task_service(task_service)
 scheduler = WaitingTaskScheduler(
     settings=settings,
     task_service=task_service,
@@ -132,12 +144,25 @@ scheduler = WaitingTaskScheduler(
 )
 internal_mcp = build_internal_mcp_mount(settings, task_service)
 global_mcp = build_global_mcp_mount(settings)
+horizon_service = HorizonService(settings=settings, repo=repo)
+# El timer unico de Horizon: duerme hasta el proximo vencimiento y lo despierta
+# cada encolado. No es un barrido (AGENTS.md §5.1).
+horizon_store = HorizonTriggerStore(repo, settings=settings)
+horizon_scheduler = HorizonScheduler(
+    repo=repo,
+    store=horizon_store,
+    handler=horizon_service.handle_trigger,
+    settings=settings,
+)
+workflow_service.set_horizon_service(horizon_service)
+task_service.set_horizon_hooks(on_task_terminal=horizon_service.acknowledge_task_result)
 first_layer_gateway = FirstLayerGateway(
     settings=settings,
     repo=repo,
     project_service=project_service,
     dev_session_service=dev_session_service,
     task_service=task_service,
+    horizon_service=horizon_service,
 )
 _PM_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
@@ -156,6 +181,20 @@ async def lifespan(_: FastAPI):
         await repo.mark_interrupted_dev_sessions()
         await dev_session_service.startup_reconcile()
         await scheduler.start()
+        # Ojo: dentro de ``lifespan`` hay un ``settings = get_settings()`` mas
+        # abajo (bloque de auth) que vuelve ``settings`` local a toda la funcion.
+        # Leerlo aqui antes de esa asignacion lanzaria UnboundLocalError, asi que
+        # se consulta el ajuste por su cuenta.
+        if get_settings().HORIZON_ENABLED:
+            # Deja encolada la proxima ocurrencia de cada trabajo recurrente. El
+            # espacio personal tiene un solo dueño, asi que se siembra ese.
+            with suppress(Exception):
+                await horizon_service.ensure_upcoming_triggers(
+                    get_settings().HORIZON_OWNER_USER_ID
+                )
+            await horizon_scheduler.start()
+        else:
+            logger.info("Horizon deshabilitado: no se programan disparadores")
 
         # Initialize auth DB on startup
         from motor.motor_asyncio import AsyncIOMotorClient
@@ -190,6 +229,9 @@ async def lifespan(_: FastAPI):
 
         yield
 
+        # Horizon se para antes que el resto para que ninguna escritura suya
+        # caiga despues de cerrar el repositorio.
+        await horizon_scheduler.stop()
         await scheduler.stop()
         await dev_session_service.shutdown()
         await repo.close()
@@ -356,6 +398,141 @@ async def approve_discovery_run(discovery_id: str, payload: DiscoveryApprovalReq
         detail = str(exc)
         status_code = 404 if "not found" in detail.lower() else 400
         raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
+# ------------------------- horizon (espacio personal) -------------------------
+# Todas las rutas filtran por el usuario autenticado. El espacio personal no se
+# expone a otros usuarios ni a los espejos externos (seccion 9.3).
+
+
+@app.get("/api/horizon/profile")
+async def get_horizon_profile(
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    return await horizon_service.ensure_profile(
+        current_user.user_id,
+        display_name=current_user.display_name,
+    )
+
+
+@app.get("/api/horizon/objectives")
+async def list_horizon_objectives(
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    objectives = await horizon_service.list_objectives(current_user.user_id)
+    return {"objectives": objectives, "count": len(objectives)}
+
+
+@app.get("/api/horizon/plan")
+async def get_horizon_plan(
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    return await horizon_service.plan_summary(current_user.user_id)
+
+
+@app.get("/api/horizon/next-action")
+async def get_horizon_next_action(
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    return await horizon_service.next_action(current_user.user_id)
+
+
+@app.post("/api/horizon/capture")
+async def create_horizon_capture(
+    payload: HorizonCaptureRequest,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    return await horizon_service.capture(
+        current_user.user_id,
+        payload.text,
+        kind=payload.kind,
+        channel=payload.channel,
+        origin=payload.origin,
+    )
+
+
+@app.post("/api/horizon/progress")
+async def create_horizon_progress(
+    payload: HorizonProgressRequest,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    # Con un aviso de por medio, la confirmacion cierra la accion que se le
+    # mostro al usuario, no la que este vigente ahora (seccion 9.10).
+    if payload.aviso_id:
+        return await horizon_service.confirm_done(
+            current_user.user_id,
+            aviso_id=payload.aviso_id,
+            text=payload.text,
+        )
+    return await horizon_service.record_progress(
+        current_user.user_id,
+        payload.text,
+        source_id=payload.source_id,
+        objective_id=payload.objective_id,
+    )
+
+
+@app.post("/api/horizon/import")
+async def import_horizon_context(
+    payload: HorizonImportRequest,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    try:
+        return await horizon_service.import_context(
+            current_user.user_id,
+            source_path=payload.source_path,
+            display_name=current_user.display_name,
+            force=payload.force,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/horizon/plan/today")
+async def get_horizon_plan_today(
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Plan vigente del dia. Si no existe, se prepara y se deja disponible."""
+    plan = await horizon_service.plan_today(current_user.user_id, channel="api")
+    return await horizon_service.deliver_plan(current_user.user_id, plan, channel="api")
+
+
+@app.post("/api/horizon/plan/day")
+async def post_horizon_plan_day(
+    payload: HorizonPlanRequest,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Replanifica con la disponibilidad declarada ("hoy solo tengo 15 minutos")."""
+    plan = await horizon_service.plan_day(
+        current_user.user_id,
+        declared_free_minutes=payload.free_minutes,
+        exercise_included=payload.exercise_included,
+        date_key=payload.date_key,
+        trigger_kind="daily_plan",
+        source="api",
+    )
+    return await horizon_service.deliver_plan(current_user.user_id, plan, channel="api")
+
+
+@app.get("/api/horizon/triggers")
+async def list_horizon_triggers(
+    statuses: str | None = Query(default=None, description="Estados separados por coma"),
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Trabajo pendiente persistido, para inspeccionar sin adivinar."""
+    parsed = [s.strip() for s in (statuses or "").split(",") if s.strip()] or None
+    triggers = await horizon_service.list_triggers(current_user.user_id, statuses=parsed)
+    return {"triggers": triggers, "count": len(triggers)}
+
+
+@app.post("/api/horizon/review")
+async def post_horizon_review(
+    payload: HorizonReviewRequest,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    return await horizon_service.review_objectives(
+        current_user.user_id, kind=payload.kind
+    )
 
 
 # ------------------------- tasks (legacy compatible) -------------------------
@@ -2808,22 +2985,30 @@ def _extract_project_from_text(text: str, project_names: list[str]) -> str | Non
     if not project_names:
         return None
 
+    # 3. Numerical project references: 'proyecto 1', 'proyecto nro 1', 'en el 1', 'sesion en el 2', '#1'
+    num_patterns = [
+        re.compile(r"\b(?:proyecto|repo|repositorio|project)\s*(?:n[roº\.]*|n[uú]mero|#)?\s*(\d{1,2})\b", re.IGNORECASE),
+        re.compile(r"\b(?:sesi[oó]n|session)\s+(?:dev\s+)?(?:en|al|para|del?)\s+(?:el\s+)?(?:proyecto\s+)?(?:n[roº\.]*|n[uú]mero|#)?\s*(\d{1,2})\b", re.IGNORECASE),
+        re.compile(r"\b(?:en|al|para|del?)\s+(?:el\s+)?(?:proyecto\s+)(?:n[roº\.]*|n[uú]mero|#)?\s*(\d{1,2})\b", re.IGNORECASE),
+        re.compile(r"\b(?:en|al|para|del?)\s+(?:el\s+)(?:n[roº\.]+|n[uú]mero|#)\s*(\d{1,2})\b", re.IGNORECASE),
+        re.compile(r"\b(?:en|al)\s+el\s+(\d{1,2})\b", re.IGNORECASE),
+    ]
+    for pat in num_patterns:
+        m = pat.search(lowered)
+        if m:
+            idx = int(m.group(1))
+            if 1 <= idx <= len(project_names):
+                return project_names[idx - 1]
+
+    # 4. Ordinal project references: 'primer proyecto', 'el primero', 'segundo', etc.
     for word, index in _ORDINAL_MAP.items():
-        if re.search(
-            rf"\b(?:proyecto|repo|repositorio|project)\b(?:\s+\w+){{0,2}}\s+\b{word}\b",
-            lowered,
-        ) or re.search(
-            rf"\b{word}\b(?:\s+\w+){{0,2}}\s+\b(?:proyecto|repo|repositorio|project)\b",
-            lowered,
+        if (
+            re.search(rf"\b(?:el\s+)?{word}\s+(?:proyecto|repo|repositorio|project)\b", lowered)
+            or re.search(rf"\b(?:proyecto|repo|repositorio|project)\s+(?:el\s+)?{word}\b", lowered)
+            or re.search(rf"\b(?:en|al|para|del?)\s+(?:el\s+)?{word}\b", lowered)
         ):
             if 1 <= index <= len(project_names):
                 return project_names[index - 1]
-
-    indexed = re.search(r"\b(?:proyecto|repo|repositorio|project)\s*(\d{1,2})\b", lowered)
-    if indexed:
-        index = int(indexed.group(1))
-        if 1 <= index <= len(project_names):
-            return project_names[index - 1]
 
     return None
 

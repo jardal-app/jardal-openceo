@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from db.mongo import MongoRepository
 from events import RealtimeHub
 from graph import OpenCEOGraph
+from horizon.privacy import is_personal_scope
 from phase_workflows import (
     find_phase_index,
     first_executable_phase_index,
@@ -29,6 +30,7 @@ from state import (
     TaskReviewCreateRequest,
     TaskStatus,
     WorkflowPhaseType,
+    WorkflowRunStatus,
     make_task_document,
     make_task_review_document,
 )
@@ -40,6 +42,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _NOTION_MIRROR_EVENT_KEY = "notion_mirror_created"
+
+
+# Estados que cierran un ticket. Horizon reacciona a la transicion hacia uno de
+# ellos para replanificar, nunca a los parches posteriores.
+_TERMINAL_TASK_STATUSES = frozenset(
+    {
+        TaskStatus.COMPLETED.value,
+        TaskStatus.FAILED.value,
+        TaskStatus.ESCALATED.value,
+    }
+)
 
 
 class TaskService:
@@ -68,6 +81,32 @@ class TaskService:
         self._project_locks: dict[str, asyncio.Lock] = {}
         self._notion_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._notion_worker: asyncio.Task[None] | None = None
+        self._horizon_terminal: Any | None = None
+
+    def set_horizon_hooks(self, *, on_task_terminal: Any | None = None) -> None:
+        """Inyecta la reaccion de Horizon a un resultado de tarea.
+
+        La dependencia apunta hacia afuera a proposito: Horizon no importa
+        TaskService, es TaskService quien avisa. Sin gancho configurado el flujo
+        de tickets funciona igual.
+        """
+        self._horizon_terminal = on_task_terminal
+
+    async def _notify_horizon_terminal(self, task: dict[str, Any]) -> None:
+        """Avisa a Horizon de una tarea personal terminada, sin poder romperla.
+
+        Solo el alcance personal: una tarea de empresa no pertenece al espacio
+        personal (seccion 9.3) y no debe replanificar la vida del usuario.
+        """
+        if self._horizon_terminal is None or task is None:
+            return
+        if not is_personal_scope(task):
+            return
+        try:
+            await self._horizon_terminal(task)
+        except Exception:
+            # Un fallo de Horizon nunca puede impedir que un ticket se cierre.
+            logger.warning("Horizon no pudo registrar el resultado de la tarea", exc_info=True)
 
     def start_notion_worker(self) -> None:
         """Start the background worker that drains the Notion mirror queue."""
@@ -148,8 +187,11 @@ class TaskService:
 
         return created
 
-    def _task_params(self, task: dict[str, Any]) -> dict[str, Any]:
-        params = task.get("params")
+    def _task_params(self, task: dict[str, Any] | Any) -> dict[str, Any]:
+        if isinstance(task, dict):
+            params = task.get("params")
+        else:
+            params = getattr(task, "params", None)
         return dict(params) if isinstance(params, dict) else {}
 
     async def _project_workflow_templates(self, project: str | None) -> dict[str, dict[str, Any]]:
@@ -180,6 +222,18 @@ class TaskService:
                 doc.phase_index = index
                 doc.phase = phase_key(doc.workflow_phases[index])
                 doc.phase_started_at = datetime.now(timezone.utc)
+            return
+
+        params = self._task_params(doc)
+        explicit_yaml_target = bool(
+            params.get("workflow")
+            or params.get("workflow_id")
+            or params.get("workflow_ref")
+            or params.get("use_workflow")
+            or params.get("discover_workflow")
+            or params.get("workflow_discovery")
+        )
+        if explicit_yaml_target and not doc.workflow_key:
             return
 
         agent = str((doc.agent_hint or doc.agent or AgentName.CEO).value if hasattr(doc.agent_hint or doc.agent, "value") else (doc.agent_hint or doc.agent or AgentName.CEO.value))
@@ -398,6 +452,12 @@ class TaskService:
             return False
         if task.get("source") == "notion":
             return False
+        # El espacio personal de Horizon nunca se proyecta a un espejo externo.
+        # El safety net de arranque tiene su propio filtro en
+        # ``MongoRepository.list_tasks_missing_notion_mirror``: ambos deben
+        # excluir el alcance personal o los datos privados se publicarian.
+        if is_personal_scope(task):
+            return False
         if self._resolve_notion_page_id(task):
             return False
         already_done = task.get("post_actions_executed") or []
@@ -602,8 +662,18 @@ class TaskService:
 
                 try:
                     # Tickets with manual approval phases (e.g. dev_work -> qa_review -> client_signoff)
-                    # should execute directly via the agent graph, not via the YAML workflow service.
-                    has_approval_phases = bool(task.get("workflow_phases"))
+                    # should execute directly via the agent graph, not via the YAML workflow service,
+                    # unless the task explicitly targeted a YAML workflow or discovery.
+                    params = self._task_params(task)
+                    explicit_yaml_target = bool(
+                        params.get("workflow")
+                        or params.get("workflow_id")
+                        or params.get("workflow_ref")
+                        or params.get("use_workflow")
+                        or params.get("discover_workflow")
+                        or params.get("workflow_discovery")
+                    )
+                    has_approval_phases = bool(task.get("workflow_phases")) and not explicit_yaml_target
                     if has_approval_phases:
                         graph_out = await self._graph.execute(task, agent_hint=task.get("agent_hint"))
                     elif self._workflow_service is not None:
@@ -655,6 +725,19 @@ class TaskService:
                 updates["approval_state"] = graph_out["approval_state"]
             if graph_out.get("params") is not None:
                 updates["params"] = graph_out["params"]
+            if graph_out.get("waiting_reason") and str(graph_out["waiting_reason"]).startswith("phase:"):
+                phase_name = str(graph_out["waiting_reason"]).split("phase:", 1)[1].strip()
+                updates["phase"] = phase_name
+                updates["workflow_phases"] = [
+                    {
+                        "key": phase_name,
+                        "phase": phase_name,
+                        "type": "human",
+                        "name": phase_name.replace("_", " ").title(),
+                        "permission": phase_name,
+                    }
+                ]
+                updates["phase_index"] = 0
             # Persist modified files into params to keep task document stable
             modified_files = graph_out.get("modified_files")
             if modified_files:
@@ -685,6 +768,11 @@ class TaskService:
                     TaskStatus.ESCALATED.value,
                 }:
                     asyncio.create_task(self._on_ticket_done(updated))
+                    # ``run_task`` escribe con ``self._repo.patch_task``, no con
+                    # el embudo del servicio, asi que el aviso a Horizon tiene
+                    # que repetirse aqui o los tickets ejecutados de verdad
+                    # serian justo los que nunca replanifican.
+                    asyncio.create_task(self._notify_horizon_terminal(updated))
             return updated
 
     async def _fire_notion_sync_back(self, task: dict[str, Any], status_label: str) -> None:
@@ -761,6 +849,13 @@ class TaskService:
             await self._hub.broadcast("task_updated", updated)
             if any(key in updates for key in {"approval_required", "approval_state"}):
                 asyncio.create_task(self._fire_notion_approval_sync_back(updated))
+            # Solo en la transicion a un estado terminal, no en cada parche
+            # posterior: si no, un ticket ya cerrado replanificaria sin parar.
+            if (
+                str(updated.get("status")) in _TERMINAL_TASK_STATUSES
+                and str(task.get("status")) != str(updated.get("status"))
+            ):
+                asyncio.create_task(self._notify_horizon_terminal(updated))
         return updated
 
     async def create_task_review(self, task_id: str, payload: TaskReviewCreateRequest) -> dict[str, Any]:
@@ -850,6 +945,22 @@ class TaskService:
         updates: dict[str, Any] = {}
         if action == TaskReviewAction.APPROVE:
             approval_after = ApprovalState.APPROVED
+            if self._workflow_service is not None:
+                resumed = await self._workflow_service.resume_blocked_run_for_task(
+                    task_id, action="approve", actor_id=actor_id
+                )
+                if resumed is not None:
+                    review_doc = make_task_review_document(
+                        task_id=task_id,
+                        project=str(task.get("project") or ""),
+                        payload=payload,
+                        approval_state_after=approval_after,
+                    )
+                    review = await self._repo.create_task_review(review_doc.model_dump(mode="python"))
+                    await self._hub.broadcast("task_review_created", review)
+                    updated_task = await self._repo.get_task(task_id) or task
+                    return {"review": review, "task": updated_task}
+
             next_index = index + 1
             if next_index >= len(phases):
                 updates = {
@@ -870,6 +981,17 @@ class TaskService:
                 )
         elif action in {TaskReviewAction.REQUEST_CHANGES, TaskReviewAction.REJECT}:
             approval_after = ApprovalState.CHANGES_REQUESTED if action == TaskReviewAction.REQUEST_CHANGES else ApprovalState.REJECTED
+            if self._workflow_service is not None:
+                run = await self._repo.latest_workflow_run_for_task(task_id)
+                if run and str(run.get("status") or "") == WorkflowRunStatus.BLOCKED_HUMAN.value:
+                    await self._repo.patch_workflow_run(
+                        str(run["run_id"]),
+                        {
+                            "status": WorkflowRunStatus.FAILED.value,
+                            "error": f"Rejected by {actor_id}: {comment}",
+                            "completed_at": datetime.now(timezone.utc),
+                        },
+                    )
             updates = self._phase_rejection_updates(task, phases, current, actor_id=actor_id, comment=comment)
         elif action == TaskReviewAction.COMMENT:
             approval_after = None

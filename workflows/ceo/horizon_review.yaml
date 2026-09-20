@@ -1,0 +1,14 @@
+workflow: ceo.horizon_review
+name: Revision de objetivos de Horizon
+agent: ceo
+description: >-
+  Revisa resultados, desviaciones y carga del espacio personal, y separa lo que
+  exige una decision del usuario de lo que el sistema ajusta por si mismo
+  (secciones 9.4 y 9.7). Deterministico: no usa LLM.
+auto_match: false
+triggers: []
+steps:
+  - id: review
+    tool: ceo.review_objectives
+    params:
+      kind: "{{task.params.horizon_review_kind}}"

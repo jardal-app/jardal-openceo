@@ -166,6 +166,7 @@ Los agentes NO hacen polling de una cola. El mecanismo es push via session injec
 ## TICKET-014: Proactive CEO — objectives + autonomous loop
 - **Componente**: `openceo-core`
 - **Prioridad**: Media
+- **⚠️ Solapamiento**: este ticket y TICKET-015 describen un motor de objetivos que Horizon (**TICKET-026**) ya implementa para el alcance personal. Véase la tabla de solapamiento en TICKET-026 antes de implementar: crear una colección `objectives` aparte viola la especificación D-006.
 - **Descripción**: (1) Crear colección `objectives` en MongoDB con schema: objective_id, description, priority, deadline, progress, status, max_active_tickets, kpis. (2) Implementar CEO loop autónomo con dos triggers: periódico (cron configurable) y reactivo (post-workflow completion). (3) Anti-bloat rules: máximo N tickets activos por objetivo, acción concreta obligatoria, verificar tickets existentes antes de crear, KPIs medibles, scope check. (4) El CEO usa `create_ticket` global para generar tickets operativos.
 - **Criterio de aceptación**: Se pueden crear objetivos con KPIs. El CEO genera tickets automáticamente cuando un objetivo tiene deadline cerca y progreso bajo. No se crean tickets duplicados ni vagos. El progreso se actualiza cuando workflows completan.
 
@@ -174,6 +175,7 @@ Los agentes NO hacen polling de una cola. El mecanismo es push via session injec
 ## TICKET-015: Internal Scheduler — cron runner
 - **Componente**: `openceo-core`
 - **Prioridad**: Media
+- **⚠️ Conflicto de diseño**: el "revisa cada minuto" de este ticket es un barrido periódico, prohibido por **AGENTS.md §5.1** y por la especificación Horizon §9.2 pt.4. La implementación correcta es un trabajo intencional persistido con `next_run_at` y un solo timer que despierta en el próximo vencimiento. Véase TICKET-026.
 - **Descripción**: (1) Crear colección `schedules` en MongoDB con schema: schedule_id, cron, workflow, params, project, status. (2) Implementar cron runner como proceso async dentro de FastAPI que revisa cada minuto. (3) CEO parsea lenguaje natural a cron expressions + workflow name. (4) Personal (project: null) vs empresarial (project: "name") en el mismo sistema. (5) Si no existe workflow cristalizado → entra a tiers normales.
 - **Criterio de aceptación**: "recuérdame los jueves a las 8am comprar carne" crea un schedule con cron correcto. El cron runner ejecuta el workflow en el horario definido. Schedules con project se ejecutan en contexto del proyecto. CRUD de schedules funciona.
 
@@ -359,4 +361,85 @@ Cuando entra una tarea, el sistema debe:
     2. **Badge de Foco en Pantalla de Voz**: Mostrar un chip visual dinámico en `VoiceAssistantScreen.kt` con el ticket enfocado y el proyecto activo (`melanyryr · Ticket #49`).
     3. **Reconexión WebRTC Resiliente**: Configurar LiveKit Android para reintentos transparentes cuando el usuario cambia entre cobertura Wi-Fi y datos móviles 4G/5G caminando por la calle, manteniendo el estado de la conversación.
 - **Criterio de aceptación**: La app Android se abre, se conecta con 1 tap al modo unificado, y muestra visualmente en pantalla el ticket y proyecto sobre el que se está conversando.
+
+---
+
+## TICKET-025: Sistema Financiero — ERPNext como registro canónico
+- **Componente**: stack nuevo `jardal-erpnext` + `openceo-core/agents/finance`
+- **Prioridad**: Alta
+- **Nota**: Decisión, alternativas descartadas y mediciones en [`docs/decision-2026-09-19-sistema-financiero-erpnext.md`](file:///home/develop/development/Jardal/jardal-openceo/docs/decision-2026-09-19-sistema-financiero-erpnext.md). Se relaciona con TICKET-004 (Finance — administrador de fortuna).
+- **Descripción**: Implementar el sistema de registro financiero decidido (ERPNext, GPL-3.0, self-hosted), conectado al agente Finance de OpenCEO, para cubrir dinero personal, por proyecto y a futuro por empresa.
+  - **Fronteras**: ERPNext es dueño de asientos, cuentas y saldos. OpenCEO sigue siendo dueño de objetivos y tareas. El agente Finance es la puerta de entrada (captura y consulta). BTCPay Server sigue siendo la fuente de verdad de crypto y sincroniza **hacia** ERPNext. Notion nunca toca dinero. **Regla: adoptar el complemento, nunca el duplicado** — no se usan los módulos Project, CRM, Helpdesk, Calendar ni Discuss de ERPNext.
+  - **Fases a implementar**:
+    1. **Fase 0 — Cerrar el espejo.** Asegurar que los datos financieros personales no se espejen a Notion (`NOTION_MIRROR_ENABLED`, `openceo-core/settings.py:87`). Horizon §9.2 lo exige antes de importar información privada.
+    2. **Fase 1 — Desplegar ERPNext en topology mínimo.** 1 MariaDB, 1 Redis, 1 web, 1 worker (todas las colas), 1 scheduler, socketio solo si se necesita tiempo real. Reutilizar el Traefik existente. DNS vía el MCP `manage_dns_check_or_create`. **Medir y reportar consumo real de RAM en reposo y bajo carga** — la estimación (~1–1.5 GB reposo, 2.5–4 GB carga) no sustituye la medición.
+    3. **Fase 2 — Modelo de datos.** Company "Personal"; moneda base BOB, segunda USD; chart of accounts base boliviana; **Cost Center tree por proyecto** (personal, jardal-openceo, jardal-trading, jardal-vpn, melanyryc, cebitec, docencia/remoto). Decidir aquí la dimensión custom para proyectos que crucen empresas.
+    4. **Fase 3 — Adapter del agente Finance.** `openceo-core/agents/finance/erpnext.py` + tools registrados en `WorkflowToolRegistry` (`openceo-core/workflow_service.py:49`): `finance.register_movement`, `finance.get_balance`, `finance.get_project_spend`, `finance.get_goal_progress`, `finance.list_pending`, `finance.register_tithe`. **Idempotencia obligatoria**: campo custom `openceo_ref` con índice único, para que un reintento no duplique el asiento. Captura por voz y Telegram — sin esto la adopción diaria no ocurre.
+    5. **Fase 4 — BTCPay → ERPNext.** Arqueo de cajas: traer invoices y settlements de BTCPay Server, nodo Lightning y Binance. Relacionado con TICKET-004. Hoy no existe ninguna integración (`openceo-core` no referencia `btcpay`, `lightning` ni `binance`).
+    6. **Fase 5 — Objetivos.** La colección `objectives` de OpenCEO lee los números vía Finance para mostrar "cuánto falta" contra cada meta. El objetivo vive en OpenCEO; el sistema financiero solo aporta la cifra.
+    7. **Fase 6 — Empresas (futuro).** Alta de Companies reales + inter-company, cuando exista forma jurídica. **Sin migración** — por eso se elige ERPNext desde el inicio.
+  - **Restricciones**: `execute_money_movements` permanece en `false` (Horizon §9.9) hasta que la conciliación esté probada. El disco del host está al 82% (55 GB libres) — condición preexistente a vigilar.
+- **Criterio de aceptación**: ERPNext corre en el host con consumo medido y documentado; existe la Company "Personal" con BOB/USD y Cost Centers por proyecto; el agente Finance registra un movimiento por voz con idempotencia verificada (el mismo movimiento dos veces produce un solo asiento) y responde el saldo por proyecto; BTCPay sincroniza sus movimientos; un objetivo de OpenCEO muestra su "cuánto falta" leyendo el número desde ERPNext.
+
+---
+
+## TICKET-026: Horizon — fases 2 a 5 (ciclo proactivo, delegación, fuentes)
+- **Componente**: `openceo-core/horizon/`, `openceo-core/workflow_service.py`, `openceo-core/scheduler.py`, `workflows/ceo/`
+- **Prioridad**: Alta
+- **Estado**: **Fases 1 (HZ-001) y 2 (HZ-002) implementadas y verificadas.** Fase 1 el 2026-09-19; fase 2 el 2026-09-20. Las fases 3 a 5 no han empezado.
+- **Especificación**: [`jardal-horizon/README.md`](file:///home/develop/development/Jardal/jardal-openceo/jardal-horizon/README.md) v2.1. Estado en `STATUS.md` (2026-09-19).
+
+### Solapamiento que hay que resolver ANTES de implementar
+
+Este ticket **no** debe construirse en paralelo a TICKET-014 y TICKET-015. Hay que decidir y unificar primero, porque hacerlo por separado crea exactamente el segundo planificador que la especificación prohíbe (D-006, §9.2 punto 1: "no crear una segunda cola").
+
+| Ya documentado | Qué describe | Conflicto / relación con Horizon |
+|---|---|---|
+| `README.md` → `## Proactive CEO — Autonomous Objectives` + **TICKET-014** | Colección `objectives` **plana** (`objective_id, description, priority, deadline, progress, status, max_active_tickets, kpis`) y loop del CEO con dos disparadores | Es el **mismo motor** en otro alcance. Horizon ya implementa la jerarquía misión → objetivo → hito → acción en `horizon_objectives`, con propietario, privacidad, capacidad y aparcados por condición. Crear una `objectives` aparte duplicaría el motor. **Decisión: un solo motor, dos alcances** — `horizon_objectives` para lo personal, y el alcance de empresa se modela sobre el mismo motor en vez de una colección nueva. |
+| **TICKET-015** | Cron runner que "revisa cada minuto" | Contradice **AGENTS.md §5.1** (prohibido barrido periódico) y §9.2 punto 4. La solución de Horizon es trabajos intencionales persistidos con `next_run_at`, un solo timer que despierta en el próximo vencimiento, recuperación al reiniciar y reintentos acotados. **No copiar el patrón de barrido.** |
+| **TICKET-025** (ERPNext) + `docs/decision-2026-09-19-sistema-financiero-erpnext.md` | Sistema financiero canónico externo | **Es** la frontera financiera de Horizon §4.7. Horizon no debe construir registro financiero propio: consume el adapter del agente Finance cuando exista. El objetivo financiero de Horizon muestra "cuánto falta" leyendo la cifra de ERPNext. |
+
+### Fases a implementar
+
+1. **HZ-002 — Ciclo proactivo.** Planificador de capacidad con la regla del 70% (ejercicio y descanso reservados antes del crecimiento); una **única versión de plan vigente por usuario**; disparadores persistidos según el párrafo anterior; replanificación reactiva cuando un resultado de tarea llega; revisión automática periódica; y **modo degradado**: con el presupuesto de LLM agotado, los cálculos, el registro y la consulta del último plan válido siguen funcionando.
+   - Tools `ceo.plan_day` y `ceo.review_objectives` en `WorkflowToolRegistry` (`workflow_service.py`), hoy inexistentes.
+   - `workflows/ceo/horizon_daily.yaml` (el directorio `workflows/ceo/` existe y está vacío).
+   - Cuidado: el motor YAML **no** habilita `llm_eval` (`workflow_service.py:1355` lanza `ValueError`). Cualquier condición de `loop` debe ser `python_eval`.
+   - Criterio: una interrupción real modifica el plan y la acción nueva llega al usuario; no existe una segunda cola paralela a las tareas.
+2. **HZ-003 — Delegación y dev móvil.** Encargo autónomo de un ticket de alcance personal sobre las sesiones dev existentes, midiendo tiempo humano y retrabajo. Entrega única del resultado aunque el teléfono se desconecte.
+3. **HZ-004 — Fuentes conectadas y espacio personal.** Fuentes que reduzcan la captura manual, y la vista de misión/objetivos/progreso en `openceo-react` con permisos por propietario. (Se relaciona con TICKET-023.)
+
+### Cerrado en la fase 2
+
+| Pendiente | Cómo se cerró |
+|---|---|
+| Importar el contexto desde voz o chat sin sesión web | Intent `horizon_import` ("importa mi contexto") en el clasificador determinista y en el prompt del modelo. |
+| El espacio personal arrancaba vacío y `qué sigue?` respondía que no había objetivos | Se resuelve con lo anterior. **Además se encontró y corrigió un fallo silencioso**: el chat resolvía `user_id = payload.user or "openwebui"` (`main.py:1355`) mientras el dashboard usa el usuario de la sesión, así que una captura por voz se guardaba bajo un propietario que el dashboard nunca consulta. Ahora `HorizonService.owner_for()` es el único punto de resolución y todo converge en `HORIZON_OWNER_USER_ID` (hoy `usr_8c9941ae0bc9`, admin). No hubo datos que migrar: `horizon_objectives` y `horizon_captures` estaban vacíos. |
+
+### Pendiente de la fase 2: el canal de entrega
+
+El plan del día se **persiste y se expone** (API, voz/chat, dashboard); **no hay push**. La fila de la sección 9.10 *"Llega la hora diaria y no has abierto el chat → Recibes una acción preparada por el canal probado"* se cumple a medias: el disparador de las 06:00 **prepara y deja listo** el plan con `delivered_at` pendiente, y el usuario lo recibe en su siguiente interacción. Es una decisión explícita del propietario, no un olvido, y por eso queda escrito aquí en vez de darse por cumplido.
+
+Estado real de los canales salientes, verificado en código:
+
+| Canal | ¿Funciona con la app cerrada? | Estado |
+|---|---|---|
+| **Email (SMTP)** — `secretary.send_email`, `openceo-core/tools/email_sender.py` | **Sí** | Implementado, configurado y multi-cuenta. **Es el único canal durable que existe hoy** y el candidato natural para cerrar este hueco. |
+| Telegram | — | **Stub sin implementar**: `integrations/telegram_bot.py` dice `# Implement this in phase 7` y nadie lo importa. Sin variables de configuración. |
+| WhatsApp | — | Sólo un valor de enum para el origen de tickets entrantes, no un canal saliente. |
+| `RealtimeHub` (`/ws`) | **No** | Efímero: sin persistencia, sin replay y sin dirigirse a un usuario concreto. Sólo alcanza un dashboard ya abierto. |
+| Voz (LiveKit) | **No** | El agente espera a que alguien entre a la sala (`openceo-voice/agent.py:259-260`). `openceo-core` no tiene ninguna referencia a LiveKit: hoy no puede alcanzar la voz. |
+| Recordatorios programados / cron | — | No existe. No hay dependencia de scheduler en `requirements.txt`. |
+
+### Cerrado también: el solapamiento con TICKET-014 y TICKET-015
+
+La fase 2 implementa el motor de objetivos sobre `horizon_objectives`, **sin** crear una colección `objectives` paralela (D-006) y **sin** cron de barrido: disparadores persistidos con `next_run_at` y un solo timer que despierta en el próximo vencimiento. `TICKET-014` y `TICKET-015` quedan absorbidos por este motor y no deben implementarse por separado.
+
+- **Criterio de aceptación** (estado tras la fase 2):
+  1. Un solo motor de objetivos sirve a los alcances personal y de empresa, sin colecciones competidoras. — **Cumplido**: todo vive en `horizon_objectives`; TICKET-014/015 quedan absorbidos.
+  2. El plan diario se entrega a la hora configurada mediante un trabajo persistido, no un barrido, y sobrevive a un reinicio del servicio. — **Cumplido en el mecanismo**: disparador persistido con `next_run_at`, timer único sin sondeo (con test que lo comprueba), recuperación al reiniciar y reintentos acotados. **Parcial en la entrega**: se prepara y se deja disponible, sin push (véase "Pendiente de la fase 2: el canal de entrega").
+  3. Una interrupción real replanifica y notifica la acción nueva. — **Cumplido**: replanificación reactiva al cerrarse un ticket de alcance personal, con deduplicación por `(task_id, status)`. La *notificación* queda en el mismo canal pendiente del punto 2.
+  4. Con el presupuesto de IA agotado, captura, cálculo y consulta del último plan siguen respondiendo. — **Cumplido por construcción**: el ciclo no llama a ningún LLM, y un test lo verifica inspeccionando los imports reales de los módulos.
+  5. El contexto personal es importable desde voz o chat sin sesión web. — **Cumplido**, con la unificación de propietario descrita arriba.
+  6. Un ticket de alcance personal se delega y su resultado se entrega una sola vez. — **Pendiente: es HZ-003.**
 

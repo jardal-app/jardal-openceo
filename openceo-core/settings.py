@@ -171,6 +171,31 @@ class Settings(BaseSettings):
     DEFAULT_PROJECT: str = "example-project"
     WORKFLOWS_DIR: str = str(CORE_DIR.parent / "workflows")
 
+    # Horizon: capacidad personal del CEO.
+    # El espejo externo de datos personales nace deshabilitado y la fraccion de
+    # capacidad es un techo, no un objetivo: el codigo la recorta igualmente.
+    HORIZON_ENABLED: bool = True
+    HORIZON_TIMEZONE: str = "America/La_Paz"
+    HORIZON_CAPACITY_FRACTION: float = 0.70
+    HORIZON_PERSONAL_MIRROR_ENABLED: bool = False
+    HORIZON_SOURCE_PATH: str = ""
+
+    # Propietario unico del espacio personal. La voz y el chat no traen
+    # identidad autenticada (el cliente de chat manda su propio nombre y la app
+    # movil no manda ninguno), asi que sin un dueño configurado una captura por
+    # voz se guardaria bajo una identidad que el dashboard nunca consulta y el
+    # espacio personal pareceria vacio sin que nada fallara.
+    HORIZON_OWNER_USER_ID: str = "usr_8c9941ae0bc9"
+
+    # Horarios locales (America/La_Paz) del ciclo proactivo.
+    HORIZON_DAILY_PLAN_TIME: str = "06:00"
+    HORIZON_CLOSE_DAY_TIME: str = "21:00"
+    HORIZON_WEEKLY_REVIEW_TIME: str = "18:00"
+
+    # Reintentos acotados de los disparadores (seccion 9.2 punto 4).
+    HORIZON_TRIGGER_MAX_ATTEMPTS: int = 3
+    HORIZON_TRIGGER_BACKOFF_SECONDS: int = 60
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import re
 from copy import deepcopy
@@ -16,6 +17,7 @@ from langchain_openai import ChatOpenAI
 
 from db.mongo import MongoRepository
 from events import RealtimeHub
+from horizon import privacy as privacy_module
 from settings import Settings, get_settings
 from state import DiscoveryRunStatus, TaskStatus, WorkflowRunStatus
 
@@ -48,9 +50,29 @@ class WorkflowExecutionOutcome:
 class WorkflowToolRegistry:
     """Runtime registry for deterministic YAML workflow tools."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        settings: Settings | None = None,
+        repo: MongoRepository | None = None,
+        task_service: Any | None = None,
+    ) -> None:
         self._tools: dict[str, Callable[..., Any]] = {}
+        self._settings = settings or get_settings()
+        self._repo = repo
+        self._task_service = task_service
+        self._horizon: Any | None = None
+        self._catalog_provider: Callable[[], dict[str, Any]] | None = None
         self._register_builtin_tools()
+
+    def set_task_service(self, task_service: Any) -> None:
+        self._task_service = task_service
+
+    def set_repo(self, repo: MongoRepository) -> None:
+        self._repo = repo
+
+    def set_catalog_provider(self, provider: Callable[[], dict[str, Any]]) -> None:
+        self._catalog_provider = provider
 
     def names(self) -> list[str]:
         return sorted(self._tools)
@@ -80,31 +102,461 @@ class WorkflowToolRegistry:
         return result
 
     def _register_builtin_tools(self) -> None:
+        # Core
         self.register("core.echo", self._core_echo)
         self.register("core.complete", self._core_complete)
+        self.register("core.check_registry", self._core_check_registry)
+        self.register("core.query_tasks", self._core_query_tasks)
+        self.register("core.query_workflow_runs", self._core_query_workflow_runs)
+
+        # PM
+        self.register("pm.create_ticket", self._pm_create_ticket)
+        self.register("pm.create_tickets_batch", self._pm_create_tickets_batch)
+        self.register("pm.extract_tickets", self._pm_extract_tickets)
+
+        # Secretary
         self.register("secretary.send_email", self._secretary_send_email)
         self.register("secretary.list_sender_accounts", self._secretary_list_sender_accounts)
+        self.register("secretary.save_note", self._secretary_save_note)
+        self.register("secretary.query_notes", self._secretary_query_notes)
+
+        # Finance
         self.register("finance.pago_elfec_house", self._finance_pago_elfec_house)
+
+        # CEO / Horizon (espacio personal). Nombres del contrato de la seccion
+        # 9.2 punto 3; todos delegan en HorizonService, que es deterministico.
+        self.register("ceo.plan_day", self._ceo_plan_day)
+        self.register("ceo.review_objectives", self._ceo_review_objectives)
+        self.register("ceo.get_next_action", self._ceo_get_next_action)
+        self.register("ceo.capture_context", self._ceo_capture_context)
+        self.register("ceo.record_progress", self._ceo_record_progress)
+
+        # Infrastructure
+        self.register("cloudflare.upsert_dns_record", self._cloudflare_upsert_dns)
+        self.register("cloudflare.delete_dns_record", self._cloudflare_delete_dns)
+
+    def set_horizon_service(self, horizon_service: Any) -> None:
+        self._horizon = horizon_service
+
+    @staticmethod
+    def _coerce_int(value: Any) -> int | None:
+        """Interpreta un entero tolerando el templating del motor YAML.
+
+        ``_resolve_value`` convierte un parametro ausente en ``""`` (o en ``None``
+        cuando ocupa todo el valor). Leer ese ``""`` como cero convertiria "no lo
+        se" en "dia saturado", que es justo lo contrario.
+        """
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _resolve_horizon_owner(
+        self, user_id: Any, context: dict[str, Any] | None
+    ) -> str | None:
+        """Resuelve el propietario del espacio personal. Nunca lo adivina.
+
+        Orden: parametro explicito, propietario de la tarea de contexto, y nada
+        mas. Un workflow no puede elegir de quien es el espacio personal.
+        """
+        explicit = str(user_id or "").strip()
+        if explicit:
+            return explicit
+        task = (context or {}).get("task") or {}
+        owner = privacy_module.personal_owner(task)
+        return str(owner) if owner else None
+
+    async def _ceo_plan_day(
+        self,
+        *,
+        user_id: Any = None,
+        date: Any = None,
+        free_minutes: Any = None,
+        exercise_included: Any = None,
+        context: dict[str, Any] | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Prepara y publica el plan del dia del espacio personal."""
+        if self._horizon is None:
+            return {"ok": False, "reason": "horizon_unavailable"}
+        owner = self._resolve_horizon_owner(user_id, context)
+        if not owner:
+            return {"ok": False, "reason": "not_personal_scope"}
+
+        date_key = str(date).strip() or None if date else None
+        plan = await self._horizon.plan_day(
+            owner,
+            declared_free_minutes=self._coerce_int(free_minutes),
+            exercise_included=(
+                None if exercise_included in (None, "") else bool(exercise_included)
+            ),
+            date_key=date_key,
+        )
+        return {
+            "ok": True,
+            "plan_id": plan.get("plan_id"),
+            "version": plan.get("version"),
+            "status": plan.get("status"),
+            "message": plan.get("message"),
+            "growth_budget_minutes": (plan.get("capacity") or {}).get(
+                "growth_budget_minutes"
+            ),
+        }
+
+    async def _ceo_review_objectives(
+        self,
+        *,
+        user_id: Any = None,
+        kind: Any = None,
+        context: dict[str, Any] | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Revisa resultados, desviaciones y carga del espacio personal."""
+        if self._horizon is None:
+            return {"ok": False, "reason": "horizon_unavailable"}
+        owner = self._resolve_horizon_owner(user_id, context)
+        if not owner:
+            return {"ok": False, "reason": "not_personal_scope"}
+        review = await self._horizon.review_objectives(
+            owner, kind=str(kind or "weekly_review")
+        )
+        return {"ok": True, **review}
+
+    async def _ceo_get_next_action(
+        self,
+        *,
+        user_id: Any = None,
+        context: dict[str, Any] | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Devuelve la accion principal de hoy, con su motivo."""
+        if self._horizon is None:
+            return {"ok": False, "reason": "horizon_unavailable"}
+        owner = self._resolve_horizon_owner(user_id, context)
+        if not owner:
+            return {"ok": False, "reason": "not_personal_scope"}
+        result = await self._horizon.next_action(owner)
+        return {"ok": True, **result}
+
+    async def _ceo_capture_context(
+        self,
+        *,
+        user_id: Any = None,
+        text: Any = None,
+        context: dict[str, Any] | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Registra una idea, pendiente o avance en el espacio personal."""
+        if self._horizon is None:
+            return {"ok": False, "reason": "horizon_unavailable"}
+        owner = self._resolve_horizon_owner(user_id, context)
+        if not owner:
+            return {"ok": False, "reason": "not_personal_scope"}
+        result = await self._horizon.capture(owner, str(text or ""))
+        return {"ok": True, **result}
+
+    async def _ceo_record_progress(
+        self,
+        *,
+        user_id: Any = None,
+        text: Any = None,
+        context: dict[str, Any] | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Registra un avance medible con evidencia y deduplicacion."""
+        if self._horizon is None:
+            return {"ok": False, "reason": "horizon_unavailable"}
+        owner = self._resolve_horizon_owner(user_id, context)
+        if not owner:
+            return {"ok": False, "reason": "not_personal_scope"}
+        result = await self._horizon.record_progress(owner, str(text or ""))
+        return {"ok": True, **result}
 
     @staticmethod
     def _core_echo(**params: Any) -> dict[str, Any]:
+        """Echoes back the parameters passed to it."""
         return dict(params)
 
     @staticmethod
     def _core_complete(**params: Any) -> dict[str, Any]:
+        """Marks a workflow branch as completed with the given parameters."""
         return {"status": "completed", **params}
+
+    def _core_check_registry(self, agent: str | None = None, **_: Any) -> dict[str, Any]:
+        """Returns available crystallized workflows and tools in OpenCEO.
+        If agent is None: returns compact summary of all agents and their workflows/tools.
+        If agent is given: returns full signatures and documentation for that agent only.
+        """
+        all_tools = self.describe()
+        workflows_by_agent: dict[str, list[str]] = {}
+        if self._catalog_provider:
+            for wf_id in self._catalog_provider():
+                ag = wf_id.split(".", 1)[0] if "." in wf_id else "ceo"
+                workflows_by_agent.setdefault(ag, []).append(wf_id)
+
+        tools_by_agent: dict[str, list[str]] = {}
+        for tool_name in self.names():
+            ag = tool_name.split(".", 1)[0] if "." in tool_name else "core"
+            tools_by_agent.setdefault(ag, []).append(tool_name)
+
+        if not agent:
+            agents = sorted(set(list(workflows_by_agent.keys()) + list(tools_by_agent.keys())))
+            return {
+                "agents": agents,
+                "workflows": {ag: workflows_by_agent.get(ag, []) for ag in agents},
+                "tools": {ag: tools_by_agent.get(ag, []) for ag in agents},
+            }
+
+        clean_agent = agent.strip().lower()
+        matching_tools = {k: v for k, v in all_tools.items() if k.startswith(f"{clean_agent}.")}
+        return {
+            "agent": clean_agent,
+            "workflows": workflows_by_agent.get(clean_agent, []),
+            "tools": matching_tools,
+        }
+
+    async def _core_query_tasks(
+        self,
+        project: str | None = None,
+        status: str | None = None,
+        agent: str | None = None,
+        limit: int = 10,
+        **_: Any,
+    ) -> list[dict[str, Any]]:
+        """Queries tasks in MongoDB with filters (project, status, agent, limit)."""
+        if not self._repo:
+            return []
+        query: dict[str, Any] = {}
+        if project:
+            query["project"] = project
+        if status:
+            query["status"] = status
+        if agent:
+            query["$or"] = [{"agent": agent}, {"agent_hint": agent}]
+        cursor = self._repo.tasks.find(query).sort("created_at", -1).limit(max(1, min(limit, 50)))
+        results: list[dict[str, Any]] = []
+        async for doc in cursor:
+            results.append({
+                "task_id": doc.get("task_id"),
+                "ticket_number": doc.get("ticket_number"),
+                "title": doc.get("title"),
+                "status": doc.get("status"),
+                "agent": doc.get("agent"),
+                "project": doc.get("project"),
+                "priority": doc.get("priority"),
+            })
+        return results
+
+    async def _core_query_workflow_runs(
+        self,
+        status: str | None = None,
+        workflow: str | None = None,
+        task_id: str | None = None,
+        limit: int = 10,
+        **_: Any,
+    ) -> list[dict[str, Any]]:
+        """Queries workflow run records in MongoDB with filters (status, workflow, task_id, limit)."""
+        if not self._repo:
+            return []
+        runs = await self._repo.list_workflow_runs(task_id=task_id, status=status, limit=max(1, min(limit, 50)))
+        if workflow:
+            runs = [r for r in runs if str(r.get("workflow") or "") == workflow]
+        return [
+            {
+                "run_id": r.get("run_id"),
+                "task_id": r.get("task_id"),
+                "workflow": r.get("workflow"),
+                "status": r.get("status"),
+                "tier": r.get("tier"),
+                "created_at": str(r.get("created_at")),
+            }
+            for r in runs
+        ]
+
+    async def _pm_create_ticket(
+        self,
+        title: str,
+        description: str = "",
+        project: str | None = None,
+        priority: str = "medium",
+        assigned_to: str = "dev",
+        ticket_type: str = "task",
+        tags: list[str] | None = None,
+        params: dict[str, Any] | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Creates an operational task in OpenCEO (MongoDB with automatic Notion sync)."""
+        from state import TaskCreateRequest, TaskPriority, TaskSource, AgentName
+
+        priority_map = {
+            "low": TaskPriority.LOW,
+            "medium": TaskPriority.MEDIUM,
+            "high": TaskPriority.HIGH,
+            "critical": TaskPriority.CRITICAL,
+        }
+        agent_map = {
+            "dev": AgentName.DEV,
+            "pm": AgentName.PM,
+            "finance": AgentName.FINANCE,
+            "secretary": AgentName.SECRETARY,
+            "ceo": AgentName.CEO,
+        }
+        mapped_priority = priority_map.get(str(priority).lower(), TaskPriority.MEDIUM)
+        mapped_agent = agent_map.get(str(assigned_to).lower(), AgentName.DEV)
+        merged_params = dict(params or {})
+        merged_params["ticket_type"] = ticket_type
+
+        req = TaskCreateRequest(
+            title=title,
+            description=description,
+            project=project,
+            priority=mapped_priority,
+            agent_hint=mapped_agent,
+            source=TaskSource.API,
+            tags=tags or [],
+            params=merged_params,
+            autorun=False,
+        )
+        if self._task_service is not None:
+            created = await self._task_service.create_task(req)
+            return {
+                "ok": True,
+                "task_id": created.get("task_id"),
+                "ticket_number": created.get("ticket_number"),
+                "status": created.get("status"),
+                "title": created.get("title"),
+            }
+        return {"ok": False, "error": "TaskService not configured in registry"}
+
+    async def _pm_create_tickets_batch(
+        self,
+        tickets: list[dict[str, Any]],
+        project: str | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Batch-creates tickets in OpenCEO. Input: list of ticket objects with at least title."""
+        results: list[dict[str, Any]] = []
+        created_count = 0
+        for item in tickets:
+            if not isinstance(item, dict) or not item.get("title"):
+                continue
+            res = await self._pm_create_ticket(
+                title=item["title"],
+                description=item.get("description", ""),
+                project=item.get("project") or project,
+                priority=item.get("priority", "medium"),
+                assigned_to=item.get("assigned_to", "dev"),
+                ticket_type=item.get("ticket_type", "task"),
+                tags=item.get("tags"),
+                params=item.get("params"),
+            )
+            results.append(res)
+            if res.get("ok"):
+                created_count += 1
+        return {"ok": True, "created_count": created_count, "results": results}
+
+    async def _pm_extract_tickets(
+        self,
+        text: str,
+        project: str | None = None,
+        create: bool = False,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Extracts actionable development tickets from text using DeepSeek v4 Flash."""
+        if not self._settings.DEEPSEEK_API_KEY:
+            return {"tickets": [], "error": "DEEPSEEK_API_KEY not configured"}
+
+        llm = ChatOpenAI(
+            model=self._settings.CEO_LLM_MODEL,
+            api_key=self._settings.DEEPSEEK_API_KEY,
+            base_url=self._settings.CEO_LLM_BASE_URL,
+            temperature=0,
+        )
+        prompt = (
+            "You are a Senior Technical Project Manager. "
+            "Extract actionable development tickets from the provided text. "
+            "Return a JSON array of objects with keys: "
+            "title (string), description (string), priority (low/medium/high/critical), "
+            "ticket_type (feature/bug/task/refactor), tags (list of strings). "
+            "Return JSON ONLY inside ```json ``` block."
+        )
+        response = await llm.ainvoke([
+            SystemMessage(content=prompt),
+            HumanMessage(content=text),
+        ])
+        raw = _strip_fenced_json(str(getattr(response, "content", "") or ""))
+        try:
+            tickets = json.loads(raw)
+            if not isinstance(tickets, list):
+                tickets = []
+        except Exception:
+            tickets = []
+
+        if create and tickets:
+            batch_res = await self._pm_create_tickets_batch(tickets, project=project)
+            return {"tickets": tickets, "created": batch_res}
+        return {"tickets": tickets, "count": len(tickets)}
 
     @staticmethod
     def _secretary_send_email(**params: Any) -> dict[str, Any]:
         from agents.secretary.tools import send_email
-
         return send_email(**params)
 
     @staticmethod
     def _secretary_list_sender_accounts(**_: Any) -> dict[str, Any]:
         from agents.secretary.tools import list_sender_accounts
-
         return list_sender_accounts()
+
+    async def _secretary_save_note(
+        self,
+        content: str,
+        project: str | None = None,
+        tags: list[str] | None = None,
+        user: str = "admin",
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Saves a note, idea, or reminder into MongoDB collection 'notes'."""
+        if not self._repo:
+            return {"ok": False, "error": "Repo not available"}
+        note_id = str(uuid4())
+        doc = {
+            "note_id": note_id,
+            "content": content,
+            "project": project,
+            "tags": tags or [],
+            "user": user,
+            "created_at": _utc_now(),
+        }
+        await self._repo.db["notes"].insert_one(doc)
+        doc.pop("_id", None)
+        return {"ok": True, "note_id": note_id, "note": doc}
+
+    async def _secretary_query_notes(
+        self,
+        project: str | None = None,
+        tag: str | None = None,
+        search: str | None = None,
+        limit: int = 20,
+        **_: Any,
+    ) -> list[dict[str, Any]]:
+        """Queries notes from MongoDB collection 'notes' with optional filters."""
+        if not self._repo:
+            return []
+        query: dict[str, Any] = {}
+        if project:
+            query["project"] = project
+        if tag:
+            query["tags"] = tag
+        if search:
+            query["content"] = {"$regex": re.escape(search), "$options": "i"}
+        cursor = self._repo.db["notes"].find(query).sort("created_at", -1).limit(max(1, min(limit, 50)))
+        notes: list[dict[str, Any]] = []
+        async for doc in cursor:
+            doc.pop("_id", None)
+            notes.append(doc)
+        return notes
 
     @staticmethod
     def _finance_pago_elfec_house(**params: Any) -> dict[str, Any]:
@@ -114,6 +566,14 @@ class WorkflowToolRegistry:
         if not isinstance(workflow_cfg, dict):
             workflow_cfg = dict(params)
         return run_elfec_house_payment_practice(get_settings(), workflow_cfg)
+
+    def _cloudflare_upsert_dns(self, hostname: str, **_: Any) -> dict[str, Any]:
+        from tools.cloudflare import CloudflareDNSManager
+        return CloudflareDNSManager(self._settings).check_or_create(hostname)
+
+    def _cloudflare_delete_dns(self, hostname: str, **_: Any) -> dict[str, Any]:
+        from tools.cloudflare import CloudflareDNSManager
+        return CloudflareDNSManager(self._settings).delete(hostname)
 
     @staticmethod
     def _build_kwargs(fn: Callable[..., Any], params: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -155,7 +615,8 @@ class WorkflowService:
         self._settings = settings
         self._repo = repo
         self._hub = realtime_hub
-        self._tools = tool_registry or WorkflowToolRegistry()
+        self._tools = tool_registry or WorkflowToolRegistry(settings=settings, repo=repo)
+        self._tools.set_catalog_provider(lambda: self._load_workflows())
         self._llm: ChatOpenAI | None = None
         if settings.DEEPSEEK_API_KEY:
             self._llm = ChatOpenAI(
@@ -164,6 +625,44 @@ class WorkflowService:
                 base_url=settings.CEO_LLM_BASE_URL,
                 temperature=0,
             )
+
+    def set_task_service(self, task_service: Any) -> None:
+        self._tools.set_task_service(task_service)
+
+    def set_horizon_service(self, horizon_service: Any) -> None:
+        self._tools.set_horizon_service(horizon_service)
+
+    async def resume_blocked_run_for_task(
+        self,
+        task_id: str,
+        *,
+        action: str = "approve",
+        actor_id: str = "admin",
+    ) -> WorkflowExecutionOutcome | None:
+        run = await self._repo.latest_workflow_run_for_task(task_id)
+        if not run or str(run.get("status") or "") != WorkflowRunStatus.BLOCKED_HUMAN.value:
+            return None
+        workflow_id = str(run.get("workflow") or "")
+        workflows = self._load_workflows()
+        workflow = self._find_workflow(workflows, workflow_id)
+        if not workflow:
+            return None
+
+        curr_index = int(run.get("current_step_index") or 0)
+        patched_run = await self._repo.patch_workflow_run(
+            str(run["run_id"]),
+            {
+                "current_step_index": curr_index + 1,
+                "current_step_id": None,
+                "waiting": None,
+            },
+        )
+        run = patched_run or run
+        outcome = await self._continue_workflow_run(run, workflow)
+        task = await self._repo.get_task(task_id)
+        if task:
+            await self._apply_outcome_to_task(task, outcome)
+        return outcome
 
     @property
     def workflows_dir(self) -> Path:
@@ -439,6 +938,31 @@ class WorkflowService:
                 error=str(exc),
             )
 
+        if result.get("blocked"):
+            blocked_reason = result.get("blocked_reason")
+            if blocked_reason == "human_in_the_loop":
+                perm = str(result.get("permission") or "qa_review")
+                prompt = str(result.get("prompt") or "")
+                params = dict((run.get("context") or {}).get("params") or {})
+                params["_workflow"] = {
+                    "run_id": run.get("run_id"),
+                    "workflow": workflow.get("workflow"),
+                    "status": WorkflowRunStatus.BLOCKED_HUMAN.value,
+                }
+                return WorkflowExecutionOutcome(
+                    selected_agent=str(workflow.get("agent") or _agent_from_workflow_id(str(workflow.get("workflow") or ""))),
+                    status=TaskStatus.WAITING.value,
+                    steps=[
+                        _task_step(str(item.get("id") or "workflow_step"), str(item.get("status") or ""), item.get("detail"))
+                        for item in (result.get("events") or [])
+                    ],
+                    last_response_summary=f"Esperando aprobacion humana ({perm}): {prompt}",
+                    waiting_reason=f"phase:{perm}",
+                    approval_required=True,
+                    approval_state="pending",
+                    params=params,
+                )
+
         updated_run = await self._repo.patch_workflow_run(
             str(run["run_id"]),
             {
@@ -516,6 +1040,31 @@ class WorkflowService:
                 continue
 
             step_type = str(step.get("type") or "tool").strip().lower()
+            if step_type == "human_in_the_loop":
+                permission = str(step.get("permission") or "qa_review").strip()
+                prompt = str(step.get("prompt") or step.get("description") or f"Aprobacion requerida: {permission}")
+                events.append(_run_event(step_id, "waiting_approval", prompt))
+                await self._repo.patch_workflow_run(
+                    str(run["run_id"]),
+                    {
+                        "status": WorkflowRunStatus.BLOCKED_HUMAN.value,
+                        "current_step_index": index,
+                        "current_step_id": step_id,
+                        "steps": events,
+                        "outputs": outputs,
+                        "context": context,
+                        "waiting": {"permission": permission, "prompt": prompt},
+                    },
+                )
+                return {
+                    "blocked": True,
+                    "blocked_reason": "human_in_the_loop",
+                    "permission": permission,
+                    "prompt": prompt,
+                    "events": events,
+                    "outputs": outputs,
+                }
+
             if step_type == "loop":
                 loop_result = await self._execute_loop(step, workflow, run, context, outputs, events)
                 if loop_result.get("blocked"):
@@ -607,6 +1156,19 @@ class WorkflowService:
             updates["approval_state"] = outcome.approval_state
         if outcome.params is not None:
             updates["params"] = outcome.params
+        if outcome.waiting_reason and outcome.waiting_reason.startswith("phase:"):
+            phase_name = outcome.waiting_reason.split("phase:", 1)[1].strip()
+            updates["phase"] = phase_name
+            updates["workflow_phases"] = [
+                {
+                    "key": phase_name,
+                    "phase": phase_name,
+                    "type": "human",
+                    "name": phase_name.replace("_", " ").title(),
+                    "permission": phase_name,
+                }
+            ]
+            updates["phase_index"] = 0
         if outcome.status in {TaskStatus.COMPLETED.value, TaskStatus.FAILED.value, TaskStatus.ESCALATED.value}:
             updates["completed_at"] = _utc_now()
         updated = await self._repo.patch_task(str(task["task_id"]), updates)
@@ -678,16 +1240,24 @@ class WorkflowService:
             return self._fallback_workflow_yaml(task)
 
         instruction = (
-            "Generate one OpenCEO crystallized YAML workflow for this task. "
-            "Use only these top-level keys: workflow, name, agent, description, auto_match, triggers, steps. "
-            "Each step must use either tool, ref, or type: loop. "
-            "Use only the available tools. Do not include human approvals in YAML; "
-            "all human approvals are handled by ticket phases in the dashboard. "
-            "Return YAML only, no markdown."
+            "You are the OpenCEO Enterprise Workflow Architect. "
+            "Generate one crystallized YAML workflow for this task using the available tools.\n\n"
+            "Rules:\n"
+            "1. Top-level keys: workflow, name, agent, description, auto_match, triggers, steps.\n"
+            "2. workflow must be in format {agent}.{action_name} (e.g. pm.extract_and_create, secretary.monthly_digest, etc.).\n"
+            "3. Each step must use either:\n"
+            "   - tool: <tool_name> with params matching the tool's signature.\n"
+            "   - ref: <workflow_id> to call another crystallized workflow.\n"
+            "   - type: loop with max_iterations, condition (type: python_eval, expr: ...), and steps.\n"
+            "   - type: human_in_the_loop with permission: qa_review | pm_approval | client_review | admin_approval and prompt: 'message' for sensitive operations or approvals.\n"
+            "4. Variables: use {{task.params.field}}, {{task.title}}, or {{steps.<step_id>.<field>}}.\n"
+            "5. auto_match: true only if triggers contains 2-5 explicit natural language trigger phrases.\n"
+            "6. Use ONLY tools from the catalog. Do not invent non-existent tools.\n"
+            "7. Return clean YAML only, without markdown formatting or commentary."
         )
         payload = {
             "task": _task_context(task),
-            "available_tools": self._tools.names(),
+            "available_tools": self._tools.describe(),
         }
         try:
             response = await self._llm.ainvoke(
@@ -767,10 +1337,9 @@ class WorkflowService:
                 raise ValueError(f"Workflow {source} step {index + 1} must be an object")
             step_type = str(raw_step.get("type") or "tool").strip().lower()
             if step_type == "human_in_the_loop":
-                raise ValueError(
-                    f"Workflow {source} uses type: human_in_the_loop. "
-                    "Human approvals are managed by dashboard phases, not YAML."
-                )
+                if not raw_step.get("permission"):
+                    raw_step["permission"] = "qa_review"
+                continue
             if step_type == "loop":
                 nested = raw_step.get("steps") or []
                 if not isinstance(nested, list) or not nested:
@@ -825,11 +1394,13 @@ class WorkflowService:
     @staticmethod
     def _should_start_discovery(task: dict[str, Any]) -> bool:
         params = _task_params(task)
-        return bool(
-            _truthy(params.get("discover_workflow"))
-            or _truthy(params.get("workflow_discovery"))
-            or _first_text(params.get("workflow"), params.get("workflow_id"), params.get("workflow_ref"))
-        )
+        if _truthy(params.get("discover_workflow")) or _truthy(params.get("workflow_discovery")):
+            return True
+        if _truthy(params.get("use_workflow")) and not _truthy(params.get("no_discovery")):
+            return True
+        if _first_text(params.get("workflow"), params.get("workflow_id"), params.get("workflow_ref")):
+            return not _truthy(params.get("no_discovery"))
+        return False
 
 
 def _task_params(task: dict[str, Any]) -> dict[str, Any]:
@@ -984,6 +1555,20 @@ def _agent_from_workflow_id(workflow_id: str) -> str:
 def _safe_name(value: str) -> str:
     cleaned = _SAFE_NAME_RE.sub("_", value.strip().lower()).strip("._-")
     return cleaned or "workflow"
+
+
+def _strip_fenced_json(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
+    if lines and lines[0].strip().lower() in {"json", "javascript", "js"}:
+        lines = lines[1:]
+    return "\n".join(lines).strip()
 
 
 def _strip_fenced_yaml(text: str) -> str:
