@@ -76,7 +76,9 @@ from horizon.models import (
     CaptureChannel,
     CaptureKind as HorizonCaptureKind,
     HorizonCaptureRequest,
+    HorizonDelegateRequest,
     HorizonImportRequest,
+    HorizonMetricsRequest,
     HorizonPlanRequest,
     HorizonProgressRequest,
     HorizonReviewRequest,
@@ -156,6 +158,7 @@ horizon_scheduler = HorizonScheduler(
 )
 workflow_service.set_horizon_service(horizon_service)
 task_service.set_horizon_hooks(on_task_terminal=horizon_service.acknowledge_task_result)
+horizon_service.set_task_service(task_service)
 first_layer_gateway = FirstLayerGateway(
     settings=settings,
     repo=repo,
@@ -533,6 +536,77 @@ async def post_horizon_review(
     return await horizon_service.review_objectives(
         current_user.user_id, kind=payload.kind
     )
+
+
+@app.post("/api/horizon/delegate")
+async def post_horizon_delegate(
+    payload: HorizonDelegateRequest,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Encarga la siguiente accion personal (o una especifica) a dev en background."""
+    return await horizon_service.delegate_action(
+        current_user.user_id,
+        action_id=payload.action_id,
+        project=payload.project,
+        instruction=payload.instruction,
+        dedupe_key=payload.dedupe_key,
+    )
+
+
+@app.post("/api/horizon/actions/{action_id}/delegate")
+async def post_horizon_action_delegate(
+    action_id: str,
+    payload: HorizonDelegateRequest | None = None,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Encarga una accion concreta a dev en background."""
+    p = payload or HorizonDelegateRequest()
+    return await horizon_service.delegate_action(
+        current_user.user_id,
+        action_id=action_id,
+        project=p.project,
+        instruction=p.instruction,
+        dedupe_key=p.dedupe_key,
+    )
+
+
+@app.get("/api/horizon/delivery")
+async def get_horizon_delivery(
+    action_id: str | None = Query(default=None),
+    channel: str = Query(default="api"),
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Obtiene el resultado de una tarea delegada UNA SOLA VEZ (delivered once)."""
+    return await horizon_service.deliver_action_result(
+        current_user.user_id,
+        action_id=action_id,
+        channel=channel,
+    )
+
+
+@app.post("/api/horizon/actions/{action_id}/metrics")
+async def post_horizon_action_metrics(
+    action_id: str,
+    payload: HorizonMetricsRequest,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Registra tiempo humano de encargo/supervisión y retrabajo."""
+    return await horizon_service.record_delegation_metrics(
+        current_user.user_id,
+        action_id,
+        human_supervision_minutes=payload.human_supervision_minutes,
+        human_rework_minutes=payload.human_rework_minutes,
+        rework=payload.rework,
+        note=payload.note or "",
+    )
+
+
+@app.get("/api/horizon/delegation/summary")
+async def get_horizon_delegation_summary(
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Resumen de delegacion efectiva e indicadores humanos (§10.3)."""
+    return await horizon_service.get_delegation_summary(current_user.user_id)
 
 
 # ------------------------- tasks (legacy compatible) -------------------------

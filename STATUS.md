@@ -4,13 +4,15 @@ Resumen operativo corto del estado real del repo.
 
 ## Continuar aquí (traspaso a la próxima sesión)
 
-Estado al cerrar la sesión del **2026-09-20**: Horizon fases 1 y 2 implementadas, verificadas contra Mongo real y desplegadas. Commit **`d628a2d`** en `main` (31 archivos). El servicio corre con el código nuevo (reiniciado y comprobado).
+Estado al cerrar la sesión del **2026-09-20 (segunda sesión del día)**: Horizon **HZ-003 (delegación y dev móvil) implementada, probada y desplegada**. El servicio corre con el código nuevo (reiniciado y verificado: 16 rutas `/api/horizon/*`). Detalle de la implementación en la entrada "Estado actual (2026-09-20) — HZ-003" de abajo.
+
+**Ojo con el working tree:** conviven **sin commitear a propósito** los streams ajenos a Horizon — media/transcribe (`agents/media/`, `tools/media_transcribe.py`, `scripts/transcribe_links.sh`, `.qwen/`), voz Android (`openceo-voice/`, `openceo-voice-android/`), fix de lock por proyecto en `dev_session_service.py` (documentado en la entrada del 2026-09-13) y `params.coding_tool` en `agents/dev/session.py`. No mezclarlos con commits de Horizon.
 
 **Lo siguiente, por orden de valor:**
 
-1. **HZ-003 — Delegación y dev móvil** (fase 3). Es el punto 6, el único que falta del criterio de aceptación de TICKET-026: encargar un ticket de alcance personal sobre las sesiones dev existentes, medir tiempo humano y retrabajo, y entregar el resultado una sola vez aunque el teléfono se desconecte. Se apoya en `dev_session_service` y en el puente reactivo que ya existe (`TaskService._notify_horizon_terminal` → `HorizonService.acknowledge_task_result`).
+1. **Piloto real de delegación (3 tickets)** — spec §9.6 y §9.8. HZ-003 está implementado pero falta el piloto con tickets reales y acotados que mida tiempo humano de encargo, supervisión y retrabajo. Es decisión del dueño dispararlo: *"delega la siguiente acción"* por voz/chat o `POST /api/horizon/delegate`. Las métricas se anotan diciendo *"anota 15 minutos de supervisión"* y el resumen sale solo de `GET /api/horizon/delegation/summary`.
 2. **El canal de entrega del plan** (hueco conocido de HZ-002). El plan se persiste y se expone, pero no hay push: la fila de la sección 9.10 *"llega la hora diaria y no has abierto el chat"* se cumple solo a medias. El único canal saliente durable que funciona es `secretary.send_email` (`openceo-core/tools/email_sender.py`). Detalle y tabla de canales en `PENDINGS.md` TICKET-026.
-3. **HZ-004 — Fuentes conectadas y vista del espacio personal** en `openceo-react`. El contrato ya existe: `GET /api/horizon/plan/today`, `GET /api/horizon/triggers`.
+3. **HZ-004 — Fuentes conectadas y vista del espacio personal** en `openceo-react`. El contrato ya existe: `GET /api/horizon/plan/today`, `GET /api/horizon/triggers` y, desde HZ-003, `GET /api/horizon/delivery` y `GET /api/horizon/delegation/summary`.
 
 **Cosas que harán perder tiempo si no se saben:**
 
@@ -25,13 +27,30 @@ Estado al cerrar la sesión del **2026-09-20**: Horizon fases 1 y 2 implementada
 
 ```bash
 ./scripts/openceo-core-host.sh status          # servicio arriba
-./.venv/bin/python -m pytest tests/test_horizon_*.py -q
+./.venv/bin/python -m pytest tests/test_horizon_*.py -q   # 163 tests (151 + 12 de delegación)
 ./scripts/chat.sh "hoy solo tengo 15 minutos"  # replanifica por capacidad
 ./scripts/chat.sh "qué sigue"                  # acción principal + objetivo
-curl -s localhost:18765/openapi.json | grep -c '/horizon/'   # 11 rutas
+./scripts/chat.sh "cómo va lo delegado"        # entrega única (o "no hay pendientes")
+curl -s localhost:18765/openapi.json | grep -c '/horizon/'   # 16 rutas
 ```
 
-## Estado actual (2026-09-20)
+## Estado actual (2026-09-20) — HZ-003
+
+- `Horizon HZ-003 — Delegación y dev móvil (Fase 3 de 5)`: implementado el tercer entregable de [`jardal-horizon/README.md`](file:///home/develop/development/Jardal/jardal-openceo/jardal-horizon/README.md) §9.8 — *"Un ticket autorizado se ejecuta desde voz/chat hasta evidencia de resultado; el teléfono puede desconectarse, el trabajo sigue y el resultado se entrega una sola vez"*.
+  - **Qué se implementó** (el circuito completo):
+    1. [`openceo-core/horizon/service.py`](file:///home/develop/development/Jardal/jardal-openceo/openceo-core/horizon/service.py): `delegate_action()` encarga la acción (la siguiente por prioridad o una específica) como ticket canónico con `agent_hint=dev`, `autorun=true` y alcance personal en `params` — reutiliza la cola de tareas y las sesiones dev existentes, no crea un runtime paralelo. `deliver_action_result()` implementa **entrega única** (`delivered_at` persistido: una reconexión móvil que re-consulta recibe el mismo resultado marcado `already_delivered`, nunca un segundo efecto). `record_delegation_metrics()` acumula minutos humanos de supervisión y retrabajo (§9.6 *"medir la promesa"*), y `get_delegation_summary()` agrega delegación efectiva.
+    2. **Cierre reactivo del ciclo**: el puente `TaskService._notify_horizon_terminal` → `HorizonService.acknowledge_task_result` (commiteado en HZ-002) ahora captura evidencia — `last_response_summary` → `result_summary`, y `review_links`/`test_url`/`client_review_url` → `evidence_links` — y deja la acción en espera de **entrega humana** (`delivered_at: null`): el agente terminó no significa que el dueño ya lo vio.
+    3. **Idempotencia y desconexión móvil**: re-delegar una acción `in_progress` devuelve la misma tarea sin crear otra (`already_in_progress`), y el ticket lleva `dedupe_key` en `params`. La escritura del resultado se resuelve por `task_id` + estado, no por cercanía en el chat.
+    4. **5 endpoints nuevos**: `POST /api/horizon/delegate`, `POST /api/horizon/actions/{id}/delegate`, `GET /api/horizon/delivery`, `POST /api/horizon/actions/{id}/metrics`, `GET /api/horizon/delegation/summary`. Total: 16 rutas `/api/horizon/*`.
+    5. **3 intents nuevos** en `first_layer.py` y `classify.py`: `horizon_delegate`, `horizon_delivery`, `horizon_metrics`, con el clasificador determinista corriendo **antes** del modelo (captura con `parse_metrics_input` extrae minutos de supervisión/retrabajo sin LLM). Un test exige que frases dev (*"crea una sesión dev"*, *"corre el preset review"*) **no** sean robadas por los intents nuevos.
+  - **Decisiones de diseño relevantes**:
+    - **La delegación no ejecuta dinero ni mensajes externos**: el ticket nace con alcance personal (`privacy.personal_scope_params`), por lo que queda fuera del espejo de Notion por las dos rutas ya filtradas (guard reactivo + safety net de arranque).
+    - **"Hecho" del agente ≠ "entregado" al dueño**: `acknowledge_task_result` marca la acción `done` con evidencia, pero la entrega es un evento aparte (`deliver_action_result`) — la fila de §9.10 *"responde tarde 'hecho'"* se resuelve contra el aviso, no contra la acción vigente.
+    - **Fix de HEAD roto incluido**: `d628a2d` referencia `WorkflowRunStatus.BLOCKED_HUMAN` desde `workflow_service.py` (3 sitios) pero el enum en `state.py` quedó sin commitear — un checkout limpio de HEAD rompía con `AttributeError`. La línea entra en este commit.
+  - **Tests**: `tests/test_horizon_delegation.py` — 12 tests + 19 subtests (delegación, idempotencia por desconexión, entrega única, métricas humanas, agregación del resumen, clasificador determinista). Suite de Horizon: **163 pasan**. Suite completa: **236 pasan / 7 fallan** (los mismos 7 preexistentes diagnosticados).
+  - **Pendiente de esta iniciativa**: el **piloto con 3 tickets reales** (§9.6) que mida tiempo humano — es decisión del dueño disparar cada encargo. Después: canal de entrega push (TICKET-026) y HZ-004 (vista del espacio personal en `openceo-react`).
+
+## Estado actual (2026-09-20, primera sesión)
 
 - `Horizon HZ-002 — Ciclo proactivo del CEO (Fase 2 de 5)`: implementada la fase que la especificación reclamaba en [`jardal-horizon/README.md`](file:///home/develop/development/Jardal/jardal-openceo/jardal-horizon/README.md) §9.2 punto 1 — *"Un prompt por sí solo no mantiene objetivos ni despierta por la mañana"*. Hasta ahora Horizon era **reactivo**: sólo respondía cuando el usuario hablaba.
   - **Qué se implementó**:

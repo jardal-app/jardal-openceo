@@ -56,6 +56,7 @@ class WorkflowRunStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
     BLOCKED_TOOL = "blocked_tool"
+    BLOCKED_HUMAN = "blocked_human"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELED = "canceled"

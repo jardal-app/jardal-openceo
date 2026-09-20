@@ -457,6 +457,16 @@ class HorizonAction(BaseModel):
     # Un vencimiento externo no se mueve desde el planificador (seccion 9.10):
     # una fecha comprometida con un tercero no es una palanca interna.
     external_due_date: bool = False
+    # HZ-003: Delegacion y dev movil
+    delegated_at: datetime | None = None
+    delegated_project: str | None = None
+    human_supervision_minutes: int = 0
+    human_rework_minutes: int = 0
+    rework_count: int = 0
+    delivered_at: datetime | None = None
+    delivery_channel: str | None = None
+    result_summary: str | None = None
+    evidence_links: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -526,6 +536,20 @@ class HorizonReviewRequest(BaseModel):
 class HorizonImportRequest(BaseModel):
     source_path: str | None = None
     force: bool = False
+
+
+class HorizonDelegateRequest(BaseModel):
+    action_id: str | None = None
+    project: str | None = None
+    instruction: str | None = None
+    dedupe_key: str | None = None
+
+
+class HorizonMetricsRequest(BaseModel):
+    human_supervision_minutes: int | None = None
+    human_rework_minutes: int | None = None
+    rework: bool = False
+    note: str | None = None
 
 
 def normalize_document(value: Any) -> Any:

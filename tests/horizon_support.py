@@ -350,6 +350,11 @@ class FakeHorizonRepo:
 
     # ------------------------- acciones (por tarea) -------------------------
 
+    async def get_horizon_action(self, action_id: str) -> dict[str, Any] | None:
+        self.calls.append("get_horizon_action")
+        action = self.actions.get(action_id)
+        return copy.deepcopy(action) if action else None
+
     async def get_horizon_action_by_task_id(
         self, user_id: str, task_id: str
     ) -> dict[str, Any] | None:

@@ -25,6 +25,7 @@ from horizon import planner as planner_module
 from horizon import privacy as privacy_module
 from horizon import triggers as triggers_module
 from horizon.models import (
+    ActionOwner,
     ActionStatus,
     AvisoKind,
     CaptureChannel,
@@ -99,9 +100,13 @@ def _metric_key_for(text: str) -> str | None:
 class HorizonService:
     """Capacidad personal del CEO. Un solo coordinador, sin cola paralela."""
 
-    def __init__(self, settings: Settings, repo: Any) -> None:
+    def __init__(self, settings: Settings, repo: Any, task_service: Any | None = None) -> None:
         self._settings = settings
         self._repo = repo
+        self._task_service = task_service
+
+    def set_task_service(self, task_service: Any) -> None:
+        self._task_service = task_service
 
     # ------------------------------------------------------------------
     # Perfil e importacion
@@ -1008,6 +1013,21 @@ class HorizonService:
             elif status in ("failed", "escalated"):
                 updates["status"] = ActionStatus.BLOCKED.value
                 updates["blocked_reason"] = f"tarea_{status}"
+
+            # HZ-003: Guardar evidencia y resumen para entrega unica
+            summary = str(task.get("last_response_summary") or task.get("error") or status)
+            params = task.get("params") or {}
+            links: list[str] = []
+            if isinstance(params, dict):
+                if params.get("review_links") and isinstance(params["review_links"], list):
+                    links.extend([str(l) for l in params["review_links"]])
+                if params.get("test_url"):
+                    links.append(str(params["test_url"]))
+                if params.get("client_review_url"):
+                    links.append(str(params["client_review_url"]))
+            updates["result_summary"] = summary
+            updates["evidence_links"] = links
+            updates["delivered_at"] = None
             await self._repo.patch_horizon_action(str(action.get("action_id")), updates)
 
         enqueued = await self.enqueue_replan(user_id, task_id=task_id, status=status)
@@ -1016,6 +1036,270 @@ class HorizonService:
             "duplicate": bool(progress.get("duplicate")),
             "action_id": (action or {}).get("action_id"),
             "replan_enqueued": enqueued,
+        }
+
+    # ------------------------------------------------------------------
+    # HZ-003: Delegacion autonoma y dev movil
+    # ------------------------------------------------------------------
+
+    async def delegate_action(
+        self,
+        user_id: str,
+        *,
+        action_id: str | None = None,
+        project: str | None = None,
+        instruction: str | None = None,
+        dedupe_key: str | None = None,
+        task_service: Any | None = None,
+    ) -> dict[str, Any]:
+        """Encarga una accion de alcance personal para ejecucion autonoma en background.
+
+        Seccion 9.6: Identificar proyecto/ticket, encargar, desconectar y conservar contexto.
+        """
+        target_action: dict[str, Any] | None = None
+        if action_id:
+            target_action = await self._repo.get_horizon_action(action_id)
+            if not target_action or target_action.get("user_id") != user_id:
+                return {
+                    "delegated": False,
+                    "reason": "action_not_found",
+                    "message": "Acción no encontrada.",
+                }
+        else:
+            chosen_res = await self.next_action(user_id)
+            if not chosen_res.get("has_action") or not chosen_res.get("action"):
+                return {
+                    "delegated": False,
+                    "reason": "no_action_available",
+                    "message": "No hay ninguna acción lista para delegar.",
+                }
+            target_action = chosen_res["action"]
+
+        aid = str(target_action.get("action_id") or "")
+
+        # Idempotencia y reconexion movil: si ya tiene tarea activa en curso, devolverla sin duplicar
+        existing_task_id = target_action.get("task_id")
+        current_status = str(target_action.get("status") or "")
+        if existing_task_id and current_status == ActionStatus.IN_PROGRESS.value:
+            return {
+                "delegated": True,
+                "already_in_progress": True,
+                "action_id": aid,
+                "task_id": existing_task_id,
+                "project": target_action.get("delegated_project") or project or "jardal-openceo",
+                "message": f"La tarea ya está delegada ({existing_task_id}) y ejecutándose en segundo plano.",
+            }
+
+        svc = task_service or self._task_service
+        if svc is None:
+            return {
+                "delegated": False,
+                "reason": "task_service_unavailable",
+                "message": "El servicio de tareas no está disponible para delegar.",
+            }
+
+        resolved_project = project or target_action.get("delegated_project") or "jardal-openceo"
+        title = f"[Horizon] {target_action.get('title') or 'Acción personal'}"
+        desc = instruction or target_action.get("title") or "Tarea delegada desde Horizon"
+        task_params = privacy_module.personal_scope_params(
+            user_id,
+            extra={
+                "horizon_action_id": aid,
+                "dedupe_key": dedupe_key or f"del:{aid}",
+                "delegated_by": "horizon",
+            },
+        )
+
+        from state import AgentName, TaskCreateRequest, TaskPriority, TaskSource
+
+        priority_val = int(target_action.get("priority") or 100)
+        task_priority = TaskPriority.HIGH if priority_val <= 50 else TaskPriority.MEDIUM
+
+        task_req = TaskCreateRequest(
+            project=resolved_project,
+            source=TaskSource.API,
+            title=title[:120],
+            description=desc,
+            agent_hint=AgentName.DEV,
+            priority=task_priority,
+            autorun=True,
+            params=task_params,
+        )
+
+        created = await svc.create_task(task_req)
+        task_id = str(created.get("task_id") or "")
+
+        updates = {
+            "task_id": task_id,
+            "status": ActionStatus.IN_PROGRESS.value,
+            "owner": ActionOwner.AGENT.value,
+            "delegated_at": _now(),
+            "delegated_project": resolved_project,
+            "delivered_at": None,
+            "result_summary": None,
+        }
+        await self._repo.patch_horizon_action(aid, updates)
+
+        return {
+            "delegated": True,
+            "already_in_progress": False,
+            "action_id": aid,
+            "task_id": task_id,
+            "project": resolved_project,
+            "status": ActionStatus.IN_PROGRESS.value,
+            "message": f"Acción '{target_action.get('title')}' delegada a dev en {resolved_project}. Ejecutando en segundo plano.",
+        }
+
+    async def deliver_action_result(
+        self,
+        user_id: str,
+        *,
+        action_id: str | None = None,
+        mark_delivered: bool = True,
+        channel: str = "chat",
+    ) -> dict[str, Any]:
+        """Entrega el resultado de una tarea delegada UNA SOLA VEZ (seccion 9.8)."""
+        target: dict[str, Any] | None = None
+        if action_id:
+            target = await self._repo.get_horizon_action(action_id)
+            if not target or target.get("user_id") != user_id:
+                return {
+                    "delivered": False,
+                    "reason": "action_not_found",
+                    "message": "Acción no encontrada.",
+                }
+        else:
+            actions = await self._repo.list_horizon_actions(
+                user_id,
+                statuses=[ActionStatus.DONE.value, ActionStatus.BLOCKED.value],
+                limit=50,
+            )
+            delegated = [a for a in actions if a.get("task_id")]
+            if not delegated:
+                return {
+                    "delivered": False,
+                    "reason": "no_delegated_actions",
+                    "message": "No hay resultados de tareas delegadas disponibles.",
+                }
+            undelivered = [a for a in delegated if not a.get("delivered_at")]
+            target = undelivered[0] if undelivered else delegated[0]
+
+        aid = str(target.get("action_id"))
+        status = str(target.get("status"))
+        summary = target.get("result_summary") or "Sin resumen disponible."
+        evidence = target.get("evidence_links") or []
+        was_delivered = target.get("delivered_at") is not None
+
+        if not was_delivered and mark_delivered:
+            delivered_time = _now()
+            await self._repo.patch_horizon_action(
+                aid,
+                {"delivered_at": delivered_time, "delivery_channel": channel},
+            )
+            target["delivered_at"] = delivered_time
+
+        prefix = "Resultado ya entregado previamente" if was_delivered else "Resultado de la tarea delegada"
+        msg = f"{prefix} ('{target.get('title')}'): estado {status}. {summary}"
+
+        return {
+            "delivered": True,
+            "already_delivered": was_delivered,
+            "action_id": aid,
+            "task_id": target.get("task_id"),
+            "status": status,
+            "result_summary": summary,
+            "evidence_links": evidence,
+            "delivered_at": target.get("delivered_at"),
+            "message": msg,
+        }
+
+    async def record_delegation_metrics(
+        self,
+        user_id: str,
+        action_id: str,
+        *,
+        human_supervision_minutes: int | None = None,
+        human_rework_minutes: int | None = None,
+        rework: bool = False,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """Registra tiempo humano de encargo/supervisión y retrabajo (seccion 9.6 y 10.3)."""
+        target = await self._repo.get_horizon_action(action_id)
+        if not target or target.get("user_id") != user_id:
+            return {
+                "recorded": False,
+                "reason": "action_not_found",
+                "message": "Acción no encontrada.",
+            }
+
+        cur_sup = int(target.get("human_supervision_minutes") or 0)
+        cur_rew = int(target.get("human_rework_minutes") or 0)
+        cur_cnt = int(target.get("rework_count") or 0)
+
+        add_sup = int(human_supervision_minutes or 0)
+        add_rew = int(human_rework_minutes or 0)
+        inc_cnt = 1 if rework or add_rew > 0 else 0
+
+        updates = {
+            "human_supervision_minutes": cur_sup + add_sup,
+            "human_rework_minutes": cur_rew + add_rew,
+            "rework_count": cur_cnt + inc_cnt,
+        }
+        await self._repo.patch_horizon_action(action_id, updates)
+
+        event_text = note or f"Métricas para '{target.get('title')}': {add_sup} min supervisión, {add_rew} min retrabajo."
+        source_id = f"metrics:{action_id}:{_now().timestamp()}"
+        await self.record_progress(
+            user_id,
+            event_text,
+            source_id=source_id,
+            objective_id=target.get("objective_id"),
+            source="user",
+        )
+
+        return {
+            "recorded": True,
+            "action_id": action_id,
+            "human_supervision_minutes": cur_sup + add_sup,
+            "human_rework_minutes": cur_rew + add_rew,
+            "rework_count": cur_cnt + inc_cnt,
+            "message": f"Registrado: {add_sup} min de supervisión y {add_rew} min de retrabajo.",
+        }
+
+    async def get_delegation_summary(self, user_id: str) -> dict[str, Any]:
+        """Calcula el resumen de delegacion efectiva segun la tabla de indicadores (seccion 10.3)."""
+        actions = await self._repo.list_horizon_actions(user_id, limit=200)
+        delegated = [a for a in actions if a.get("task_id")]
+
+        total = len(delegated)
+        completed = sum(1 for a in delegated if str(a.get("status")) == ActionStatus.DONE.value)
+        blocked = sum(1 for a in delegated if str(a.get("status")) == ActionStatus.BLOCKED.value)
+        in_progress = sum(1 for a in delegated if str(a.get("status")) == ActionStatus.IN_PROGRESS.value)
+        total_sup = sum(int(a.get("human_supervision_minutes") or 0) for a in delegated)
+        total_rew = sum(int(a.get("human_rework_minutes") or 0) for a in delegated)
+        total_rework_count = sum(int(a.get("rework_count") or 0) for a in delegated)
+        pending_delivery = sum(
+            1 for a in delegated
+            if str(a.get("status")) in (ActionStatus.DONE.value, ActionStatus.BLOCKED.value)
+            and not a.get("delivered_at")
+        )
+
+        msg = (
+            f"Tenemos {total} tareas delegadas: {completed} completadas, {in_progress} en curso "
+            f"y {blocked} bloqueadas. Tiempo humano: {total_sup} min de supervisión, "
+            f"{total_rew} min de retrabajo ({total_rework_count} retrabajos)."
+        )
+
+        return {
+            "total_delegated": total,
+            "completed": completed,
+            "blocked": blocked,
+            "in_progress": in_progress,
+            "pending_delivery": pending_delivery,
+            "human_supervision_minutes": total_sup,
+            "human_rework_minutes": total_rew,
+            "rework_count": total_rework_count,
+            "message": msg,
         }
 
     async def resolve_aviso(

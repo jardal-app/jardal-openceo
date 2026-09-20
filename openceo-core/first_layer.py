@@ -421,11 +421,14 @@ PERSONALIDAD Y TONO DE VOZ (CRÍTICO):
    - 'planifica mi día', 'prepara el plan', 'qué hago hoy', 'plan del día' -> intent="horizon_plan_day".
    - 'revisa la semana', 'cómo va la semana', 'revisión semanal' -> intent="horizon_review".
    - 'importa mi contexto', 'trae mi contexto' -> intent="horizon_import".
+   - 'delega la siguiente acción', 'encarga la siguiente tarea', 'haz la siguiente acción en dev' -> intent="horizon_delegate".
+   - 'qué resultado dio la tarea', 'cómo va lo delegado', 'qué entregó el dev' -> intent="horizon_delivery".
+   - 'anota 15 minutos de supervisión', 'fueron 10 minutos de retrabajo' -> intent="horizon_metrics".
    REGLA DE ORO: una frase sobre tu vida personal NUNCA es una instrucción de código. Ante duda entre dev_instruction y horizon_capture, si la frase habla de tu vida, tu familia, tu dinero, tu salud, tu voz, tus clientes o una idea tuya, elige horizon_capture. NUNCA envíes notas personales a tmux.
 
 Responde SIEMPRE en formato JSON estricto con esta estructura:
 {{
-  "intent": "focus_ticket" | "ticket_query" | "ticket_count" | "ticket_retry" | "list_tickets" | "preset_load" | "preset_dictate" | "preset_list" | "tmux_enter" | "preset_cancel" | "list_tmux" | "tmux_inspect" | "tmux_send" | "tmux_create" | "tmux_kill" | "dev_session_start" | "dev_session_stop" | "dev_instruction" | "dev_output" | "switch_project" | "list_projects" | "horizon_capture" | "horizon_next_action" | "horizon_progress" | "horizon_plan_query" | "horizon_capacity" | "horizon_plan_day" | "horizon_review" | "horizon_import" | "guidance" | "chat_response",
+  "intent": "focus_ticket" | "ticket_query" | "ticket_count" | "ticket_retry" | "list_tickets" | "preset_load" | "preset_dictate" | "preset_list" | "tmux_enter" | "preset_cancel" | "list_tmux" | "tmux_inspect" | "tmux_send" | "tmux_create" | "tmux_kill" | "dev_session_start" | "dev_session_stop" | "dev_instruction" | "dev_output" | "switch_project" | "list_projects" | "horizon_capture" | "horizon_next_action" | "horizon_progress" | "horizon_plan_query" | "horizon_capacity" | "horizon_plan_day" | "horizon_review" | "horizon_import" | "horizon_delegate" | "horizon_delivery" | "horizon_metrics" | "guidance" | "chat_response",
   "ticket_number": int | null,
   "session_name": string | null,
   "project": string | null,
@@ -906,6 +909,9 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
             "horizon_plan_day",
             "horizon_review",
             "horizon_import",
+            "horizon_delegate",
+            "horizon_delivery",
+            "horizon_metrics",
         ):
             horizon_text = (dictation_param or text).strip()
             handled, reply = await self._handle_horizon(user_id, intent, horizon_text)
@@ -1003,6 +1009,30 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
                 if result.get("reason") == "already_current":
                     return True, "Ya teníamos el contexto importado, no lo dupliqué."
                 return True, "No encontré el contexto personal para importar."
+
+            if intent == "horizon_delegate":
+                result = await self.horizon.delegate_action(owner, instruction=text)
+                return True, str(result.get("message") or "Acción delegada.")
+
+            if intent == "horizon_delivery":
+                result = await self.horizon.deliver_action_result(owner, channel="chat")
+                return True, str(result.get("message") or "No hay entregas pendientes.")
+
+            if intent == "horizon_metrics":
+                parsed = horizon_classify.parse_metrics_input(text)
+                actions = await self.horizon._repo.list_horizon_actions(owner, limit=20)
+                target = next((a for a in actions if a.get("task_id")), None)
+                if target:
+                    res = await self.horizon.record_delegation_metrics(
+                        owner,
+                        str(target["action_id"]),
+                        human_supervision_minutes=parsed.get("human_supervision_minutes"),
+                        human_rework_minutes=parsed.get("human_rework_minutes"),
+                        rework=bool(parsed.get("rework")),
+                        note=text,
+                    )
+                    return True, str(res.get("message") or "Métricas registradas.")
+                return True, "No encontré una acción delegada para registrar esas métricas."
         except Exception:
             logger.warning("Horizon handling failed for intent %s", intent, exc_info=True)
             return True, "No pude completar esa operación del espacio personal. Lo intentamos de nuevo."

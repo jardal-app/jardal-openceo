@@ -1191,6 +1191,10 @@ class MongoRepository:
 
     # ------------------------- Horizon: acciones -------------------------
 
+    async def get_horizon_action(self, action_id: str) -> dict[str, Any] | None:
+        row = await self.horizon_actions.find_one({"action_id": action_id})
+        return self._clean(row)
+
     async def get_horizon_action_by_task_id(
         self, user_id: str, task_id: str
     ) -> dict[str, Any] | None:

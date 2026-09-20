@@ -36,6 +36,10 @@ INTENT_CAPACITY = "horizon_capacity"
 INTENT_PLAN_DAY = "horizon_plan_day"
 INTENT_REVIEW = "horizon_review"
 INTENT_IMPORT = "horizon_import"
+# Fase 3: delegacion y dev movil.
+INTENT_DELEGATE = "horizon_delegate"
+INTENT_DELIVERY = "horizon_delivery"
+INTENT_METRICS = "horizon_metrics"
 
 # Verbos de registro explicito: precedencia maxima.
 _CAPTURE_PREFIX_PATTERNS = (
@@ -197,6 +201,30 @@ _IMPORT_PATTERNS = (
     r"\bcarga(?:r|me)?\s+(?:mi|el)\s+contexto\b",
 )
 
+# Fase 3: Delegacion, entrega y metricas de supervisión/retrabajo.
+_DELEGATE_PATTERNS = (
+    r"\b(?:delega|delegar|encarga|encargar)\s+(?:la\s+|el\s+|esta\s+|este\s+)?(?:siguiente\s+)?(?:acci[oó]n|tarea|ticket)\b",
+    r"\bdelega\s+(?:la\s+)?siguiente\b",
+    r"\bencarga\s+(?:la\s+)?siguiente\b",
+    r"\bdelega\s+esta\s+acci[oó]n\b",
+    r"\bencarga\s+esta\s+acci[oó]n\b",
+    r"\bhaz\s+la\s+siguiente\s+acci[oó]n\s+en\s+dev\b",
+)
+
+_DELIVERY_PATTERNS = (
+    r"\bqu[eé]\s+(?:resultado|respuesta)\s+(?:dio|entreg[oó]|hay de)\s+(?:la\s+)?(?:delegaci[oó]n|tarea\s+delegada|acci[oó]n\s+delegada)\b",
+    r"\bc[oó]mo\s+(?:sali[oó]|va|termin[oó])\s+(?:la\s+delegaci[oó]n|el\s+encargo|lo\s+que\s+encargu[eé]|lo\s+delegado)\b",
+    r"\bqu[eé]\s+entreg[oó]\s+el\s+dev\b",
+    r"\bentregas?\s+de\s+(?:la\s+)?delegaci[oó]n\b",
+    r"\bresultado\s+de\s+lo\s+delegado\b",
+)
+
+_METRICS_PATTERNS = (
+    r"\b(?:anota|registra|fueron|tom[oó]|cost[oó])\s+\d+\s+minutos?\s+de\s+(?:supervisi[oó]n|revisi[oó]n|retrabajo|correcci[oó]n)\b",
+    r"\b\d+\s+minutos?\s+de\s+(?:supervisi[oó]n|retrabajo)\b",
+    r"\bhubo\s+(?:retrabajo|que\s+corregir)\b",
+)
+
 _MEASUREMENT_PATTERN = re.compile(
     r"\b(\d{1,4})\s*(minutos?|min|horas?|h)\b",
     re.IGNORECASE,
@@ -308,20 +336,31 @@ def classify(text: str) -> str | None:
     personal = has_personal_markers(text)
     explicit = has_explicit_capture(text)
 
+    # 0. Metricas de delegacion/retrabajo especificas (gana sobre captura generica).
+    if _matches(normalized, _METRICS_PATTERNS):
+        return INTENT_METRICS
+
     # 1. Verbo de registro explicito: gana siempre. Una nota personal declarada
     #    como tal no debe terminar en tmux aunque mencione un ticket.
     if explicit:
         return INTENT_CAPTURE
 
-    # 2. Consultas de direccion.
+    # 2. Delegacion y entregas (debe ir antes de consultas de direccion,
+    #    para que "delega la siguiente accion" ejecute y no solo consulte).
+    if _matches(normalized, _DELEGATE_PATTERNS):
+        return INTENT_DELEGATE
+    if _matches(normalized, _DELIVERY_PATTERNS):
+        return INTENT_DELIVERY
+
+    # 3. Consultas de direccion.
     if _matches(normalized, _NEXT_ACTION_PATTERNS):
         return INTENT_NEXT_ACTION
     if _matches(normalized, _PLAN_QUERY_PATTERNS):
         return INTENT_PLAN_QUERY
 
-    # 2b. Ciclo proactivo. Va despues de la captura explicita -que debe seguir
-    #     ganando- y antes de la deteccion de avances: "hoy solo tengo 15
-    #     minutos" declara capacidad, no registra un avance de 15 minutos.
+    # 4. Ciclo proactivo. Va despues de la captura explicita -que debe seguir
+    #    ganando- y antes de la deteccion de avances: "hoy solo tengo 15
+    #    minutos" declara capacidad, no registra un avance de 15 minutos.
     if _matches(normalized, _CAPACITY_PATTERNS):
         return INTENT_CAPACITY
     if _matches(normalized, _PLAN_DAY_PATTERNS):
@@ -415,3 +454,18 @@ def parse_exercise_included(text: str) -> bool | None:
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def parse_metrics_input(text: str) -> dict[str, Any]:
+    """Extrae minutos de supervision, retrabajo y si hubo retrabajo."""
+    normalized = normalize_text(text)
+    sup_m = re.search(r"(\d{1,4})\s*minutos?\s*(?:de\s+)?(?:supervisi[oó]n|revisi[oó]n)", normalized)
+    rew_m = re.search(r"(\d{1,4})\s*minutos?\s*(?:de\s+)?(?:retrabajo|correcci[oó]n)", normalized)
+    sup = int(sup_m.group(1)) if sup_m else None
+    rew = int(rew_m.group(1)) if rew_m else None
+    has_rework = bool(rew) or bool(re.search(r"\b(?:retrabajo|hubo que corregir|corregir)\b", normalized))
+    return {
+        "human_supervision_minutes": sup,
+        "human_rework_minutes": rew,
+        "rework": has_rework,
+    }
