@@ -82,124 +82,126 @@ class DevSessionService:
 
     async def create_session(self, payload: DevSessionCreateRequest) -> dict[str, Any]:
         project = await self._project_service.resolve_project(payload.user_id, payload.project)
-        await self._repo.set_selected_project(payload.user_id, project)
-        config = self._config_loader.load_project(project)
-        consensus_mode = payload.provider == DevProvider.AUTO and self._is_consensus_enabled(config)
+        lock = self._project_locks.setdefault(project, asyncio.Lock())
+        async with lock:
+            await self._repo.set_selected_project(payload.user_id, project)
+            config = self._config_loader.load_project(project)
+            consensus_mode = payload.provider == DevProvider.AUTO and self._is_consensus_enabled(config)
 
-        # One session per project maximum — reuse if tmux is actually running
-        active = await self._repo.find_active_project_session(project, user_id=payload.user_id)
-        if active is not None:
-            runtime_matches = self._is_consensus_session(active) == consensus_mode
-            if runtime_matches:
-                if self._settings.DEV_EXECUTION_MODE == "mock":
-                    return active
+            # One session per project maximum — reuse if tmux is actually running
+            active = await self._repo.find_active_project_session(project, user_id=payload.user_id)
+            if active is not None:
+                runtime_matches = self._is_consensus_session(active) == consensus_mode
+                if runtime_matches:
+                    if self._settings.DEV_EXECUTION_MODE == "mock":
+                        return active
+                    if consensus_mode:
+                        try:
+                            await self._consensus.ensure_project_sessions(
+                                project=project,
+                                config=config,
+                                wait_ready=False,
+                                prime_reviewers=False,
+                            )
+                            return active
+                        except Exception as exc:
+                            logger.warning("Consensus runtime for '%s' looked stale: %s", project, exc)
+                    elif self._tmux.has_session(project):
+                        return active
+
+                logger.warning(
+                    "DB session %s says active but no tmux session for project '%s' — canceling stale",
+                    active["session_id"], project,
+                )
+                await self._close_missing_runtime_session(
+                    active,
+                    "Stale session: tmux no longer exists",
+                    terminal_status=DevSessionStatus.CANCELED,
+                )
+
+            session_doc = make_dev_session_document(payload, project)
+            provider = self._resolve_provider(session_doc.model_dump(mode="python"), config)
+
+            cwd = self._resolve_repo_path(config)
+            if self._settings.DEV_EXECUTION_MODE == "mock":
+                tmux_name = f"dev-{project}-claude" if consensus_mode else f"openceo-dev-{project}"
+                session_doc.status = DevSessionStatus.WAITING_USER
+            else:
                 if consensus_mode:
                     try:
-                        await self._consensus.ensure_project_sessions(
+                        lead, reviewers = await self._consensus.ensure_project_sessions(
                             project=project,
                             config=config,
                             wait_ready=False,
                             prime_reviewers=False,
                         )
-                        return active
+                        tmux_name = lead.tmux_session_name
+                        provider = lead.provider
+                        session_doc.metadata["execution_mode"] = "tier_s"
+                        session_doc.metadata["consensus"] = {
+                            "lead": "planner",
+                            "reviewers": ["plan-reviewer", "builder", "gemini-reviewer"],
+                        }
                     except Exception as exc:
-                        logger.warning("Consensus runtime for '%s' looked stale: %s", project, exc)
-                elif self._tmux.has_session(project):
-                    return active
+                        logger.error("Failed to start Tier S for '%s': %s", project, exc)
+                        raise ValueError(f"Failed to start Tier S: {exc}") from exc
+                else:
+                    command, env_vars, cwd = self._resolve_command(provider, config)
+                    try:
+                        shell_mode = provider == DevProvider.OPENCODE
+                        if shell_mode:
+                            session_doc.metadata["opencode_run_mode"] = True
+                        start_command = [] if shell_mode else command
+                        tmux_name = self._tmux.start_session(
+                            project=project,
+                            provider=provider,
+                            command=start_command,
+                            cwd=cwd,
+                            env=env_vars,
+                            shell_mode=shell_mode,
+                        )
+                    except ValueError as exc:
+                        if "already exists" in str(exc):
+                            # tmux session already exists (e.g., orphan from crash) — reconnect
+                            tmux_name = self._tmux._session_name(project)
+                            logger.warning("tmux session '%s' already existed, reusing", tmux_name)
+                        else:
+                            raise
+                    except Exception as exc:
+                        logger.error("Failed to start tmux session for '%s': %s", project, exc)
+                        raise ValueError(f"Failed to start tmux session: {exc}") from exc
 
-            logger.warning(
-                "DB session %s says active but no tmux session for project '%s' — canceling stale",
-                active["session_id"], project,
+                    try:
+                        await self._tmux.wait_until_ready(project=project, timeout=45)
+                    except Exception:
+                        logger.warning("tmux session '%s' started but initial readiness check failed", tmux_name)
+                session_doc.status = DevSessionStatus.WAITING_USER
+
+            session_doc.tmux_session_name = tmux_name
+            session_doc.provider = provider
+            session_doc.started_at = datetime.now(timezone.utc)
+            session_doc.repo_path = cwd
+            session_doc.repo_name = self._resolve_repo_name(config)
+
+            session_doc.messages.append(
+                SessionMessage(
+                    role=SessionMessageRole.SYSTEM,
+                    channel=SessionMessageChannel.SYSTEM,
+                    content=(
+                        f"Sesión tmux '{tmux_name}' creada. "
+                        f"Provider: {provider.value}. "
+                        + (
+                            "Modo: tier_s. Planner (clauded) → Plan reviewer (codexf) → Builder (claudep) → 3 reviewers × 2 rondas."
+                            if consensus_mode
+                            else "Esperando instrucciones."
+                        )
+                    ),
+                )
             )
-            await self._close_missing_runtime_session(
-                active,
-                "Stale session: tmux no longer exists",
-                terminal_status=DevSessionStatus.CANCELED,
-            )
 
-        session_doc = make_dev_session_document(payload, project)
-        provider = self._resolve_provider(session_doc.model_dump(mode="python"), config)
-
-        cwd = self._resolve_repo_path(config)
-        if self._settings.DEV_EXECUTION_MODE == "mock":
-            tmux_name = f"dev-{project}-claude" if consensus_mode else f"openceo-dev-{project}"
-            session_doc.status = DevSessionStatus.WAITING_USER
-        else:
-            if consensus_mode:
-                try:
-                    lead, reviewers = await self._consensus.ensure_project_sessions(
-                        project=project,
-                        config=config,
-                        wait_ready=False,
-                        prime_reviewers=False,
-                    )
-                    tmux_name = lead.tmux_session_name
-                    provider = lead.provider
-                    session_doc.metadata["execution_mode"] = "tier_s"
-                    session_doc.metadata["consensus"] = {
-                        "lead": "planner",
-                        "reviewers": ["plan-reviewer", "builder", "gemini-reviewer"],
-                    }
-                except Exception as exc:
-                    logger.error("Failed to start Tier S for '%s': %s", project, exc)
-                    raise ValueError(f"Failed to start Tier S: {exc}") from exc
-            else:
-                command, env_vars, cwd = self._resolve_command(provider, config)
-                try:
-                    shell_mode = provider == DevProvider.OPENCODE
-                    if shell_mode:
-                        session_doc.metadata["opencode_run_mode"] = True
-                    start_command = [] if shell_mode else command
-                    tmux_name = self._tmux.start_session(
-                        project=project,
-                        provider=provider,
-                        command=start_command,
-                        cwd=cwd,
-                        env=env_vars,
-                        shell_mode=shell_mode,
-                    )
-                except ValueError as exc:
-                    if "already exists" in str(exc):
-                        # tmux session already exists (e.g., orphan from crash) — reconnect
-                        tmux_name = self._tmux._session_name(project)
-                        logger.warning("tmux session '%s' already existed, reusing", tmux_name)
-                    else:
-                        raise
-                except Exception as exc:
-                    logger.error("Failed to start tmux session for '%s': %s", project, exc)
-                    raise ValueError(f"Failed to start tmux session: {exc}") from exc
-
-                try:
-                    await self._tmux.wait_until_ready(project=project, timeout=45)
-                except Exception:
-                    logger.warning("tmux session '%s' started but initial readiness check failed", tmux_name)
-            session_doc.status = DevSessionStatus.WAITING_USER
-
-        session_doc.tmux_session_name = tmux_name
-        session_doc.provider = provider
-        session_doc.started_at = datetime.now(timezone.utc)
-        session_doc.repo_path = cwd
-        session_doc.repo_name = self._resolve_repo_name(config)
-
-        session_doc.messages.append(
-            SessionMessage(
-                role=SessionMessageRole.SYSTEM,
-                channel=SessionMessageChannel.SYSTEM,
-                content=(
-                    f"Sesión tmux '{tmux_name}' creada. "
-                    f"Provider: {provider.value}. "
-                    + (
-                        "Modo: tier_s. Planner (clauded) → Plan reviewer (codexf) → Builder (claudep) → 3 reviewers × 2 rondas."
-                        if consensus_mode
-                        else "Esperando instrucciones."
-                    )
-                ),
-            )
-        )
-
-        created = await self._repo.create_dev_session(session_doc.model_dump(mode="python"))
-        await self._hub.broadcast("dev_session_created", created)
-        return created
+            created = await self._repo.create_dev_session(session_doc.model_dump(mode="python"))
+            await self._hub.broadcast("dev_session_created", created)
+            return created
 
     async def get_session(self, session_id: str) -> dict[str, Any] | None:
         return await self._repo.get_dev_session(session_id)

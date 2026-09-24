@@ -20,13 +20,42 @@ class ConfigLoader:
         if not projects_root.exists():
             return []
 
-        names: list[str] = []
+        discovered: list[str] = []
         for candidate in projects_root.iterdir():
             if not candidate.is_dir():
                 continue
             if (candidate / "project.yaml").exists():
-                names.append(candidate.name)
-        return sorted(names)
+                discovered.append(candidate.name)
+
+        if not discovered:
+            return []
+
+        # Sort projects by 'number' (or 'order' / 'id') defined directly in each project.yaml
+        def _get_project_sort_key(name: str) -> tuple[int, str]:
+            cfg_path = projects_root / name / "project.yaml"
+            if cfg_path.exists():
+                try:
+                    with cfg_path.open("r", encoding="utf-8") as fh:
+                        data = yaml.safe_load(fh) or {}
+                    p_info = data.get("project") if isinstance(data.get("project"), dict) else {}
+                    num = data.get("number")
+                    if num is None:
+                        num = p_info.get("number")
+                    if num is None:
+                        num = data.get("order") or p_info.get("order")
+                    if num is None:
+                        num = data.get("id") or p_info.get("id")
+
+                    if num is not None:
+                        try:
+                            return (int(num), name.lower())
+                        except (ValueError, TypeError):
+                            pass
+                except Exception:
+                    pass
+            return (9999, name.lower())
+
+        return sorted(discovered, key=_get_project_sort_key)
 
     def has_project(self, project: str | None) -> bool:
         if not project:

@@ -1,4 +1,5 @@
 project:
+  number: 4
   name: melanyryr
   repos:
     - name: melanyryr
@@ -61,3 +62,15 @@ voice:
     require_project_selection: false
 
 notifications: []
+
+presets:
+  review:
+    prompt: "Revisa los cambios recientes en git diff del frontend y backend de melanyryr, valida componentes y estilos."
+    description: "Revisar cambios de frontend y backend"
+  test_fix:
+    prompt: "Ejecuta los tests del proyecto y valida el build de React y PWA corrigiendo cualquier error."
+    description: "Validar tests y build de React/PWA"
+  sync_context:
+    prompt: "Actualiza el estado de desarrollo y documentación de melanyryr."
+    description: "Sincronizar documentación de melanyryr"
+

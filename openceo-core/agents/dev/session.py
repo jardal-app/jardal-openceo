@@ -82,8 +82,9 @@ class DevSessionManager:
         qa_cfg = dev_cfg.get("qa", {})
 
         # Respect ticket-level tier/tool overrides (e.g. manual classification)
-        task_tier = task.get("coding_tier")
-        task_tool = task.get("coding_tool")
+        task_params = task.get("params") if isinstance(task.get("params"), dict) else {}
+        task_tier = task.get("coding_tier") or task_params.get("coding_tier")
+        task_tool = task.get("coding_tool") or task_params.get("coding_tool")
 
         if task_tier:
             tier = CodingTier(task_tier)
