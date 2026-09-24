@@ -78,10 +78,32 @@ tools MCP no pasaban `autorun` y heredaban el `True` del modelo, así que **regi
 lanzaba ejecución** — con `TASK_AUTORUN=true` en el `.env`. Ahora registrar no ejecuta: hace falta
 `autorun: true` explícito, y la descripción del tool lo dice.
 
-**Documento nuevo: [`CLAUDE_TICKETS.md`](CLAUDE_TICKETS.md)** — la sección para copiar en el
-`AGENTS.md`/`CLAUDE.md` de cada proyecto. Explica dónde vive el trabajo, las reglas (buscar antes
-de crear, registrar ≠ ejecutar, no mantener backlog en markdown) y el reparto con el vault de
-Obsidian y `qmd`.
+**Documento nuevo: [`CLAUDE_TICKETS.md`](CLAUDE_TICKETS.md)** — la referencia corta para pegar
+en el `AGENTS.md`/`CLAUDE.md` de un proyecto, que defiere al canónico.
+
+**Los dos mounts MCP exponen ahora lo mismo.** El global tenía solo DNS, y era la única
+superficie que veían las **sesiones manuales de Codex CLI** (`mcp_servers.openceo-global` en
+`~/.codex/config.toml`): un agente fuera de OpenCEO no podía ni buscar ni registrar trabajo.
+Claude Code manual ya los tenía porque lee el interno (`~/.claude.json`). La diferencia entre
+mounts es **quién los recibe**, no qué contienen. `MCP_SERVER_ALLOWED_IPS` es loopback-only y
+ninguno está publicado en Traefik.
+
+### Memoria de ingeniería centralizada
+
+`jardal-knowledge/CLAUDE.md` es la **autoridad** (v2.2 de `ENGINEERING_MEMORY_SETUP.md`):
+los cuatro dominios con sus casas, las reglas de tickets y cuándo usar el vault. El problema
+era que un `CLAUDE.md` solo lo lee quien trabaja **dentro** de esa carpeta, y no existía
+ningún cargador de nivel usuario — así que no llegaba a ningún proyecto. Ahora sí:
+
+| Agente | Cargador |
+| --- | --- |
+| `clauded` | `~/.claude/CLAUDE.md` — el archivo |
+| `claudep`, `claudeg` | `~/.claude-deepseek/CLAUDE.md` — symlink al anterior |
+| `claudej` | `~/.claude-j/CLAUDE.md` — symlink al anterior |
+| Codex CLI | `~/.codex/AGENTS.md` |
+
+Un solo archivo físico con symlinks, así los perfiles no pueden divergir. Cada wrapper
+`claude*` fija su propio `CLAUDE_CONFIG_DIR`, que es la razón de un symlink por perfil.
 
 ### El índice de la migración (`TICKET-NNN → TASK-2026-NNNNN`)
 

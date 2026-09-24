@@ -77,15 +77,36 @@ def build_internal_mcp_mount(
     )
 
 
-def build_global_mcp_mount(settings: Settings) -> MountedMCPServer | None:
-    """Build the global MCP — infra tools only (DNS). Used by manual Claude/Codex on any project."""
+def build_global_mcp_mount(
+    settings: Settings,
+    task_service: "TaskService | None" = None,
+    erpnext: Any | None = None,
+) -> MountedMCPServer | None:
+    """Build the global MCP — infra + tickets. Used by manual Claude/Codex on any project.
+
+    Originalmente exponia solo infraestructura (DNS). Se le agregaron los tools de tickets
+    porque es la unica superficie que ven las sesiones manuales de Codex CLI
+    (`~/.codex/config.toml` apunta aqui), y sin ellos un agente fuera de OpenCEO no puede
+    ni buscar ni registrar trabajo.
+
+    Los dos mounts exponen lo mismo; la diferencia es **quien los recibe**, no que
+    contienen: el interno se inyecta por configuracion en las sesiones que OpenCEO
+    gestiona, y el global es opt-in para sesiones manuales del host.
+
+    Superficie de seguridad: `MCP_SERVER_ALLOWED_IPS` es loopback-only por defecto y el
+    mount no se publica en Traefik, asi que solo alcanzable desde esta maquina.
+    """
     if not settings.MCP_SERVER_ENABLED:
         return None
+    if task_service is None:
+        register_fn = _register_infra_tools
+    else:
+        register_fn = lambda s, st: _register_all_tools(s, st, task_service, erpnext)
     return _build_mcp(
         settings=settings,
         path=_normalize_path(settings.MCP_GLOBAL_PATH),
         name="OpenCEO Global MCP",
-        register_fn=_register_infra_tools,
+        register_fn=register_fn,
         transport="streamable-http",
         stateless_http=False,
         json_response=True,

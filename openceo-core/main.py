@@ -159,7 +159,7 @@ scheduler = WaitingTaskScheduler(
     dev_session_service=dev_session_service,
 )
 internal_mcp = build_internal_mcp_mount(settings, task_service, erpnext_adapter)
-global_mcp = build_global_mcp_mount(settings)
+global_mcp = build_global_mcp_mount(settings, task_service, erpnext_adapter)
 horizon_service = HorizonService(settings=settings, repo=repo)
 # El timer unico de Horizon: duerme hasta el proximo vencimiento y lo despierta
 # cada encolado. No es un barrido (AGENTS.md §5.1).
