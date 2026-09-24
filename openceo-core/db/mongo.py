@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -10,6 +11,8 @@ from pymongo.errors import DuplicateKeyError
 from horizon.privacy import mirror_exclusion_filter
 from settings import Settings
 from state import DevSessionStatus, TaskStatus
+
+logger = logging.getLogger(__name__)
 
 
 class MongoRepository:
@@ -318,7 +321,45 @@ class MongoRepository:
 
         updates["updated_at"] = datetime.now(timezone.utc)
         await self.tasks.update_one({"task_id": task_id}, {"$set": updates})
-        return await self.get_task(task_id)
+        task = await self.get_task(task_id)
+        await self._notify_status_observer(task, updates)
+        return task
+
+    def set_status_observer(self, observer: Any | None) -> None:
+        """Instala el observador de cambios de estado (uno solo, opcional).
+
+        El observador se asigna desde fuera y se lee con `getattr` dentro de
+        `_notify_status_observer`, nunca se crea en `__init__`: los dobles de test
+        construyen el repositorio sin llamar a `super().__init__()`, y un atributo del
+        constructor no existiria ahi.
+        """
+        self._status_observer = observer
+
+    async def _notify_status_observer(self, task: dict[str, Any] | None, updates: dict[str, Any]) -> None:
+        """Avisa de una transicion de estado para propagarla al sistema de negocio.
+
+        Violacion de capas consciente: la persistencia dispara una notificacion. Se hace
+        AQUI y no en `TaskService.patch_task` porque este metodo es el unico camino por el
+        que pasan TODAS las transiciones, incluidas las que se saltan el embudo oficial
+        (el gate de rate limit, `run_task`, la revision de QA, el outcome de un workflow).
+        Engancharse en el embudo perderia esas transiciones en silencio.
+
+        El observador es opcional, se ejecuta fuera del camino critico y no puede lanzar:
+        un fallo suyo no debe romper un `patch_task`.
+        """
+        if task is None or "status" not in updates:
+            return
+        observer = getattr(self, "_status_observer", None)
+        if observer is None:
+            return
+        try:
+            await observer(task)
+        except Exception:
+            logger.warning(
+                "El observador de estado fallo para el ticket %s",
+                task.get("task_id"),
+                exc_info=True,
+            )
 
     async def due_waiting_tasks(self, now_utc: datetime) -> list[dict[str, Any]]:
         rows = self.tasks.find(
@@ -328,6 +369,31 @@ class MongoRepository:
             },
             sort=[("resume_at", ASCENDING)],
         )
+        return [self._clean(row) async for row in rows]
+
+    async def list_tasks_needing_erpnext_sync(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Tickets con el enlace de negocio roto, para reconciliar al arrancar.
+
+        Solo mira tickets donde la integracion **ya intento** enlazar (existe
+        `params._mirrors.erpnext`). NO hace backfill de los tickets historicos que nunca
+        pasaron por ERPNext: eso inventaria registros de negocio hacia atras, que es justo
+        lo que el contrato prohibe. Es reparacion de intentos propios, no migracion.
+
+        Lleva el filtro de privacidad de Horizon desde el primer commit. Sin el, la
+        reconciliacion publicaria datos personales en el primer reinicio — el mismo fallo
+        que ya se corrigio para el espejo de Notion (`tests/test_horizon_privacy.py`).
+
+        Acotada por `limit`: es reconciliacion de arranque, no un barrido periodico.
+        """
+        query: dict[str, Any] = {
+            "params._mirrors.erpnext": {"$exists": True},
+            "$or": [
+                {"params._mirrors.erpnext.name": {"$in": [None, ""]}},
+                {"params._mirrors.erpnext.pending_status": {"$ne": None}},
+            ],
+            **mirror_exclusion_filter(),
+        }
+        rows = self.tasks.find(query).limit(limit)
         return [self._clean(row) async for row in rows]
 
     async def mark_interrupted_tasks(self) -> int:

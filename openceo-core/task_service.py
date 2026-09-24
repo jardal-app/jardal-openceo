@@ -34,14 +34,20 @@ from state import (
     make_task_document,
     make_task_review_document,
 )
+from tools.erpnext_client import ERPNextError, ERPNextUnavailable, ERPNextValidationError
+from tools.erpnext_tickets import map_status
 
 if TYPE_CHECKING:
+    from tools.erpnext_tickets import ERPNextTicketAdapter
     from tools.notion import NotionTicketManager
     from workflow_service import WorkflowExecutionOutcome, WorkflowService
 
 logger = logging.getLogger(__name__)
 
 _NOTION_MIRROR_EVENT_KEY = "notion_mirror_created"
+
+#: Marca en `params._mirrors.erpnext` de un ticket cuyo enlace de negocio quedo pendiente.
+ERPNEXT_PENDING_REASON = "erpnext_pending"
 
 
 # Estados que cierran un ticket. Horizon reacciona a la transicion hacia uno de
@@ -51,8 +57,17 @@ _TERMINAL_TASK_STATUSES = frozenset(
         TaskStatus.COMPLETED.value,
         TaskStatus.FAILED.value,
         TaskStatus.ESCALATED.value,
+        TaskStatus.CANCELLED.value,
     }
 )
+
+#: Estados de ERPNext que son una decision de NEGOCIO y por tanto se propagan de vuelta
+#: al runtime. El resto (Open, Working, Pending Review, Overdue, Template) son eco de lo
+#: que OpenCEO ya empujo: propagarlos seria un bucle.
+_ERPNEXT_BUSINESS_TO_TASK_STATUS: dict[str, str] = {
+    "Completed": TaskStatus.COMPLETED.value,
+    "Cancelled": TaskStatus.CANCELLED.value,
+}
 
 
 class TaskService:
@@ -68,6 +83,7 @@ class TaskService:
         rate_monitor: RateMonitor | None = None,
         qa_service: QAReviewService | None = None,
         workflow_service: WorkflowService | None = None,
+        erpnext: "ERPNextTicketAdapter | None" = None,
     ) -> None:
         self._settings = settings
         self._repo = repo
@@ -77,10 +93,16 @@ class TaskService:
         self._rate_monitor = rate_monitor
         self._qa_service = qa_service
         self._workflow_service = workflow_service
+        # Colaborador opcional: sin el (o con ERPNEXT_TICKETS_ENABLED=false) el servicio
+        # se comporta exactamente como antes de la integracion. Los tests construyen
+        # TaskService con __new__ y sin __init__, asi que todo uso tolera None.
+        self._erpnext = erpnext
         self._locks: dict[str, asyncio.Lock] = {}
         self._project_locks: dict[str, asyncio.Lock] = {}
         self._notion_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._notion_worker: asyncio.Task[None] | None = None
+        self._erpnext_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._erpnext_worker: asyncio.Task[None] | None = None
         self._horizon_terminal: Any | None = None
 
     def set_horizon_hooks(self, *, on_task_terminal: Any | None = None) -> None:
@@ -143,6 +165,289 @@ class TaskService:
         """Put a task into the Notion mirror queue (non-blocking)."""
         self._notion_queue.put_nowait(task)
 
+    # --- ERPNext: registro de negocio -------------------------------------
+    #
+    # ERPNext es dueno del ticket de NEGOCIO; Mongo conserva la EJECUCION. La direccion
+    # esta en docs/OPENCEO_DIRECTION.md v1.1 y el contrato en
+    # docs/ARCHITECTURE_REFERENCE_2026.md §Read and Write Boundaries.
+    #
+    # Solo la creacion es sincrona: "escribir una tarea en Mongo no acredita un registro
+    # exitoso en ERPNext". Las transiciones de estado (Fase 3) van por cola y nunca
+    # bloquean el camino del request.
+
+    def _erpnext_ref(self, doc: Any) -> str:
+        """Clave de idempotencia determinista del ticket de negocio.
+
+        Con `source_id` se deriva de el, asi que un reintento y una llamada concurrente
+        producen el MISMO valor, y ERPNext deduplica aunque Mongo todavia no tenga el
+        documento. Sin `source_id` queda el `task_id`, que es un identificador generado y
+        por tanto NO protege ante un reintento del llamador: para ese caso `POST /api/tasks`
+        acepta la cabecera `Idempotency-Key`, que se convierte en `source_id` sintetico.
+        """
+        source = getattr(doc, "source", None)
+        source_value = getattr(source, "value", None) or str(source or "")
+        source_id = str(getattr(doc, "source_id", "") or "").strip()
+        if source_id:
+            return f"{source_value}:{source_id}"
+        return str(getattr(doc, "task_id", "") or "")
+
+    def _merge_erpnext_mirror_params(
+        self, params: dict[str, Any] | None, mirror: dict[str, Any]
+    ) -> dict[str, Any]:
+        merged = dict(params or {})
+        mirrors = merged.get("_mirrors")
+        if not isinstance(mirrors, dict):
+            mirrors = {}
+        current = mirrors.get("erpnext")
+        if isinstance(current, dict):
+            current.update(mirror)
+            mirror = current
+        mirrors["erpnext"] = mirror
+        merged["_mirrors"] = mirrors
+        return merged
+
+    async def _register_business_ticket(self, doc: Any) -> tuple[dict[str, Any] | None, bool]:
+        """Crea el ticket de negocio en ERPNext ANTES de persistir en Mongo.
+
+        Devuelve `(mirror, pending)`:
+
+        - `(None, False)` — la integracion esta apagada, o el ticket es de alcance personal
+          y el espejo externo personal esta deshabilitado.
+        - `(mirror, False)` — el ticket quedo registrado en el sistema de negocio.
+        - `(mirror, True)` — ERPNext no respondio. El enlace queda pendiente y el llamador
+          debe impedir que arranque ejecucion sobre trabajo que no existe en negocio.
+
+        Lanza si ERPNext **rechaza** los datos: ahi no se persiste nada en Mongo, porque un
+        ticket de ejecucion sin contraparte de negocio es exactamente el "competing business
+        record" que el contrato prohibe.
+        """
+        adapter = getattr(self, "_erpnext", None)
+        if adapter is None:
+            # Solo ocurre en tests, que inyectan el adapter explicitamente. En runtime
+            # `main.py` siempre lo construye.
+            return None, False
+        if not adapter.is_enabled:
+            # No configurado NO es "apagado": es un error de despliegue. Se falla fuerte
+            # en vez de crear un ticket que el sistema de negocio nunca vera.
+            raise ERPNextValidationError(
+                adapter.client.config_error() or "ERPNext no esta configurado."
+            )
+
+        snapshot = doc.model_dump(mode="python")
+        if is_personal_scope(snapshot) and not getattr(
+            self._settings, "HORIZON_PERSONAL_MIRROR_ENABLED", False
+        ):
+            return None, False
+
+        ref = self._erpnext_ref(doc)
+        params = snapshot.get("params") if isinstance(snapshot.get("params"), dict) else {}
+        priority = getattr(doc.priority, "value", None) or str(doc.priority or "")
+        now = datetime.now(timezone.utc).isoformat()
+
+        try:
+            result = await adapter.create_ticket(
+                ref=ref,
+                title=snapshot.get("title") or "",
+                description=snapshot.get("description") or "",
+                project_key=snapshot.get("project"),
+                priority=priority,
+                ticket_type=params.get("ticket_type"),
+                tags=snapshot.get("tags"),
+                due_date=params.get("due_date"),
+                ticket_number=snapshot.get("ticket_number"),
+                task_id=snapshot.get("task_id"),
+            )
+        except ERPNextUnavailable as exc:
+            logger.warning("ERPNext no respondio al registrar el ticket %s: %s", ref, exc)
+            # Misma forma que la rama de exito, con `name` vacio: quien lea el espejo no
+            # tiene que distinguir dos esquemas.
+            return {"name": None, "ref": ref, "pending": True, "linked_at": now}, True
+        except ERPNextError:
+            logger.exception("ERPNext rechazo el registro del ticket %s", ref)
+            raise
+
+        task = result.get("task") or {}
+        # Ojo: `TaskStatus` es `str, Enum`, pero `str(TaskStatus.QUEUED)` da
+        # 'TaskStatus.QUEUED' y no 'queued'. Sin `.value` el valor guardado nunca
+        # coincidiria con el que devuelve Mongo y cada parche pareceria una transicion.
+        status_value = snapshot.get("status")
+        status_value = getattr(status_value, "value", status_value)
+        return (
+            {
+                "name": task.get("name"),
+                "ref": ref,
+                # `status_pushed` guarda SIEMPRE el vocabulario de OpenCEO, no el de
+                # ERPNext: el observador compara contra el, y comparar `in_progress`
+                # contra `Working` haria que cada parche pareciera una transicion nueva.
+                "status_pushed": str(status_value or ""),
+                "pending": False,
+                "linked_at": now,
+            },
+            False,
+        )
+
+    async def _enqueue_erpnext_registration(self, task: dict[str, Any]) -> None:
+        """Reintenta el enlace de negocio de un ticket que quedo pendiente.
+
+        Se llama en el camino de idempotencia: si el ticket ya existe en Mongo pero su
+        espejo de ERPNext esta pendiente o ausente, hay que repararlo en vez de devolverlo
+        como si estuviera completo. Fire-and-forget: nunca puede romper la creacion.
+        """
+        adapter = getattr(self, "_erpnext", None)
+        if adapter is None or not adapter.is_enabled:
+            return
+
+        params = self._task_params(task)
+        mirrors = params.get("_mirrors")
+        existing = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
+        if isinstance(existing, dict) and existing.get("name") and not existing.get("pending"):
+            return
+
+        ref = ""
+        if isinstance(existing, dict):
+            ref = str(existing.get("ref") or "").strip()
+        if not ref:
+            return
+
+        try:
+            task_doc = await adapter.find_by_ref(ref)
+            if task_doc is not None:
+                mirror = {
+                    "name": task_doc.get("name"),
+                    "ref": ref,
+                    # Vocabulario de OpenCEO, no el de ERPNext (ver _register_business_ticket).
+                    "status_pushed": str(getattr(task.get("status"), "value", task.get("status")) or ""),
+                    "pending": False,
+                    "linked_at": datetime.now(timezone.utc).isoformat(),
+                }
+                await self._repo.patch_task(
+                    task["task_id"],
+                    {
+                        "params": self._merge_erpnext_mirror_params(params, mirror),
+                        "waiting_reason": None,
+                    },
+                )
+                logger.info("Enlace ERPNext reparado para el ticket %s -> %s", task["task_id"], mirror["name"])
+        except Exception:
+            logger.warning("No se pudo reparar el enlace ERPNext del ticket %s", task.get("task_id"), exc_info=True)
+
+    # --- ERPNext: transiciones de estado ----------------------------------
+    #
+    # `MongoRepository.patch_task` llama a `observe_task_status` en CADA transicion, asi
+    # que aqui no hay que conocer los sitios que escriben estado. La comparacion es contra
+    # el ultimo estado EMPUJADO (no contra el anterior en la base), lo que hace el envio
+    # idempotente y lo vuelve independiente del orden entre parches concurrentes.
+
+    def start_erpnext_worker(self) -> None:
+        if self._erpnext_worker is not None and not self._erpnext_worker.done():
+            return
+        self._erpnext_worker = asyncio.create_task(self._erpnext_queue_loop())
+
+    async def stop_erpnext_worker(self) -> None:
+        if self._erpnext_worker is not None:
+            self._erpnext_worker.cancel()
+            try:
+                await self._erpnext_worker
+            except asyncio.CancelledError:
+                pass
+            self._erpnext_worker = None
+
+    async def observe_task_status(self, task: dict[str, Any]) -> None:
+        """Recibe cada transicion de estado. Nunca hace I/O: solo encola."""
+        adapter = getattr(self, "_erpnext", None)
+        if adapter is None or not adapter.is_enabled or not task:
+            return
+        if is_personal_scope(task) and not getattr(
+            self._settings, "HORIZON_PERSONAL_MIRROR_ENABLED", False
+        ):
+            return
+
+        params = self._task_params(task)
+        mirrors = params.get("_mirrors")
+        mirror = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
+        if not isinstance(mirror, dict):
+            return
+        name = str(mirror.get("name") or "").strip()
+        if not name:
+            # El enlace de negocio todavia esta pendiente: lo repara la reconciliacion.
+            return
+
+        status = str(task.get("status") or "")
+        if status == str(mirror.get("status_pushed") or ""):
+            return
+        if map_status(status) is None:
+            # Estado que no se empuja (completed, failed, escalated, interrupted).
+            return
+
+        queue = getattr(self, "_erpnext_queue", None)
+        if queue is not None:
+            queue.put_nowait({"task_id": task.get("task_id"), "name": name, "status": status})
+
+    async def _erpnext_queue_loop(self) -> None:
+        while True:
+            item = await self._erpnext_queue.get()
+            try:
+                await self._push_status(item)
+            except Exception:
+                logger.warning("Fallo empujando un estado a ERPNext", exc_info=True)
+            finally:
+                self._erpnext_queue.task_done()
+
+    async def _push_status(self, item: dict[str, Any]) -> None:
+        """Empuja una transicion con reintento real, no un sleep fijo."""
+        adapter = getattr(self, "_erpnext", None)
+        if adapter is None or not adapter.is_enabled:
+            return
+
+        delay = 1.0
+        for attempt in range(3):
+            try:
+                await adapter.update_status(item["name"], item["status"])
+            except ERPNextUnavailable as exc:
+                if attempt == 2:
+                    logger.warning(
+                        "ERPNext no respondio al empujar %s -> %s: %s", item["name"], item["status"], exc
+                    )
+                    await self._record_status_outcome(item, pushed=False)
+                    return
+                await asyncio.sleep(delay)
+                delay *= 2
+            except ERPNextError:
+                logger.exception(
+                    "ERPNext rechazo la transicion %s -> %s", item["name"], item["status"]
+                )
+                return
+            else:
+                await self._record_status_outcome(item, pushed=True)
+                return
+
+    async def _record_status_outcome(self, item: dict[str, Any], *, pushed: bool) -> None:
+        """Deja constancia del resultado en `params._mirrors.erpnext`.
+
+        Un fallo no se pierde en silencio: queda como `pending_status` para que la
+        reconciliacion de arranque lo reintente. Es el fallo que el espejo de Notion si
+        tiene (marca el exito despues del HTTP y en una escritura aparte).
+        """
+        task_id = str(item.get("task_id") or "")
+        if not task_id:
+            return
+        task = await self._repo.get_task(task_id)
+        if not task:
+            return
+        params = self._task_params(task)
+        if pushed:
+            mirror = {
+                "status_pushed": item["status"],
+                "pending_status": None,
+                "status_pushed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        else:
+            mirror = {"pending_status": item["status"]}
+        # Escribir solo `params` no dispara al observador (no hay cambio de `status`).
+        await self._repo.patch_task(
+            task_id, {"params": self._merge_erpnext_mirror_params(params, mirror)}
+        )
+
     async def create_task(self, payload: TaskCreateRequest) -> dict[str, Any]:
         # Idempotency: if a task with the same source+source_id exists, return it
         if payload.source_id:
@@ -151,15 +456,43 @@ class TaskService:
                 logger.info("Idempotent hit: task %s already exists for source=%s source_id=%s",
                             existing["task_id"], payload.source.value, payload.source_id)
                 self._enqueue_notion_mirror(existing)
+                # El ticket puede existir en Mongo con el enlace de negocio pendiente:
+                # devolverlo sin repararlo lo dejaria invisible en ERPNext para siempre.
+                await self._enqueue_erpnext_registration(existing)
                 return existing
 
         doc = make_task_document(payload)
         await self._apply_default_phase_workflow_to_document(doc)
         if doc.ticket_number is None:
             doc.ticket_number = await self._repo.get_next_ticket_number()
+
+        # El ticket de negocio se crea ANTES de persistir la ejecucion. Si ERPNext rechaza
+        # los datos, esto lanza y no queda nada en Mongo: un ticket de ejecucion sin
+        # contraparte de negocio es el "competing business record" que el contrato prohibe.
+        erpnext_mirror, erpnext_pending = await self._register_business_ticket(doc)
+        if erpnext_mirror is not None:
+            doc.params = self._merge_erpnext_mirror_params(doc.params, erpnext_mirror)
+
         created = await self._repo.create_task(doc.model_dump(mode="python"))
         await self._hub.broadcast("task_created", created)
         self._enqueue_notion_mirror(created)
+
+        # ERPNext no respondio: el ticket queda registrado pero sin enlace de negocio.
+        # No se arranca ejecucion sobre trabajo que todavia no existe en el sistema de
+        # negocio; el reencolado repara el enlace cuando ERPNext vuelva.
+        if erpnext_pending:
+            logger.warning(
+                "Ticket %s queda pendiente de enlace ERPNext; no se lanza ejecucion.",
+                created["task_id"],
+            )
+            await self._repo.patch_task(
+                created["task_id"],
+                {
+                    "status": TaskStatus.QUEUED.value,
+                    "waiting_reason": ERPNEXT_PENDING_REASON,
+                },
+            )
+            return created
 
         if self._settings.TASK_AUTORUN and payload.autorun:
             try:
@@ -568,6 +901,147 @@ class TaskService:
                 mirrored += 1
         logger.info("Startup reconcile: mirrored %d/%d", mirrored, len(pending))
         return mirrored
+
+    # --- ERPNext: camino inverso (decisiones de negocio hacia el runtime) ---
+    #
+    # El contrato exige que la actividad humana en ERPNext llegue a OpenCEO por eventos
+    # explicitos (ARCHITECTURE_REFERENCE_2026.md §Read and Write Boundaries). Lo hace un
+    # webhook de Frappe, no un sondeo: AGENTS.md §5.1 prohibe los barridos periodicos.
+
+    async def find_task_for_business_ref(
+        self, *, task_id: str | None = None, ref: str | None = None
+    ) -> dict[str, Any] | None:
+        """Resuelve la tarea de Mongo a partir de una referencia de ERPNext.
+
+        Se prefiere `openceo_task_id` (identidad directa); el `ref` es el respaldo, y se
+        descompone con `partition` porque `TaskSource` es un enum cerrado sin `:`.
+        """
+        if task_id:
+            task = await self._repo.get_task(str(task_id).strip())
+            if task:
+                return task
+        key = str(ref or "").strip()
+        if not key:
+            return None
+        source, _, source_id = key.partition(":")
+        if source and source_id:
+            return await self._repo.find_task_by_source(source, source_id)
+        return None
+
+    async def apply_business_status(
+        self,
+        *,
+        task_id: str | None = None,
+        ref: str | None = None,
+        business_status: str | None = None,
+        deleted: bool = False,
+    ) -> dict[str, Any]:
+        """Aplica al runtime una decision tomada por un humano en ERPNext.
+
+        Solo se propagan las decisiones de NEGOCIO (`Completed`, `Cancelled` y el borrado).
+        Los demas estados de `Task` son eco de lo que OpenCEO ya empujo, y propagarlos
+        seria un bucle.
+
+        El guardia anti-eco es estructural, no casual: el parche escribe `status_pushed`
+        con el mismo valor que el estado nuevo, asi que aunque el observador vea el
+        cambio, no lo reenvia a ERPNext.
+        """
+        adapter = getattr(self, "_erpnext", None)
+        if adapter is None:
+            return {"ok": False, "status": "no_adapter"}
+
+        task = await self.find_task_for_business_ref(task_id=task_id, ref=ref)
+        if task is None:
+            return {"ok": False, "status": "not_found"}
+
+        target = _ERPNEXT_BUSINESS_TO_TASK_STATUS.get(str(business_status or "").strip())
+        if deleted:
+            target = TaskStatus.CANCELLED.value
+        if target is None:
+            return {"ok": True, "status": "ignored", "task_id": task.get("task_id")}
+        if str(task.get("status") or "") == target:
+            return {"ok": True, "status": "already_applied", "task_id": task.get("task_id")}
+
+        params = self._task_params(task)
+        mirror = {
+            "business_status": "Deleted" if deleted else str(business_status or ""),
+            "business_synced_at": datetime.now(timezone.utc).isoformat(),
+            # Guardia anti-eco: el observador compara contra este campo.
+            "status_pushed": target,
+        }
+        updates: dict[str, Any] = {
+            "status": target,
+            "params": self._merge_erpnext_mirror_params(params, mirror),
+        }
+        if target == TaskStatus.CANCELLED.value:
+            # Una cancelacion del negocio no se reanuda nunca: se limpia el despertador.
+            updates["resume_at"] = None
+            updates["waiting_reason"] = None
+            updates["error"] = (
+                "El ticket fue eliminado en ERPNext."
+                if deleted
+                else "El ticket fue cancelado en ERPNext."
+            )
+
+        updated = await self.patch_task(task["task_id"], updates)
+        logger.info(
+            "Decision de negocio aplicada al ticket %s: %s",
+            task.get("task_id"),
+            "eliminado" if deleted else business_status,
+        )
+        return {
+            "ok": True,
+            "status": "applied",
+            "task_id": task.get("task_id"),
+            "task_status": target,
+        }
+
+    async def startup_reconcile_erpnext(self) -> int:
+        """Repara al arrancar los enlaces de negocio que quedaron a medias.
+
+        Cinturon de seguridad del observador de transiciones: si el proceso murio entre el
+        cambio de estado y el envio a ERPNext, o si ERPNext estaba caido, la brecha se
+        repara aqui. Nunca replica un efecto ya exitoso, porque compara contra el estado
+        empujado y no contra el estado anterior.
+
+        Acotada y de una sola pasada, como la de Notion: no es un barrido periodico
+        (AGENTS.md §5.1).
+        """
+        adapter = getattr(self, "_erpnext", None)
+        if adapter is None or not adapter.is_enabled:
+            return 0
+
+        pending = await self._repo.list_tasks_needing_erpnext_sync(limit=200)
+        if not pending:
+            return 0
+        logger.info("Startup reconcile ERPNext: %d tickets con enlace roto", len(pending))
+
+        queue = getattr(self, "_erpnext_queue", None)
+        repaired = 0
+        for task in pending:
+            params = self._task_params(task)
+            mirrors = params.get("_mirrors")
+            mirror = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
+            if not isinstance(mirror, dict):
+                continue
+
+            if not str(mirror.get("name") or "").strip():
+                # El ticket de negocio nunca llego a crearse (o no se supo): reintentar.
+                await self._enqueue_erpnext_registration(task)
+                repaired += 1
+                continue
+
+            # El ticket existe pero una transicion no se pudo empujar.
+            status = str(task.get("status") or "")
+            pending_status = str(mirror.get("pending_status") or "").strip()
+            if queue is not None and pending_status and map_status(status) is not None:
+                queue.put_nowait(
+                    {"task_id": task.get("task_id"), "name": mirror["name"], "status": status}
+                )
+                repaired += 1
+
+        logger.info("Startup reconcile ERPNext: %d reparados de %d", repaired, len(pending))
+        return repaired
 
     async def _ensure_notion_mirror(self, task: dict[str, Any]) -> dict[str, Any]:
         """Create a Notion mirror page for a task. Called reactively from CRUD operations only."""

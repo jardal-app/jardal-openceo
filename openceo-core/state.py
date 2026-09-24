@@ -50,6 +50,9 @@ class TaskStatus(str, Enum):
     ESCALATED = "escalated"
     INTERRUPTED = "interrupted"
     WAITING = "waiting"
+    # El negocio cancelo el ticket (o lo borro) en ERPNext. Es terminal y no reanuda:
+    # se distingue de WAITING, que implica que algo lo va a desbloquear.
+    CANCELLED = "cancelled"
 
 
 class WorkflowRunStatus(str, Enum):
