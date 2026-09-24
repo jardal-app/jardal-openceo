@@ -78,15 +78,16 @@ tools MCP no pasaban `autorun` y heredaban el `True` del modelo, así que **regi
 lanzaba ejecución** — con `TASK_AUTORUN=true` en el `.env`. Ahora registrar no ejecuta: hace falta
 `autorun: true` explícito, y la descripción del tool lo dice.
 
-**Documento nuevo: [`CLAUDE_TICKETS.md`](CLAUDE_TICKETS.md)** — la referencia corta para pegar
-en el `AGENTS.md`/`CLAUDE.md` de un proyecto, que defiere al canónico.
-
 **Los dos mounts MCP exponen ahora lo mismo.** El global tenía solo DNS, y era la única
 superficie que veían las **sesiones manuales de Codex CLI** (`mcp_servers.openceo-global` en
 `~/.codex/config.toml`): un agente fuera de OpenCEO no podía ni buscar ni registrar trabajo.
 Claude Code manual ya los tenía porque lee el interno (`~/.claude.json`). La diferencia entre
 mounts es **quién los recibe**, no qué contienen. `MCP_SERVER_ALLOWED_IPS` es loopback-only y
 ninguno está publicado en Traefik.
+
+**No hay documento de tickets en este repo a propósito.** El canónico es
+`jardal-knowledge/CLAUDE.md` y llega a todos los proyectos por los cargadores de nivel usuario
+(abajo). Un archivo por proyecto sería una tercera fuente que deriva.
 
 ### Memoria de ingeniería centralizada
 
