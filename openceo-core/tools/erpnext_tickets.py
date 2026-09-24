@@ -155,6 +155,21 @@ class ERPNextTicketAdapter:
 
     # --- maestros --------------------------------------------------------
 
+    async def find_project(self, project_key: str) -> str | None:
+        """Busca el `Project` por su clave. NO crea nada: es camino de lectura."""
+        key = (project_key or "").strip()
+        if not key:
+            return None
+        if key in self._projects_cache:
+            return self._projects_cache[key]
+        found = await self._client.list_docs("Project", filters=[["project_key", "=", key]], limit=1)
+        if not found:
+            return None
+        name = str(found[0].get("name") or "")
+        if name:
+            self._projects_cache[key] = name
+        return name or None
+
     async def ensure_project(self, project_key: str, display_name: str | None = None) -> str | None:
         """Devuelve el `name` del Project, creandolo si no existe.
 
@@ -165,14 +180,9 @@ class ERPNextTicketAdapter:
         key = (project_key or "").strip()
         if not key:
             return None
-        if key in self._projects_cache:
-            return self._projects_cache[key]
-
-        found = await self._client.list_docs("Project", filters=[["project_key", "=", key]], limit=1)
-        if found:
-            name = str(found[0].get("name") or "")
-            self._projects_cache[key] = name
-            return name
+        existing = await self.find_project(key)
+        if existing:
+            return existing
 
         created = await self._client.create_doc(
             "Project",
@@ -207,6 +217,58 @@ class ERPNextTicketAdapter:
             return None
         rows = await self._client.list_docs("Task", filters=[["openceo_ref", "=", key]], fields=_TASK_FIELDS, limit=1)
         return rows[0] if rows else None
+
+    async def get_ticket(self, identifier: str) -> dict[str, Any] | None:
+        """Lee un ticket por su nombre de ERPNext (`TASK-...`) o por su `openceo_ref`.
+
+        Existe para que un agente pueda comprobar el estado de un ticket concreto antes de
+        decidir si crea otro.
+        """
+        key = (identifier or "").strip()
+        if not key:
+            return None
+        if key.upper().startswith("TASK-"):
+            try:
+                return await self._client.get_doc("Task", key)
+            except ERPNextError:
+                return None
+        return await self.find_by_ref(key)
+
+    async def search_tickets(
+        self,
+        *,
+        query: str | None = None,
+        project_key: str | None = None,
+        status: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Busca tickets de negocio en ERPNext.
+
+        Es la capacidad que un agente necesita para **no duplicar**: antes de registrar
+        trabajo conviene mirar si ya existe un ticket que lo cubra. Busca sobre el registro
+        de negocio, no sobre Mongo, porque el backlog vive ahi y puede no tener todavia una
+        tarea de ejecucion asociada.
+
+        Solo lectura: un `project_key` inexistente devuelve lista vacia en vez de crear el
+        proyecto, que es lo que haria `ensure_project`.
+        """
+        filters: list[list[Any]] = []
+        if query:
+            filters.append(["subject", "like", f"%{str(query).strip()}%"])
+        if project_key:
+            project_name = await self.find_project(project_key)
+            if not project_name:
+                return []
+            filters.append(["project", "=", project_name])
+        if status:
+            filters.append(["status", "=", str(status).strip()])
+
+        return await self._client.list_docs(
+            "Task",
+            filters=filters or None,
+            fields=_TASK_FIELDS,
+            limit=max(1, min(int(limit or 20), 100)),
+        )
 
     async def build_payload(
         self,

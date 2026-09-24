@@ -24,7 +24,7 @@ cristalizado. El servicio corre con el código nuevo.
 | 4 | **27 items de `PENDINGS.md` migrados** a ERPNext, auditados contra el código | 27 creados, segunda corrida: 0 creados / 27 existentes |
 | 5 | **Camino inverso**: webhook de Frappe → `POST /api/integrations/erpnext/task` → el runtime reacciona | En vivo: cerrar→`completed`, cancelar→`cancelled`, borrar→`cancelled` |
 
-**Tests:** baseline 7 fallan / 236 pasan → ahora **7 fallan / 281 pasan**. Los 7 son los
+**Tests:** baseline 7 fallan / 236 pasan → ahora **7 fallan / 289 pasan**. Los 7 son los
 preexistentes diagnosticados abajo; **cero regresiones**. `npm run build` del dashboard OK.
 
 ### El camino inverso (Fase 5)
@@ -61,6 +61,27 @@ algo lo va a desbloquear, ni `failed`, que implicaría que falló la ejecución)
 
 **Secreto del webhook:** `ERPNEXT_WEBHOOK_SECRET` en `openceo-core/.env`. Si falta, el endpoint
 responde **503**; con secreto incorrecto, **401**. Se compara con `hmac.compare_digest`.
+
+### Capacidades MCP para los agentes (Fase 6)
+
+Un agente que solo puede **crear** tickets duplica trabajo: no tiene forma de saber si ya existe
+uno que lo cubra. Se añadieron dos tools de lectura al **MCP interno** (el global sigue solo con
+DNS):
+
+| Tool | Qué hace |
+| --- | --- |
+| `openceo_search_tickets` | Busca por texto en el asunto, filtra por `project` (project_key) y `status`, y **enriquece con el estado de ejecución de Mongo** cuando el ticket llegó a ejecutarse. Es de solo lectura: un `project_key` desconocido devuelve lista vacía, **no crea el proyecto** |
+| `openceo_get_ticket` | Lee uno por `TASK-2026-000NN` o por su `openceo_ref` |
+
+**`autorun` ahora es explícito y por defecto `false`** en los tres tools de creación. Antes los
+tools MCP no pasaban `autorun` y heredaban el `True` del modelo, así que **registrar backlog
+lanzaba ejecución** — con `TASK_AUTORUN=true` en el `.env`. Ahora registrar no ejecuta: hace falta
+`autorun: true` explícito, y la descripción del tool lo dice.
+
+**Documento nuevo: [`CLAUDE_TICKETS.md`](CLAUDE_TICKETS.md)** — la sección para copiar en el
+`AGENTS.md`/`CLAUDE.md` de cada proyecto. Explica dónde vive el trabajo, las reglas (buscar antes
+de crear, registrar ≠ ejecutar, no mantener backlog en markdown) y el reparto con el vault de
+Obsidian y `qmd`.
 
 ### El índice de la migración (`TICKET-NNN → TASK-2026-NNNNN`)
 
@@ -127,7 +148,7 @@ por TICKET-026; migrarlos como abiertos habría resucitado decisiones cerradas (
 **Cosas que harán perder tiempo si no se saben:**
 
 - **Los tests necesitan el venv del root**: `./.venv/bin/python -m pytest tests/ -q`. Línea base al
-  cerrar: **281 pasan / 7 fallan**.
+  cerrar: **289 pasan / 7 fallan**.
 - **No hay flag de encendido/apagado, y es deliberado.** Existió `ERPNEXT_TICKETS_ENABLED` y se
   eliminó: apagado, OpenCEO creaba tickets que vivían solo en Mongo y que el sistema de negocio
   nunca vería, y la reconciliación **no los recupera** (no hace backfill a propósito). Eso no es
@@ -157,7 +178,7 @@ por TICKET-026; migrarlos como abiertos habría resucitado decisiones cerradas (
 
 ```bash
 ./scripts/openceo-core-host.sh status
-./.venv/bin/python -m pytest tests/ -q                      # 281 pasan / 7 fallan
+./.venv/bin/python -m pytest tests/ -q                      # 289 pasan / 7 fallan
 ./.venv/bin/python scripts/migrate_pendings_to_erpnext.py   # 0 creados / 27 existentes
 set -a; . openceo-core/.env.finance.local; set +a
 curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: token $ERPNEXT_API_KEY:$ERPNEXT_API_SECRET" \

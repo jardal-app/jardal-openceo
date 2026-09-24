@@ -24,7 +24,7 @@ CORE_DIR = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
-from tools.erpnext_client import ERPNextDuplicateError  # noqa: E402
+from tools.erpnext_client import ERPNextDuplicateError, ERPNextValidationError  # noqa: E402
 from tools.erpnext_tickets import (  # noqa: E402
     SUBJECT_MAX_LENGTH,
     ERPNextTicketAdapter,
@@ -49,12 +49,21 @@ class FakeClient:
         self.created: list[tuple[str, dict]] = []
         self.updated: list[tuple[str, str, dict]] = []
         self.listed: list[tuple[str, list | None]] = []
+        self.limits: list[int] = []
+        self.docs: dict[str, dict] = {}
+
+    async def get_doc(self, doctype, name):
+        row = self.docs.get(name)
+        if row is None:
+            raise ERPNextValidationError(f"No existe {doctype} {name}")
+        return row
 
     def config_error(self) -> str | None:
         return None if self.is_configured else "Falta configuracion de ERPNext: ERPNEXT_URL."
 
     async def list_docs(self, doctype, *, filters=None, fields=None, limit=20):
         self.listed.append((doctype, filters))
+        self.limits.append(limit)
         if doctype == "Task Type":
             return [{"name": "Bug"}, {"name": "Feature"}]
         if doctype == "Project":
@@ -569,6 +578,64 @@ class ReversePathTests(unittest.TestCase):
         result = run(service.apply_business_status(ref="api:1", business_status="Completed"))
         self.assertEqual(vistos, [("api", "1")])
         self.assertEqual(result["status"], "applied")
+
+
+class SearchAndReadTests(unittest.TestCase):
+    """Buscar antes de crear: es lo que evita el ticket duplicado."""
+
+    def test_busqueda_arma_filtro_de_texto(self):
+        client = FakeClient()
+        adapter = make_adapter(client)
+        run(adapter.search_tickets(query="login google"))
+        _, filters = [c for c in client.listed if c[0] == "Task"][0]
+        self.assertIn(["subject", "like", "%login google%"], filters)
+
+    def test_busqueda_filtra_por_proyecto_y_estado(self):
+        client = FakeClient()
+        adapter = make_adapter(client)
+        run(adapter.search_tickets(project_key="proj-x", status="Open"))
+        _, filters = [c for c in client.listed if c[0] == "Task"][0]
+        self.assertIn(["project", "=", "PROJ-0001"], filters)
+        self.assertIn(["status", "=", "Open"], filters)
+
+    def test_busqueda_en_proyecto_inexistente_no_crea_nada(self):
+        """Camino de lectura: un project_key desconocido NO debe crear el Project."""
+        client = FakeClient()
+        adapter = make_adapter(client)
+        rows = run(adapter.search_tickets(project_key="no-existe"))
+        self.assertEqual(rows, [])
+        self.assertEqual(client.created, [], "buscar no puede tener efectos secundarios")
+
+    def test_sin_filtros_no_inventa_clausulas(self):
+        client = FakeClient()
+        adapter = make_adapter(client)
+        run(adapter.search_tickets())
+        _, filters = [c for c in client.listed if c[0] == "Task"][0]
+        self.assertIsNone(filters)
+
+    def test_limite_se_acota(self):
+        client = FakeClient()
+        adapter = make_adapter(client)
+        run(adapter.search_tickets(limit=9999))
+        self.assertEqual(client.limits[-1], 100)
+
+    def test_get_ticket_por_nombre_usa_el_doc_directo(self):
+        client = FakeClient()
+        client.docs["TASK-2026-00025"] = {"name": "TASK-2026-00025", "subject": "x"}
+        adapter = make_adapter(client)
+        row = run(adapter.get_ticket("TASK-2026-00025"))
+        self.assertEqual(row["name"], "TASK-2026-00025")
+
+    def test_get_ticket_por_ref_cae_a_busqueda(self):
+        client = FakeClient(by_ref={"name": "TASK-2026-00026", "openceo_ref": "api:1"})
+        adapter = make_adapter(client)
+        row = run(adapter.get_ticket("api:1"))
+        self.assertEqual(row["name"], "TASK-2026-00026")
+
+    def test_get_ticket_inexistente_devuelve_none(self):
+        client = FakeClient()
+        adapter = make_adapter(client)
+        self.assertIsNone(run(adapter.get_ticket("TASK-2026-99999")))
 
 
 if __name__ == "__main__":
