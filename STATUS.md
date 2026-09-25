@@ -89,6 +89,26 @@ ninguno está publicado en Traefik.
 `jardal-knowledge/CLAUDE.md` y llega a todos los proyectos por los cargadores de nivel usuario
 (abajo). Un archivo por proyecto sería una tercera fuente que deriva.
 
+### Visibilidad del provider en el tablero (2026-09-25)
+
+Dos campos custom nuevos en `Task`, para que el tablero de ERPNext no oculte lo que decide
+cuánto cuesta un ticket:
+
+| Campo | Tipo | Por qué |
+| --- | --- | --- |
+| `openceo_coding_tool` | Select (`codex`/`claude`/`glm`/`gemini`/`opencode`/`kimi`/`tier_s`) | Sin él no se ve que un ticket es **Tier S** — lento, caro y con revisores múltiples |
+| `openceo_external_url` | Data (URL) | El enlace a donde nació la petición |
+
+`map_coding_tool` **omite** un provider que no esté en el enum: el campo es un Select y un
+valor inválido haría fallar el POST, perdiendo el ticket entero por un dato de ejecución.
+
+**Lo que sigue sin viajar a ERPNext, y está bien que no viaje:** fases de workflow,
+aprobaciones, QA, visibilidad de cliente, sesiones de coding y trazabilidad. Son *cómo se
+ejecuta* y su casa es MongoDB; el vínculo es `openceo_ref` + `openceo_task_id`. Comparado con
+lo que el espejo de Notion sí mostraba (`agent`, `approval_state`, `runtime_summary`,
+`external_url`), ERPNext sigue mostrando menos — por eso `external_url` se agregó, y por eso
+`runtime_summary` y `last_sync_at` se dejaron fuera a propósito: cambian en cada parche.
+
 ### Memoria de ingeniería centralizada
 
 `jardal-knowledge/CLAUDE.md` es la **autoridad** (v2.2 de `ENGINEERING_MEMORY_SETUP.md`):

@@ -27,6 +27,7 @@ import logging
 from typing import Any
 
 from settings import Settings
+from state import CodingTool
 from tools.erpnext_client import (
     ERPNextClient,
     ERPNextDuplicateError,
@@ -36,6 +37,10 @@ from tools.erpnext_client import (
 logger = logging.getLogger(__name__)
 
 SUBJECT_MAX_LENGTH = 140
+
+#: Valores que acepta el Select `openceo_coding_tool` en ERPNext. Se derivan del enum
+#: para que no puedan desincronizarse: si se agrega un provider, se agrega aca solo.
+_CODING_TOOLS: frozenset[str] = frozenset(tool.value for tool in CodingTool)
 
 #: OpenCEO -> ERPNext. `completed` NO esta a proposito:
 #: `docs/ARCHITECTURE_REFERENCE_2026.md` dice que "completed en un registro de ejecucion no
@@ -66,6 +71,8 @@ _TASK_FIELDS = [
     "openceo_ref",
     "openceo_ticket_number",
     "openceo_task_id",
+    "openceo_coding_tool",
+    "openceo_external_url",
 ]
 
 
@@ -107,6 +114,17 @@ def normalize_due_date(value: str | None) -> str | None:
 def as_user_tags(tags: list[str] | None) -> str | None:
     clean = [str(tag).strip().replace(",", " ") for tag in (tags or []) if str(tag).strip()]
     return ",".join(clean) if clean else None
+
+
+def map_coding_tool(value: Any) -> str | None:
+    """Normaliza el provider. Devuelve None si no es un valor conocido.
+
+    `openceo_coding_tool` es un **Select**, asi que un valor fuera de la lista haria
+    fallar el POST y el ticket no se crearia. Un provider desconocido se omite: se
+    pierde el dato de ejecucion, no el ticket de negocio.
+    """
+    raw = str(getattr(value, "value", value) or "").strip().lower()
+    return raw if raw in _CODING_TOOLS else None
 
 
 def tags_footer(tags: list[str] | None) -> str:
@@ -283,6 +301,8 @@ class ERPNextTicketAdapter:
         due_date: str | None = None,
         ticket_number: int | None = None,
         task_id: str | None = None,
+        coding_tool: Any = None,
+        external_url: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "subject": truncate_subject(title),
@@ -322,6 +342,13 @@ class ERPNextTicketAdapter:
         if task_id:
             payload["openceo_task_id"] = str(task_id)
 
+        coding = map_coding_tool(coding_tool)
+        if coding:
+            payload["openceo_coding_tool"] = coding
+        url = str(external_url or "").strip()
+        if url:
+            payload["openceo_external_url"] = url
+
         return payload
 
     async def create_ticket(
@@ -337,6 +364,8 @@ class ERPNextTicketAdapter:
         due_date: str | None = None,
         ticket_number: int | None = None,
         task_id: str | None = None,
+        coding_tool: Any = None,
+        external_url: str | None = None,
     ) -> dict[str, Any]:
         """Crea el Task. Idempotente por `ref`.
 
@@ -357,6 +386,8 @@ class ERPNextTicketAdapter:
             due_date=due_date,
             ticket_number=ticket_number,
             task_id=task_id,
+            coding_tool=coding_tool,
+            external_url=external_url,
         )
 
         try:

@@ -256,6 +256,10 @@ class TaskService:
                 due_date=params.get("due_date"),
                 ticket_number=snapshot.get("ticket_number"),
                 task_id=snapshot.get("task_id"),
+                # Provider y origen son visibilidad de negocio: sin el provider, el
+                # tablero oculta que un ticket es Tier S (lento, caro, multi-revisor).
+                coding_tool=snapshot.get("coding_tool"),
+                external_url=params.get("external_url"),
             )
         except ERPNextUnavailable as exc:
             logger.warning("ERPNext no respondio al registrar el ticket %s: %s", ref, exc)

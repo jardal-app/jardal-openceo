@@ -28,6 +28,7 @@ from tools.erpnext_client import ERPNextDuplicateError, ERPNextValidationError  
 from tools.erpnext_tickets import (  # noqa: E402
     SUBJECT_MAX_LENGTH,
     ERPNextTicketAdapter,
+    map_coding_tool,
     map_priority,
     map_status,
     normalize_due_date,
@@ -35,6 +36,7 @@ from tools.erpnext_tickets import (  # noqa: E402
     to_html_description,
     truncate_subject,
 )
+from state import CodingTool  # noqa: E402
 
 TITULO_LARGO = "Arreglar el login con Google cuando el usuario tiene 2FA activo " * 4
 
@@ -152,6 +154,20 @@ class MappingTests(unittest.TestCase):
         self.assertIn("auth", footer)
         self.assertEqual(tags_footer([]), "")
 
+    def test_provider_se_normaliza_desde_el_enum(self):
+        self.assertEqual(map_coding_tool(CodingTool.TIER_S), "tier_s")
+        self.assertEqual(map_coding_tool("TIER_S"), "tier_s")
+        self.assertEqual(map_coding_tool("codex"), "codex")
+
+    def test_provider_desconocido_devuelve_none(self):
+        """`openceo_coding_tool` es un Select: un valor invalido haria fallar el POST.
+
+        Omitirlo pierde un dato de ejecucion; mandarlo perderia el ticket entero.
+        """
+        self.assertIsNone(map_coding_tool("provider-nuevo"))
+        self.assertIsNone(map_coding_tool(""))
+        self.assertIsNone(map_coding_tool(None))
+
 
 class PayloadTests(unittest.TestCase):
     def test_payload_completo(self):
@@ -194,6 +210,28 @@ class PayloadTests(unittest.TestCase):
         self.assertNotIn("project", payload)
         self.assertNotIn("exp_end_date", payload)
         self.assertNotIn("description", payload)
+        self.assertNotIn("openceo_coding_tool", payload)
+        self.assertNotIn("openceo_external_url", payload)
+
+    def test_provider_y_origen_llegan_a_erpnext(self):
+        """Sin ellos el tablero oculta si un ticket es Tier S y de donde vino."""
+        adapter = make_adapter(FakeClient())
+        payload = run(
+            adapter.build_payload(
+                ref="r",
+                title="t",
+                coding_tool=CodingTool.TIER_S,
+                external_url="https://x.test/1",
+            )
+        )
+        self.assertEqual(payload["openceo_coding_tool"], "tier_s")
+        self.assertEqual(payload["openceo_external_url"], "https://x.test/1")
+
+    def test_provider_invalido_no_tumba_el_ticket(self):
+        adapter = make_adapter(FakeClient())
+        payload = run(adapter.build_payload(ref="r", title="t", coding_tool="lo-que-sea"))
+        self.assertNotIn("openceo_coding_tool", payload)
+        self.assertEqual(payload["subject"], "t")
 
 
 class EnsureProjectTests(unittest.TestCase):
