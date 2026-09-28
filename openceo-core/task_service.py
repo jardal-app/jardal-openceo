@@ -389,7 +389,7 @@ class TaskService:
         if status == str(mirror.get("status_pushed") or ""):
             return
         if map_status(status) is None:
-            # Estado que no se empuja (completed, failed, escalated, interrupted).
+            # Estado que no se empuja (failed, escalated, interrupted).
             return
 
         queue = getattr(self, "_erpnext_queue", None)
