@@ -14,6 +14,7 @@ import Dashboard4 from '../components/Dashboard4'
 // Pages
 const Dashboard = lazy(() => import('@/pages/Dashboard'))
 const PersonalSpace = lazy(() => import('@/pages/PersonalSpace'))
+const HumanInbox = lazy(() => import('@/pages/HumanInbox'))
 const TicketList = lazy(() => import('@/pages/TicketList'))
 const TicketDetail = lazy(() => import('@/pages/TicketDetail'))
 const TicketForm = lazy(() => import('@/pages/TicketForm'))
@@ -77,6 +78,7 @@ const router = createBrowserRouter([
           { path: 'tickets/create', element: <Page Component={TicketForm} permissions={['write_tickets']} /> },
           { path: 'tickets/update/:id', element: <Page Component={TicketForm} permissions={['write_tickets']} /> },
           { path: 'tickets/:id', element: <Page Component={TicketDetail} permissions={['read_tickets']} /> },
+          { path: 'inbox', element: <Page Component={HumanInbox} permissions={[]} /> },
           { path: 'review', element: <Navigate to="/dashboard/inicio" replace /> },
 
           { path: 'admin/users/list', element: <Page Component={UserList} permissions={['manage_users']} /> },

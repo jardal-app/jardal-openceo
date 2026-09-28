@@ -8,7 +8,7 @@ export var navigation = [
     children: [
       { name: 'Tickets', href: '/dashboard/tickets/list', icon: "TicketIcon", permissions: ['read_tickets'] },
 
-      { name: 'Revisión Cliente', href: '/dashboard/review', icon: "ClipboardDocumentCheckIcon", permissions: ['client_review'] },
+      { name: 'Requiere humano', href: '/dashboard/inbox', icon: "ClipboardDocumentCheckIcon", permissions: ['read_tickets', 'qa_review', 'client_review'] },
     ],
   },
 ]
