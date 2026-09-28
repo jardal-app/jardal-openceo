@@ -4,7 +4,7 @@ Resumen operativo corto del estado real del repo.
 
 ## Continuar aquí (traspaso a la próxima sesión)
 
-Estado al cerrar la sesión del **2026-09-28 (continuación)**: **TASK-2026-00032 mergeado a `main`** (merge `b004fd6`, pusheado a `origin/main`) y **servicio reiniciado con el código nuevo** (pid 1728599, `:18765/openapi.json` 200, parser `voice_expense` verificado en `main`, 15/15 tests del flujo). En ERPNext el ticket sigue `Open` con ejecución `completed` — el cierre es decisión de negocio, no se empuja solo. Siguiente corte recomendado: lectura (`get_cash_position`/resumen por Scope) antes de ingresos o presupuestos.
+Estado al cerrar la sesión del **2026-09-28 (cierre)**: **TASK-2026-00033 mergeado a `main`** (merge `c278763`, pusheado) y **servicio reiniciado con el código nuevo** (pid 2719852, `:18765/openapi.json` 200). Desde ahora un ticket terminado se mueve solo a `Pending Review` en ERPNext — probado en vivo con el propio ticket (`Working` → `Pending Review`, espejo `status_pushed=completed`); el `Completed` de negocio se acepta en el desk. Limpieza hecha: rama `feat/finance-voice-expense-TASK-2026-00032` y su doc temporal borrados (durable en vault + ticket); rama `feat/auto-qa-push-TASK-2026-00033` borrada en local (nunca se subió). Suite: 309 pasan / 7 fallan (preexistentes, cero regresiones). Regla nueva en `CLAUDE.md` §9: la sesión termina con merge + servicio + ticket + temporales borrados + registro (vault/ERPNext/STATUS). Siguiente corte sugerido: lectura (`get_cash_position`/resumen por Scope) antes de ingresos o presupuestos.
 
 ### Qué se hizo (2026-09-28, TASK-2026-00032)
 
