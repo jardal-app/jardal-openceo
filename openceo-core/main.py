@@ -182,6 +182,49 @@ first_layer_gateway = FirstLayerGateway(
     task_service=task_service,
     horizon_service=horizon_service,
 )
+
+
+async def _run_finance_voice_expense(text: str) -> str | None:
+    """Ejecuta un gasto ocasional por voz/chat sin crear tickets.
+
+    El registro en ERPNext es el efecto: la app puede apagarse despues.
+    Devuelve el resumen breve apto para TTS, o el error en el mismo tono.
+    """
+    clean = str(text or "").strip()
+    task = {
+        "task_id": f"finance-voice-{uuid4().hex}",
+        "project": settings.DEFAULT_PROJECT,
+        "title": clean.splitlines()[0][:120] if clean else "Gasto por voz",
+        "description": clean,
+        "attachments": [],
+        "priority": TaskPriority.MEDIUM.value,
+    }
+    try:
+        result = await finance_step_manager.run(task, {})
+    except Exception as exc:
+        logger.warning("Finance voice expense failed: %s", exc)
+        return "No pude registrar el gasto ahora mismo. Lo intentamos de nuevo."
+    return result.last_response_summary or result.error
+
+
+def _is_finance_expense_text(text: str) -> bool:
+    try:
+        from agents.finance.voice_expense import looks_like_expense
+    except Exception:
+        return False
+    try:
+        return bool(looks_like_expense(text))
+    except Exception:
+        return False
+
+
+async def _handle_finance_expense_direct(payload: ChatCompletionRequest, message: str) -> dict:
+    summary = await _run_finance_voice_expense(_strip_agent_prefix(message))
+    return _maybe_stream(payload, summary or "No pude registrar el gasto.")
+
+
+# El dueno habla con el CEO y el CEO deriva a Finance (TASK-2026-00032).
+first_layer_gateway.set_finance_handler(_run_finance_voice_expense)
 _PM_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 
@@ -1686,6 +1729,9 @@ async def chat_completions(payload: ChatCompletionRequest):
             dispatch_message = _strip_agent_prefix(message)
             if agent_hint == AgentName.PM:
                 return await _handle_openceo_pm_direct(payload, user_id, dispatch_message)
+            if agent_hint == AgentName.FINANCE and _is_finance_expense_text(dispatch_message):
+                # Gasto ocasional: se registra directo, sin ticket por cada gasto.
+                return await _handle_finance_expense_direct(payload, dispatch_message)
             task_payload = TaskCreateRequest(
                 project=payload.project or settings.DEFAULT_PROJECT,
                 source=TaskSource.API,
@@ -2493,6 +2539,11 @@ async def _handle_openceo_ceo_model(
         return _maybe_stream(payload, text)
     if selected == AgentName.PM:
         return await _handle_openceo_pm_direct(payload, user_id, _strip_agent_prefix(message))
+
+    if selected == AgentName.FINANCE and _is_finance_expense_text(message):
+        # Gasto ocasional por voz/chat: el CEO deriva a Finance y se registra
+        # directo en ERPNext, sin ticket por cada gasto (TASK-2026-00032).
+        return await _handle_finance_expense_direct(payload, message)
 
     task_payload = TaskCreateRequest(
         project=project,

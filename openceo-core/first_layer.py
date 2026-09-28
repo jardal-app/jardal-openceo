@@ -175,6 +175,7 @@ class FirstLayerGateway:
         self.dev_session_service = dev_session_service
         self.task_service = task_service
         self.horizon = horizon_service
+        self._finance_handler: Any | None = None
         self._llm: ChatOpenAI | None = None
 
         if settings.DEEPSEEK_API_KEY:
@@ -186,6 +187,14 @@ class FirstLayerGateway:
                 max_tokens=2000,
                 timeout=15,
             )
+
+    def set_finance_handler(self, handler: Any | None) -> None:
+        """Derivacion CEO -> Finance para gasto ocasional por voz/chat.
+
+        El handler ejecuta Finance de forma determinista y devuelve el
+        resumen breve para voz. Sin handler, el turno sigue su curso normal.
+        """
+        self._finance_handler = handler
 
     async def gather_context(self, user_id: str) -> dict[str, Any]:
         """Gather real-time workspace context for the user."""
@@ -351,6 +360,21 @@ class FirstLayerGateway:
                 handled, reply = await self._handle_horizon(user_id, horizon_intent, text)
                 if handled:
                     return True, reply
+
+        # Gasto ocasional por voz (TASK-2026-00032): el dueno habla con el CEO
+        # y el CEO deriva a Finance. Detector determinista antes del LLM:
+        # no cuesta tokens, funciona con presupuesto agotado y responde en el
+        # mismo turno para poder apagar la app. No crea tickets.
+        if self._finance_handler is not None:
+            try:
+                from agents.finance.voice_expense import looks_like_expense
+
+                if looks_like_expense(text):
+                    summary = await self._finance_handler(text)
+                    if summary:
+                        return True, str(summary)
+            except Exception:
+                logger.warning("Finance voice handling failed", exc_info=True)
 
         if self._llm is None:
             return False, ""

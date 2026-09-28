@@ -122,6 +122,7 @@ class WorkflowToolRegistry:
 
         # Finance
         self.register("finance.pago_elfec_house", self._finance_pago_elfec_house)
+        self.register("finance.register_expense", self._finance_register_expense)
 
         # CEO / Horizon (espacio personal). Nombres del contrato de la seccion
         # 9.2 punto 3; todos delegan en HorizonService, que es deterministico.
@@ -566,6 +567,43 @@ class WorkflowToolRegistry:
         if not isinstance(workflow_cfg, dict):
             workflow_cfg = dict(params)
         return run_elfec_house_payment_practice(get_settings(), workflow_cfg)
+
+    async def _finance_register_expense(
+        self,
+        text: str = "",
+        openceo_ref: str | None = None,
+        submit: bool = True,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Registra un gasto ocasional por voz/chat en ERPNext (TASK-2026-00032).
+
+        Crea un `Journal Entry` idempotente por `openceo_ref` y lo envia para
+        que llegue al libro mayor. Sin tickets por gasto.
+        """
+        from agents.finance import voice_expense as _voice_expense
+        from tools.erpnext_client import ERPNextClient
+
+        parsed = _voice_expense.parse_expense(text)
+        if parsed is None:
+            return {"ok": False, "error": "no_amount"}
+        client = ERPNextClient(self._settings)
+        try:
+            result = await _voice_expense.register_expense(
+                client, parsed, ref=openceo_ref, submit=bool(submit)
+            )
+        finally:
+            await client.aclose()
+        doc = result["doc"]
+        return {
+            "ok": True,
+            "duplicate": result["duplicate"],
+            "ref": result["ref"],
+            "journal_entry": doc.get("name"),
+            "docstatus": doc.get("docstatus"),
+            "summary": _voice_expense.build_spoken_summary(
+                parsed, doc, result["duplicate"]
+            ),
+        }
 
     def _cloudflare_upsert_dns(self, hostname: str, **_: Any) -> dict[str, Any]:
         from tools.cloudflare import CloudflareDNSManager

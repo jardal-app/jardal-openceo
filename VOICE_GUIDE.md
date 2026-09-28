@@ -100,6 +100,25 @@ Si dices una frase entrecortada o confusa por ruido ambiente:
 
 ---
 
+## 6b. Registro de gastos por voz (Finanzas → ERPNext)
+
+Hablas con el **CEO** y el CEO deriva a **Finanzas** (no necesitas `@finance`;
+queda como atajo). Cada gasto se registra directo en ERPNext como asiento
+idempotente: **ningún gasto crea un ticket** y puedes apagar la app después.
+
+| Di por voz | Qué se registra |
+|---|---|
+| *"registra gasto personal carne 50 bolivianos"* | 50,00 BOB en `Gastos varios - J` |
+| *"pago de luz de casa 300 bs"* | 300,00 BOB en `Servicios públicos - J` |
+| *"anota pasaje 15 bs"* | 15,00 BOB en transporte |
+
+Respuesta típica: *"Listo, dejamos registrados 50,00 BOB de carne en gastos
+personales. Asiento ACC-JV-2026-00012."* Si el gasto ya se había registrado
+(reintento), responde que no lo duplicó. Sin monto no hay registro: te pide
+el monto y la moneda (BOB por defecto; USD y USDT se distinguen).
+
+---
+
 ## 7. Configuración de la App Android (`openceo-voice.apk`)
 
 1. **Instalar el APK**: Archivo listo en `/home/develop/development/Jardal/jardal-openceo/openceo-voice.apk`.
