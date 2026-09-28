@@ -3,16 +3,14 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
+from agents.finance import contribution as contribution_flow
+from agents.finance import scope_summary as scope_flow
+from agents.finance import voice_expense as expense_flow
+from agents.finance import voice_income as income_flow
 from agents.finance.elfec import run_elfec_house_payment_practice
-from agents.finance.voice_expense import (
-    build_spoken_summary,
-    looks_like_expense,
-    new_openceo_ref,
-    parse_expense,
-    register_expense,
-)
+from agents.finance.intent import BALANCE, CONTRIBUTION, EXPENSE, INCOME, classify
 from settings import Settings
 from state import TaskStatus
 
@@ -26,7 +24,12 @@ class FinanceExecutionOutput:
 
 
 class FinanceSessionManager:
-    """Minimal deterministic finance runtime: gasto por voz y practica ELFEC."""
+    """Runtime determinista de finanzas: ingresos, gastos, lecturas y ELFEC.
+
+    Los cuatro flujos de ERPNext se resuelven sin tickets: el registro (o la
+    consulta) es el efecto. El dispatch lo decide `intent.classify`, un solo
+    lugar para la precedencia entre ingreso, aporte, saldo y gasto.
+    """
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -45,14 +48,26 @@ class FinanceSessionManager:
             text = title
         else:
             text = f"{title} {desc}".strip()
-        if looks_like_expense(text):
+
+        intent = classify(text)
+        if intent == INCOME:
+            return await self._run_income(output, text)
+        if intent == CONTRIBUTION:
+            return await self._run_contribution(output)
+        if intent == BALANCE:
+            return await self._run_balance(output)
+        if intent == EXPENSE:
             return await self._run_expense(output, text)
+
         workflow = self._resolve_workflow(task, project_config or {})
         if workflow is None:
             detail = (
                 "No encontré un workflow de finanzas compatible. "
-                "Puedo registrar gastos por voz ('registra gasto personal carne 50 bolivianos', "
-                "'pago de luz de casa 300 bs') o practicar el 'Pago Elfec House'."
+                "Puedo registrar gastos ('registra gasto personal carne 50 bolivianos'), "
+                "registrar ingresos ('registra ingreso sueldo 6200 bolivianos'), "
+                "consultar el saldo ('cuánto gastamos este mes'), "
+                "consultar la regla del 10% ('cómo vamos con el diezmo') "
+                "o practicar el 'Pago Elfec House'."
             )
             output.steps.append(self._step("resolve_finance_workflow", "failed", detail))
             output.status = TaskStatus.FAILED
@@ -96,7 +111,7 @@ class FinanceSessionManager:
     async def _run_expense(self, output: FinanceExecutionOutput, text: str) -> FinanceExecutionOutput:
         """Registra un gasto ocasional en ERPNext. Sin tickets: el registro es el efecto."""
         output.steps.append(self._step("resolve_finance_workflow", "ok", "Workflow resuelto: gasto ocasional por voz"))
-        parsed = parse_expense(text)
+        parsed = expense_flow.parse_expense(text)
         if parsed is None:
             detail = (
                 "No encontré un monto válido para registrar. "
@@ -107,24 +122,104 @@ class FinanceSessionManager:
             output.error = detail
             return output
         try:
-            from tools.erpnext_client import ERPNextClient
-
-            client = ERPNextClient(self._settings)
-            try:
-                result = await register_expense(client, parsed, ref=new_openceo_ref())
-            finally:
-                await client.aclose()
+            result = await self._with_client(
+                lambda client: expense_flow.register_expense(
+                    client, parsed, ref=expense_flow.new_openceo_ref()
+                )
+            )
         except Exception as exc:
             detail = f"No pude registrar el gasto en ERPNext: {exc}"
             output.steps.append(self._step("register_expense", "failed", detail))
             output.status = TaskStatus.FAILED
             output.error = detail
             return output
-        summary = build_spoken_summary(parsed, result["doc"], result["duplicate"])
+        summary = expense_flow.build_spoken_summary(parsed, result["doc"], result["duplicate"])
         output.steps.append(self._step("register_expense", "ok", summary))
         output.status = TaskStatus.COMPLETED
         output.last_response_summary = summary
         return output
+
+    async def _run_income(self, output: FinanceExecutionOutput, text: str) -> FinanceExecutionOutput:
+        """Registra un ingreso ya cobrado en ERPNext (TASK-2026-00053).
+
+        Espejo del gasto con el asiento invertido: debito a efectivo, credito a
+        la cuenta de ingreso real. Sin tickets: el registro es el efecto.
+        """
+        output.steps.append(self._step("resolve_finance_workflow", "ok", "Workflow resuelto: ingreso ocasional por voz"))
+        parsed = income_flow.parse_income(text)
+        if parsed is None:
+            detail = (
+                "No encontré un monto válido para el ingreso. "
+                "Dime por ejemplo: 'registra ingreso sueldo 6200 bolivianos'."
+            )
+            output.steps.append(self._step("register_income", "failed", detail))
+            output.status = TaskStatus.FAILED
+            output.error = detail
+            return output
+        try:
+            result = await self._with_client(
+                lambda client: income_flow.register_income(
+                    client, parsed, ref=income_flow.new_openceo_ref()
+                )
+            )
+        except Exception as exc:
+            detail = f"No pude registrar el ingreso en ERPNext: {exc}"
+            output.steps.append(self._step("register_income", "failed", detail))
+            output.status = TaskStatus.FAILED
+            output.error = detail
+            return output
+        summary = income_flow.build_spoken_summary(parsed, result["doc"], result["duplicate"])
+        output.steps.append(self._step("register_income", "ok", summary))
+        output.status = TaskStatus.COMPLETED
+        output.last_response_summary = summary
+        return output
+
+    async def _run_balance(self, output: FinanceExecutionOutput) -> FinanceExecutionOutput:
+        """Consulta de saldo/gasto (TASK-2026-00044). Solo lectura."""
+        output.steps.append(self._step("resolve_finance_workflow", "ok", "Workflow resuelto: resumen de saldos por Scope"))
+        try:
+            summary = await self._with_client(scope_flow.get_scope_summary)
+        except Exception as exc:
+            detail = f"No pude consultar el saldo en ERPNext: {exc}"
+            output.steps.append(self._step("get_scope_summary", "failed", detail))
+            output.status = TaskStatus.FAILED
+            output.error = "No pude consultar el saldo ahora mismo. Lo intentamos de nuevo."
+            return output
+        spoken = scope_flow.build_spoken_summary(summary)
+        output.steps.append(self._step("get_scope_summary", "ok", spoken))
+        output.status = TaskStatus.COMPLETED
+        output.last_response_summary = spoken
+        return output
+
+    async def _run_contribution(self, output: FinanceExecutionOutput) -> FinanceExecutionOutput:
+        """Estado de la regla del 10% (TASK-2026-00054). Solo lectura."""
+        output.steps.append(self._step("resolve_finance_workflow", "ok", "Workflow resuelto: regla del 10%"))
+        try:
+            status = await self._with_client(contribution_flow.get_contribution_10_status)
+        except Exception as exc:
+            detail = f"No pude calcular la regla del 10% desde ERPNext: {exc}"
+            output.steps.append(self._step("get_contribution_10_status", "failed", detail))
+            output.status = TaskStatus.FAILED
+            output.error = "No pude consultar el estado del aporte ahora mismo. Lo intentamos de nuevo."
+            return output
+        spoken = contribution_flow.build_spoken_summary(status)
+        output.steps.append(
+            self._step("get_contribution_10_status", status.state, spoken)
+        )
+        # `needs_input` no es un fallo: falta una decision del dueno (la cuenta
+        # que recibe el aporte). La respuesta es util y se entrega igual.
+        output.status = TaskStatus.COMPLETED
+        output.last_response_summary = spoken
+        return output
+
+    async def _with_client(self, fn: Callable[[Any], Awaitable[Any]]) -> Any:
+        from tools.erpnext_client import ERPNextClient
+
+        client = ERPNextClient(self._settings)
+        try:
+            return await fn(client)
+        finally:
+            await client.aclose()
 
     def _resolve_workflow(self, task: dict[str, Any], project_config: dict[str, Any]) -> dict[str, Any] | None:
         blob = " ".join(

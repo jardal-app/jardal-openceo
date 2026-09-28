@@ -201,15 +201,6 @@ _IMPORT_PATTERNS = (
     r"\bcarga(?:r|me)?\s+(?:mi|el)\s+contexto\b",
 )
 
-# Nota: `_matches` normaliza antes (sin acentos, `.`, `,` ni `$`: "1.234,56"
-# llega como "1 234 56"), asi que los patrones toleran espacios entre digitos.
-_FINANCE_EXPENSE_PATTERNS = (
-    r"\b(?:registr\w*|anot\w*|apunt\w*|carg\w*|pag\w*|compr\w*|gast\w*)\b"
-    r".*\b\d[\d\s]*\s*(?:bs|bolivianos?|bob|usd|dolares?|usdt)\b",
-    r"\b\d[\d\s]*\s*(?:bs|bolivianos?|bob|usd|dolares?|usdt)\b"
-    r".*\b(?:luz|elfec|electricidad|carne|mercado|comida|alimentos?|gasto|factura|recibo)\b",
-)
-
 # Fase 3: Delegacion, entrega y metricas de supervisión/retrabajo.
 _DELEGATE_PATTERNS = (
     r"\b(?:delega|delegar|encarga|encargar)\s+(?:la\s+|el\s+|esta\s+|este\s+)?(?:siguiente\s+)?(?:acci[oó]n|tarea|ticket)\b",
@@ -262,6 +253,28 @@ def has_personal_markers(text: str) -> bool:
 
 def has_explicit_capture(text: str) -> bool:
     return _matches(text, _CAPTURE_PREFIX_PATTERNS)
+
+
+def is_finance_operative(text: str) -> bool:
+    """True si la frase pertenece a Finance (ERPNext), no a Horizon.
+
+    La autoridad es el mismo clasificador que usa Finance
+    (`agents.finance.intent`), no un vocabulario duplicado aqui: si los dos
+    modulos deciden por su cuenta, una frase de dinero termina como nota
+    personal y el libro mayor no se entera. "registra ingreso sueldo 6200
+    bolivianos" empieza con verbo de captura explicita y "me pagaron 500
+    dólares del contrato" encaja en avance: sin esta guarda, Horizon se las
+    queda. El import es perezoso y un fallo degrada a "Horizon conserva la
+    frase", que era el comportamiento anterior.
+    """
+    try:
+        from agents.finance.intent import is_finance_text
+    except Exception:
+        return False
+    try:
+        return bool(is_finance_text(text))
+    except Exception:
+        return False
 
 
 def _matches(text: str, patterns: tuple[str, ...]) -> bool:
@@ -349,9 +362,12 @@ def classify(text: str) -> str | None:
     if _matches(normalized, _METRICS_PATTERNS):
         return INTENT_METRICS
 
-    # 0b. Gasto ocasional con monto y moneda: pertenece a Finance (ERPNext),
-    # no a Horizon. Devolver None deja que siga el flujo normal (CEO->Finance).
-    if _matches(normalized, _FINANCE_EXPENSE_PATTERNS):
+    # 0b. Finanzas operativas (ingreso, gasto, saldo, regla del 10%):
+    #     pertenecen a Finance sobre ERPNext, no a Horizon. Devolver None deja
+    #     que siga el flujo normal (CEO->Finance). Se consulta al clasificador
+    #     de Finance con el texto crudo: el normalizado aqui pierde `.`, `,` y
+    #     `$`, que es justo lo que `money_text` necesita para leer el monto.
+    if is_finance_operative(text):
         return None
 
     # 1. Verbo de registro explicito: gana siempre. Una nota personal declarada
