@@ -195,7 +195,7 @@ ignoran, para no crear un bucle.
 
 ### Reglas al tocar esto
 
-1. **`completed` no cierra el ticket en ERPNext a propósito**: cerrar es una decisión de negocio.
+1. **`completed` no cierra el ticket en ERPNext a propósito**: la ejecución empuja `Pending Review` (cola QA) y cerrar a `Completed` es una decisión de negocio en el desk.
 2. **`status_pushed` guarda el vocabulario de OpenCEO, no el de ERPNext** — comparar `in_progress`
    contra `Working` rompería la idempotencia. Y `str(TaskStatus.QUEUED)` da `'TaskStatus.QUEUED'`:
    usar `.value`.
@@ -203,4 +203,18 @@ ignoran, para no crear un bucle.
    semánticas cerradas, y el cliente tiene allowlist de DocTypes.
 4. **`openceo_ref` es la clave de idempotencia** (nullable, única). Un reintento usa el mismo valor.
 5. **La consola de `bench` decodifica stdin como latin-1**: usar escapes `é` en scripts ASCII.
+
+---
+
+## 9. Cierre de sesión (regla del dueño, 2026-09-28)
+
+Una sesión de trabajo **no termina con el código listo**: termina cuando el ticket queda
+cerrado en su ciclo completo. No hay sesiones dedicadas solo a mergear; el merge es parte
+del mismo trabajo. Al cerrar, en orden:
+
+1. **Merge a `main` + push** de la rama del ticket (`git checkout main && git merge --no-ff <rama> && git push origin main`).
+2. **Servicio reiniciado con el código nuevo** (`scripts/openceo-core-host.sh restart` + `status` + smoke del endpoint).
+3. **Ticket en ERPNext en su estado final**: la ejecución a `completed` lo deja solo en `Pending Review`; el `Completed` de negocio se acepta en el desk. Borrar la rama (`-d` + `push --delete`) una vez mergeada.
+4. **Docs temporales eliminados**: `docs/work/TASK-2026-000NN-tema.md` se borra con aprobación del dueño una vez verificado que lo durable quedó en el vault y el resultado en el ticket.
+5. **Registro durable**: `STATUS.md` (traspaso), ticket ERPNext (resultado) y vault (solo hechos, decisiones, flujos y conclusiones reutilizables, con el número de ticket como evidencia).
 

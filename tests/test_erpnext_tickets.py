@@ -122,19 +122,21 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(map_priority(None), "Medium")
         self.assertEqual(map_priority("lo-que-sea"), "Medium")
 
-    def test_completed_no_se_empuja(self):
-        """Cerrar un ticket es una decision de negocio, no un efecto de la ejecucion.
+    def test_completed_empuja_a_pending_review(self):
+        """Terminar el trabajo lleva el ticket a la cola QA sin intervencion manual.
 
-        `docs/ARCHITECTURE_REFERENCE_2026.md`: "completed en un registro de ejecucion no
-        salta una aprobacion de negocio de ERPNext". Si esto cambia, el ticket se cerraria
-        solo y un humano nunca aceptaria el trabajo.
+        `docs/ARCHITECTURE_REFERENCE_2026.md` §50/§119: "completed en un registro de
+        ejecucion no salta una aprobacion de negocio". Por eso se empuja `Pending Review`
+        (cola de revision) y NUNCA `Completed`: el cierre sigue siendo decision de negocio
+        en el desk (TASK-2026-00033). `failed`/`escalated`/`interrupted` no se empujan:
+        son resultado de ejecucion, no de negocio.
         """
-        self.assertIsNone(map_status("completed"))
+        self.assertEqual(map_status("completed"), "Pending Review")
         self.assertIsNone(map_status("failed"))
         self.assertIsNone(map_status("escalated"))
         self.assertIsNone(map_status("interrupted"))
 
-    def test_solo_se_empujan_tres_estados(self):
+    def test_se_empujan_cuatro_estados(self):
         self.assertEqual(map_status("queued"), "Open")
         self.assertEqual(map_status("in_progress"), "Working")
         self.assertEqual(map_status("waiting"), "Pending Review")
@@ -286,9 +288,16 @@ class CreateTicketTests(unittest.TestCase):
     def test_update_status_no_llama_si_el_estado_no_se_empuja(self):
         client = FakeClient()
         adapter = make_adapter(client)
-        self.assertIsNone(run(adapter.update_status("TASK-1", "completed")))
         self.assertIsNone(run(adapter.update_status("TASK-1", "failed")))
+        self.assertIsNone(run(adapter.update_status("TASK-1", "escalated")))
         self.assertEqual(client.updated, [])
+
+    def test_update_status_completed_empuja_pending_review(self):
+        """TASK-2026-00033: terminar lleva el ticket a la cola QA, nunca a Completed."""
+        client = FakeClient()
+        adapter = make_adapter(client)
+        run(adapter.update_status("TASK-1", "completed"))
+        self.assertEqual(client.updated[0], ("Task", "TASK-1", {"status": "Pending Review"}))
 
     def test_update_status_empuja_los_que_si(self):
         client = FakeClient()
@@ -476,11 +485,11 @@ class StatusObserverTests(unittest.TestCase):
         run(service.observe_task_status(self._task("in_progress")))
         self.assertEqual(self._queued(service), [{"task_id": "t1", "name": "TASK-1", "status": "in_progress"}])
 
-    def test_completed_no_se_empuja(self):
-        """Cerrar es una decision de negocio: un agente que termina no cierra el ticket."""
+    def test_completed_se_empuja_a_pending_review(self):
+        """Terminar lleva el ticket a la cola QA: sale de `Working` sin acto manual."""
         service = self._service(FakeAdapter())
         run(service.observe_task_status(self._task("completed")))
-        self.assertEqual(self._queued(service), [])
+        self.assertEqual(self._queued(service), [{"task_id": "t1", "name": "TASK-1", "status": "completed"}])
 
     def test_failed_no_se_empuja(self):
         service = self._service(FakeAdapter())

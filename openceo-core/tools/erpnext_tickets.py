@@ -43,17 +43,20 @@ SUBJECT_MAX_LENGTH = 140
 #: para que no puedan desincronizarse: si se agrega un provider, se agrega aca solo.
 _CODING_TOOLS: frozenset[str] = frozenset(tool.value for tool in CodingTool)
 
-#: OpenCEO -> ERPNext. `completed` NO esta a proposito:
-#: `docs/ARCHITECTURE_REFERENCE_2026.md` dice que "completed en un registro de ejecucion no
-#: salta una aprobacion de negocio de ERPNext" y que "la aceptacion de negocio queda sujeta a
-#: su workflow". Que un agente termine su trabajo no es que un humano lo acepte. Cerrar el
-#: ticket es una transicion de negocio explicita, que se hace en el desk de ERPNext.
-#: Por eso un ticket terminado sigue en `Pending Review`: esta esperando esa decision.
+#: OpenCEO -> ERPNext. `completed` empuja a `Pending Review` (cola de revision),
+#: NO a `Completed`: `docs/ARCHITECTURE_REFERENCE_2026.md` §50/§119 dice que "completed
+#: en un registro de ejecucion no salta una aprobacion de negocio de ERPNext" y que "la
+#: aceptacion de negocio queda sujeta a su workflow". Que un agente termine su trabajo no
+#: es que un humano lo acepte: el ticket sale solo de `Working` y espera en la cola QA,
+#: y el cierre a `Completed` sigue siendo una transicion de negocio explicita en el desk
+#: (camino inverso ya existente). Decision del dueño 2026-09-28 (TASK-2026-00033): no
+#: cerrar tickets a mano uno por uno.
 #: `failed`/`escalated`/`interrupted` tampoco empujan: son resultado de ejecucion, no de negocio.
 _STATUS_MAP: dict[str, str] = {
     "queued": "Open",
     "in_progress": "Working",
     "waiting": "Pending Review",
+    "completed": "Pending Review",
 }
 
 _PRIORITY_MAP: dict[str, str] = {
