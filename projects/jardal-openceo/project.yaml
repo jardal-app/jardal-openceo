@@ -1,4 +1,5 @@
 project:
+  number: 1
   name: jardal-openceo
   repos:
     - name: openceo
@@ -15,9 +16,27 @@ dev:
   create_pr: true
   pr_body: auto
 
+  tier_s:
+    # El propietario reactiva claudej cuando renueve la suscripcion.
+    roles:
+      planner:
+        active: false
+        command: ["claudej"]
+      plan-reviewer:
+        active: true
+        command: ["codexf"]
+      builder:
+        active: true
+        command: ["claudep"]
+    reviewers:
+      - {label: qwen, provider: qwen, model: qwen3.8-max, active: true, command: ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"]}
+      - {label: claudeg, provider: claude, model: glm-5.3, active: true, command: ["claudeg", "--model", "opus", "--tools", "Read,Glob,Grep"]}
+      - {label: agyd, provider: gemini, model: gemini, active: false, command: ["agyd"]}
+      - {label: mimo, provider: opencode, model: opencode-go/mimo-v2.6-pro, active: false, command: ["opencode"]}
+
   providers:
     codex:
-      command: ["/home/develop/.npm-global/bin/codex", "--sandbox", "workspace-write", "-a", "never", "--no-alt-screen", "-m", "gpt-5.4", "-c", "model_reasoning_effort=xhigh"]
+      command: ["/home/develop/.local/bin/codex", "--sandbox", "workspace-write", "-a", "never", "--no-alt-screen"]
       cwd: /home/develop/development/Jardal/jardal-openceo
       env: {}
 
@@ -65,3 +84,25 @@ finance:
       stop_before_card: true
 
 notifications: []
+
+presets:
+  review:
+    number: 1
+    prompt: "Revisa los cambios recientes en git diff, valida el cumplimiento estricto de las reglas de AGENTS.md y confirma que no haya errores de sintaxis ni regresiones."
+    description: "Revisar git diff y reglas de AGENTS.md"
+  test_fix:
+    number: 2
+    prompt: "Ejecuta las pruebas unitarias del proyecto y si alguna falla analiza el traceback y corrige el código hasta que todas pasen."
+    description: "Ejecutar tests y autocorregir fallos"
+  refactor:
+    number: 3
+    prompt: "Analiza el código reciente, simplifica y optimiza la lógica manteniendo total compatibilidad hacia atrás y estilo limpio."
+    description: "Refactorizar y optimizar código reciente"
+  sync_context:
+    number: 4
+    prompt: "Revisa el estado del proyecto y actualiza STATUS.md y CONTEXT.md con un resumen claro del trabajo realizado y estado vigente."
+    description: "Sincronizar STATUS.md y contexto"
+  security_audit:
+    number: 5
+    prompt: "Audita el código en busca de posibles vulnerabilidades, endpoints expuestos sin autenticación o fugas de configuración."
+    description: "Auditoría de seguridad y endpoints"

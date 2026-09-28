@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import datetime, timezone
@@ -12,7 +13,7 @@ import time
 from typing import Any
 
 import uvicorn
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -87,6 +88,7 @@ from horizon.triggers import HorizonScheduler, HorizonTriggerStore
 from horizon.service import HorizonService
 from task_service import TaskService
 from tools.notion import NotionTicketManager
+from tools.erpnext_tickets import ERPNextTicketAdapter
 from workflow_service import WorkflowService
 
 logger = logging.getLogger(__name__)
@@ -97,7 +99,7 @@ config_loader = ConfigLoader(settings)
 router = CEORouter(settings)
 rate_monitor = RateMonitor(settings)
 rate_monitor.set_repo(repo)
-dev_step_manager = DevSessionManager(settings, config_loader, rate_monitor=rate_monitor)
+dev_step_manager = DevSessionManager(settings, config_loader, rate_monitor=rate_monitor, repo=repo)
 finance_step_manager = FinanceSessionManager(settings)
 pm_step_manager = PMSessionManager(
     settings,
@@ -116,6 +118,16 @@ graph = OpenCEOGraph(
 realtime_hub = RealtimeHub()
 notion_manager = NotionTicketManager(settings) if settings.NOTION_API_TOKEN.strip() else None
 graph._notion = notion_manager  # late-bind after creation
+# Adapter de tickets hacia ERPNext. No es opcional: ERPNext es el registro de negocio de
+# los tickets, asi que construir el cliente siempre. Construirlo NO abre red (el
+# httpx.AsyncClient es perezoso); si falta configuracion se avisa fuerte al arrancar.
+erpnext_adapter = ERPNextTicketAdapter(settings)
+dev_step_manager._consensus._erpnext = erpnext_adapter
+if not erpnext_adapter.is_enabled:
+    logger.error(
+        "ERPNext no esta configurado (%s). La creacion de tickets fallara hasta que lo este.",
+        erpnext_adapter.client.config_error(),
+    )
 project_service = ProjectService(settings=settings, repo=repo, config_loader=config_loader)
 workflow_service = WorkflowService(
     settings=settings,
@@ -134,18 +146,21 @@ qa_review_service = QAReviewService(settings=settings, repo=repo)
 task_service = TaskService(
     settings=settings, repo=repo, graph=graph, realtime_hub=realtime_hub,
     notion=notion_manager, rate_monitor=rate_monitor, workflow_service=workflow_service,
-    qa_service=qa_review_service,
+    qa_service=qa_review_service, erpnext=erpnext_adapter,
 )
 qa_review_service.set_task_service(task_service)
 pm_step_manager.set_task_service(task_service)
 workflow_service.set_task_service(task_service)
+# El repositorio avisa de CADA transicion de estado; el servicio decide cuales se
+# propagan a ERPNext. Se instala aqui porque el repositorio es anterior al servicio.
+repo.set_status_observer(task_service.observe_task_status)
 scheduler = WaitingTaskScheduler(
     settings=settings,
     task_service=task_service,
     dev_session_service=dev_session_service,
 )
-internal_mcp = build_internal_mcp_mount(settings, task_service)
-global_mcp = build_global_mcp_mount(settings)
+internal_mcp = build_internal_mcp_mount(settings, task_service, erpnext_adapter)
+global_mcp = build_global_mcp_mount(settings, task_service, erpnext_adapter)
 horizon_service = HorizonService(settings=settings, repo=repo)
 # El timer unico de Horizon: duerme hasta el proximo vencimiento y lo despierta
 # cada encolado. No es un barrido (AGENTS.md §5.1).
@@ -182,6 +197,8 @@ async def lifespan(_: FastAPI):
         await repo.mark_interrupted_pm_states()
         await repo.mark_interrupted_tasks()
         await repo.mark_interrupted_dev_sessions()
+        await dev_step_manager._consensus.reconcile_interrupted_runs()
+        await dev_step_manager._consensus.cleanup_expired_all()
         await dev_session_service.startup_reconcile()
         await scheduler.start()
         # Ojo: dentro de ``lifespan`` hay un ``settings = get_settings()`` mas
@@ -237,6 +254,8 @@ async def lifespan(_: FastAPI):
         await horizon_scheduler.stop()
         await scheduler.stop()
         await dev_session_service.shutdown()
+        if erpnext_adapter is not None:
+            await erpnext_adapter.aclose()
         await repo.close()
 
 
@@ -616,10 +635,55 @@ async def get_horizon_delegation_summary(
 async def create_task(
     payload: TaskCreateRequest,
     current_user: UserDocument = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict:
     data = payload.model_dump()
     data["created_by"] = current_user.user_id
+    # Sin `source_id` no hay clave de idempotencia, y un reintento tras un timeout crearia
+    # un SEGUNDO ticket de negocio en ERPNext (el `task_id` se genera de nuevo). La cabecera
+    # `Idempotency-Key` se convierte en `source_id` sintetico para que el reintento
+    # converja al mismo ticket en Mongo y en ERPNext.
+    if idempotency_key and not str(data.get("source_id") or "").strip():
+        data["source_id"] = idempotency_key.strip()
     return await task_service.create_task(TaskCreateRequest(**data))
+
+
+@app.post("/api/integrations/erpnext/task")
+async def erpnext_task_webhook(
+    payload: dict = Body(...),
+    x_openceo_secret: str | None = Header(default=None, alias="X-OpenCEO-Webhook-Secret"),
+) -> dict:
+    """Camino inverso: una decision humana en ERPNext llega al runtime.
+
+    Lo llama el webhook de Frappe cuando alguien **cierra, cancela o borra** un `Task` en
+    el desk. No lo llama un cron: AGENTS.md §5.1 prohibe los barridos periodicos, y el
+    contrato exige que la actividad humana llegue por eventos explicitos.
+
+    No usa sesion de usuario (quien llama es ERPNext): se autentica con el secreto
+    compartido `ERPNEXT_WEBHOOK_SECRET`.
+    """
+    expected = (settings.ERPNEXT_WEBHOOK_SECRET or "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="ERPNEXT_WEBHOOK_SECRET no esta configurado.")
+    if not x_openceo_secret or not hmac.compare_digest(x_openceo_secret, expected):
+        raise HTTPException(status_code=401, detail="Secreto de webhook invalido.")
+
+    # Frappe manda el documento anidado en `doc`; se acepta tambien plano para poder
+    # probar el endpoint a mano y sobrevivir a cambios del formato del webhook.
+    doc = payload.get("doc") if isinstance(payload.get("doc"), dict) else payload
+    doctype = str(payload.get("doctype") or doc.get("doctype") or "").strip()
+    if doctype and doctype != "Task":
+        return {"ok": True, "status": "ignored_doctype", "doctype": doctype}
+
+    event = str(payload.get("event") or "").strip()
+    deleted = event in ("on_trash", "after_delete") or doc.get("deleted") is True
+
+    return await task_service.apply_business_status(
+        task_id=doc.get("openceo_task_id"),
+        ref=doc.get("openceo_ref"),
+        business_status=doc.get("status"),
+        deleted=deleted,
+    )
 
 
 @app.get("/api/tasks")
@@ -1049,6 +1113,82 @@ async def run_task(task_id: str) -> dict:
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
+
+
+@app.post("/api/tasks/{task_id}/tier-s/answer")
+async def answer_tier_s_question(
+    task_id: str,
+    body: dict[str, Any],
+    current_user: UserDocument = Depends(require_permissions("write_tickets")),
+) -> dict:
+    task = await task_service.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not current_user.is_admin and (
+        task.get("project") not in (current_user.allowed_projects or [])
+        or current_user.user_id not in (task.get("involved_user_ids") or [])
+    ):
+        raise HTTPException(status_code=403, detail="Access denied")
+    run = await repo.active_tier_s_run(task_id)
+    if run is None or not run.get("question"):
+        raise HTTPException(status_code=409, detail="No Tier S question is pending")
+    answer = str(body.get("answer") or "").strip()
+    if not answer or len(answer) > 2000 or "\n" in answer or "\r" in answer:
+        raise HTTPException(status_code=400, detail="answer must be one line (1-2000 characters)")
+    accepted = await repo.answer_tier_s_question(task_id, answer)
+    if accepted is None:
+        raise HTTPException(status_code=409, detail="Question already answered or attempt changed")
+    async def resume() -> None:
+        try:
+            await task_service.run_task(task_id, force=True)
+        except Exception:
+            logger.exception("Tier S answer could not resume task %s", task_id)
+            try:
+                active = await repo.active_tier_s_run(task_id)
+                if active and active.get("run_id") == run["run_id"] and active.get("status") == "resuming":
+                    await repo.patch_tier_s_run(run["run_id"], {
+                        "status": "waiting", "waiting_reason": "Error al reanudar; relanza el ticket",
+                    })
+            except Exception:
+                logger.exception("Tier S answer recovery failed for task %s", task_id)
+    asyncio.create_task(resume())
+    return {"run_id": run["run_id"], "status": "resuming"}
+
+
+@app.get("/api/tier-s/waits")
+async def list_tier_s_waits(
+    project: str = Query(..., min_length=1),
+    current_user: UserDocument = Depends(require_permissions("write_tickets")),
+) -> dict:
+    if not current_user.is_admin and project not in (current_user.allowed_projects or []):
+        raise HTTPException(status_code=403, detail="Access denied")
+    runs = await repo.list_tier_s_waits(project)
+    return {"project": project, "count": len(runs), "runs": [
+        {key: run.get(key) for key in (
+            "run_id", "task_id", "session_id", "phase", "subplan", "round",
+            "waiting_reason", "question", "updated_at",
+        )} for run in runs
+    ]}
+
+
+@app.post("/api/tasks/{task_id}/tier-s/cancel")
+async def cancel_tier_s_run(
+    task_id: str,
+    current_user: UserDocument = Depends(require_permissions("write_tickets")),
+) -> dict:
+    task = await task_service.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not current_user.is_admin and (
+        task.get("project") not in (current_user.allowed_projects or [])
+        or current_user.user_id not in (task.get("involved_user_ids") or [])
+    ):
+        raise HTTPException(status_code=403, detail="Access denied")
+    config = config_loader.load_project(str(task.get("project") or ""))
+    if not await dev_step_manager._consensus.cancel_run(task_id, config):
+        raise HTTPException(status_code=409, detail="No active Tier S attempt")
+    await task_service.patch_task(task_id, {"waiting_reason": "Intento TIER S cancelado por el propietario"})
+    return {"status": "cancelled"}
 
 
 @app.post("/api/tasks/{task_id}/workflow")

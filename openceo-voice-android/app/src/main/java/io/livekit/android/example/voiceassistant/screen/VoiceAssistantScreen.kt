@@ -61,6 +61,7 @@ import io.livekit.android.example.voiceassistant.rememberCanEnableCamera
 import io.livekit.android.example.voiceassistant.rememberCanEnableMic
 import io.livekit.android.example.voiceassistant.requirePermissions
 import io.livekit.android.example.voiceassistant.DEFAULT_MODEL
+import io.livekit.android.example.voiceassistant.DEFAULT_PROJECT
 import io.livekit.android.example.voiceassistant.ui.AgentVisualization
 import io.livekit.android.example.voiceassistant.ui.ChatBar
 import io.livekit.android.example.voiceassistant.ui.ChatLog
@@ -77,6 +78,7 @@ data class VoiceAssistantRoute(
     val hardcodedUrl: String,
     val hardcodedToken: String,
     val model: String = DEFAULT_MODEL,
+    val project: String = DEFAULT_PROJECT,
 )
 
 @Composable
@@ -128,7 +130,10 @@ fun VoiceAssistant(
 
             // Handle if the session fails to connect.
             if (result.isFailure) {
-                Toast.makeText(context, "Error connecting to the session.", Toast.LENGTH_SHORT).show()
+                val error = result.exceptionOrNull()
+                val errorMsg = error?.localizedMessage ?: error?.message ?: "Error desconocido al conectar"
+                android.util.Log.e("VoiceAssistantScreen", "Error connecting to LiveKit session", error)
+                Toast.makeText(context, "Error al conectar: $errorMsg", Toast.LENGTH_LONG).show()
                 onEndCall()
             } else {
                 // Start foreground service to keep audio alive with screen off

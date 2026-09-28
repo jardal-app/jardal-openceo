@@ -23,6 +23,7 @@ const statusLabels = {
   escalated: 'Escalado',
   interrupted: 'Interrumpido',
   waiting: 'Esperando QA',
+  cancelled: 'Cancelado',
 }
 
 const statusColors = {
@@ -33,6 +34,7 @@ const statusColors = {
   escalated: 'badge-danger',
   interrupted: 'badge-warning',
   waiting: 'badge-active',
+  cancelled: 'badge-danger',
 }
 
 export default function QADashboard() {

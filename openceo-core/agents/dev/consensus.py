@@ -1,31 +1,39 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
 import shlex
+import shutil
+import subprocess
+import tempfile
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from uuid import uuid4
+
+from pymongo.errors import DuplicateKeyError
 
 from mcp_server import build_mcp_provider_env
 from rate_monitor import RateMonitor
 from settings import Settings
 from state import DevProvider
 
-from .opencode_models import apply_opencode_model_override
-from .opencode_paths import normalize_opencode_command
-from .opencode_run import build_run_command
 from .tmux_runtime import TmuxRuntime, TmuxTurnResult
+from .tier_s_contract import (
+    GitSnapshot, blocking_findings, detect_claude_question, git_snapshot,
+    review_quorum, valid_review,
+)
 
 logger = logging.getLogger(__name__)
 
 # === Tier S file conventions ===
 _TIER_S_DIR = ".tier-s"
-_STATUS_FILENAME = f"{_TIER_S_DIR}/status"
 _PLAN_FILENAME = f"{_TIER_S_DIR}/CURRENT_PLAN.md"
-_CONTEXT_FILENAME = "CONTEXT.md"  # repo root
 
 _TOTAL_PLANS_HEADER_RE = re.compile(r"^TOTAL_PLANS:\s*(\d+)\s*$", re.M)
 _PLAN_READY_RE = re.compile(r"^PLAN_READY_(\d+)$")
@@ -33,29 +41,9 @@ _PLAN_READY_RE = re.compile(r"^PLAN_READY_(\d+)$")
 # P1 TUI fallback signal patterns — detect signals printed to TUI but not persisted to file.
 # Anchored with ^...$ + re.MULTILINE so the signal must appear on its own line,
 # avoiding false positives from prompt text that mentions the signal name inline.
-_TUI_PLAN_READY_RE = re.compile(r"^PLAN_READY_\d+$", re.MULTILINE)
-_TUI_PLAN_REVIEWED_RE = re.compile(r"^PLAN_REVIEWED$", re.MULTILINE)
-_TUI_TICKET_COMPLETE_RE = re.compile(r"^TICKET_COMPLETE$", re.MULTILINE)
-
 _ROLE_PLANNER = "planner"
 _ROLE_PLAN_REVIEWER = "plan-reviewer"
 _ROLE_BUILDER = "builder"
-_ROLE_GEMINI_REVIEWER = "gemini-reviewer"
-
-# (reviewer_label, session_role) — the session_role tells us which tmux session to reuse
-_REVIEW_LABELS: tuple[tuple[str, str], ...] = (
-    ("clauded", _ROLE_PLANNER),
-    ("codexf", _ROLE_PLAN_REVIEWER),
-    ("gemini", _ROLE_GEMINI_REVIEWER),
-)
-
-# OpenCode one-shot reviewers (no tmux). (label, opencode model slug)
-# Default set; override via dev.tier_s.opencode_reviewers in project.yaml.
-# An explicit empty list in config disables OpenCode reviewers.
-_DEFAULT_OPENCODE_REVIEWERS: tuple[tuple[str, str], ...] = (
-    ("kimi26", "opencode-go/kimi-k2.6"),
-    ("qwen37", "opencode-go/qwen3.7-max"),
-)
 
 
 @dataclass
@@ -87,15 +75,28 @@ class ConsensusRunResult:
     steps_completed: int = 0
     reviews_received: int = 0
     error: str | None = None
+    waiting: bool = False
+    requires_human_attention: bool = False
+    run_id: str | None = None
+
+
+class _RepoBusy(RuntimeError):
+    pass
 
 
 class CriticalConsensusOrchestrator:
     """Deterministic tmux orchestration — Planner → Plan Reviewer → Builder → 3 Reviewers (2 rounds)."""
 
-    def __init__(self, settings: Settings, tmux: TmuxRuntime, rate_monitor: RateMonitor | None = None) -> None:
+    def __init__(self, settings: Settings, tmux: TmuxRuntime, rate_monitor: RateMonitor | None = None,
+                 repo: Any | None = None) -> None:
         self._settings = settings
         self._tmux = tmux
         self._rate_monitor = rate_monitor
+        self._repo = repo
+        self._run_cache: dict[str, dict[str, Any]] = {}
+        self._review_failures: dict[tuple[str, str], str] = {}
+        self._projection_tasks: dict[str, asyncio.Task[None]] = {}
+        self._projection_pending: dict[str, tuple[str, dict[str, Any]]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -114,15 +115,38 @@ class CriticalConsensusOrchestrator:
         progress: Callable[[str], Awaitable[None]],
         task_id: str | None = None,
         is_spillover: bool = False,
+        session_id: str | None = None,
     ) -> ConsensusRunResult:
         try:
-            return await self._execute_impl(project, instruction, config, progress, task_id=task_id, is_spillover=is_spillover)
+            return await self._execute_impl(project, instruction, config, progress, task_id=task_id,
+                                            is_spillover=is_spillover, session_id=session_id)
+        except _RepoBusy as exc:
+            return ConsensusRunResult(False, str(exc), error=str(exc), waiting=True)
         except Exception as exc:
             logger.exception("Tier S execute() raised unhandled exception")
+            run_id = None
+            owner_id = task_id or session_id
+            if self._repo is not None and owner_id:
+                try:
+                    run = await self._repo.active_tier_s_run(owner_id)
+                    if run:
+                        run_id = run["run_id"]
+                        self._run_cache[run_id] = run
+                        await self._checkpoint(run_id, task_id, session_id,
+                                               status="failed", active_repo=None,
+                                               waiting_reason=str(exc)[:500],
+                                               completed_at=datetime.now(timezone.utc),
+                                               cleanup_at=datetime.now(timezone.utc) + timedelta(days=30))
+                        path = Path(run["repo_path"])
+                        self._archive_artifacts(self._tier_s_paths(path), run_id)
+                        self._schedule_cleanup(path, days=30)
+                except Exception:
+                    logger.warning("Could not checkpoint terminal Tier S failure", exc_info=True)
             return ConsensusRunResult(
                 ok=False,
                 summary=f"Tier S falló con un error inesperado: {exc}",
                 error=str(exc)[:2000],
+                run_id=run_id,
             )
 
     async def _execute_impl(
@@ -133,6 +157,7 @@ class CriticalConsensusOrchestrator:
         progress: Callable[[str], Awaitable[None]],
         task_id: str | None = None,
         is_spillover: bool = False,
+        session_id: str | None = None,
     ) -> ConsensusRunResult:
         cfg = self._normalized_config(config)
         repo_path = self._resolve_repo_path(config)
@@ -144,109 +169,720 @@ class CriticalConsensusOrchestrator:
             )
 
         paths = self._tier_s_paths(repo_path)
+        if paths.dir.is_symlink():
+            return ConsensusRunResult(False, "La carpeta .tier-s no puede ser un enlace simbólico.",
+                                      error="unsafe_tier_s_path")
         paths.dir.mkdir(parents=True, exist_ok=True)
+        self._ensure_gitignore(repo_path)
+        run = await self._open_run(project, repo_path, cfg, task_id, session_id)
+        run_id = run["run_id"]
 
-        # Pre-launch rate-limit check for claude/codex providers used by roles
-        if self._rate_monitor is not None:
-            providers_seen: set[str] = set()
-            for role_cfg in cfg["roles"].values():
-                provider_name = str(role_cfg.get("provider", "")).strip().lower()
-                if provider_name in ("codex", "claude") and provider_name not in providers_seen:
-                    providers_seen.add(provider_name)
-                    can = await self._rate_monitor.can_launch(provider_name)
-                    if not can:
-                        status = await self._rate_monitor.get_status(provider_name)
-                        return ConsensusRunResult(
-                            ok=False,
-                            summary=(
-                                f"Tier S bloqueado: {provider_name} está en rate limit. "
-                                f"Reintenta a las {status.resets_5h_at.strftime('%H:%M UTC')}."
-                            ),
-                            error=f"rate_limit:{provider_name}",
-                        )
+        async def wait(reason: str, *, question: dict[str, object] | None = None) -> ConsensusRunResult:
+            updates: dict[str, Any] = {"status": "waiting", "waiting_reason": reason,
+                                       "requires_human_attention": question is not None or bool(run.get("question"))}
+            if question is not None:
+                updates.update(question=question, human_answer=None,
+                               requires_human_attention=True)
+            await self._checkpoint(run_id, task_id, session_id, **updates)
+            return ConsensusRunResult(False, reason, error=reason, waiting=True,
+                                      requires_human_attention=bool(run.get("question")), run_id=run_id)
 
-        planner, others = await self.ensure_project_sessions(project=project, config=config)
-        sessions: dict[str, ConsensusParticipant] = {
-            _ROLE_PLANNER: planner,
-            _ROLE_PLAN_REVIEWER: others[0],
-            _ROLE_BUILDER: others[1],
-            _ROLE_GEMINI_REVIEWER: others[2],
-        }
-
-        await progress("Tier S activo. Planner diseñando el plan de implementación.")
-        n_plans, planner_turn = await self._run_planner(sessions, instruction, paths, cfg, progress, task_id=task_id, is_spillover=is_spillover)
-        if n_plans is None:
-            return self._lead_failure(
-                turn=planner_turn,
-                signal_path=paths.status_path,
-                summary="Planner no confirmó PLAN_READY_N. Tier S no puede continuar.",
+        async def resume_question(participant: ConsensusParticipant,
+                                  completion_check: Callable[[], bool],
+                                  patterns: list[re.Pattern[str]]) -> TmuxTurnResult:
+            answer = str(run.get("human_answer") or "").strip()
+            turn = await self._tmux.answer_question(
+                participant.session_key, answer, timeout=cfg["timeout_seconds"],
+                completion_check=completion_check, tui_signal_patterns=patterns,
             )
+            # The answer belongs to one TUI panel only. A later retry must not
+            # try to select an option on a panel that has already moved on.
+            await self._checkpoint(run_id, task_id, session_id, question=None,
+                                   human_answer=None, requires_human_attention=False)
+            return turn
 
-        await progress("Plan Reviewer revisando y refinando el plan.")
-        await self._run_plan_reviewer(sessions, paths, cfg, progress)
-        n_plans = self._reread_total_plans(paths.plan_path) or n_plans
-        if n_plans < 1 or n_plans > cfg["max_plans"]:
-            return ConsensusRunResult(
-                ok=False,
-                summary=f"Plan inválido: {n_plans} sub-planes (debe ser 1-{cfg['max_plans']}).",
-                error=f"Invalid plan count: {n_plans}",
-            )
+        async def turn_wait(turn: TmuxTurnResult, fallback: str) -> ConsensusRunResult:
+            question = detect_claude_question(turn.output)
+            if question:
+                return await wait("Tier S requiere una decisión del propietario.", question=question)
+            return await wait(fallback)
 
-        total_reviews = 0
-        for p in range(1, n_plans + 1):
-            await progress(f"Builder implementando sub-plan {p}/{n_plans}.")
-            build_turn = await self._run_builder(sessions, p, paths, cfg, progress)
-            if not build_turn.ok:
-                return self._lead_failure(
-                    turn=build_turn,
-                    signal_path=paths.status_path,
-                    summary=f"Builder falló en sub-plan {p}.",
-                )
+        required = cfg["roles"]
+        if cfg["unsupported_legacy_opencode"]:
+            return await wait("Tier S espera: opencode_reviewers es una configuración obsoleta; usa reviewers cuando exista su adaptador de lectura.")
+        for role in (_ROLE_PLANNER, _ROLE_PLAN_REVIEWER, _ROLE_BUILDER):
+            account = required[role]
+            if not account["active"]:
+                return await wait(f"Tier S espera: {account['label']} está inactivo. Activa la suscripción para reanudar.")
+            command = self._account_command(account)
+            if not command or not (Path(command[0]).exists() or shutil.which(command[0])):
+                return await wait(f"Tier S espera: no se encontró el comando de {account['label']}.")
+        active_reviewers = [item for item in cfg["reviewers"] if item["active"]]
+        mandatory_label = required[_ROLE_PLAN_REVIEWER]["label"]
+        models = {mandatory_label: required[_ROLE_PLAN_REVIEWER]["model"]}
+        models.update({item["label"]: item["model"] for item in active_reviewers})
+        if len(models) != len(active_reviewers) + 1:
+            return await wait("Tier S espera: las etiquetas de revisores deben ser únicas.")
+        if required[_ROLE_PLAN_REVIEWER]["provider"] != "codex":
+            return await wait("Tier S espera: el revisor obligatorio requiere el adaptador Codex.")
+        if not any(item["model"] != models[mandatory_label] for item in active_reviewers):
+            return await wait("Tier S espera: falta un segundo modelo revisor independiente.")
+        for account in active_reviewers:
+            if account["provider"] not in {"qwen", "claude", "codex"}:
+                return await wait(f"Tier S espera: {account['label']} necesita un adaptador de lectura; desactívalo hasta que esté disponible.")
 
-            for r in range(1, cfg["review_rounds"] + 1):
-                await progress(f"Review round {r}/{cfg['review_rounds']} para sub-plan {p}.")
-                reviews_done = await self._run_review_round(sessions, p, r, paths, cfg, progress, config)
-                total_reviews += reviews_done
+        roster = self._frozen_roster(cfg)
+        if run.get("roster") and run["roster"] != roster:
+            return await wait("El roster o los comandos cambiaron durante el intento. Cancela este intento antes de iniciar otro.")
+        if not run.get("roster"):
+            await self._checkpoint(run_id, task_id, session_id, roster=roster,
+                                   initial_snapshot=git_snapshot(repo_path).files)
 
-                await progress(f"Builder aplicando fixes del round {r} para sub-plan {p}.")
-                fix_turn = await self._run_builder_fix(sessions, p, r, paths, cfg, progress)
-                if not fix_turn.ok:
-                    return self._lead_failure(
-                        turn=fix_turn,
-                        signal_path=paths.status_path,
-                        summary=f"Builder no aplicó los fixes del round {r} para sub-plan {p}.",
-                    )
+        if run.get("phase") == "complete" and run.get("status") == "completed":
+            return ConsensusRunResult(True, "Tier S ya estaba completado.", run_id=run_id)
+        await self._checkpoint(run_id, task_id, session_id, status="active", waiting_reason=None)
 
-        await progress("Finalizando ticket.")
-        finalize_turn = await self._run_finalize(sessions, paths, cfg, progress)
-        finalize_signal = self._read_signal(paths.status_path)
-        if finalize_signal != "TICKET_COMPLETE":
-            # P1 fallback: check TUI output for TICKET_COMPLETE when file is empty
-            if _TUI_TICKET_COMPLETE_RE.search(finalize_turn.output):
-                logger.info("P1 fallback: TICKET_COMPLETE found in TUI output but not status file")
-                finalize_signal = "TICKET_COMPLETE"
-            else:
-                return ConsensusRunResult(
-                    ok=False,
-                    summary="Tier S finalizó con warning: el planner no marcó TICKET_COMPLETE. Revisar manualmente.",
-                    last_output=finalize_turn.output.strip(),
-                    steps_completed=n_plans,
-                    reviews_received=total_reviews,
-                    error=f"Finalize signal mismatch: {finalize_signal!r}",
-                )
-
-        return ConsensusRunResult(
-            ok=True,
-            summary=self._build_success_summary(
-                plan_path=paths.plan_path,
-                brief_path=paths.plan_path,
-                steps_completed=n_plans,
-                total_reviews=total_reviews,
-            ),
-            last_output=finalize_turn.output.strip(),
-            steps_completed=n_plans,
-            reviews_received=total_reviews,
+        planner, others = await self.ensure_project_sessions(
+            project=project, config=config,
+            wait_ready=run.get("phase") == "planner" and not bool(run.get("question")),
         )
+        sessions = {_ROLE_PLANNER: planner, _ROLE_BUILDER: others[0]}
+        phase = run.get("phase") or "planner"
+        if phase == "planner":
+            await self._checkpoint(run_id, task_id, session_id, status="running", phase="planner")
+            await progress("Planner diseñando el plan.")
+            if run.get("question"):
+                if not str(run.get("human_answer") or "").strip():
+                    return await wait("Tier S espera respuesta a la pregunta del planner.", question=run["question"])
+                turn = await resume_question(
+                    sessions[_ROLE_PLANNER],
+                    completion_check=lambda: bool(_PLAN_READY_RE.match(self._read_signal(paths.status_path))),
+                    patterns=[],
+                )
+                n_plans = self._reread_total_plans(paths.plan_path) if turn.ok else None
+            else:
+                n_plans, turn = await self._run_planner(sessions, instruction, paths, cfg, progress,
+                                                        task_id=task_id, is_spillover=is_spillover)
+            if n_plans is None or not 1 <= n_plans <= cfg["max_plans"] or not paths.plan_path.exists():
+                if turn.rate_limited:
+                    return await wait("Tier S espera por cuota temporal de claudej.")
+                return await turn_wait(turn, "Planner sin PLAN_READY_N válido; se conserva el intento para reintentar.")
+            await self._checkpoint(run_id, task_id, session_id, phase="plan_review", total_plans=n_plans,
+                                   question=None, human_answer=None, requires_human_attention=False)
+            phase = "plan_review"
+
+        if phase == "plan_review":
+            if run.get("question"):
+                if not str(run.get("human_answer") or "").strip():
+                    return await wait("Tier S espera respuesta a la pregunta del planner.", question=run["question"])
+                turn = await resume_question(
+                    sessions[_ROLE_PLANNER],
+                    lambda: bool(_PLAN_READY_RE.match(self._read_signal(paths.status_path))),
+                    [],
+                )
+                if not _PLAN_READY_RE.match(self._read_signal(paths.status_path)):
+                    return await turn_wait(turn, "Planner no corrigió el plan.")
+            await progress("Codex revisando el plan.")
+            for attempt in range(2):
+                report = await self._readonly_review(required[_ROLE_PLAN_REVIEWER],
+                    self._plan_reviewer_prompt(paths) + "\nTicket:\n" + instruction,
+                    repo_path, cfg["timeout_seconds"])
+                if not valid_review(report):
+                    await self._checkpoint(run_id, task_id, session_id,
+                        reviewer_availability={mandatory_label: self._review_failures.get(
+                            (str(repo_path), mandatory_label), "invalid_report")})
+                    return await wait("Codex no entregó una revisión válida del plan.")
+                (paths.dir / "PLAN_REVIEW.md").write_text(report, encoding="utf-8")
+                if not blocking_findings(report):
+                    break
+                if attempt:
+                    return await wait("El plan conserva hallazgos tras la corrección.")
+                self._reset_signal_file(paths.status_path)
+                turn = await self._send_participant_instruction(
+                    sessions[_ROLE_PLANNER], None, None,
+                    f"Corrige hallazgos de .tier-s/PLAN_REVIEW.md en CURRENT_PLAN.md. Conserva TOTAL_PLANS y anuncia PLAN_READY_N. Directorio: {repo_path}",
+                    cfg["timeout_seconds"],
+                    completion_check=lambda: bool(_PLAN_READY_RE.match(self._read_signal(paths.status_path))),
+                    tui_signal_patterns=[],
+                    interrupt_check=lambda pane: detect_claude_question(pane) is not None,
+                )
+                if not turn.ok:
+                    return await turn_wait(turn, "Planner no corrigió el plan.")
+            n_plans = self._reread_total_plans(paths.plan_path)
+            if n_plans is None or not 1 <= n_plans <= cfg["max_plans"]:
+                return await wait("TOTAL_PLANS inválido tras la revisión.")
+            paths.status_path.write_text("PLAN_REVIEWED", encoding="utf-8")
+            await self._checkpoint(run_id, task_id, session_id, phase="build", total_plans=n_plans,
+                                   subplan=1, round=1)
+            phase = "build"
+
+        n_plans = int(run.get("total_plans") or self._reread_total_plans(paths.plan_path) or 0)
+        if n_plans < 1 or n_plans > cfg["max_plans"]:
+            return await wait("No hay plan aprobado recuperable.")
+        total_reviews = int(run.get("reviews_received") or 0)
+        p = int(run.get("subplan") or 1)
+        if p <= n_plans:
+            await self._ensure_participant_session(sessions[_ROLE_BUILDER], config, wait_ready=True)
+        while p <= n_plans:
+            if phase == "build":
+                before = (GitSnapshot(run["baseline"], "") if run.get("baseline")
+                          and run.get("subplan") == p else git_snapshot(repo_path))
+                await self._checkpoint(run_id, task_id, session_id, phase="build", subplan=p,
+                                       baseline=before.files)
+                await progress(f"Builder implementando subplan {p}/{n_plans}.")
+                if not (self._read_signal(paths.status_path) == f"BUILD_DONE_{p}"
+                        and paths.build_summary(p).exists()):
+                    if run.get("question"):
+                        if not str(run.get("human_answer") or "").strip():
+                            return await wait("Tier S espera respuesta a la pregunta del builder.", question=run["question"])
+                        build_turn = await resume_question(
+                            sessions[_ROLE_BUILDER],
+                            lambda: self._read_signal(paths.status_path) == f"BUILD_DONE_{p}" and paths.build_summary(p).exists(),
+                            [re.compile(rf"^BUILD_DONE_{p}$", re.MULTILINE)],
+                        )
+                    else:
+                        build_turn = await self._run_builder(sessions, p, paths, cfg, progress)
+                    if build_turn.rate_limited:
+                        return await wait("Tier S espera por cuota temporal de claudep.")
+                if self._read_signal(paths.status_path) != f"BUILD_DONE_{p}" or not paths.build_summary(p).exists():
+                    return await turn_wait(build_turn, f"Builder no confirmó BUILD_DONE_{p}.")
+                after = git_snapshot(repo_path)
+                changed = after.changed_since(before)
+                if not changed:
+                    return await wait(f"Subplan {p} no produjo cambios verificables en Git.")
+                await self._checkpoint(run_id, task_id, session_id, phase="review", round=1,
+                                       changed_files=changed, snapshot_hash=after.digest)
+                phase = "review"
+            if phase == "fix":
+                r = int(run.get("round") or 1)
+                before_fix = GitSnapshot(run["fix_baseline"], "") if run.get("fix_baseline") else git_snapshot(repo_path)
+                if not run.get("fix_baseline"):
+                    await self._checkpoint(run_id, task_id, session_id, fix_baseline=before_fix.files)
+                labels = [mandatory_label, *[item["label"] for item in active_reviewers]]
+                if self._read_signal(paths.status_path) != f"FIX_DONE_{p}_{r}":
+                    if run.get("question"):
+                        if not str(run.get("human_answer") or "").strip():
+                            return await wait("Tier S espera respuesta a la pregunta del builder.", question=run["question"])
+                        fix = await resume_question(sessions[_ROLE_BUILDER],
+                            lambda: self._read_signal(paths.status_path) == f"FIX_DONE_{p}_{r}",
+                            [re.compile(rf"^FIX_DONE_{p}_{r}$", re.MULTILINE)])
+                    else:
+                        fix = await self._run_builder_fix(sessions, p, r, paths, cfg, progress, labels=labels)
+                    if fix.rate_limited:
+                        return await wait("Tier S espera por cuota temporal de claudep.")
+                    if self._read_signal(paths.status_path) != f"FIX_DONE_{p}_{r}":
+                        return await turn_wait(fix, f"Builder no confirmó FIX_DONE_{p}_{r}.")
+                delta = git_snapshot(repo_path).changed_since(before_fix)
+                if not delta:
+                    return await wait("El builder no cambió código tras los hallazgos.")
+                await self._checkpoint(run_id, task_id, session_id, phase="review", round=r + 1,
+                                       changed_files=delta, fix_baseline=None)
+                phase = "review"
+            r = int(run.get("round") or 1) if phase == "review" else 1
+            while phase == "review" and r <= cfg["review_rounds"]:
+                changed = (run.get("changed_files") or []) if r == int(run.get("round") or 1) else changed
+                snapshot = git_snapshot(repo_path)
+                if not changed:
+                    changed = snapshot.changed_since(GitSnapshot(run.get("baseline") or {}, ""))
+                if not changed:
+                    return await wait("El diff del subplan desapareció antes de la revisión.")
+                await progress(f"Revisión {r} del subplan {p}.")
+                reports, availability = await self._review_snapshot(required[_ROLE_PLAN_REVIEWER], active_reviewers,
+                                                       p, r, changed, paths, cfg, repo_path)
+                total_reviews += sum(valid_review(value) for value in reports.values())
+                await self._checkpoint(run_id, task_id, session_id, reviews_received=total_reviews,
+                                       findings_count=int(run.get("findings_count") or 0) + sum(
+                                           len(re.findall(r"^\[(?:CRITICAL|WARN|SUGGEST)\] ", value, re.MULTILINE))
+                                           for value in reports.values()),
+                                       reviewer_results={key: bool(valid_review(value)) for key, value in reports.items()},
+                                       reviewer_availability=availability,
+                                       snapshot_hash=snapshot.digest)
+                if git_snapshot(repo_path).digest != snapshot.digest:
+                    return await wait("Un revisor modificó el árbol de trabajo; revisar antes de continuar.")
+                if not review_quorum(reports, models, mandatory_label):
+                    return await wait(f"Revisión {r} sin quorum: Codex y otro modelo son obligatorios.")
+                if not any(blocking_findings(value) for value in reports.values()):
+                    phase = "next"
+                    break
+                if r >= cfg["review_rounds"]:
+                    return await wait(f"Quedan hallazgos bloqueantes en subplan {p} tras {r} rondas.")
+                await self._checkpoint(run_id, task_id, session_id, phase="fix", round=r,
+                                       fix_baseline=snapshot.files)
+                fix = await self._run_builder_fix(sessions, p, r, paths, cfg, progress,
+                                                  labels=list(reports))
+                if fix.rate_limited:
+                    return await wait("Tier S espera por cuota temporal de claudep.")
+                if self._read_signal(paths.status_path) != f"FIX_DONE_{p}_{r}" or not fix.ok:
+                    return await turn_wait(fix, f"Builder no confirmó FIX_DONE_{p}_{r}.")
+                after_fix = git_snapshot(repo_path)
+                delta = after_fix.changed_since(snapshot)
+                if not delta:
+                    return await wait("El builder no cambió código tras los hallazgos.")
+                changed = delta
+                r += 1
+                await self._checkpoint(run_id, task_id, session_id, phase="review", round=r,
+                                       changed_files=delta, snapshot_hash=after_fix.digest,
+                                       fix_baseline=None)
+                phase = "review"
+            p += 1
+            if p <= n_plans:
+                await self._checkpoint(run_id, task_id, session_id, phase="build", subplan=p,
+                                       round=1, baseline=None, changed_files=[])
+                phase = "build"
+
+        if phase != "integrated_fix":
+            await self._checkpoint(run_id, task_id, session_id, phase="integrated_review", subplan=n_plans + 1)
+        for attempt in range(int(run.get("integrated_attempt") or 0), 3):
+            if phase != "integrated_fix":
+                cumulative = git_snapshot(repo_path)
+                files = cumulative.changed_since(GitSnapshot(run.get("initial_snapshot") or {}, ""))
+                if not files:
+                    return await wait("No quedó diff acumulado para la revisión integrada.")
+                integrated = await self._readonly_review(required[_ROLE_PLAN_REVIEWER],
+                    self._integrated_prompt(files), repo_path, cfg["timeout_seconds"])
+                if not valid_review(integrated):
+                    return await wait("Codex no entregó revisión integrada válida.")
+                (paths.dir / "REVIEW-INTEGRATED.md").write_text(integrated, encoding="utf-8")
+                if git_snapshot(repo_path).digest != cumulative.digest:
+                    return await wait("El diff cambió durante la revisión integrada.")
+                if not blocking_findings(integrated):
+                    break
+                if attempt >= 2:
+                    return await wait("Quedan hallazgos en la revisión integrada.")
+                await self._checkpoint(run_id, task_id, session_id, phase="integrated_fix",
+                                       integrated_baseline=cumulative.files, integrated_attempt=attempt)
+                phase = "integrated_fix"
+
+            before_fix = GitSnapshot(run.get("integrated_baseline") or {}, "")
+            if self._read_signal(paths.status_path) != "FIX_DONE_INTEGRATED":
+                if run.get("question"):
+                    if not str(run.get("human_answer") or "").strip():
+                        return await wait("Tier S espera respuesta a la pregunta del builder.", question=run["question"])
+                    fix_turn = await resume_question(
+                        sessions[_ROLE_BUILDER],
+                        lambda: self._read_signal(paths.status_path) == "FIX_DONE_INTEGRATED",
+                        [re.compile(r"^FIX_DONE_INTEGRATED$", re.MULTILINE)],
+                    )
+                else:
+                    self._reset_signal_file(paths.status_path)
+                    fix_turn = await self._send_participant_instruction(
+                        sessions[_ROLE_BUILDER], None, None,
+                        "Fix valid blocking findings in .tier-s/REVIEW-INTEGRATED.md. "
+                        "Update the relevant BUILD_SUMMARY_N.md. Write FIX_DONE_INTEGRATED to .tier-s/status when done. "
+                        f"Work inside {repo_path}.",
+                        cfg["timeout_seconds"],
+                        completion_check=lambda: self._read_signal(paths.status_path) == "FIX_DONE_INTEGRATED",
+                        tui_signal_patterns=[re.compile(r"^FIX_DONE_INTEGRATED$", re.MULTILINE)],
+                        interrupt_check=lambda pane: detect_claude_question(pane) is not None,
+                    )
+                if fix_turn.rate_limited:
+                    return await wait("Tier S espera por cuota temporal de claudep.")
+                if not fix_turn.ok or self._read_signal(paths.status_path) != "FIX_DONE_INTEGRATED":
+                    return await turn_wait(fix_turn, "Builder no confirmó el fix integrado.")
+            after_fix = git_snapshot(repo_path)
+            delta = after_fix.changed_since(before_fix)
+            if not delta:
+                return await wait("El fix integrado no cambió código verificable.")
+            reports, availability = await self._review_snapshot(required[_ROLE_PLAN_REVIEWER], active_reviewers,
+                n_plans, cfg["review_rounds"] + 1 + attempt, delta, paths, cfg, repo_path)
+            total_reviews += sum(valid_review(value) for value in reports.values())
+            await self._checkpoint(run_id, task_id, session_id, reviews_received=total_reviews,
+                                   findings_count=int(run.get("findings_count") or 0) + sum(
+                                       len(re.findall(r"^\[(?:CRITICAL|WARN|SUGGEST)\] ", value, re.MULTILINE))
+                                       for value in reports.values()),
+                                   reviewer_results={key: bool(valid_review(value)) for key, value in reports.items()},
+                                   reviewer_availability=availability)
+            if git_snapshot(repo_path).digest != after_fix.digest or not review_quorum(reports, models, mandatory_label):
+                return await wait("La confirmación del último delta no alcanzó quorum o cambió el diff.")
+            if any(blocking_findings(value) for value in reports.values()):
+                return await wait("El último delta conserva hallazgos bloqueantes.")
+            await self._checkpoint(run_id, task_id, session_id, phase="integrated_review",
+                                   integrated_attempt=attempt + 1)
+            phase = "integrated_review"
+        else:
+            return await wait("No se confirmó la revisión integrada final.")
+
+        if git_snapshot(repo_path).digest != cumulative.digest:
+            return await wait("El diff cambió después de la confirmación final.")
+        paths.status_path.write_text("TICKET_COMPLETE", encoding="utf-8")
+        await self._checkpoint(run_id, task_id, session_id, status="completed", phase="complete",
+                               active_repo=None, completed_at=datetime.now(timezone.utc),
+                               cleanup_at=datetime.now(timezone.utc) + timedelta(days=7),
+                               snapshot_hash=cumulative.digest)
+        self._archive_artifacts(paths, run_id)
+        self._schedule_cleanup(repo_path, days=7)
+        return ConsensusRunResult(True, f"Tier S completado: {n_plans} subplan(es), {total_reviews} revisiones válidas.",
+                                  steps_completed=n_plans, reviews_received=total_reviews, run_id=run_id)
+
+    @staticmethod
+    def _ensure_gitignore(repo_path: Path) -> None:
+        result = subprocess.run(["git", "rev-parse", "--git-path", "info/exclude"],
+                                cwd=repo_path, check=True, capture_output=True, text=True)
+        exclude = Path(result.stdout.strip())
+        if not exclude.is_absolute():
+            exclude = repo_path / exclude
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        lines = exclude.read_text(encoding="utf-8").splitlines() if exclude.exists() else []
+        if ".tier-s/" not in lines and ".tier-s" not in lines:
+            with exclude.open("a", encoding="utf-8") as handle:
+                handle.write(("\n" if lines else "") + ".tier-s/\n")
+
+    @staticmethod
+    def _archive_artifacts(paths: _TierSPaths, run_id: str) -> None:
+        if (paths.dir / "runs").is_symlink():
+            raise ValueError("Unsafe .tier-s/runs symlink")
+        archive = paths.dir / "runs" / run_id
+        archive.mkdir(parents=True, exist_ok=True)
+        for path in paths.dir.iterdir():
+            if path.is_file():
+                path.replace(archive / path.name)
+
+    @staticmethod
+    def _account_command(account: dict[str, Any]) -> list[str]:
+        raw = account.get("command")
+        if isinstance(raw, str):
+            return shlex.split(raw)
+        if isinstance(raw, list) and raw:
+            return [str(part) for part in raw]
+        return [str(account.get("label") or "")]
+
+    def _frozen_roster(self, cfg: dict[str, Any]) -> list[dict[str, Any]]:
+        accounts = [{"role": role, **item} for role, item in cfg["roles"].items()]
+        accounts += [{"role": "code-reviewer", **item} for item in cfg["reviewers"]]
+        return [{
+            "role": item["role"], "label": item["label"], "model": item["model"],
+            "provider": item["provider"], "active": item["active"],
+            "command_hash": hashlib.sha256(
+                repr(self._account_command(item)).encode()).hexdigest(),
+        } for item in accounts]
+
+    async def _open_run(self, project: str, repo_path: Path, cfg: dict[str, Any],
+                        task_id: str | None, session_id: str | None) -> dict[str, Any]:
+        owner = task_id or session_id or str(uuid4())
+        if self._repo is not None:
+            await self._cleanup_expired(repo_path)
+            existing = await self._repo.active_tier_s_run(owner)
+            if existing:
+                self._run_cache[existing["run_id"]] = existing
+                return existing
+            occupant = await self._repo.active_tier_s_run_for_repo(str(repo_path))
+            if occupant:
+                raise _RepoBusy(f"Tier S espera: el repo ya tiene un intento activo ({occupant['run_id']}).")
+        now = datetime.now(timezone.utc)
+        doc = {"run_id": str(uuid4()), "owner_id": owner, "task_id": task_id,
+               "session_id": session_id, "project": project, "repo_path": str(repo_path),
+               "active_repo": str(repo_path), "status": "active", "phase": "planner",
+               "subplan": 1, "round": 1, "roster": [],
+               "initial_snapshot": {},
+               "phase_started_at": now, "phase_durations_seconds": {},
+               "created_at": now, "updated_at": now}
+        if self._repo is not None:
+            try:
+                await self._repo.create_tier_s_run(doc)
+            except DuplicateKeyError as exc:
+                raise _RepoBusy("Tier S espera: otro intento tomó el repo antes de iniciar.") from exc
+            if task_id:
+                await self._repo.patch_task(task_id, {"tier_s_run_id": doc["run_id"]})
+            if session_id:
+                await self._repo.patch_dev_session(session_id, {"tier_s_run_id": doc["run_id"]})
+        self._run_cache[doc["run_id"]] = doc
+        return doc
+
+    async def _cleanup_expired(self, repo_path: Path) -> None:
+        if self._repo is None:
+            return
+        if (repo_path / _TIER_S_DIR).is_symlink():
+            logger.warning("Refusing Tier S cleanup through symlink in %s", repo_path)
+            return
+        if (repo_path / _TIER_S_DIR / "runs").is_symlink():
+            logger.warning("Refusing Tier S cleanup through runs symlink in %s", repo_path)
+            return
+        for run in await self._repo.expired_tier_s_runs(datetime.now(timezone.utc), str(repo_path)):
+            run_id = str(run.get("run_id") or "")
+            try:
+                from uuid import UUID
+                UUID(run_id)
+            except ValueError:
+                continue
+            archive = repo_path / _TIER_S_DIR / "runs" / run_id
+            if archive.is_dir() and not archive.is_symlink():
+                shutil.rmtree(archive)
+            await self._repo.patch_tier_s_run(run_id, {
+                "cleanup_at": None, "artifacts_cleaned_at": datetime.now(timezone.utc),
+            })
+
+    async def cleanup_expired_all(self) -> None:
+        """Reconcile due artifact cleanup once at service startup."""
+        if self._repo is None:
+            return
+        previous_ids: set[str] = set()
+        while True:
+            due = await self._repo.expired_tier_s_runs_any(datetime.now(timezone.utc))
+            if not due:
+                return
+            current_ids = {str(run["run_id"]) for run in due}
+            if current_ids == previous_ids:
+                logger.warning("Tier S cleanup made no progress; retaining remaining records")
+                return
+            previous_ids = current_ids
+            paths = {Path(str(run["repo_path"])) for run in due}
+            for path in paths:
+                await self._cleanup_expired(path)
+            if len(due) < 200:
+                return
+
+    async def reconcile_interrupted_runs(self) -> None:
+        """A restart pauses active attempts without discarding their phase or TUI."""
+        if self._repo is None:
+            return
+        while True:
+            runs = await self._repo.interrupted_tier_s_runs()
+            if not runs:
+                return
+            for run in runs:
+                self._run_cache[run["run_id"]] = run
+                await self._checkpoint(
+                    run["run_id"], run.get("task_id"), run.get("session_id"),
+                    status="waiting", waiting_reason="Tier S pausado por reinicio; relanza el ticket para reanudar el mismo intento",
+                )
+            if len(runs) < 200:
+                return
+
+    def _schedule_cleanup(self, repo_path: Path, *, days: int) -> None:
+        if self._repo is None:
+            return
+        asyncio.get_running_loop().call_later(
+            days * 24 * 3600,
+            lambda: asyncio.create_task(self._cleanup_expired(repo_path)),
+        )
+
+    async def cancel_run(self, owner_id: str, config: dict[str, Any]) -> bool:
+        if self._repo is None:
+            return False
+        run = await self._repo.active_tier_s_run(owner_id)
+        if run is None:
+            return False
+        repo_path = self._resolve_repo_path(config)
+        if repo_path is None or str(repo_path) != run.get("repo_path"):
+            return False
+        self._run_cache[run["run_id"]] = run
+        await self._checkpoint(run["run_id"], run.get("task_id"), run.get("session_id"),
+                               status="cancelled", active_repo=None, question=None,
+                               requires_human_attention=False,
+                               waiting_reason="Intento TIER S cancelado por el propietario",
+                               completed_at=datetime.now(timezone.utc),
+                               cleanup_at=datetime.now(timezone.utc) + timedelta(days=30))
+        self._archive_artifacts(self._tier_s_paths(repo_path), run["run_id"])
+        self._schedule_cleanup(repo_path, days=30)
+        self.close_project(run["project"], config)
+        return True
+
+    async def _checkpoint(self, run_id: str, task_id: str | None, session_id: str | None,
+                          **updates: Any) -> None:
+        run = self._run_cache[run_id]
+        public_keys = {"phase", "status", "subplan", "round", "reviewer_results", "reviewer_availability",
+                       "requires_human_attention", "question", "waiting_reason"}
+        changed_public = any(key in public_keys and run.get(key) != value for key, value in updates.items())
+        next_phase = updates.get("phase")
+        if next_phase and next_phase != run.get("phase"):
+            now = datetime.now(timezone.utc)
+            started = run.get("phase_started_at") or run.get("updated_at") or now
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            durations = dict(run.get("phase_durations_seconds") or {})
+            old_phase = str(run.get("phase") or "preflight")
+            durations[old_phase] = round(float(durations.get(old_phase) or 0) + (now - started).total_seconds(), 2)
+            updates["phase_started_at"] = now
+            updates["phase_durations_seconds"] = durations
+        run.update(updates)
+        run["updated_at"] = datetime.now(timezone.utc)
+        if self._repo is not None:
+            await self._repo.patch_tier_s_run(run_id, updates)
+            if task_id:
+                summary = {
+                    "run_id": run_id, "phase": run.get("phase"), "status": run.get("status"),
+                    "subplan": run.get("subplan"), "round": run.get("round"),
+                    "reviewers": run.get("reviewer_results") or {},
+                    "reviewer_availability": run.get("reviewer_availability") or {},
+                    "requires_human_attention": bool(run.get("requires_human_attention")),
+                    "question": run.get("question"), "waiting_reason": run.get("waiting_reason"),
+                }
+                task = await self._repo.patch_task(task_id, {"tier_s_progress": summary})
+                adapter = getattr(self, "_erpnext", None)
+                if changed_public and adapter is not None and task is not None:
+                    mirrors = (task.get("params") or {}).get("_mirrors") or {}
+                    mirror = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
+                    name = str(mirror.get("name") or "") if isinstance(mirror, dict) else ""
+                    if name:
+                        self._projection_pending[task_id] = (name, summary)
+                        if task_id not in self._projection_tasks:
+                            self._projection_tasks[task_id] = asyncio.create_task(
+                                self._flush_projection(task_id, adapter))
+            if session_id:
+                await self._repo.patch_dev_session(session_id, {"tier_s_progress": {
+                    "phase": run.get("phase"), "status": run.get("status"),
+                    "waiting_reason": run.get("waiting_reason"), "question": run.get("question"),
+                }})
+        if run.get("status") in {"completed", "failed", "cancelled"} and run.get("active_repo") is None:
+            self._run_cache.pop(run_id, None)
+            repo_path = str(run.get("repo_path") or "")
+            for key in [key for key in self._review_failures if key[0] == repo_path]:
+                self._review_failures.pop(key, None)
+
+    async def _flush_projection(self, task_id: str, adapter: Any) -> None:
+        while task_id in self._projection_pending:
+            name, summary = self._projection_pending.pop(task_id)
+            try:
+                await asyncio.wait_for(adapter.update_tier_s_progress(name, summary), timeout=10)
+            except Exception:
+                logger.warning("Tier S progress projection failed for %s", task_id, exc_info=True)
+        self._projection_tasks.pop(task_id, None)
+
+    async def _readonly_review(self, account: dict[str, Any], prompt: str,
+                               repo_path: Path, timeout: int) -> str:
+        command = self._account_command(account)
+        provider = account["provider"]
+        if provider == "codex":
+            argv = [*command, "exec", "--ephemeral", "-"]
+        elif provider == "qwen":
+            argv = [*command, "--output-format", "text", prompt]
+        elif provider == "claude":
+            argv = [*command, "--print", "--permission-mode", "plan",
+                    "--no-session-persistence", prompt]
+        else:
+            return ""
+        try:
+            with self._isolated_review_worktree(repo_path) as review_path:
+                return await self._run_review_process(account, argv, prompt, review_path,
+                                                      timeout, check_writes=True,
+                                                      origin_repo=repo_path)
+        except Exception:
+            self._review_failures[(str(repo_path), str(account["label"]))] = "worktree_error"
+            logger.warning("Tier S isolated reviewer workspace failed", exc_info=True)
+            return ""
+
+    @staticmethod
+    @contextmanager
+    def _isolated_review_worktree(repo_path: Path):
+        """Reviewers inspect the same snapshot away from the builder's real tree."""
+        with tempfile.TemporaryDirectory(prefix="tier-s-review-") as directory:
+            target = Path(directory) / "repo"
+            subprocess.run(["git", "worktree", "add", "--detach", "--quiet", str(target), "HEAD"],
+                           cwd=repo_path, check=True, capture_output=True)
+            try:
+                for name, digest in git_snapshot(repo_path).files.items():
+                    source = repo_path / name
+                    dest = target / name
+                    if digest is None:
+                        if dest.is_dir() and not dest.is_symlink():
+                            shutil.rmtree(dest)
+                        elif dest.exists() or dest.is_symlink():
+                            dest.unlink()
+                        continue
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    if dest.exists() or dest.is_symlink():
+                        dest.unlink()
+                    if source.is_symlink():
+                        dest.symlink_to(os.readlink(source))
+                    else:
+                        shutil.copy2(source, dest)
+                source_artifacts = repo_path / _TIER_S_DIR
+                if source_artifacts.is_dir():
+                    dest_artifacts = target / _TIER_S_DIR
+                    dest_artifacts.mkdir(exist_ok=True)
+                    for source in source_artifacts.iterdir():
+                        if source.is_file():
+                            shutil.copy2(source, dest_artifacts / source.name)
+                yield target
+            finally:
+                removal = subprocess.run(["git", "worktree", "remove", "--force", str(target)],
+                                         cwd=repo_path, check=False, capture_output=True)
+                if removal.returncode != 0:
+                    shutil.rmtree(target, ignore_errors=True)
+                    subprocess.run(["git", "worktree", "prune"], cwd=repo_path,
+                                   check=False, capture_output=True)
+
+    async def _run_review_process(self, account: dict[str, Any], argv: list[str], prompt: str,
+                                  cwd: Path, timeout: int, *, check_writes: bool = False,
+                                  origin_repo: Path) -> str:
+        before = git_snapshot(cwd) if check_writes else None
+        failure_key = (str(origin_repo), str(account["label"]))
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *argv, cwd=str(cwd), stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(prompt.encode() if account["provider"] == "codex" else None),
+                timeout=timeout,
+            )
+            if process.returncode != 0:
+                error_text = stderr.decode(errors="replace").lower()
+                self._review_failures[failure_key] = (
+                    "quota" if any(word in error_text for word in ("rate limit", "quota", "429"))
+                    else "access" if any(word in error_text for word in ("unauthorized", "forbidden", "auth"))
+                    else "payment" if any(word in error_text for word in ("payment", "billing"))
+                    else "process_error"
+                )
+                logger.warning("Tier S reviewer %s failed: %s", account["label"],
+                               stderr.decode(errors="replace")[-500:])
+                return ""
+            if before is not None and git_snapshot(cwd).digest != before.digest:
+                self._review_failures[failure_key] = "write_attempt"
+                logger.warning("Tier S reviewer %s changed its isolated worktree", account["label"])
+                return ""
+            report = stdout.decode(errors="replace").strip()
+            if len(report) > 64000:
+                self._review_failures[failure_key] = "oversized_report"
+                return ""
+            self._review_failures.pop(failure_key, None)
+            return report
+        except asyncio.TimeoutError:
+            self._review_failures[failure_key] = "timeout"
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
+            logger.warning("Tier S reviewer %s timed out", account["label"])
+            return ""
+        except Exception:
+            self._review_failures[failure_key] = "process_error"
+            logger.warning("Tier S reviewer %s failed", account["label"], exc_info=True)
+            return ""
+
+    async def _review_snapshot(self, mandatory: dict[str, Any], reviewers: list[dict[str, Any]],
+                               p: int, round_: int, changed: list[str], paths: _TierSPaths,
+                               cfg: dict[str, Any], repo_path: Path) -> tuple[dict[str, str], dict[str, str]]:
+        accounts = [mandatory, *reviewers]
+        labels = [account["label"] for account in accounts]
+        prompts = [self._code_reviewer_prompt(label, p, round_, paths, changed)
+                   for label in labels]
+        outputs = await asyncio.gather(*(
+            self._readonly_review(account, prompt, repo_path, cfg["timeout_seconds"])
+            for account, prompt in zip(accounts, prompts)
+        ))
+        reports = dict(zip(labels, outputs))
+        for label, content in reports.items():
+            report_path = paths.review(label, p, round_)
+            if valid_review(content):
+                report_path.write_text(content.rstrip() + f"\nREVIEW_DONE_{p}_{round_}_{label}\n", encoding="utf-8")
+            elif report_path.exists():
+                report_path.unlink()
+        availability = {
+            label: ("available" if valid_review(content) else
+                    self._review_failures.get((str(repo_path), label), "invalid_report"))
+            for label, content in reports.items()
+        }
+        return reports, availability
+
+    @staticmethod
+    def _integrated_prompt(files: list[str]) -> str:
+        names = "\n".join(f"- {name}" for name in files)
+        return ("Read-only integrated review of the ticket's cumulative working-tree changes. "
+                "Inspect the current Git diff and listed new files; check integration, contracts, "
+                "and unresolved defects. Do not edit files or run tests. Output only actionable "
+                "[CRITICAL]/[WARN]/[SUGGEST] path:line findings or exactly 'No findings.'.\n" + names)
 
     async def ensure_project_sessions(
         self,
@@ -254,6 +890,7 @@ class CriticalConsensusOrchestrator:
         config: dict[str, Any],
         wait_ready: bool = True,
         prime_reviewers: bool = True,
+        start_roles: set[str] | None = None,
     ) -> tuple[ConsensusParticipant, list[ConsensusParticipant]]:
         cfg = self._normalized_config(config)
 
@@ -273,21 +910,23 @@ class CriticalConsensusOrchestrator:
             )
 
         planner = _make(_ROLE_PLANNER)
-        plan_reviewer = _make(_ROLE_PLAN_REVIEWER)
         builder = _make(_ROLE_BUILDER)
-        gemini_reviewer = _make(_ROLE_GEMINI_REVIEWER)
 
-        for participant in [planner, plan_reviewer, builder, gemini_reviewer]:
+        for participant in [planner, builder]:
+            if participant.role not in (start_roles or {_ROLE_PLANNER}):
+                continue
+            if not cfg["roles"][participant.role]["active"]:
+                continue
             await self._ensure_participant_session(
                 participant=participant,
                 config=config,
                 wait_ready=wait_ready,
             )
 
-        return planner, [plan_reviewer, builder, gemini_reviewer]
+        return planner, [builder]
 
     def close_project(self, project: str, config: dict[str, Any]) -> None:
-        for role in [_ROLE_PLANNER, _ROLE_PLAN_REVIEWER, _ROLE_BUILDER, _ROLE_GEMINI_REVIEWER]:
+        for role in [_ROLE_PLANNER, _ROLE_BUILDER]:
             safe_project = re.sub(r"[^a-zA-Z0-9_-]", "-", project)
             safe_role = re.sub(r"[^a-zA-Z0-9_-]", "-", role)
             self._tmux.close_session(
@@ -297,7 +936,7 @@ class CriticalConsensusOrchestrator:
 
     def get_live_output(self, project: str, config: dict[str, Any]) -> str:
         lines: list[str] = []
-        for role in [_ROLE_PLANNER, _ROLE_PLAN_REVIEWER, _ROLE_BUILDER, _ROLE_GEMINI_REVIEWER]:
+        for role in [_ROLE_PLANNER, _ROLE_BUILDER]:
             session_key = f"tier_s::{project}::{role}"
             content = self._tmux.get_current_output(session_key, lines=30).strip()
             if not content:
@@ -351,41 +990,66 @@ class CriticalConsensusOrchestrator:
             tier_s_cfg = {}
 
         review_rounds = max(1, int(tier_s_cfg.get("review_rounds", 2)))
-        max_plans = max(1, int(tier_s_cfg.get("max_plans", 15)))
+        max_plans = max(1, int(tier_s_cfg.get("max_plans", 8)))
         timeout_seconds = max(120, int(tier_s_cfg.get("timeout_minutes", 15)) * 60)
 
         raw_roles = tier_s_cfg.get("roles", {}) or {}
         roles: dict[str, dict[str, Any]] = {}
-        for role_name in [_ROLE_PLANNER, _ROLE_PLAN_REVIEWER, _ROLE_BUILDER, _ROLE_GEMINI_REVIEWER]:
-            role_cfg = raw_roles.get(role_name, {}) if isinstance(raw_roles, dict) else {}
+        for role_name in [_ROLE_PLANNER, _ROLE_PLAN_REVIEWER, _ROLE_BUILDER]:
+            role_cfg = (raw_roles.get(role_name, raw_roles.get(role_name.replace("-", "_"), {}))
+                        if isinstance(raw_roles, dict) else {})
             if not isinstance(role_cfg, dict):
                 role_cfg = {}
             roles[role_name] = {
                 "provider": str(role_cfg.get("provider", "")).strip().lower() or self._default_provider_for_role(role_name),
+                "label": str(role_cfg.get("label") or {"planner": "claudej", "plan-reviewer": "codexf", "builder": "claudep"}[role_name]),
+                "model": str(role_cfg.get("model") or {"planner": "claude-opus-5-5", "plan-reviewer": "gpt-6-sol", "builder": "deepseek-v4.1-flash"}[role_name]),
+                "active": role_cfg.get("active", True) is True,
                 "command": role_cfg.get("command") or [],
                 "env": role_cfg.get("env", {}) or {},
             }
+            if not roles[role_name]["command"]:
+                try:
+                    provider = DevProvider(roles[role_name]["provider"])
+                    roles[role_name]["command"] = self._resolve_command(provider, config, role=role_name)[0]
+                except ValueError:
+                    pass
 
-        raw_oc = tier_s_cfg.get("opencode_reviewers", None)
-        if raw_oc is None:
-            opencode_reviewers = list(_DEFAULT_OPENCODE_REVIEWERS)
-        elif isinstance(raw_oc, list):
-            opencode_reviewers = []
-            for item in raw_oc:
-                if isinstance(item, dict):
-                    label = str(item.get("label", "")).strip()
-                    model = str(item.get("model", "")).strip()
-                    if label and model:
-                        opencode_reviewers.append((label, model))
-        else:
-            opencode_reviewers = list(_DEFAULT_OPENCODE_REVIEWERS)
+        default_reviewers = [
+            {"label": "qwen", "provider": "qwen", "model": "qwen3.8-max", "active": True,
+             "command": ["qwen", "--approval-mode", "plan"]},
+            {"label": "claudeg", "provider": "claude", "model": "glm-5.3", "active": True,
+             "command": ["claudeg", "--tools", "Read,Glob,Grep"]},
+            {"label": "agyd", "provider": "gemini", "model": "gemini", "active": False, "command": ["agyd"]},
+            {"label": "mimo", "provider": "opencode", "model": "opencode-go/mimo-v2.6-pro", "active": False,
+             "command": ["opencode"]},
+        ]
+        raw_reviewers = tier_s_cfg.get("reviewers", default_reviewers)
+        reviewers: list[dict[str, Any]] = []
+        if isinstance(raw_reviewers, list):
+            for item in raw_reviewers:
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("label") or "").strip()
+                model = str(item.get("model") or "").strip()
+                provider = str(item.get("provider") or "").strip().lower()
+                if label and model and provider:
+                    reviewers.append({"label": label, "model": model, "provider": provider,
+                                      "active": item.get("active", True) is True,
+                                      "command": item.get("command") or []})
+
+        legacy_gemini = raw_roles.get("gemini_reviewer") if isinstance(raw_roles, dict) else None
+        if isinstance(legacy_gemini, dict) and legacy_gemini.get("active", True):
+            reviewers.append({"label": "agyd", "model": "gemini", "provider": "gemini",
+                              "active": True, "command": legacy_gemini.get("command") or ["agyd"]})
 
         return {
             "roles": roles,
             "review_rounds": review_rounds,
             "max_plans": max_plans,
             "timeout_seconds": timeout_seconds,
-            "opencode_reviewers": opencode_reviewers,
+            "reviewers": reviewers,
+            "unsupported_legacy_opencode": bool(tier_s_cfg.get("opencode_reviewers")),
         }
 
     @staticmethod
@@ -394,8 +1058,6 @@ class CriticalConsensusOrchestrator:
             return "claude"
         if role == _ROLE_PLAN_REVIEWER:
             return "codex"
-        if role == _ROLE_GEMINI_REVIEWER:
-            return "gemini"
         return "claude"
 
     # ------------------------------------------------------------------
@@ -415,7 +1077,7 @@ class CriticalConsensusOrchestrator:
         role_cfg: dict[str, Any] = {}
         if role:
             roles_cfg = (dev_cfg.get("tier_s", {}) or {}).get("roles", {}) or {}
-            role_cfg = roles_cfg.get(role, {}) or {}
+            role_cfg = roles_cfg.get(role, roles_cfg.get(role.replace("-", "_"), {})) or {}
             if not isinstance(role_cfg, dict):
                 role_cfg = {}
 
@@ -479,16 +1141,15 @@ class CriticalConsensusOrchestrator:
             prompt=self._planner_prompt(instruction, cfg["max_plans"], paths, task_id=task_id, is_spillover=is_spillover),
             timeout=cfg["timeout_seconds"],
             completion_check=lambda: bool(_PLAN_READY_RE.match(self._read_signal(paths.status_path))),
-            tui_signal_patterns=[_TUI_PLAN_READY_RE],
+            tui_signal_patterns=[],
+            interrupt_check=lambda pane: detect_claude_question(pane) is not None,
         )
         signal = self._read_signal(paths.status_path)
         match = _PLAN_READY_RE.match(signal)
-        if not match:
-            # P1 fallback: check TUI output for PLAN_READY_N when file is empty
-            tui_match = _TUI_PLAN_READY_RE.search(turn.output)
-            if tui_match:
-                match = tui_match
-                logger.info("P1 fallback: extracted '%s' from TUI output", tui_match.group(0))
+        # A historical tmux line is not evidence for this attempt; the file is
+        # authoritative and TOTAL_PLANS must agree with it.
+        if match and self._reread_total_plans(paths.plan_path) != int(match.group(1)):
+            match = None
         if match:
             return int(match.group(1)), turn
         return None, turn
@@ -520,7 +1181,7 @@ class CriticalConsensusOrchestrator:
             )
 
         return (
-            f"Read {_CONTEXT_FILENAME} if it exists at the repo root for project context.\n"
+            f"Read the ticket and only the project context needed. Resolve ordinary technical choices yourself.\n"
             f"Ticket: {instruction}\n\n"
             f"Create {_TIER_S_DIR}/{_PLAN_FILENAME.split('/')[-1]} with this exact format:\n\n"
             f"TOTAL_PLANS: N\n\n"
@@ -533,10 +1194,12 @@ class CriticalConsensusOrchestrator:
             f"...\n\n"
             f"Rules:\n"
             f"- 1 <= N <= {max_plans}. Choose the minimum number that fully solves the ticket.\n"
-            f"- Each sub-plan must be independently implementable and reviewable.\n"
+            f"- One coherent sub-plan is preferable. Split only for real dependencies or risk.\n"
             f"- Be specific about files, not vague.\n"
             f"- Order sub-plans so dependencies are satisfied left-to-right.\n"
             f"{spillover_block}\n"
+            f"If a material owner decision blocks planning, use Claude Code's native question mode. "
+            f"Do not announce PLAN_READY_N while a question is pending.\n"
             f"When done, overwrite {_TIER_S_DIR}/status with exactly PLAN_READY_N (where N is your chosen number) and print it.\n"
             f"Work inside {paths.dir.parent}."
         )
@@ -545,42 +1208,12 @@ class CriticalConsensusOrchestrator:
     # Phase B — Plan Reviewer
     # ------------------------------------------------------------------
 
-    async def _run_plan_reviewer(
-        self,
-        sessions: dict[str, ConsensusParticipant],
-        paths: _TierSPaths,
-        cfg: dict[str, Any],
-        progress: Callable[[str], Awaitable[None]],
-    ) -> None:
-        self._reset_signal_file(paths.status_path)
-        turn = await self._send_participant_instruction(
-            participant=sessions[_ROLE_PLAN_REVIEWER],
-            config=None,
-            repo_path=None,
-            prompt=self._plan_reviewer_prompt(paths),
-            timeout=cfg["timeout_seconds"],
-            completion_check=lambda: self._read_signal(paths.status_path) == "PLAN_REVIEWED",
-            tui_signal_patterns=[_TUI_PLAN_REVIEWED_RE],
-        )
-        signal = self._read_signal(paths.status_path)
-        if signal != "PLAN_REVIEWED":
-            await progress("Plan reviewer no firmó PLAN_REVIEWED — sigo con el plan original.")
-            if not turn.ok:
-                logger.warning("Plan reviewer failed. Status: %r, turn error: %s", signal, turn.error)
-
     def _plan_reviewer_prompt(self, paths: _TierSPaths) -> str:
         return (
-            f"Read {_TIER_S_DIR}/{_PLAN_FILENAME.split('/')[-1]} carefully. You are the Plan Reviewer.\n\n"
-            f"Edit the file inline if you find issues:\n"
-            f"- Missing steps? Add them and update TOTAL_PLANS.\n"
-            f"- Wrong order? Reorder steps.\n"
-            f"- Too many or too few sub-plans? Adjust TOTAL_PLANS: N.\n"
-            f"- Unclear objectives or missing files? Clarify them.\n"
-            f"- Missing dependencies or success criteria? Add them.\n\n"
-            f"Do NOT re-prompt the planner. You are the final authority on the plan.\n"
-            f"Make your edits directly in the file.\n\n"
-            f"When done, overwrite {_TIER_S_DIR}/status with exactly PLAN_REVIEWED and print it.\n"
-            f"Work inside {paths.dir.parent}."
+            f"Review {_TIER_S_DIR}/CURRENT_PLAN.md against the ticket. Read only direct contracts needed. "
+            f"Check completeness, ordering, invariants and whether the subplan count is minimal. "
+            f"Do not edit files or run tests. Report each real issue as [WARN] path:line — issue → fix; "
+            "otherwise output exactly 'No findings.'. Work in the current directory."
         )
 
     def _reread_total_plans(self, plan_path: Path) -> int | None:
@@ -621,6 +1254,7 @@ class CriticalConsensusOrchestrator:
             tui_signal_patterns=[
                 re.compile(rf"^BUILD_DONE_{re.escape(str(p))}$", re.MULTILINE),
             ],
+            interrupt_check=lambda pane: detect_claude_question(pane) is not None,
         )
         return turn
 
@@ -643,105 +1277,15 @@ class CriticalConsensusOrchestrator:
     # Phase D — Code Reviewers (parallel) + Builder Fixes
     # ------------------------------------------------------------------
 
-    async def _run_review_round(
-        self,
-        sessions: dict[str, ConsensusParticipant],
-        p: int,
-        round_: int,
-        paths: _TierSPaths,
-        cfg: dict[str, Any],
-        progress: Callable[[str], Awaitable[None]],
-        config: dict[str, Any] | None = None,
-    ) -> int:
-        # Delete any stale review files for this round
-        for reviewer_label, _session_role in _REVIEW_LABELS:
-            rpath = paths.review(reviewer_label, p, round_)
-            if rpath.exists():
-                rpath.unlink()
-        for label, _model in cfg["opencode_reviewers"]:
-            rpath = paths.review(label, p, round_)
-            if rpath.exists():
-                rpath.unlink()
-
-        async def _one_review(reviewer_label: str, session_role: str) -> bool:
-            rpath = paths.review(reviewer_label, p, round_)
-            expected_signal = f"REVIEW_DONE_{p}_{round_}_{reviewer_label}"
-            try:
-                turn = await self._send_participant_instruction(
-                    participant=sessions[session_role],
-                    config=None,
-                    repo_path=None,
-                    prompt=self._code_reviewer_prompt(reviewer_label, p, round_, paths),
-                    timeout=cfg["timeout_seconds"],
-                    completion_check=lambda rp=rpath, es=expected_signal: self._review_file_done(rp, es),
-                    tui_signal_patterns=[
-                        re.compile(rf"^{re.escape(expected_signal)}$", re.MULTILINE),
-                    ],
-                )
-                return turn.ok
-            except Exception:
-                logger.warning("Reviewer %s round %d sub-plan %d failed", reviewer_label, round_, p, exc_info=True)
-                return False
-
-        tmux_tasks = [
-            _one_review(reviewer_label, session_role)
-            for reviewer_label, session_role in _REVIEW_LABELS
-        ]
-
-        oc_reviewers = cfg["opencode_reviewers"]
-        api_key = self._settings.OPENCODE_GO_API_KEY or os.environ.get("OPENCODE_GO_API_KEY", "")
-        if oc_reviewers and not api_key:
-            logger.warning("OpenCode reviewers configured but OPENCODE_GO_API_KEY is empty; skipping them")
-            oc_reviewers = []
-        oc_tasks = [
-            self._one_opencode_review(label, model, p, round_, paths, cfg, config or {})
-            for label, model in oc_reviewers
-        ]
-
-        results = await asyncio.gather(*tmux_tasks, *oc_tasks, return_exceptions=True)
-        ok_count = sum(1 for r in results if r is True)
-        expected = len(_REVIEW_LABELS) + len(oc_reviewers)
-        if ok_count < expected:
-            logger.warning("Review round %d sub-plan %d: %d/%d reviewers completed", round_, p, ok_count, expected)
-        return ok_count
-
-    def _code_reviewer_prompt(self, reviewer_label: str, p: int, round_: int, paths: _TierSPaths) -> str:
+    def _code_reviewer_prompt(self, reviewer_label: str, p: int, round_: int,
+                              paths: _TierSPaths, changed: list[str]) -> str:
+        names = "\n".join(f"- {name}" for name in changed)
         return (
-            f"You are a unit code reviewer ({reviewer_label}) in round {round_} for sub-plan {p}.\n\n"
-            f"1. Read {_TIER_S_DIR}/BUILD_SUMMARY_{p}.md and note the exact files in 'Files modified'.\n"
-            f"2. Review ONLY those files. Do NOT explore the entire project.\n"
-            f"3. You may read files directly imported/required by the modified files to verify\n"
-            f"   integration correctness, but limit yourself to ONE hop — do not trace transitive deps.\n"
-            f"4. Do NOT run tests, type-checkers, linters, or any project-wide tooling.\n"
-            f"5. Write your findings to {_TIER_S_DIR}/REVIEW-{reviewer_label}-{p}-{round_}.md.\n\n"
-            f"Scope rules:\n"
-            f"- Only review files listed in BUILD_SUMMARY_{p}.md 'Files modified' section.\n"
-            f"- At most one hop: read direct imports of those files, but do NOT chase their deps further.\n"
-            f"- Do NOT run tests, type-checkers, linters, or any project-wide tooling.\n"
-            f"- Do NOT explore the repo structure or unrelated directories.\n"
-            f"- If the sub-plan touches 3 files, your review covers those 3 files + their direct imports.\n\n"
-            f"Output rules — CRITICAL for cost control:\n"
-            f"- Be concise but complete. Each finding must be actionable by the builder.\n"
-            f"- Use this exact one-line format per finding (no bullets, no paragraphs):\n"
-            f"  [CRITICAL] path:line — issue → fix\n"
-            f"  [WARN] path:line — issue → fix\n"
-            f"  [SUGGEST] path:line — issue → fix\n"
-            f"- One finding = one line. If a finding truly needs more context, add a second\n"
-            f"  indented line with the key detail, but only for critical/warn severity.\n"
-            f"- No code snippets. Reference the line number; the builder will read the file.\n"
-            f"- No narrative intros (no \"I reviewed...\", \"Looking at...\", \"The code does...\").\n"
-            f"- If the code has zero issues, write exactly: No findings.\n"
-            f"- Report only real problems. Do NOT pad with \"looks good but consider...\" fluff.\n"
-            f"- Be specific in the fix: \"use param query\" not \"improve security\".\n"
-            f"- Quality first: if a finding needs 2 lines to be clear, use 2 lines.\n"
-            f"  But 90% of findings should fit in 1 line.\n\n"
-            f"Focus on:\n"
-            f"- Correctness of the changed logic (wrong condition, off-by-one, null access).\n"
-            f"- Edge cases in modified functions (empty input, boundary values, race conditions).\n"
-            f"- Error handling gaps in new/changed code (missing try/catch, swallowed exceptions).\n"
-            f"- Integration breaks with directly imported modules (changed signature, missing arg).\n\n"
-            f"The LAST LINE of {_TIER_S_DIR}/REVIEW-{reviewer_label}-{p}-{round_}.md must be exactly: REVIEW_DONE_{p}_{round_}_{reviewer_label}\n"
-            f"Work inside {paths.dir.parent}."
+            f"Read-only code review, {reviewer_label}, subplan {p}, round {round_}. "
+            f"Review the current working-tree diff for these Git-derived paths, including new files:\n{names}\n"
+            "Read direct contracts only. Do not edit files or run tests. Report actionable "
+            "[CRITICAL]/[WARN]/[SUGGEST] path:line — issue → fix findings; "
+            "otherwise output exactly 'No findings.'."
         )
 
     async def _run_builder_fix(
@@ -752,23 +1296,25 @@ class CriticalConsensusOrchestrator:
         paths: _TierSPaths,
         cfg: dict[str, Any],
         progress: Callable[[str], Awaitable[None]],
+        labels: list[str] | None = None,
     ) -> TmuxTurnResult:
         self._reset_signal_file(paths.status_path)
         turn = await self._send_participant_instruction(
             participant=sessions[_ROLE_BUILDER],
             config=None,
             repo_path=None,
-            prompt=self._builder_fix_prompt(p, round_, paths, cfg["opencode_reviewers"]),
+            prompt=self._builder_fix_prompt(p, round_, paths, labels=labels or []),
             timeout=cfg["timeout_seconds"],
             completion_check=lambda: self._read_signal(paths.status_path) == f"FIX_DONE_{p}_{round_}",
             tui_signal_patterns=[
                 re.compile(rf"^FIX_DONE_{re.escape(str(p))}_{re.escape(str(round_))}$", re.MULTILINE),
             ],
+            interrupt_check=lambda pane: detect_claude_question(pane) is not None,
         )
         return turn
 
-    def _builder_fix_prompt(self, p: int, round_: int, paths: _TierSPaths, opencode_reviewers: list | None = None) -> str:
-        labels = [label for label, _ in _REVIEW_LABELS] + [label for label, _ in (opencode_reviewers or [])]
+    def _builder_fix_prompt(self, p: int, round_: int, paths: _TierSPaths,
+                            labels: list[str]) -> str:
         review_files = [f"{_TIER_S_DIR}/REVIEW-{label}-{p}-{round_}.md" for label in labels]
         file_list = "\n".join(f"- {f} (if exists)" for f in review_files)
         return (
@@ -777,99 +1323,6 @@ class CriticalConsensusOrchestrator:
             f"Apply the valid findings to the code. Ignore findings you disagree with (note why).\n"
             f"Update {_TIER_S_DIR}/BUILD_SUMMARY_{p}.md with what was changed.\n"
             f"Overwrite {_TIER_S_DIR}/status with exactly FIX_DONE_{p}_{round_} and print it.\n"
-            f"Work inside {paths.dir.parent}."
-        )
-
-    @staticmethod
-    def _review_file_done(rpath: Path, expected_signal: str) -> bool:
-        if not rpath.exists():
-            return False
-        content = rpath.read_text(encoding="utf-8", errors="replace").strip()
-        return content.endswith(expected_signal)
-
-    async def _one_opencode_review(
-        self,
-        reviewer_label: str,
-        model: str,
-        p: int,
-        round_: int,
-        paths: _TierSPaths,
-        cfg: dict[str, Any],
-        config: dict[str, Any],
-    ) -> bool:
-        rpath = paths.review(reviewer_label, p, round_)
-        expected_signal = f"REVIEW_DONE_{p}_{round_}_{reviewer_label}"
-        try:
-            base_command, env_vars, cwd = self._resolve_command(DevProvider.OPENCODE, config)
-            base_command = apply_opencode_model_override(base_command, model)
-            base_command = normalize_opencode_command(base_command)
-            argv = build_run_command(
-                base_command=base_command,
-                prompt=self._code_reviewer_prompt(reviewer_label, p, round_, paths),
-                cwd=cwd,
-                title=f"tier-s review {reviewer_label} p{p} r{round_}",
-                agent_name="build",
-            )
-            env = {**os.environ, **env_vars}
-            api_key = self._settings.OPENCODE_GO_API_KEY or os.environ.get("OPENCODE_GO_API_KEY", "")
-            if api_key:
-                env["OPENCODE_GO_API_KEY"] = api_key
-
-            process = await asyncio.create_subprocess_exec(
-                *argv,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=env,
-            )
-            try:
-                await asyncio.wait_for(process.communicate(), timeout=cfg["timeout_seconds"])
-            except asyncio.TimeoutError:
-                try:
-                    process.kill()
-                    await process.wait()
-                except Exception:
-                    pass
-                logger.warning("OpenCode reviewer %s timed out (sub-plan %d round %d)",
-                               reviewer_label, p, round_)
-                return self._review_file_done(rpath, expected_signal)
-
-            return self._review_file_done(rpath, expected_signal)
-        except Exception:
-            logger.warning("OpenCode reviewer %s failed (sub-plan %d round %d)",
-                           reviewer_label, p, round_, exc_info=True)
-            return False
-
-    # ------------------------------------------------------------------
-    # Phase E — Finalize
-    # ------------------------------------------------------------------
-
-    async def _run_finalize(
-        self,
-        sessions: dict[str, ConsensusParticipant],
-        paths: _TierSPaths,
-        cfg: dict[str, Any],
-        progress: Callable[[str], Awaitable[None]],
-    ) -> TmuxTurnResult:
-        self._reset_signal_file(paths.status_path)
-        turn = await self._send_participant_instruction(
-            participant=sessions[_ROLE_PLANNER],
-            config=None,
-            repo_path=None,
-            prompt=self._finalize_prompt(paths),
-            timeout=cfg["timeout_seconds"],
-            completion_check=lambda: self._read_signal(paths.status_path) == "TICKET_COMPLETE",
-            tui_signal_patterns=[_TUI_TICKET_COMPLETE_RE],
-        )
-        return turn
-
-    def _finalize_prompt(self, paths: _TierSPaths) -> str:
-        return (
-            f"All sub-plans are implemented and reviewed.\n\n"
-            f"1. Mark all sub-plans as done in {_TIER_S_DIR}/{_PLAN_FILENAME.split('/')[-1]}.\n"
-            f"2. Update {_CONTEXT_FILENAME} at the repo root with what was learned, new conventions, or gotchas.\n"
-            f"3. Overwrite {_TIER_S_DIR}/status with exactly TICKET_COMPLETE and print it.\n"
             f"Work inside {paths.dir.parent}."
         )
 
@@ -895,7 +1348,7 @@ class CriticalConsensusOrchestrator:
         if not local_path:
             return None
         path = Path(str(local_path))
-        return path if path.exists() else None
+        return path.resolve() if path.exists() else None
 
     async def _send_participant_instruction(
         self,
@@ -906,6 +1359,7 @@ class CriticalConsensusOrchestrator:
         timeout: int,
         completion_check: Callable[[], bool] | None = None,
         tui_signal_patterns: list[re.Pattern[str]] | None = None,
+        interrupt_check: Callable[[str], bool] | None = None,
     ) -> TmuxTurnResult:
         return await self._tmux.send_instruction(
             participant.session_key,
@@ -913,6 +1367,8 @@ class CriticalConsensusOrchestrator:
             timeout=timeout,
             completion_check=completion_check,
             tui_signal_patterns=tui_signal_patterns,
+            interrupt_check=interrupt_check,
+            wait_on_rate_limit=False,
         )
 
     def _reset_signal_file(self, path: Path) -> None:
@@ -922,50 +1378,3 @@ class CriticalConsensusOrchestrator:
         if not path.exists():
             return ""
         return path.read_text(encoding="utf-8", errors="replace").strip()
-
-    def _pane_has_text(self, session_key: str, needle: str) -> bool:
-        content = self._tmux.get_current_output(session_key, lines=40)
-        return needle in content
-
-    def _lead_failure(
-        self,
-        turn: TmuxTurnResult,
-        signal_path: Path,
-        summary: str,
-    ) -> ConsensusRunResult:
-        signal = self._read_signal(signal_path)
-        detail = signal or turn.error or turn.output.strip()[-1200:]
-        return ConsensusRunResult(
-            ok=False,
-            summary=summary,
-            last_output=turn.output.strip(),
-            error=detail or "Unknown Tier S failure",
-        )
-
-    def _build_success_summary(
-        self,
-        plan_path: Path,
-        brief_path: Path,
-        steps_completed: int,
-        total_reviews: int,
-    ) -> str:
-        plan_excerpt = ""
-        if plan_path.exists():
-            plan_excerpt = self._compact(plan_path.read_text(encoding="utf-8", errors="replace"), 260)
-        elif brief_path.exists():
-            plan_excerpt = self._compact(brief_path.read_text(encoding="utf-8", errors="replace"), 260)
-
-        summary = (
-            f"Tier S completado: {steps_completed} sub-plan(s), {total_reviews} review(s) recibidos. "
-            "Plan y contexto del proyecto actualizados."
-        )
-        if plan_excerpt:
-            summary += f" Plan: {plan_excerpt}"
-        return summary
-
-    @staticmethod
-    def _compact(text: str, max_len: int) -> str:
-        normalized = " ".join(text.split())
-        if len(normalized) <= max_len:
-            return normalized
-        return normalized[: max_len - 3] + "..."

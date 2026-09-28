@@ -3,6 +3,7 @@
 .codex/
 .opencode/
 .runtime/
+.tier-s/
 .venv/
 .mcp.json
 
@@ -44,6 +45,10 @@ acme.json
 # Logs / temp
 *.log
 tmp/
+
+# Trabajo temporal por ticket (no versionar: se destila a ERPNext/vault y se retira)
+docs/work/
+docs/reviews/
 
 # Misc local artifacts
 0.112.0

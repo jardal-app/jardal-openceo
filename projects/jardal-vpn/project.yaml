@@ -1,4 +1,5 @@
 project:
+  number: 3
   name: jardal-vpn
   repos:
     - name: jardal-vpn
@@ -14,7 +15,7 @@ dev:
 
   providers:
     codex:
-      command: ["/home/develop/.npm-global/bin/codex", "--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5.4", "-c", "model_reasoning_effort=xhigh"]
+      command: ["/home/develop/.local/bin/codex", "--dangerously-bypass-approvals-and-sandbox"]
       cwd: /home/develop/development/Jardal/jardal-vpn
       env: {}
 
@@ -35,3 +36,15 @@ voice:
     require_project_selection: false
 
 notifications: []
+
+presets:
+  review:
+    prompt: "Revisa los cambios recientes en git diff de la VPN y confirma configuraciones seguras de WireGuard y firewall."
+    description: "Revisar cambios de red y seguridad VPN"
+  test_fix:
+    prompt: "Verifica la conectividad de la VPN, scripts de validación y corrige cualquier error en las reglas."
+    description: "Verificar conectividad y corregir fallos"
+  sync_context:
+    prompt: "Actualiza la documentación de arquitectura de red y estado de túneles VPN."
+    description: "Sincronizar documentación de VPN"
+

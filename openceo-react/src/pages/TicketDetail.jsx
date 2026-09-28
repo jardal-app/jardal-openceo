@@ -43,6 +43,7 @@ const statusLabels = {
   escalated: 'Escalated',
   interrupted: 'Interrupted',
   waiting: 'Waiting',
+  cancelled: 'Cancelled',
 }
 
 const statusColors = {
@@ -53,6 +54,7 @@ const statusColors = {
   escalated: 'badge-danger',
   interrupted: 'badge-warning',
   waiting: 'badge-active',
+  cancelled: 'badge-danger',
 }
 
 const tierLabels = {

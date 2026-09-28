@@ -59,7 +59,11 @@ class MountedMCPServer:
             self.app.set_inner_app(None)
 
 
-def build_internal_mcp_mount(settings: Settings, task_service: "TaskService") -> MountedMCPServer | None:
+def build_internal_mcp_mount(
+    settings: Settings,
+    task_service: "TaskService",
+    erpnext: Any | None = None,
+) -> MountedMCPServer | None:
     """Build the internal MCP — all tools (infra + OpenCEO-specific). Used by OpenCEO tmux sessions."""
     if not settings.MCP_SERVER_ENABLED:
         return None
@@ -67,21 +71,42 @@ def build_internal_mcp_mount(settings: Settings, task_service: "TaskService") ->
         settings=settings,
         path=_normalize_path(settings.MCP_SERVER_PATH),
         name="OpenCEO Internal MCP",
-        register_fn=lambda s, st: _register_all_tools(s, st, task_service),
+        register_fn=lambda s, st: _register_all_tools(s, st, task_service, erpnext),
         stateless_http=True,
         json_response=True,
     )
 
 
-def build_global_mcp_mount(settings: Settings) -> MountedMCPServer | None:
-    """Build the global MCP — infra tools only (DNS). Used by manual Claude/Codex on any project."""
+def build_global_mcp_mount(
+    settings: Settings,
+    task_service: "TaskService | None" = None,
+    erpnext: Any | None = None,
+) -> MountedMCPServer | None:
+    """Build the global MCP — infra + tickets. Used by manual Claude/Codex on any project.
+
+    Originalmente exponia solo infraestructura (DNS). Se le agregaron los tools de tickets
+    porque es la unica superficie que ven las sesiones manuales de Codex CLI
+    (`~/.codex/config.toml` apunta aqui), y sin ellos un agente fuera de OpenCEO no puede
+    ni buscar ni registrar trabajo.
+
+    Los dos mounts exponen lo mismo; la diferencia es **quien los recibe**, no que
+    contienen: el interno se inyecta por configuracion en las sesiones que OpenCEO
+    gestiona, y el global es opt-in para sesiones manuales del host.
+
+    Superficie de seguridad: `MCP_SERVER_ALLOWED_IPS` es loopback-only por defecto y el
+    mount no se publica en Traefik, asi que solo alcanzable desde esta maquina.
+    """
     if not settings.MCP_SERVER_ENABLED:
         return None
+    if task_service is None:
+        register_fn = _register_infra_tools
+    else:
+        register_fn = lambda s, st: _register_all_tools(s, st, task_service, erpnext)
     return _build_mcp(
         settings=settings,
         path=_normalize_path(settings.MCP_GLOBAL_PATH),
         name="OpenCEO Global MCP",
-        register_fn=_register_infra_tools,
+        register_fn=register_fn,
         transport="streamable-http",
         stateless_http=False,
         json_response=True,
@@ -178,8 +203,61 @@ def _register_infra_tools(server: FastMCP, settings: Settings) -> tuple[str, ...
     return ("manage_dns_check_or_create",)
 
 
-def _register_openceo_tools(server: FastMCP, settings: Settings, task_service: "TaskService") -> tuple[str, ...]:
-    """OpenCEO-specific tools (ticket CRUD via MongoDB). Never exposed globally."""
+def _register_openceo_tools(
+    server: FastMCP,
+    settings: Settings,
+    task_service: "TaskService",
+    erpnext: Any | None = None,
+) -> tuple[str, ...]:
+    """OpenCEO-specific tools (ticket CRUD via ERPNext + MongoDB). Never exposed globally."""
+
+    async def _enrich_with_execution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Añade el estado de EJECUCION de Mongo a los tickets de negocio de ERPNext.
+
+        El ticket de negocio puede no tener tarea de ejecucion todavia (backlog
+        registrado y aun no arrancado), y al reves, la ejecucion puede ir por detras del
+        estado de negocio. Se devuelven los dos para que un agente vea la foto completa.
+        """
+        for row in rows:
+            task_id = str(row.get("openceo_task_id") or "").strip()
+            if not task_id:
+                continue
+            try:
+                task = await task_service.get_task(task_id)
+            except Exception:  # noqa: BLE001 - el estado de ejecucion es un extra, no un requisito
+                task = None
+            if task:
+                row["execution_status"] = task.get("status")
+                row["execution_ticket_number"] = task.get("ticket_number")
+        return rows
+
+    async def openceo_search_tickets(
+        query: str | None = None,
+        project: str | None = None,
+        status: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        if erpnext is None or not erpnext.is_enabled:
+            return {"ok": False, "status": "not_configured", "message": "ERPNext no esta configurado."}
+        try:
+            rows = await erpnext.search_tickets(
+                query=query, project_key=project, status=status, limit=limit
+            )
+        except Exception as exc:  # noqa: BLE001 - se devuelve el error, no se propaga
+            return {"ok": False, "status": "error", "message": str(exc)}
+        return {"ok": True, "count": len(rows), "tickets": await _enrich_with_execution(rows)}
+
+    async def openceo_get_ticket(identifier: str) -> dict[str, Any]:
+        if erpnext is None or not erpnext.is_enabled:
+            return {"ok": False, "status": "not_configured", "message": "ERPNext no esta configurado."}
+        try:
+            row = await erpnext.get_ticket(identifier)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "status": "error", "message": str(exc)}
+        if row is None:
+            return {"ok": False, "status": "not_found", "message": f"No existe el ticket {identifier}."}
+        enriched = (await _enrich_with_execution([row]))[0]
+        return {"ok": True, "ticket": enriched}
 
     def _map_priority(priority: str | None) -> TaskPriority:
         try:
@@ -219,6 +297,7 @@ def _register_openceo_tools(server: FastMCP, settings: Settings, task_service: "
         external_url: str | None = None,
         coding_tool: Literal["codex", "claude", "glm", "gemini", "opencode", "kimi", "tier_s"] | None = None,
         coding_tier: Literal["tier1", "tier2", "tier3", "tier4"] | None = None,
+        autorun: bool = False,
     ) -> dict[str, Any]:
         req = TaskCreateRequest(
             title=title,
@@ -231,6 +310,7 @@ def _register_openceo_tools(server: FastMCP, settings: Settings, task_service: "
             params=_build_params(ticket_type, due_date, external_url, status),
             coding_tool=CodingTool(coding_tool) if coding_tool else None,
             coding_tier=CodingTier(coding_tier) if coding_tier else None,
+            autorun=autorun,
         )
         try:
             result = await task_service.create_task(req)
@@ -238,7 +318,7 @@ def _register_openceo_tools(server: FastMCP, settings: Settings, task_service: "
         except Exception as exc:
             return {"ok": False, "status": "error", "message": str(exc)}
 
-    async def openceo_create_tickets_batch(tickets: str) -> dict[str, Any]:
+    async def openceo_create_tickets_batch(tickets: str, autorun: bool = False) -> dict[str, Any]:
         try:
             parsed = json.loads(tickets)
         except json.JSONDecodeError as exc:
@@ -269,6 +349,7 @@ def _register_openceo_tools(server: FastMCP, settings: Settings, task_service: "
                         item.get("external_url"),
                         item.get("status"),
                     ),
+                    autorun=autorun,
                 )
                 result = await task_service.create_task(req)
                 created += 1
@@ -283,6 +364,7 @@ def _register_openceo_tools(server: FastMCP, settings: Settings, task_service: "
         source_id: str,
         tickets: str,
         source: Literal["jira", "notion", "github", "telegram", "voice", "whatsapp", "api", "entrevista", "spillover"] = "spillover",
+        autorun: bool = False,
     ) -> dict[str, Any]:
         normalized_project = str(project or "").strip()
         normalized_source_id = str(source_id or "").strip()
@@ -343,6 +425,7 @@ def _register_openceo_tools(server: FastMCP, settings: Settings, task_service: "
                         item.get("external_url"),
                         item.get("status"),
                     ),
+                    autorun=autorun,
                 )
                 result = await task_service.create_task(req)
                 created += 1
@@ -355,25 +438,46 @@ def _register_openceo_tools(server: FastMCP, settings: Settings, task_service: "
     server.tool(
         openceo_create_ticket,
         name="openceo_create_ticket",
-        description="Create a ticket in OpenCEO (MongoDB). Notion sync triggers automatically. Required: title. Optional: description, project, priority (low/medium/high/critical), status (queued/in_progress/completed/failed/escalated/interrupted/waiting), ticket_type, source (jira/notion/github/telegram/voice/whatsapp/api/entrevista/spillover), source_id, tags, due_date, external_url, coding_tool (codex/claude/glm/gemini/opencode/kimi/tier_s), coding_tier (tier1/tier2/tier3/tier4).",
+        description="Create a ticket in OpenCEO. It is registered in ERPNext (the business record) and in MongoDB (the execution record). Required: title. Optional: description, project, priority (low/medium/high/critical), status (queued/in_progress/completed/failed/escalated/interrupted/waiting), ticket_type, source, source_id, tags, due_date, external_url, coding_tool, coding_tier, autorun (default false). Set autorun=true ONLY when the ticket must start executing now; by default it is only registered. Before creating, consider openceo_search_tickets to avoid duplicating existing work.",
     )
     server.tool(
         openceo_create_tickets_batch,
         name="openceo_create_tickets_batch",
-        description='Batch-create tickets in OpenCEO. Input: JSON array of objects with at least "title". Max 50.',
+        description='Batch-create tickets. Input: JSON array of objects with at least "title". Max 50. Registered but NOT executed unless autorun=true.',
     )
     server.tool(
         openceo_create_pm_tickets_batch,
         name="openceo_create_pm_tickets_batch",
-        description='Create child tickets (spillover/interview) from a parent ticket. Forces project/source/source_id across the batch. Required: project, source_id, tickets (JSON array with title and optional description, priority, tags, ticket_type, due_date, external_url). Optional: source (jira/notion/github/telegram/voice/whatsapp/api/entrevista/spillover, default "spillover").',
+        description='Create child tickets (spillover/interview) from a parent ticket. Forces project/source/source_id across the batch. Required: project, source_id, tickets (JSON array with title and optional description, priority, tags, ticket_type, due_date, external_url). Optional: source (default "spillover"), autorun (default false).',
     )
-    return ("openceo_create_ticket", "openceo_create_tickets_batch", "openceo_create_pm_tickets_batch")
+    server.tool(
+        openceo_search_tickets,
+        name="openceo_search_tickets",
+        description="Search business tickets in ERPNext before creating new ones. Returns ERPNext tickets (name, subject, status, priority, project, openceo_ref) plus execution_status from the runtime when the ticket has been started. Optional filters: query (substring of the subject), project (project_key, e.g. 'jardal-openceo'), status (Open/Working/Pending Review/Completed/Cancelled), limit (default 20).",
+    )
+    server.tool(
+        openceo_get_ticket,
+        name="openceo_get_ticket",
+        description="Read one ticket plus its execution status. Accepts either the ERPNext name (e.g. 'TASK-2026-00025') or the OpenCEO ref.",
+    )
+    return (
+        "openceo_create_ticket",
+        "openceo_create_tickets_batch",
+        "openceo_create_pm_tickets_batch",
+        "openceo_search_tickets",
+        "openceo_get_ticket",
+    )
 
 
-def _register_all_tools(server: FastMCP, settings: Settings, task_service: "TaskService") -> tuple[str, ...]:
+def _register_all_tools(
+    server: FastMCP,
+    settings: Settings,
+    task_service: "TaskService",
+    erpnext: Any | None = None,
+) -> tuple[str, ...]:
     """Internal MCP: infra + OpenCEO-specific tools."""
     infra = _register_infra_tools(server, settings)
-    openceo = _register_openceo_tools(server, settings, task_service)
+    openceo = _register_openceo_tools(server, settings, task_service, erpnext)
     return infra + openceo
 
 

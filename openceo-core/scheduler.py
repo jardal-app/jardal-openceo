@@ -32,8 +32,11 @@ class WaitingTaskScheduler:
         self._stop.clear()
         # Start the Notion mirror queue worker (1 req/s)
         self._task_service.start_notion_worker()
+        # ERPNext: cola de transiciones y reparacion de enlaces a medias.
+        self._task_service.start_erpnext_worker()
         # One-time startup reconcile for orphaned tasks
         await self._task_service.startup_reconcile_notion_mirrors()
+        await self._task_service.startup_reconcile_erpnext()
         self._job = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
@@ -43,6 +46,7 @@ class WaitingTaskScheduler:
             with suppress(asyncio.CancelledError):
                 await self._job
         await self._task_service.stop_notion_worker()
+        await self._task_service.stop_erpnext_worker()
 
     async def _loop(self) -> None:
         while not self._stop.is_set():

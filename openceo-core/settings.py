@@ -88,6 +88,24 @@ class Settings(BaseSettings):
     NOTION_SYNC_BACK_ENABLED: bool = True
     NOTION_SYNC_BACK_PROPERTY_MAP_JSON: str = ""
 
+    # ERPNext — adapter del agente Finance y de tickets.
+    # Secretos en openceo-core/.env.finance.local (git-ignored). Todos los campos
+    # llevan default: un campo sin default rompe Settings() y con ella toda la suite.
+    #
+    # NO hay flag de encendido/apagado y es deliberado: ERPNext es el registro de negocio
+    # de los tickets, asi que un modo que los cree solo en Mongo produciria tickets que el
+    # sistema de negocio nunca vera, y la reconciliacion no los recupera. La resiliencia
+    # ante un ERPNext caido la da la marca `erpnext_pending`, no un interruptor.
+    ERPNEXT_URL: str = ""
+    ERPNEXT_USER: str = ""
+    ERPNEXT_API_KEY: str = ""
+    ERPNEXT_API_SECRET: str = ""
+    ERPNEXT_TIMEOUT_SECONDS: float = 5.0
+    ERPNEXT_CONNECT_TIMEOUT_SECONDS: float = 2.0
+    ERPNEXT_TICKETS_PROJECT_COMPANY: str = "Jardal"
+    # Secreto compartido que ERPNext debe enviar en sus webhooks de vuelta (camino inverso).
+    ERPNEXT_WEBHOOK_SECRET: str = ""
+
     # Shared infrastructure tools
     CLOUDFLARE_API_TOKEN: str = ""
     CLOUDFLARE_ACCOUNT_ID: str = ""

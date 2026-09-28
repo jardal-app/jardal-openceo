@@ -4,8 +4,23 @@ import json
 import logging
 import os
 from typing import Any
+from collections.abc import AsyncGenerator, AsyncIterable
 
-from livekit.agents import Agent, AgentSession, AutoSubscribe, JobContext, JobProcess, WorkerOptions, cli
+from livekit import rtc
+from livekit.agents import (
+    APIConnectOptions,
+    Agent,
+    AgentSession,
+    AutoSubscribe,
+    DEFAULT_API_CONNECT_OPTIONS,
+    JobContext,
+    JobProcess,
+    WorkerOptions,
+    cli,
+    tts,
+)
+from livekit.agents.tts import AudioEmitter, ChunkedStream, TTSCapabilities
+from livekit.agents.voice import ModelSettings
 from livekit.plugins import openai, silero
 from livekit.plugins import groq as groq_plugin
 from project_env import load_project_env
@@ -46,6 +61,10 @@ def _first_non_empty(*values: Any) -> str | None:
 
 
 def prewarm(proc: JobProcess) -> None:
+    try:
+        import edge_tts  # noqa: F401
+    except Exception:
+        pass
     proc.userdata["vad"] = silero.VAD.load(
         min_speech_duration=float(os.getenv("VOICE_VAD_MIN_SPEECH_DURATION", "0.05")),
         min_silence_duration=float(os.getenv("VOICE_VAD_MIN_SILENCE_DURATION", "0.35")),
@@ -95,6 +114,7 @@ def _build_llm(user_id: str, project: str | None, model: str) -> openai.LLM:
         "api_key": api_key,
         "base_url": base_url,
         "user": user_id,
+        "timeout": float(os.getenv("VOICE_LLM_TIMEOUT", "45.0")),
     }
     if project:
         kwargs["extra_body"] = {"project": project}
@@ -109,24 +129,111 @@ def _build_stt() -> groq_plugin.STT:
     )
 
 
-def _build_tts() -> openai.TTS | None:
+class EdgeTTS(tts.TTS):
+    def __init__(self, voice: str = "es-ES-AlvaroNeural", sample_rate: int = 24000):
+        super().__init__(
+            capabilities=TTSCapabilities(streaming=False),
+            sample_rate=sample_rate,
+            num_channels=1,
+        )
+        self._voice = voice
+
+    @property
+    def model(self) -> str:
+        return "edge-tts"
+
+    @property
+    def provider(self) -> str:
+        return "microsoft"
+
+    def synthesize(
+        self, text: str, *, conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS
+    ) -> ChunkedStream:
+        return _EdgeChunkedStream(
+            tts=self,
+            input_text=text,
+            conn_options=conn_options,
+            voice=self._voice,
+            sample_rate=self.sample_rate,
+            num_channels=self.num_channels,
+        )
+
+
+class _EdgeChunkedStream(ChunkedStream):
+    def __init__(
+        self,
+        *,
+        tts: tts.TTS,
+        input_text: str,
+        conn_options: APIConnectOptions,
+        voice: str,
+        sample_rate: int,
+        num_channels: int,
+    ):
+        super().__init__(tts=tts, input_text=input_text, conn_options=conn_options)
+        self._voice = voice
+        self._sample_rate = sample_rate
+        self._num_channels = num_channels
+
+    async def _run(self, output_emitter: AudioEmitter) -> None:
+        import edge_tts
+
+        output_emitter.initialize(
+            request_id="edge-tts",
+            sample_rate=self._sample_rate,
+            num_channels=self._num_channels,
+            mime_type="audio/mp3",
+        )
+        comm = edge_tts.Communicate(self.input_text, self._voice)
+        async for chunk in comm.stream():
+            if chunk["type"] == "audio":
+                output_emitter.push(chunk["data"])
+
+
+class VoiceAgent(Agent):
+    """Custom Agent ensuring tts_node safely handles None TTS without throwing AssertionError."""
+
+    async def tts_node(
+        self, text: AsyncIterable[str], model_settings: ModelSettings
+    ) -> AsyncGenerator[rtc.AudioFrame, None]:
+        activity = self._get_activity_or_raise()
+        if activity.tts is not None:
+            async for frame in Agent.default.tts_node(self, text, model_settings):
+                yield frame
+        else:
+            async for _ in text:
+                pass
+
+
+def _build_tts() -> tts.TTS | None:
     tts_key = (os.getenv("VOICE_TTS_API_KEY") or "").strip()
-    if not tts_key:
-        allow_no_tts = _env_bool("VOICE_ALLOW_NO_TTS", default=True)
-        if not allow_no_tts:
-            raise ValueError("VOICE_TTS_API_KEY is required when VOICE_ALLOW_NO_TTS=false")
-        logger.warning("VOICE_TTS_API_KEY not configured; running without spoken replies.")
-        return None
+    if tts_key:
+        tts_base = (os.getenv("VOICE_TTS_BASE_URL") or "https://api.openai.com/v1").strip()
+        logger.info("Using OpenAI TTS with key")
+        return openai.TTS(
+            model=(os.getenv("VOICE_TTS_MODEL") or "gpt-4o-mini-tts").strip(),
+            voice=(os.getenv("VOICE_TTS_VOICE") or "alloy").strip(),
+            api_key=tts_key,
+            base_url=tts_base,
+            instructions=(os.getenv("VOICE_TTS_INSTRUCTIONS") or "Habla en español, claro y breve.").strip(),
+        )
 
-    tts_base = (os.getenv("VOICE_TTS_BASE_URL") or "https://api.openai.com/v1").strip()
+    # Free high-quality neural Spanish voice using edge-tts
+    try:
+        import edge_tts  # noqa: F401
+        voice = (os.getenv("VOICE_TTS_VOICE") or "es-ES-AlvaroNeural").strip()
+        if voice in {"alloy", "echo", "fable", "onyx", "nova", "shimmer"}:
+            voice = "es-ES-AlvaroNeural"
+        logger.info("VOICE_TTS_API_KEY not configured; using free EdgeTTS with voice '%s'", voice)
+        return EdgeTTS(voice=voice)
+    except Exception as e:
+        logger.warning("EdgeTTS failed to initialize: %s", e)
 
-    return openai.TTS(
-        model=(os.getenv("VOICE_TTS_MODEL") or "gpt-4o-mini-tts").strip(),
-        voice=(os.getenv("VOICE_TTS_VOICE") or "alloy").strip(),
-        api_key=tts_key,
-        base_url=tts_base,
-        instructions=(os.getenv("VOICE_TTS_INSTRUCTIONS") or "Habla en español, claro y breve.").strip(),
-    )
+    allow_no_tts = _env_bool("VOICE_ALLOW_NO_TTS", default=True)
+    if not allow_no_tts:
+        raise ValueError("VOICE_TTS_API_KEY is required when VOICE_ALLOW_NO_TTS=false")
+    logger.warning("No TTS engine available; running in text-only response mode.")
+    return None
 
 
 def _agent_instructions(model: str) -> str:
@@ -138,6 +245,8 @@ def _agent_instructions(model: str) -> str:
 
 
 def _ready_message(model: str) -> str:
+    if model == "ceo":
+        return "OpenCEO listo para hablar. Dime en qué proyecto, ticket o preset trabajamos hoy."
     if model == "dev":
         return (
             "Puente de voz listo. Modelo activo: dev. "
@@ -165,7 +274,7 @@ async def entrypoint(ctx: JobContext) -> None:
     tts = _build_tts()
     vad = ctx.proc.userdata["vad"]
 
-    agent = Agent(
+    agent = VoiceAgent(
         instructions=_agent_instructions(model),
     )
 
@@ -174,8 +283,8 @@ async def entrypoint(ctx: JobContext) -> None:
         stt=stt,
         tts=tts,
         vad=vad,
-        min_endpointing_delay=float(os.getenv("VOICE_MIN_ENDPOINTING_DELAY", "0.2")),
-        max_endpointing_delay=float(os.getenv("VOICE_MAX_ENDPOINTING_DELAY", "0.8")),
+        min_endpointing_delay=float(os.getenv("VOICE_MIN_ENDPOINTING_DELAY", "0.6")),
+        max_endpointing_delay=float(os.getenv("VOICE_MAX_ENDPOINTING_DELAY", "1.5")),
     )
     await session.start(agent=agent, room=ctx.room)
 

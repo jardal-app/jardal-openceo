@@ -1,4 +1,5 @@
 project:
+  number: 2
   name: jardal-trading
   repos:
     - name: jardal-trading
@@ -69,3 +70,19 @@ voice:
     require_project_selection: false
 
 notifications: []
+
+presets:
+  review:
+    prompt: "Revisa los cambios recientes en git diff de jardal-trading y verifica la correcta gestión de riesgo y manejo de órdenes."
+    description: "Revisar cambios y gestión de riesgo"
+  test_fix:
+    prompt: "Ejecuta las pruebas del bot de trading y si alguna falla corrige el código de las estrategias o conectores."
+    description: "Ejecutar tests del bot y corregir fallos"
+  backtest_check:
+    prompt: "Verifica los resultados del último backtest y reporta métricas clave de drawdown, win rate y Sharpe ratio."
+    description: "Analizar métricas de backtest"
+  sync_context:
+    prompt: "Actualiza la documentación del bot y el estado de estrategias en el repositorio."
+    description: "Sincronizar documentación del bot"
+
+

@@ -4,6 +4,236 @@ Resumen operativo corto del estado real del repo.
 
 ## Continuar aquí (traspaso a la próxima sesión)
 
+Estado al cerrar la sesión del **2026-09-24**: **los tickets de OpenCEO se crean en ERPNext** y
+el backlog de `PENDINGS.md` se migró. `PENDINGS.md` ya no es el backlog: quedó como puntero.
+
+### Qué se hizo (2026-09-24)
+
+Se ejecutó el plan de redirección de tickets a ERPNext, en 6 fases. **No hay flag de
+encendido/apagado**: ERPNext es el registro de negocio de los tickets, así que el flujo está
+cristalizado. El servicio corre con el código nuevo.
+
+| Fase | Qué | Verificación |
+| --- | --- | --- |
+| 0 | **Credenciales movidas a su sitio.** El bootstrap del 2026-09-22 dejó `.env.finance.local` en la **raíz** del repo, pero `settings.py:14` lee `openceo-core/.env.finance.local`; pydantic ignora un `env_file` inexistente, así que `ERPNEXT_URL` llegaba **vacío** y el fallo habría parecido "ERPNext caído". También hubo que **declarar** los campos `ERPNEXT_*` en `settings.py` (con `extra="ignore"` una variable no declarada se descarta en silencio) | `Settings().ERPNEXT_URL` ya no está vacío |
+| 0 | **Rol `Projects User`** al usuario API de ERPNext. Antes `GET /api/resource/Task` daba **403** | Ahora **200** en `Task` y `Project`; `if_owner=0` y `create=1` comprobados en `tabDocPerm` |
+| 0 | Campos custom `Task.openceo_ref` (unique), `Task.openceo_ticket_number`, `Task.openceo_task_id`, `Project.project_key` (unique) y 4 `Task Type` | Índices `Non_unique=0` y `Null=YES` en MariaDB |
+| 1 | `openceo-core/tools/erpnext_client.py` (HTTP determinista, async, timeouts 2/5 s) y `tools/erpnext_tickets.py` (operaciones semánticas) | 45 tests |
+| 2 | **`TaskService.create_task` crea el ticket de negocio ANTES de persistir en Mongo**, con las tres ramas de resultado | En vivo: éxito, idempotencia por 417 y ERPNext caído |
+| 3 | Transiciones por **observador en `MongoRepository.patch_task`** (el único camino por el que pasan las 7 vías que escriben estado) + cola con reintento + reconciliación de arranque | En vivo: `in_progress→Working`, `waiting→Pending Review`; `completed` **no** se empuja |
+| 4 | **27 items de `PENDINGS.md` migrados** a ERPNext, auditados contra el código | 27 creados, segunda corrida: 0 creados / 27 existentes |
+| 5 | **Camino inverso**: webhook de Frappe → `POST /api/integrations/erpnext/task` → el runtime reacciona | En vivo: cerrar→`completed`, cancelar→`cancelled`, borrar→`cancelled` |
+
+**Tests:** baseline 7 fallan / 236 pasan → ahora **7 fallan / 289 pasan**. Los 7 son los
+preexistentes diagnosticados abajo; **cero regresiones**. `npm run build` del dashboard OK.
+
+### El camino inverso (Fase 5)
+
+Si alguien **cierra, cancela o borra** un `Task` en el desk de ERPNext, OpenCEO se entera. Lo
+hace un **webhook de Frappe** (`on_update` + `on_trash`), no un sondeo: AGENTS.md §5.1 prohíbe
+los barridos periódicos y el contrato exige que la actividad humana llegue por eventos
+explícitos.
+
+| Estado en ERPNext | Estado en OpenCEO | Por qué |
+| --- | --- | --- |
+| `Completed` | `completed` | El humano aceptó el trabajo |
+| `Cancelled` | `cancelled` (nuevo) | El negocio dijo que no; es terminal y **no reanuda** (se limpia `resume_at`) |
+| borrado (`on_trash`) | `cancelled` | El ticket ya no existe en el negocio |
+| `Open`/`Working`/`Pending Review`/... | sin cambio | Son **eco** de lo que OpenCEO ya empujó: propagarlos sería un bucle |
+
+**Guardia anti-eco estructural:** el parche escribe `status_pushed` con el mismo valor que el
+estado nuevo, así que aunque el observador vea el cambio, no lo reenvía a ERPNext.
+
+**`cancelled` es un estado nuevo de `TaskStatus`** (no se reutilizó `waiting`, que implica que
+algo lo va a desbloquear, ni `failed`, que implicaría que falló la ejecución). Se añadió a
+`_TERMINAL_TASK_STATUSES` y a los mapas de etiquetas de `TicketList`, `TicketDetail` y
+`QADashboard`.
+
+**Infraestructura que hubo que tocar** (fuera de OpenCEO, reportado por transparencia):
+
+1. **Regla `ufw`**: `allow from 172.23.0.0/16 to any port 18765 proto tcp`. UFW tiene política
+   `DROP` y ya existían dos reglas idénticas para `172.20.0.0/16` y `172.19.0.0/16`; se extendió
+   el mismo patrón a la red `jardal-erpnext-net`. Sin esto el contenedor de ERPNext no alcanza el
+   servicio.
+2. **Dos `Webhook` en ERPNext**: `OpenCEO Ticket Sync` (`on_update`) y `OpenCEO Ticket Trash`
+   (`on_trash`), ambos a `http://172.23.0.1:18765/api/integrations/erpnext/task` con la cabecera
+   `X-OpenCEO-Webhook-Secret`.
+
+**Secreto del webhook:** `ERPNEXT_WEBHOOK_SECRET` en `openceo-core/.env`. Si falta, el endpoint
+responde **503**; con secreto incorrecto, **401**. Se compara con `hmac.compare_digest`.
+
+### Capacidades MCP para los agentes (Fase 6)
+
+Un agente que solo puede **crear** tickets duplica trabajo: no tiene forma de saber si ya existe
+uno que lo cubra. Se añadieron dos tools de lectura al **MCP interno** (el global sigue solo con
+DNS):
+
+| Tool | Qué hace |
+| --- | --- |
+| `openceo_search_tickets` | Busca por texto en el asunto, filtra por `project` (project_key) y `status`, y **enriquece con el estado de ejecución de Mongo** cuando el ticket llegó a ejecutarse. Es de solo lectura: un `project_key` desconocido devuelve lista vacía, **no crea el proyecto** |
+| `openceo_get_ticket` | Lee uno por `TASK-2026-000NN` o por su `openceo_ref` |
+
+**`autorun` ahora es explícito y por defecto `false`** en los tres tools de creación. Antes los
+tools MCP no pasaban `autorun` y heredaban el `True` del modelo, así que **registrar backlog
+lanzaba ejecución** — con `TASK_AUTORUN=true` en el `.env`. Ahora registrar no ejecuta: hace falta
+`autorun: true` explícito, y la descripción del tool lo dice.
+
+**Los dos mounts MCP exponen ahora lo mismo.** El global tenía solo DNS, y era la única
+superficie que veían las **sesiones manuales de Codex CLI** (`mcp_servers.openceo-global` en
+`~/.codex/config.toml`): un agente fuera de OpenCEO no podía ni buscar ni registrar trabajo.
+Claude Code manual ya los tenía porque lee el interno (`~/.claude.json`). La diferencia entre
+mounts es **quién los recibe**, no qué contienen. `MCP_SERVER_ALLOWED_IPS` es loopback-only y
+ninguno está publicado en Traefik.
+
+**No hay documento de tickets en este repo a propósito.** El canónico es
+`jardal-knowledge/README.md` y llega a todos los proyectos por los cargadores de nivel usuario
+(abajo). Un archivo por proyecto sería una tercera fuente que deriva.
+
+### Visibilidad del provider en el tablero (2026-09-25)
+
+Dos campos custom nuevos en `Task`, para que el tablero de ERPNext no oculte lo que decide
+cuánto cuesta un ticket:
+
+| Campo | Tipo | Por qué |
+| --- | --- | --- |
+| `openceo_coding_tool` | Select (`codex`/`claude`/`glm`/`gemini`/`opencode`/`kimi`/`tier_s`) | Sin él no se ve que un ticket es **Tier S** — lento, caro y con revisores múltiples |
+| `openceo_external_url` | Data (URL) | El enlace a donde nació la petición |
+
+`map_coding_tool` **omite** un provider que no esté en el enum: el campo es un Select y un
+valor inválido haría fallar el POST, perdiendo el ticket entero por un dato de ejecución.
+
+**Lo que sigue sin viajar a ERPNext, y está bien que no viaje:** fases de workflow,
+aprobaciones, QA, visibilidad de cliente, sesiones de coding y trazabilidad. Son *cómo se
+ejecuta* y su casa es MongoDB; el vínculo es `openceo_ref` + `openceo_task_id`. Comparado con
+lo que el espejo de Notion sí mostraba (`agent`, `approval_state`, `runtime_summary`,
+`external_url`), ERPNext sigue mostrando menos — por eso `external_url` se agregó, y por eso
+`runtime_summary` y `last_sync_at` se dejaron fuera a propósito: cambian en cada parche.
+
+### Memoria de ingeniería centralizada
+
+`jardal-knowledge/README.md` es la **autoridad** (reglas e instalación centralizadas):
+los cuatro dominios con sus casas, las reglas de tickets y cuándo usar el vault. El problema
+era que un `CLAUDE.md` solo lo lee quien trabaja **dentro** de esa carpeta, y no existía
+ningún cargador de nivel usuario — así que no llegaba a ningún proyecto. Ahora sí:
+
+| Agente | Cargador |
+| --- | --- |
+| `clauded` | `~/.claude/CLAUDE.md` — el archivo |
+| `claudep`, `claudeg` | `~/.claude-deepseek/CLAUDE.md` — symlink al anterior |
+| `claudej` | `~/.claude-j/CLAUDE.md` — symlink al anterior |
+| Codex CLI | `~/.codex/AGENTS.md` |
+
+Un solo archivo físico con symlinks, así los perfiles no pueden divergir. Cada wrapper
+`claude*` fija su propio `CLAUDE_CONFIG_DIR`, que es la razón de un symlink por perfil.
+
+### El índice de la migración (`TICKET-NNN → TASK-2026-NNNNN`)
+
+Los 27 items viven ahora en ERPNext (`https://erp.jardal.app/app/task`) con
+`openceo_ref = "pendings:TICKET-0NN"`, todos en el proyecto `jardal-openceo`.
+
+| PENDINGS | ERPNext | Estado auditado | PENDINGS | ERPNext | Estado auditado |
+| --- | --- | --- | --- | --- | --- |
+| TICKET-001 | TASK-2026-00001 | Completed | TICKET-015 | TASK-2026-00015 | **Cancelled** |
+| TICKET-002 | TASK-2026-00002 | Open | TICKET-016 | TASK-2026-00016 | Open |
+| TICKET-003 | TASK-2026-00003 | Completed | TICKET-017 | TASK-2026-00017 | Open |
+| TICKET-004 | TASK-2026-00004 | Open | TICKET-018 | TASK-2026-00018 | Completed |
+| TICKET-005 | TASK-2026-00005 | Completed | TICKET-019 | TASK-2026-00019 | Open |
+| TICKET-006 | TASK-2026-00006 | Completed | TICKET-020 | TASK-2026-00020 | Working |
+| TICKET-007 | TASK-2026-00007 | Completed | TICKET-021 | TASK-2026-00021 | Working |
+| TICKET-008 | TASK-2026-00008 | Completed | TICKET-022 | TASK-2026-00022 | Working |
+| TICKET-009 | TASK-2026-00009 | Working | TICKET-023 | TASK-2026-00023 | Open |
+| TICKET-010 | TASK-2026-00010 | Working | TICKET-024 | TASK-2026-00024 | Open |
+| TICKET-011 | TASK-2026-00011 | Open | TICKET-025 | TASK-2026-00025 | Working |
+| TICKET-012 | TASK-2026-00012 | Open | TICKET-026 | TASK-2026-00026 | Working |
+| TICKET-013 | TASK-2026-00013 | Open | TICKET-027 | TASK-2026-00027 | Open |
+| TICKET-014 | TASK-2026-00014 | **Cancelled** | | | |
+
+**7 `Completed`** (001, 003, 005, 006, 007, 008, 018): figuraban como pendientes y **ya estaban
+implementados** — verificado en código, no en el markdown. **2 `Cancelled`** (014, 015): absorbidos
+por TICKET-026; migrarlos como abiertos habría resucitado decisiones cerradas (la colección
+`objectives` paralela viola D-006 y el cron de barrido viola AGENTS.md §5.1).
+
+### Decisiones del dueño en esta sesión
+
+- **DocType `Task`, no `Issue`, no un DocType custom.** `Task` es árbol (`is_tree=1`) y admite
+  campos custom, `type` y `_user_tags`: **no es estático**. Un DocType custom obligaría a
+  reconstruir a mano el árbol con roll-up, `depends_on`, los campos de Timesheet y el enlace a
+  `Project`.
+- **`Issue` queda reservado, no descartado**, para trabajo **entrante** con reloj de SLA (un
+  cliente o ayudante reporta algo). Se enlaza al mismo `Project`. No recibe `openceo_ref` todavía.
+- **`Project` es la identidad de trabajo; `OpenCEO Scope` sigue siendo el eje financiero.** No
+  compiten: son ejes distintos. Esto **actualiza** `§3.2` y `§13` de la decisión financiera final
+  de `jardal-erpnext` y `§14` del contrato de Finance, que quedaron marcados como superados.
+- **Notion sigue encendido** hasta que ERPNext esté probado; el análisis de eliminación quedó como
+  ticket (TASK-2026-00028, ver abajo).
+
+### Hallazgos que no son de esta funcionalidad pero afectan cómo se verifica
+
+- **`params.initial_status` es código muerto.** `mcp_server.py:205` lo escribe y **nadie lo lee**:
+  el `status` que acepta `openceo_create_ticket(status=...)` no hace nada hoy; el ticket nace
+  siempre `queued`. El adapter no heredó esa mentira.
+- **`_user_tags` no se puede escribir por REST.** Frappe descarta esa columna en un POST (la
+  administra el motor de tags) y `frappe.client.add_tag` no existe en esta versión. Las etiquetas
+  van al cuerpo del ticket; hacerlo bien exigiría documentos `Tag Link` (una llamada HTTP por
+  etiqueta) en el camino del turno de voz. Decidido no pagarlo en v1.
+- **`Task.is_calendar_and_gantt=0` y `track_changes=0`** en este build: las vistas Gantt/Calendario
+  y el historial por campo no vienen encendidos. Son casillas, no funcionalidad perdida.
+
+### Pendientes de esta iniciativa
+
+| Pendiente | Tipo | Nota |
+| --- | --- | --- |
+| **`parent_task` no se mapea** | Límite declarado de v1 | El árbol de ERPNext queda plano aunque OpenCEO tenga jerarquía real (spillover, batches de PM) |
+| **`_assign`/usuarios y aprobaciones de negocio** | Diferido | `qa_review` y `client_signoff` siguen en el dashboard como interfaces de compatibilidad |
+| **Apagar Notion** | Espera al análisis | Creado como ticket en ERPNext |
+| Los 52 tickets históricos de Mongo | **No se migran a propósito** | Son registro de ejecución, no negocio |
+
+**Cosas que harán perder tiempo si no se saben:**
+
+- **Los tests necesitan el venv del root**: `./.venv/bin/python -m pytest tests/ -q`. Línea base al
+  cerrar: **289 pasan / 7 fallan**.
+- **No hay flag de encendido/apagado, y es deliberado.** Existió `ERPNEXT_TICKETS_ENABLED` y se
+  eliminó: apagado, OpenCEO creaba tickets que vivían solo en Mongo y que el sistema de negocio
+  nunca vería, y la reconciliación **no los recupera** (no hace backfill a propósito). Eso no es
+  degradación, es corrupción silenciosa. **La resiliencia la da la marca `erpnext_pending`**, no un
+  interruptor: con ERPNext caído el ticket se crea igual, sin `autorun`, y se repara al arrancar.
+- **Sin configurar no es "apagado": falla fuerte.** Si falta `ERPNEXT_URL`/`API_KEY`/`API_SECRET`,
+  la creación de tickets lanza y el arranque lo avisa con un `ERROR`. Es un error de despliegue.
+- **`status_pushed` guarda el vocabulario de OpenCEO, NO el de ERPNext.** Comparar `in_progress`
+  contra `Working` haría que cada parche pareciera una transición nueva. Y ojo con
+  `str(TaskStatus.QUEUED)`, que da `'TaskStatus.QUEUED'` y no `'queued'`: hay que usar `.value`.
+- **`completed` NO cierra el ticket de ERPNext, a propósito.** Deja `Pending Review` con la
+  evidencia. Cerrar es una decisión de negocio (`ARCHITECTURE_REFERENCE_2026.md` §119) y va a
+  generar la pregunta "¿por qué sigue ahí si ya terminó?".
+- **El observador de estado se lee con `getattr`, nunca se crea en `__init__`**: los tests de
+  Horizon construyen el repositorio sin llamar a `super().__init__()`.
+- **El webhook necesita que UFW deje pasar la red de ERPNext.** Regla añadida:
+  `allow from 172.23.0.0/16 to any port 18765 proto tcp`. Si el día de mañana se recrea la red
+  `jardal-erpnext-net` con otra subred, el webhook deja de llegar **en silencio** (Frappe registra
+  el fallo en su Error Log, no en el de OpenCEO).
+- **Los webhooks se disparan con cada actualización de `Task`,** incluidas las que provoca el
+  propio OpenCEO. Es correcto: el handler ignora los estados que son eco.
+- **La consola de `bench` decodifica stdin como latin-1.** Un archivo UTF-8 se doble-codifica
+  (`técnica` → `tÃ©cnica`). Usar escapes `é` en scripts ASCII; `Task Type` no permite renombrar
+  y `Webhook` tiene `autoname=prompt`, así que hay que pasarle `name`.
+
+**Cómo comprobar que sigue vivo:**
+
+```bash
+./scripts/openceo-core-host.sh status
+./.venv/bin/python -m pytest tests/ -q                      # 289 pasan / 7 fallan
+./.venv/bin/python scripts/migrate_pendings_to_erpnext.py   # 0 creados / 27 existentes
+set -a; . openceo-core/.env.finance.local; set +a
+curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: token $ERPNEXT_API_KEY:$ERPNEXT_API_SECRET" \
+  "$ERPNEXT_URL/api/resource/Task?limit_page_length=1"      # 200
+# el camino inverso, de punta a punta (debe dar 401 sin secreto)
+docker exec jardal-erpnext-backend-1 curl -s -o /dev/null -w "%{http_code}\n" \
+  -X POST -H "Content-Type: application/json" \
+  http://172.23.0.1:18765/api/integrations/erpnext/task
+```
+
+## Traspaso anterior (2026-09-20, sesión 3)
+
 Estado al cerrar la **tercera sesión del 2026-09-20**: la **vista del espacio personal** (la mitad decidible de HZ-004) está implementada en `openceo-react`, verificada contra los datos reales y **commiteada en `8e3b0f9`** (7 archivos, +1072/−10). **HZ-003 sigue commiteado** en `e47ff09` y el servicio corre con el código nuevo.
 
 ### Qué se hizo en esta sesión (2026-09-20, sesión 3)
@@ -28,10 +258,11 @@ Estado al cerrar la **tercera sesión del 2026-09-20**: la **vista del espacio p
 | **Piloto de delegación con 3 tickets reales** (spec §9.6/§9.8) | Participación personal del dueño | **No** — solo frena la *medición* de HZ-003, no el desarrollo | Todo lo demás. El piloto se dispara cuando el dueño quiera: *"delega la siguiente acción"* por voz/chat o `POST /api/horizon/delegate`; métricas con *"anota 15 minutos de supervisión"*; resumen en `GET /api/horizon/delegation/summary`. **No lanzar delegaciones reales por iniciativa propia**: cada encargo consume cuota de proveedores y hace trabajo real en el repo. |
 | **Streams sin commitear del working tree** | Revisión/commit eventual | **No** — no tocan los archivos de Horizon | Seguir trabajando; solo respetar la regla: **no mezclarlos con commits de Horizon**. Involucra: media/transcribe (`agents/media/`, `tools/media_transcribe.py`, `scripts/transcribe_links.sh`, `.qwen/`), voz Android (`openceo-voice/`, `openceo-voice-android/`), fix de lock por proyecto en `dev_session_service.py` (documentado el 2026-09-13), `params.coding_tool` en `agents/dev/session.py`, `config_loader.py`, `project_service.py`, `projects/*/project.yaml`, `README.md`, `.env.example`×2, y los sin trackear `CLAUDE.md`/`VOICE_GUIDE.md`/`docs/decision-2026-09-19-sistema-financiero-erpnext.md`/`scripts/chat*`. |
 | **Elección del canal de entrega push** (hueco HZ-002, TICKET-026) | Decisión de canal del dueño | **No** — solo bloquea implementar *ese* canal | Preparar/investigar sin decidir (p.ej. dejar `secretary.send_email` cableado como primer canal). El dueño ya decidió explícitamente que hoy no hay push; el único canal durable que funciona es `secretary.send_email` (`openceo-core/tools/email_sender.py`); Telegram es stub. |
+| **Entregar el mapa de funciones ERPNext → agente Finance** (`PENDINGS.md` TICKET-027) | Entregable del dueño | **No** — solo bloquea la Fase 3 de TICKET-025; el adapter no debe escribirse antes | Seguir con Horizon. **No abrir flujos financieros dentro de OpenCEO** ni inventar la superficie de tools: el contrato lo entrega el dueño cuando el sistema financiero esté definido. |
 
 ### Ruta por defecto de la próxima sesión (sin esperar al dueño)
 
-Lo más barato y con efecto inmediato: **cerrar el lazo de la propia vista**. Hoy "Delegación medida" exige pulsar *"Ver resultado pendiente"* y las métricas van en pasos fijos de 15 minutos (`+15 min supervisión` / `+15 min retrabajo`); se puede cargar la entrega pendiente al abrir la página y permitir minutos libres. La alternativa de más valor estratégico es **HZ-005 — adapter de solo lectura hacia ERPNext** según [`docs/decision-2026-09-19-sistema-financiero-erpnext.md`](file:///home/develop/development/Jardal/jardal-openceo/docs/decision-2026-09-19-sistema-financiero-erpnext.md) (resúmenes con referencia y fecha de corte, sin contabilidad propia, spec §4.7). Y si el dueño ya eligió canal de push, cablearlo.
+Lo más barato y con efecto inmediato: **cerrar el lazo de la propia vista**. Hoy "Delegación medida" exige pulsar *"Ver resultado pendiente"* y las métricas van en pasos fijos de 15 minutos (`+15 min supervisión` / `+15 min retrabajo`); se puede cargar la entrega pendiente al abrir la página y permitir minutos libres. La alternativa de más valor estratégico es **HZ-005 — adapter de solo lectura hacia ERPNext** según [`docs/decision-2026-09-19-sistema-financiero-erpnext.md`](file:///home/develop/development/Jardal/jardal-openceo/docs/decision-2026-09-19-sistema-financiero-erpnext.md) (resúmenes con referencia y fecha de corte, sin contabilidad propia, spec §4.7) — **con la salvedad del 2026-09-20: el adapter no se escribe antes de recibir el mapa de funciones (`PENDINGS.md` TICKET-027)**. Y si el dueño ya eligió canal de push, cablearlo.
 
 **Cosas que harán perder tiempo si no se saben:**
 
@@ -115,6 +346,32 @@ curl -s localhost:18765/openapi.json | grep -c '/horizon/'   # 16 rutas
   - **Corrección de un diagnóstico anterior de este mismo archivo**: los 7 fallos preexistentes **no** vienen del `autorun=False` sin commitear, como decía la entrada de 2026-09-19. Verificado ejecutando la suite: sólo **1 de los 7** se relaciona con `autorun`, y su punto de llamada (`main.py:4283`) está **sin cambios respecto a HEAD**, así que fallaría igual en un HEAD limpio. Las causas reales son dos `RuntimeError: MongoRepository not connected`, dos `TypeError: ... unexpected keyword argument 'notion_manager'` (`agents/pm/session.py:157,273`), un `TaskStatus.FAILED != COMPLETED`, y un test que espera la etiqueta en inglés `"Module: Ventas / Inventario"` mientras el prompt ya emite `"Módulo: ..."`. **No se tocaron**: no son regresiones de esta fase.
   - **Hueco pendiente y conocido — el canal de entrega**: el plan se **persiste y se expone** (API, voz/chat, dashboard); no hay push. La fila de la sección 9.10 "llega la hora diaria y no has abierto el chat" se cumple a medias: el disparador **prepara y deja listo** el plan, y el usuario lo recibe en su siguiente interacción. Es una decisión explícita del propietario, no un olvido. El único canal saliente durable que funciona hoy es `secretary.send_email` (SMTP, `openceo-core/tools/email_sender.py`); Telegram es un stub sin implementar (`integrations/telegram_bot.py`), `RealtimeHub` es efímero y la voz exige sala abierta. Registrado en `PENDINGS.md` TICKET-026.
   - **Pendiente de esta iniciativa**: HZ-003 (delegación y dev móvil, que es el punto 6 del criterio de aceptación) y HZ-004 (fuentes conectadas y vista del espacio personal en `openceo-react`). TICKET-014 y TICKET-015 quedan **formalmente absorbidos** por este motor: no se crea una colección `objectives` paralela ni un cron de barrido.
+
+## Estado actual (2026-09-20) — Qué instalar en ERPNext (TICKET-025 / TICKET-027)
+
+- **Documento nuevo [`ERPNEXT.md`](file:///home/develop/development/Jardal/jardal-openceo/ERPNEXT.md)** en la raíz (estado: *propuesta de instalación, no desplegado*). Resuelve la pregunta del dueño —"¿qué módulos instalar y hace falta levantar el stack completo?"— con evidencia de código fuente de ERPNext/Frappe y de la documentación de `frappe_docker`. Respuesta en dos partes:
+  1. **Apps: solo `erpnext`.** Los módulos internos **no son elegibles**: una *app* se instala, un *módulo* llega con ella (`erpnext/modules.txt` es una lista fija de 21; `Show/Hide Modules` ya no se soporta desde v15). Nada de `crm`, `helpdesk`, `lms`, `drive`, `wiki`, `gameplan`, `raven` — duplican OpenCEO. **Consecuencia práctica: no hace falta construir imagen propia**, porque la imagen prebuilt de `frappe/erpnext` contiene exactamente frappe + erpnext. `payments`, `hrms`, `insights` y `print_designer` quedan como *después, con necesidad demostrada*: añadir una app exige **reconstruir la imagen** (instalar en runtime no está soportado y se pierde al recrear el contenedor).
+  2. **Contenedores: stack estándar, sin recortes.** No existe perfil "slim" oficial. El único recorte documentado —consolidar colas de workers— no compensa: **deben quedar 2 Redis** (el `configurator` apunta `redis_socketio` a `REDIS_QUEUE` y no hay override de uno solo), `scheduler` es obligatorio para trabajos periódicos y quitar `websocket` es cirugía no soportada (pierde notificaciones y actualización en vivo; `frontend` lo declara en `depends_on`). Queda **corregida** la estimación previa de TICKET-025 ("1 Redis, 1 worker").
+- **Hallazgos que condicionan el despliegue**:
+  - **Bolivia no tiene plantilla de plan de cuentas en ERPNext.** Verificado directamente en `chart_of_accounts/verified` y `unverified`: **ninguna entrada `bo_`** (sí `ar`, `br`, `co`, `gt`, `mx`, `ni`, `el`, `cl`, `cr`, `ec`, `hn`, `pa`, `pe`, `uy`, `ve`), y no hay app de localización boliviana. El plan de cuentas se **construye a mano** y su contenido tributario se define con criterio contable local: **fuera de OpenCEO y fuera de `ERPNEXT.md`** (ahí no se fija ninguna alícuota).
+  - **Choques con el Traefik existente**: `compose.proxy.yaml` / `compose.https.yaml` levantan **su propio** Traefik en 80/443; `compose.multi-bench.yaml` espera una red externa llamada literalmente `traefik-public` (la nuestra es `traefik-net`); y `SITES` está deprecado a favor de **`SITES_RULE`**, que es una regla de **Traefik v3** — nuestra versión.
+  - **Una sola imagen para todos los roles** (el split `-worker` / `-nginx` / `-socketio` está retirado) y versión recomendada **`v16` fijada por tag de parche (`frappe/erpnext:v16.35.0`)** para que un `pull` no cambie versión en silencio.
+  - **No existen cifras oficiales de RAM por servicio ni de disco por sitio.** El "4 GB" de `frappe_docker` es guía **de desarrollo**; Frappe Cloud estima ~400 MB por bench (2 workers gunicorn + 1 set de workers); el "2 GB mínimo / 4 GB recomendado" que circula es folclore de foro. La medición obligatoria de TICKET-025 fase 1 sigue vigente.
+- **Medición propia del host (2026-09-20)**: **20 GB de RAM disponibles** (10 usados, 14 en caché), swap 3.4 GB en uso, **130 GB libres en `/` (55% usado)** y 57 contenedores corriendo. El disco **deja de ser** la restricción registrada el 2026-09-19 (55 GB libres, 82%): la fila de restricciones de TICKET-025 quedó actualizada con la medición nueva.
+- **Frontera registrada (decisión del dueño, 2026-09-20)**: **todo el módulo financiero se trabaja fuera de OpenCEO** — despliegue, plan de cuentas, workflows y automatizaciones viven en el ciclo de vida de ERPNext. No se mezclan flujos financieros con el runtime de agentes. OpenCEO solo guardará referencias y resúmenes con fecha de corte, y el **único** punto de contacto será el **mapa de funciones** que el dueño entregue cuando el sistema esté definido: nuevo **`PENDINGS.md` TICKET-027**, que **bloquea la Fase 3 de TICKET-025**. Los seis nombres de tools de esa fase quedaron marcados en `PENDINGS.md` como **candidatos provisionales, no contrato**.
+- **Nada implementado en el repo**: solo documentación. No se tocó código, no se desplegó nada y no hay flujo de runtime que validar en esta entrada.
+
+## Estado actual (2026-09-20) — Ops de Traefik, baja de kimi y limpieza de logs
+
+Trabajo de infraestructura hecho **fuera de OpenCEO** (en `/home/develop/deployments/jardal-traefik/`), derivado del runbook. **No se tocó código de este repo.**
+
+- **Traefik actualizado a `v3.7.13`** por el dueño el 2026-09-20 19:38 UTC siguiendo `docs/traefik-upgrade-runbook.md` (respaldo previo en `/home/develop/backups/traefik-20260920T193100Z/`; el `docker-compose.yml.bak-v3.0` difiere solo en la línea `image:`). Parque verificado por sondeos: `n8n`, `analitica`, `drive`, `mail`, `portainer`, `dev.melanyryr` → 200; `opencode` 401, `agentboard` 302, `objects` 403 (auth de cada app, normal). El runbook quedó marcado como **ejecutado**.
+- **`kimi.jardal.app`: dado de baja** (21:45 UTC). No era un contenedor sino un **proceso host** (`systemd --user kimi-web.service`, PID 1404, 51 días, `127.0.0.1:5494`). Se eliminaron de `dynamic.yml` el middleware `kimi-auth`, los routers `kimi-web`/`kimi-websecure` y el servicio `kimi` (YAML validado, Traefik recargó con 0 errores), y se hizo `systemctl --user disable --now kimi-web` → **puerto 5494 cerrado**. El archivo del unit se conserva para revertir. **El DNS lo debe borrar el dueño** (el MCP solo crea/verifica); hoy `kimi.jardal.app` responde `401` **de Cloudflare**, no del origen.
+- **Consecuencia para OpenCEO:** `openceo-core/agents/dev/kimi_session_manager.py` usa `KIMI_WEB_BASE_URL`, por defecto `https://kimi.jardal.app` (2 ocurrencias) → **el provider `kimi` de las sesiones dev queda sin endpoint**. El dueño lo autorizó explícitamente ("baja completa"). Si se retoma ese provider, hay que apuntarlo a otro endpoint o retirarlo del código.
+- **Logs limpiados:** `/var/lib/docker/containers` pasó de **1137 MB a 151 MB** (986 MB liberados) truncando los logs ≥5 MB. **No hay rotación configurada** en ningún contenedor: volverán a crecer (pendiente `max-size`/`max-file`).
+- **Volúmenes huérfanos de `jardal-vpn` / fugovpn:** eliminados los dos de caché `node_modules` (341 MB). **Se conserva a propósito `jardal-vpn_mongo-dev-data` (307 MB, datos)** por decisión del dueño. No existe ningún contenedor de ese proyecto, ni corriendo ni parado.
+- **Hallazgo no pedido, pendiente del dueño:** `cebitec-rest` **reinicia cada ~12 s (55.333 reinicios)** por `MongoServerError: Authentication failed (code 18)`; su HTTP responde de forma intermitente (el `404 Cannot GET /` de `cebitec-api.jardal.app` es de la app). Es además el motor del ruido en el log de Traefik (cada `die`/`start` fuerza un rebuild). El dueño se encarga de matar ese servicio.
+- **Evidencia completa:** `/home/develop/deployments/jardal-traefik/DIGEST-logs-2026-09-20.md` (§1–§8), incluidas las renovaciones ACME que fallan por diseño en `chat`, `code`, `agentboard` (detrás de Cloudflare) y `cui`, `cloudcli` (sin DNS).
 
 ## Estado actual (2026-09-19)
 

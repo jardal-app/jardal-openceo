@@ -20,13 +20,42 @@ class ConfigLoader:
         if not projects_root.exists():
             return []
 
-        names: list[str] = []
+        discovered: list[str] = []
         for candidate in projects_root.iterdir():
             if not candidate.is_dir():
                 continue
             if (candidate / "project.yaml").exists():
-                names.append(candidate.name)
-        return sorted(names)
+                discovered.append(candidate.name)
+
+        if not discovered:
+            return []
+
+        # Sort projects by 'number' (or 'order' / 'id') defined directly in each project.yaml
+        def _get_project_sort_key(name: str) -> tuple[int, str]:
+            cfg_path = projects_root / name / "project.yaml"
+            if cfg_path.exists():
+                try:
+                    with cfg_path.open("r", encoding="utf-8") as fh:
+                        data = yaml.safe_load(fh) or {}
+                    p_info = data.get("project") if isinstance(data.get("project"), dict) else {}
+                    num = data.get("number")
+                    if num is None:
+                        num = p_info.get("number")
+                    if num is None:
+                        num = data.get("order") or p_info.get("order")
+                    if num is None:
+                        num = data.get("id") or p_info.get("id")
+
+                    if num is not None:
+                        try:
+                            return (int(num), name.lower())
+                        except (ValueError, TypeError):
+                            pass
+                except Exception:
+                    pass
+            return (9999, name.lower())
+
+        return sorted(discovered, key=_get_project_sort_key)
 
     def has_project(self, project: str | None) -> bool:
         if not project:
@@ -103,17 +132,18 @@ class ConfigLoader:
                 "pr_body": "empty",
                 "tier_s": {
                     "review_rounds": 2,
-                    "max_plans": 15,
+                    "max_plans": 8,
                     "timeout_minutes": 15,
                     "roles": {
-                        "planner":         {"provider": "claude", "command": [], "env": {}},
-                        "plan_reviewer":   {"provider": "codex",  "command": [], "env": {}},
-                        "builder":         {"provider": "claude", "command": [], "env": {}},
-                        "gemini_reviewer": {"provider": "gemini", "command": [], "env": {}},
+                        "planner": {"provider": "claude", "label": "claudej", "model": "claude-opus-5-5", "active": True, "command": ["claudej"]},
+                        "plan-reviewer": {"provider": "codex", "label": "codexf", "model": "gpt-6-sol", "active": True, "command": ["codexf"]},
+                        "builder": {"provider": "claude", "label": "claudep", "model": "deepseek-v4.1-flash", "active": True, "command": ["claudep"]},
                     },
-                    "opencode_reviewers": [
-                        {"label": "kimi26", "model": "opencode-go/kimi-k2.6"},
-                        {"label": "qwen37", "model": "opencode-go/qwen3.7-max"},
+                    "reviewers": [
+                        {"label": "qwen", "provider": "qwen", "model": "qwen3.8-max", "active": True, "command": ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"]},
+                        {"label": "claudeg", "provider": "claude", "model": "glm-5.3", "active": True, "command": ["claudeg", "--model", "opus", "--tools", "Read,Glob,Grep"]},
+                        {"label": "agyd", "provider": "gemini", "model": "gemini", "active": False, "command": ["agyd"]},
+                        {"label": "mimo", "provider": "opencode", "model": "opencode-go/mimo-v2.6-pro", "active": False, "command": ["opencode"]},
                     ],
                 },
                 "providers": {
