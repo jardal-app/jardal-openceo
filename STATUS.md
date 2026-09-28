@@ -4,7 +4,7 @@ Resumen operativo corto del estado real del repo.
 
 ## Continuar aquí (traspaso a la próxima sesión)
 
-Estado al cerrar la sesión del **2026-09-28**: **Finance registra gasto ocasional por voz** (Fase B del contrato, ticket `TASK-2026-00032`, rama `feat/finance-voice-expense-TASK-2026-00032`, commit `9763ddb`, pusheada, **sin merge a `main`**). El servicio sigue corriendo código viejo hasta merge + `scripts/openceo-core-host.sh restart`.
+Estado al cerrar la sesión del **2026-09-28 (continuación)**: **TASK-2026-00032 mergeado a `main`** (merge `b004fd6`, pusheado a `origin/main`) y **servicio reiniciado con el código nuevo** (pid 1728599, `:18765/openapi.json` 200, parser `voice_expense` verificado en `main`, 15/15 tests del flujo). En ERPNext el ticket sigue `Open` con ejecución `completed` — el cierre es decisión de negocio, no se empuja solo. Siguiente corte recomendado: lectura (`get_cash_position`/resumen por Scope) antes de ingresos o presupuestos.
 
 ### Qué se hizo (2026-09-28, TASK-2026-00032)
 
