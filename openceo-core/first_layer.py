@@ -367,9 +367,12 @@ class FirstLayerGateway:
         # mismo turno para poder apagar la app. No crea tickets.
         if self._finance_handler is not None:
             try:
+                from agents.finance.scope_summary import (
+                    looks_like_balance_query as _looks_like_balance,
+                )
                 from agents.finance.voice_expense import looks_like_expense
 
-                if looks_like_expense(text):
+                if looks_like_expense(text) or _looks_like_balance(text):
                     summary = await self._finance_handler(text)
                     if summary:
                         return True, str(summary)

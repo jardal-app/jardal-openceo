@@ -188,9 +188,29 @@ async def _run_finance_voice_expense(text: str) -> str | None:
     """Ejecuta un gasto ocasional por voz/chat sin crear tickets.
 
     El registro en ERPNext es el efecto: la app puede apagarse despues.
+    Tambien atiende consultas de saldo/gasto (TASK-2026-00044, solo lectura):
+    la consulta en ERPNext es el efecto, tampoco crea tickets.
     Devuelve el resumen breve apto para TTS, o el error en el mismo tono.
     """
     clean = str(text or "").strip()
+    try:
+        from agents.finance.scope_summary import (
+            build_spoken_summary as _balance_spoken,
+            get_scope_summary as _get_summary,
+            looks_like_balance_query as _is_balance,
+        )
+        from tools.erpnext_client import ERPNextClient
+
+        if _is_balance(clean):
+            client = ERPNextClient(settings)
+            try:
+                summary = await _get_summary(client)
+            finally:
+                await client.aclose()
+            return _balance_spoken(summary)
+    except Exception as exc:
+        logger.warning("Finance voice balance failed: %s", exc)
+        return "No pude consultar el saldo ahora mismo. Lo intentamos de nuevo."
     task = {
         "task_id": f"finance-voice-{uuid4().hex}",
         "project": settings.DEFAULT_PROJECT,
@@ -209,11 +229,12 @@ async def _run_finance_voice_expense(text: str) -> str | None:
 
 def _is_finance_expense_text(text: str) -> bool:
     try:
+        from agents.finance.scope_summary import looks_like_balance_query
         from agents.finance.voice_expense import looks_like_expense
     except Exception:
         return False
     try:
-        return bool(looks_like_expense(text))
+        return bool(looks_like_expense(text) or looks_like_balance_query(text))
     except Exception:
         return False
 

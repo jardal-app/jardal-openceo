@@ -37,10 +37,10 @@ logger = logging.getLogger(__name__)
 # el contrato de Finance pide que cada DocType nuevo se justifique por un flujo real.
 # `Task Type` entra solo para lectura: el adapter valida contra el los tipos que existen
 # antes de mandarlos, porque un Link invalido tumbaria la creacion del ticket.
-# Fase B (TASK-2026-00032, gasto ocasional por voz): `Journal Entry` es el unico
-# DocType que `finance.register_expense` crea (idempotencia por `openceo_ref`,
-# ya existente y unico). `Account`, `Cost Center` y `Company` entran solo para
-# lectura de verificacion (Fase A): la clasificacion termina en IDs comprobables.
+# `GL Entry` NO entra a la allowlist a proposito: es el libro mayor que
+# genera el submit del `Journal Entry`, y abrirlo ahi permitiria crearlo a
+# mano. La lectura Fase A (TASK-2026-00044, `finance.get_scope_summary`)
+# usa el lector dedicado `list_gl_entries` (solo GET), sin abrir escritura.
 ALLOWED_DOCTYPES: frozenset[str] = frozenset(
     {"Task", "Project", "Task Type", "Journal Entry", "Account", "Cost Center", "Company"}
 )
@@ -233,6 +233,26 @@ class ERPNextClient:
         self._check_doctype(doctype)
         payload = await self.request("PUT", f"/api/resource/{doctype}/{name}", json=body)
         return payload.get("data") or {}
+
+    async def list_gl_entries(
+        self,
+        *,
+        filters: list[list[Any]] | None = None,
+        fields: list[str] | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Lector dedicado del libro mayor (TASK-2026-00044). Solo GET por
+        construccion: no pasa por la allowlist de escritura porque `GL Entry`
+        nunca se crea a mano (lo genera el submit del `Journal Entry`)."""
+        import json as _json
+
+        params: dict[str, Any] = {"limit_page_length": limit}
+        if filters:
+            params["filters"] = _json.dumps(filters)
+        if fields:
+            params["fields"] = _json.dumps(fields)
+        payload = await self.request("GET", "/api/resource/GL Entry", params=params)
+        return payload.get("data") or []
 
     # --- errores ---------------------------------------------------------
 
