@@ -412,10 +412,23 @@ class TaskService:
         if adapter is None or not adapter.is_enabled:
             return
 
+        # QA condicional (TASK-2026-00040): el destino de `completed` se decide con el
+        # ticket fresco, no con el estado encolado. Si QA aprobo entre el encolado y el
+        # push, el ticket va a Done en vez de quedarse en revision.
+        task = None
+        if str(item.get("status") or "").strip().lower() == TaskStatus.COMPLETED.value:
+            try:
+                repo = getattr(self, "_repo", None)
+                if repo is not None:
+                    task = await repo.get_task(str(item.get("task_id") or ""))
+            except Exception:
+                logger.warning("No se pudo leer el ticket para QA condicional", exc_info=True)
+                task = None
+
         delay = 1.0
         for attempt in range(3):
             try:
-                await adapter.update_status(item["name"], item["status"])
+                await adapter.update_status(item["name"], item["status"], task=task)
             except ERPNextUnavailable as exc:
                 if attempt == 2:
                     logger.warning(

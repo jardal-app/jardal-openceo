@@ -32,6 +32,7 @@ from tools.erpnext_tickets import (  # noqa: E402
     map_priority,
     map_status,
     normalize_due_date,
+    resolve_erpnext_status,
     tags_footer,
     to_html_description,
     truncate_subject,
@@ -293,11 +294,39 @@ class CreateTicketTests(unittest.TestCase):
         self.assertEqual(client.updated, [])
 
     def test_update_status_completed_empuja_pending_review(self):
-        """TASK-2026-00033: terminar lleva el ticket a la cola QA, nunca a Completed."""
+        """TASK-2026-00033: sin contexto rige el defecto seguro (cola QA)."""
         client = FakeClient()
         adapter = make_adapter(client)
         run(adapter.update_status("TASK-1", "completed"))
         self.assertEqual(client.updated[0], ("Task", "TASK-1", {"status": "Pending Review"}))
+
+    def test_update_status_completed_qa_condicional(self):
+        """TASK-2026-00040: solo va a QA lo que necesita ojo humano, el resto a Done."""
+        client = FakeClient()
+        adapter = make_adapter(client)
+        run(adapter.update_status("TASK-1", "completed", task={"status": "completed"}))
+        self.assertEqual(client.updated[-1], ("Task", "TASK-1", {"status": "Completed"}))
+        run(adapter.update_status(
+            "TASK-1", "completed",
+            task={"status": "completed", "qa_review_required": True,
+                  "qa_review_state": "pending"}))
+        self.assertEqual(client.updated[-1], ("Task", "TASK-1", {"status": "Pending Review"}))
+        run(adapter.update_status(
+            "TASK-1", "completed",
+            task={"status": "completed", "qa_review_required": True,
+                  "qa_review_state": "approved"}))
+        self.assertEqual(client.updated[-1], ("Task", "TASK-1", {"status": "Completed"}))
+
+    def test_resolve_erpnext_status_no_qa_es_done(self):
+        self.assertEqual(resolve_erpnext_status({"status": "completed"}), "Completed")
+        self.assertEqual(
+            resolve_erpnext_status({"status": "completed", "qa_review_required": True,
+                                    "qa_review_state": "pending"}),
+            "Pending Review",
+        )
+        self.assertEqual(resolve_erpnext_status({"status": "in_progress"}), "Working")
+        self.assertIsNone(resolve_erpnext_status({"status": "failed"}))
+        self.assertIsNone(resolve_erpnext_status({"status": "lo-que-sea"}))
 
     def test_update_status_empuja_los_que_si(self):
         client = FakeClient()
