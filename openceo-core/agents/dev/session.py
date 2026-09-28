@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shlex
 from dataclasses import dataclass, field
@@ -28,6 +29,8 @@ from settings import Settings
 from state import CodingTier, CodingTool, TaskStatus
 
 from .tier_selector import TierSelector
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -67,14 +70,17 @@ class DevExecutionOutput:
 class DevSessionManager:
     """Runs deterministic step-based Dev Agent sessions."""
 
-    def __init__(self, settings: Settings, config_loader: ConfigLoader, rate_monitor: RateMonitor | None = None) -> None:
+    def __init__(self, settings: Settings, config_loader: ConfigLoader,
+                 rate_monitor: RateMonitor | None = None, repo: Any | None = None) -> None:
         self._settings = settings
         self._config_loader = config_loader
         self._tier_selector = TierSelector(settings)
         self._rate_monitor = rate_monitor
+        self._repo = repo
         self._kimi_sessions = KimiSessionManager(settings)
         self._consensus = CriticalConsensusOrchestrator(
             settings, TmuxRuntime(settings, rate_monitor=rate_monitor), rate_monitor=rate_monitor,
+            repo=repo,
         )
 
     async def run(self, task: dict[str, Any], project_config: dict[str, Any]) -> DevExecutionOutput:
@@ -166,6 +172,29 @@ class DevSessionManager:
         output.status = TaskStatus.COMPLETED
         return output
 
+    async def _record_tier_s_verification(self, task: dict[str, Any], step: dict[str, Any]) -> None:
+        if self._repo is None:
+            return
+        task_id = str(task.get("task_id") or "")
+        if not task_id:
+            return
+        stored = await self._repo.get_task(task_id)
+        run_id = str((stored or {}).get("tier_s_run_id") or "")
+        if run_id:
+            verification = {"qa_status": step.get("status"), "detail": step.get("detail")}
+            await self._repo.patch_tier_s_run(run_id, {"verification": verification})
+            summary = {**(stored.get("tier_s_progress") or {}), "verification": verification}
+            await self._repo.patch_task(task_id, {"tier_s_progress": summary})
+            adapter = getattr(self._consensus, "_erpnext", None)
+            mirrors = (stored.get("params") or {}).get("_mirrors") or {}
+            mirror = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
+            name = str(mirror.get("name") or "") if isinstance(mirror, dict) else ""
+            if adapter is not None and name:
+                try:
+                    await adapter.update_tier_s_progress(name, summary)
+                except Exception:
+                    logger.warning("Tier S QA projection failed for %s", task_id, exc_info=True)
+
     async def _run_critical_consensus(
         self,
         task: dict[str, Any],
@@ -187,6 +216,10 @@ class DevSessionManager:
             task.get("params"),
             consensus_result.review_links,
         )
+        if consensus_result.waiting_reason:
+            output.status = TaskStatus.WAITING
+            output.waiting_reason = consensus_result.waiting_reason
+            return output
         if consensus_result.error:
             output.status = TaskStatus.FAILED
             output.error = consensus_result.error
@@ -197,6 +230,7 @@ class DevSessionManager:
 
         step_3, qa_error = await self._step_qa(project_config, qa_mode, max_retries)
         output.steps.append(step_3)
+        await self._record_tier_s_verification(task, step_3)
         if qa_error:
             if qa_mode == "required":
                 output.status = TaskStatus.ESCALATED
@@ -300,10 +334,11 @@ class DevSessionManager:
                 self._review_base_url(config),
             )
             return CodingStepResult(
-                step=self._step("tier_s", "failed", detail),
+                step=self._step("tier_s", "waiting" if result.waiting else "failed", detail),
                 prompt=prompt,
                 summary=result.summary,
-                error=detail,
+                error=None if result.waiting else detail,
+                waiting_reason=result.summary if result.waiting else None,
                 review_links=review_links,
             )
 

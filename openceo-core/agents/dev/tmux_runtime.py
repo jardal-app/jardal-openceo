@@ -188,6 +188,8 @@ class TmuxRuntime:
         completion_marker_end: str | None = None,
         completion_check: Callable[[], bool] | None = None,
         tui_signal_patterns: list[re.Pattern[str]] | None = None,
+        interrupt_check: Callable[[str], bool] | None = None,
+        wait_on_rate_limit: bool = True,
     ) -> TmuxTurnResult:
         """Send text as keystrokes to the tmux pane and wait for deterministic completion.
 
@@ -218,8 +220,16 @@ class TmuxRuntime:
 
         pane = session.active_window.active_pane
 
+        current_content = self._capture_pane(pane)
+        if interrupt_check and interrupt_check(current_content):
+            return TmuxTurnResult(False, current_content, False, error="human_question")
+
         # Ensure provider prompt is ready before sending keys (important right after session startup).
         await self.wait_until_ready(project=project, timeout=45)
+
+        current_content = self._capture_pane(pane)
+        if interrupt_check and interrupt_check(current_content):
+            return TmuxTurnResult(False, current_content, False, error="human_question")
 
         # Send keystrokes
         await self._submit_text(pane, text)
@@ -265,11 +275,20 @@ class TmuxRuntime:
                     completion_marker_found=marker_found,
                 )
 
+            if interrupt_check and interrupt_check(current_content):
+                return TmuxTurnResult(
+                    ok=False, output=current_content, is_ready=False,
+                    error="human_question",
+                )
+
             # ---- Rate limit detection (P3: checked AFTER completion) ----
             provider_name = info.provider.value if info.provider else ""
             if provider_name in ("claude", "codex"):
                 rl = RateMonitor.detect_rate_limit(current_content, provider_name)
                 if rl is not None:
+                    if not wait_on_rate_limit:
+                        return TmuxTurnResult(False, current_content, False,
+                                              error="rate_limit", rate_limited=True)
                     logger.warning(
                         "Rate limit hit for %s in session '%s' — entering wait-and-resume",
                         provider_name,
@@ -337,6 +356,75 @@ class TmuxRuntime:
             timed_out=True,
             completion_marker_found=marker_found,
         )
+
+    async def answer_question(
+        self,
+        project: str,
+        answer: str,
+        *,
+        timeout: int,
+        completion_check: Callable[[], bool],
+        tui_signal_patterns: list[re.Pattern[str]] | None = None,
+    ) -> TmuxTurnResult:
+        """Select a native Claude question option in the existing tmux session."""
+        from .tier_s_contract import detect_claude_question
+
+        info = self._sessions.get(project)
+        if info is None:
+            return TmuxTurnResult(False, "", False, error="planner_session_missing")
+        try:
+            session = self.server.sessions.get(session_name=info.tmux_session_name)
+        except Exception:
+            session = None
+        if session is None:
+            return TmuxTurnResult(False, "", False, error="planner_session_missing")
+        pane = session.active_window.active_pane
+        current = self._capture_pane(pane)
+        question = detect_claude_question(current)
+        if question is None:
+            return TmuxTurnResult(False, current, False, error="native_question_missing")
+        options = [str(option) for option in question["options"]]
+        option_indices = [int(index) for index in question.get("option_indices", range(len(options)))]
+        value = answer.strip()
+        desired: int | None = None
+        if value.isdigit():
+            if not 1 <= int(value) <= len(options):
+                return TmuxTurnResult(False, current, False, error="option_out_of_range")
+            desired = option_indices[int(value) - 1]
+        else:
+            desired = next((option_indices[i] for i, option in enumerate(options)
+                            if option.casefold() == value.casefold()), None)
+        freeform = desired is None
+        if freeform:
+            desired = question.get("input_index")
+            if desired is None:
+                return TmuxTurnResult(False, current, False, error="freeform_option_missing")
+        offset = int(desired) - int(question.get("selected_index") or 0)
+        key = "Down" if offset > 0 else "Up"
+        for _ in range(abs(offset)):
+            pane.send_keys(key, enter=False)
+        pane.enter()
+        if freeform:
+            await asyncio.sleep(0.4)
+            await self._submit_text(pane, value)
+
+        interval = max(0.2, (self._settings.TMUX_POLL_INTERVAL_MS or 300) / 1000.0)
+        elapsed = 0.0
+        while elapsed < timeout:
+            await asyncio.sleep(interval)
+            elapsed += interval
+            content = self._capture_pane(pane)
+            if self._is_completion_check_satisfied(completion_check) or self._has_tui_signal(content, tui_signal_patterns):
+                return TmuxTurnResult(True, content, True)
+            next_question = detect_claude_question(content)
+            if next_question and next_question["text"] != question["text"]:
+                return TmuxTurnResult(False, content, False, error="human_question")
+            if info.provider.value in {"claude", "codex"}:
+                if RateMonitor.detect_rate_limit(content, info.provider.value):
+                    return TmuxTurnResult(False, content, False, rate_limited=True,
+                                          error="rate_limit")
+        return TmuxTurnResult(False, self._capture_pane(pane), False,
+                              timed_out=True, error="question_answer_timeout")
 
     async def submit_instruction(self, project: str, text: str) -> TmuxTurnResult:
         """Send text as keystrokes to the tmux pane and return immediately."""
@@ -1036,7 +1124,7 @@ class TmuxRuntime:
 
     @staticmethod
     async def _submit_text(pane: Any, text: str) -> None:
-        pane.send_keys(text, enter=False)
+        pane.send_keys(text, enter=False, literal=True)
         await asyncio.sleep(0.12)
         pane.enter()
 

@@ -93,7 +93,7 @@ Obsidian stores:
 Agents read and write the vault directly as files, with no MCP, following
 the `obsidian-vault-links` skill, and find notes with `qmd search`. The
 setup is described in
-`/home/develop/development/Jardal/jardal-knowledge/ENGINEERING_MEMORY_SETUP.md`.
+`/home/develop/development/Jardal/jardal-knowledge/README.md`.
 
 ## Code Intelligence
 

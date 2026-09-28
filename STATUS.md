@@ -86,7 +86,7 @@ mounts es **quién los recibe**, no qué contienen. `MCP_SERVER_ALLOWED_IPS` es 
 ninguno está publicado en Traefik.
 
 **No hay documento de tickets en este repo a propósito.** El canónico es
-`jardal-knowledge/CLAUDE.md` y llega a todos los proyectos por los cargadores de nivel usuario
+`jardal-knowledge/README.md` y llega a todos los proyectos por los cargadores de nivel usuario
 (abajo). Un archivo por proyecto sería una tercera fuente que deriva.
 
 ### Visibilidad del provider en el tablero (2026-09-25)
@@ -111,7 +111,7 @@ lo que el espejo de Notion sí mostraba (`agent`, `approval_state`, `runtime_sum
 
 ### Memoria de ingeniería centralizada
 
-`jardal-knowledge/CLAUDE.md` es la **autoridad** (v2.2 de `ENGINEERING_MEMORY_SETUP.md`):
+`jardal-knowledge/README.md` es la **autoridad** (reglas e instalación centralizadas):
 los cuatro dominios con sus casas, las reglas de tickets y cuándo usar el vault. El problema
 era que un `CLAUDE.md` solo lo lee quien trabaja **dentro** de esa carpeta, y no existía
 ningún cargador de nivel usuario — así que no llegaba a ningún proyecto. Ahora sí:

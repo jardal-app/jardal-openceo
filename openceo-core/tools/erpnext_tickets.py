@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 from typing import Any
 
 from settings import Settings
@@ -406,3 +407,53 @@ class ERPNextTicketAdapter:
         if target is None or not (name or "").strip():
             return None
         return await self._client.update_doc("Task", name.strip(), {"status": target})
+
+    async def update_tier_s_progress(self, name: str, summary: dict[str, Any]) -> None:
+        """Project execution detail in the existing ticket without changing business status."""
+        if not name.strip():
+            return
+        # Visible sentinels survive Frappe's HTML sanitizer; comments do not.
+        start = "OPENCEO_TIER_S_BEGIN"
+        end = "OPENCEO_TIER_S_END"
+        task = await self._client.get_doc("Task", name.strip())
+        description = str(task.get("description") or "")
+        if start in description and end in description:
+            pattern = re.compile(
+                rf"<p[^>]*>\s*{start}\s*</p>.*?<p[^>]*>\s*{end}\s*</p>",
+                re.IGNORECASE | re.DOTALL,
+            )
+            cleaned = pattern.sub("", description, count=1)
+            if cleaned == description:
+                before, rest = description.split(start, 1)
+                _, after = rest.split(end, 1)
+                cleaned = before + after
+            description = cleaned
+        phase = html.escape(str(summary.get("phase") or "pending"))
+        status = html.escape(str(summary.get("status") or "pending"))
+        subplan = html.escape(str(summary.get("subplan") or "-"))
+        round_ = html.escape(str(summary.get("round") or "-"))
+        reviewers = summary.get("reviewers") or {}
+        completed = ", ".join(html.escape(str(label)) for label, ok in reviewers.items() if ok)
+        detail = (f"<p><b>TIER S:</b> {phase} · {status} · subplan {subplan} · ronda {round_}. "
+                  f"Revisores: {completed or 'pendientes'}.</p>")
+        availability = summary.get("reviewer_availability") or {}
+        unavailable = ", ".join(
+            f"{html.escape(str(label))} ({html.escape(str(state))})"
+            for label, state in availability.items() if state != "available"
+        )
+        if unavailable:
+            detail += f"<p>Revisores pendientes: {unavailable}.</p>"
+        reason = summary.get("waiting_reason")
+        if reason:
+            detail += f"<p>{html.escape(str(reason))}</p>"
+        verification = summary.get("verification") or {}
+        if isinstance(verification, dict) and verification.get("qa_status"):
+            detail += f"<p>QA: {html.escape(str(verification['qa_status']))}. "
+            detail += f"{html.escape(str(verification.get('detail') or ''))}</p>"
+        question = summary.get("question")
+        if isinstance(question, dict):
+            detail += f"<p><b>Requiere atención humana:</b> {html.escape(str(question.get('text') or ''))}</p>"
+            options = question.get("options") or []
+            detail += "<ul>" + "".join(f"<li>{html.escape(str(option))}</li>" for option in options) + "</ul>"
+        body = description.rstrip() + f"\n<p>{start}</p>{detail}<p>{end}</p>"
+        await self._client.update_doc("Task", name.strip(), {"description": body})

@@ -66,6 +66,10 @@ class MongoRepository:
         return self.db["workflow_runs"]
 
     @property
+    def tier_s_runs(self):
+        return self.db["tier_s_runs"]
+
+    @property
     def discovery_runs(self):
         return self.db["discovery_runs"]
 
@@ -176,6 +180,14 @@ class MongoRepository:
         await self.workflow_runs.create_index([("task_id", ASCENDING), ("created_at", DESCENDING)])
         await self.workflow_runs.create_index([("workflow", ASCENDING), ("status", ASCENDING), ("created_at", DESCENDING)])
         await self.workflow_runs.create_index([("status", ASCENDING), ("updated_at", DESCENDING)])
+
+        await self.tier_s_runs.create_index([("run_id", ASCENDING)], unique=True)
+        await self.tier_s_runs.create_index([("owner_id", ASCENDING), ("updated_at", DESCENDING)])
+        await self.tier_s_runs.create_index(
+            [("active_repo", ASCENDING)], unique=True,
+            partialFilterExpression={"active_repo": {"$type": "string"}},
+        )
+        await self.tier_s_runs.create_index([("cleanup_at", ASCENDING)])
 
         await self.discovery_runs.create_index([("discovery_id", ASCENDING)], unique=True)
         await self.discovery_runs.create_index([("task_id", ASCENDING), ("created_at", DESCENDING)])
@@ -397,6 +409,14 @@ class MongoRepository:
         return [self._clean(row) async for row in rows]
 
     async def mark_interrupted_tasks(self) -> int:
+        tier_result = await self.tasks.update_many(
+            {"status": TaskStatus.IN_PROGRESS.value, "$or": [
+                {"coding_tool": "tier_s"}, {"params.coding_tool": "tier_s"},
+            ]},
+            {"$set": {"status": TaskStatus.WAITING.value,
+                      "waiting_reason": "Tier S pausado por reinicio; relanza el ticket para reanudar el mismo intento",
+                      "resume_at": None, "updated_at": datetime.now(timezone.utc)}},
+        )
         result = await self.tasks.update_many(
             {"status": TaskStatus.IN_PROGRESS.value},
             {
@@ -407,7 +427,7 @@ class MongoRepository:
                 }
             },
         )
-        return result.modified_count
+        return result.modified_count + tier_result.modified_count
 
     async def find_task_by_source(self, source: str, source_id: str) -> dict[str, Any] | None:
         row = await self.tasks.find_one({"source": source, "source_id": source_id})
@@ -426,6 +446,63 @@ class MongoRepository:
         return [self._clean(row) async for row in rows]
 
     # ------------------------- workflow runs -------------------------
+
+    # ------------------------- Tier S attempts -------------------------
+
+    async def create_tier_s_run(self, doc: dict[str, Any]) -> dict[str, Any]:
+        await self.tier_s_runs.insert_one(doc)
+        return self._clean(doc)
+
+    async def get_tier_s_run(self, run_id: str) -> dict[str, Any] | None:
+        return self._clean(await self.tier_s_runs.find_one({"run_id": run_id}))
+
+    async def active_tier_s_run(self, owner_id: str) -> dict[str, Any] | None:
+        row = await self.tier_s_runs.find_one(
+            {"owner_id": owner_id, "active_repo": {"$type": "string"}},
+            sort=[("updated_at", DESCENDING)],
+        )
+        return self._clean(row)
+
+    async def active_tier_s_run_for_repo(self, repo_path: str) -> dict[str, Any] | None:
+        return self._clean(await self.tier_s_runs.find_one({"active_repo": repo_path}))
+
+    async def interrupted_tier_s_runs(self, limit: int = 200) -> list[dict[str, Any]]:
+        rows = self.tier_s_runs.find({"active_repo": {"$type": "string"},
+                                     "status": {"$in": ["active", "running", "resuming"]}}).limit(limit)
+        return [self._clean(row) async for row in rows]
+
+    async def list_tier_s_waits(self, project: str, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self.tier_s_runs.find(
+            {"project": project, "status": "waiting"},
+            sort=[("updated_at", DESCENDING)],
+        ).limit(limit)
+        return [self._clean(row) async for row in rows]
+
+    async def answer_tier_s_question(self, owner_id: str, answer: str) -> dict[str, Any] | None:
+        row = await self.tier_s_runs.find_one_and_update(
+            {"owner_id": owner_id, "active_repo": {"$type": "string"},
+             "status": "waiting", "question": {"$type": "object"},
+             "human_answer": None},
+            {"$set": {"human_answer": answer, "status": "resuming",
+                      "updated_at": datetime.now(timezone.utc)}},
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._clean(row)
+
+    async def patch_tier_s_run(self, run_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+        patch = {**updates, "updated_at": datetime.now(timezone.utc)}
+        await self.tier_s_runs.update_one({"run_id": run_id}, {"$set": patch})
+        return await self.get_tier_s_run(run_id)
+
+    async def expired_tier_s_runs(self, now: datetime, repo_path: str,
+                                  limit: int = 50) -> list[dict[str, Any]]:
+        rows = self.tier_s_runs.find({"cleanup_at": {"$lte": now}, "active_repo": None,
+                                     "repo_path": repo_path}).limit(limit)
+        return [self._clean(row) async for row in rows]
+
+    async def expired_tier_s_runs_any(self, now: datetime, limit: int = 200) -> list[dict[str, Any]]:
+        rows = self.tier_s_runs.find({"cleanup_at": {"$lte": now}, "active_repo": None}).limit(limit)
+        return [self._clean(row) async for row in rows]
 
     async def create_workflow_run(self, doc: dict[str, Any]) -> dict[str, Any]:
         await self.workflow_runs.insert_one(doc)

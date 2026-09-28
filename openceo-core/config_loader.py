@@ -132,17 +132,18 @@ class ConfigLoader:
                 "pr_body": "empty",
                 "tier_s": {
                     "review_rounds": 2,
-                    "max_plans": 15,
+                    "max_plans": 8,
                     "timeout_minutes": 15,
                     "roles": {
-                        "planner":         {"provider": "claude", "command": [], "env": {}},
-                        "plan_reviewer":   {"provider": "codex",  "command": [], "env": {}},
-                        "builder":         {"provider": "claude", "command": [], "env": {}},
-                        "gemini_reviewer": {"provider": "gemini", "command": [], "env": {}},
+                        "planner": {"provider": "claude", "label": "claudej", "model": "claude-opus-5-5", "active": True, "command": ["claudej"]},
+                        "plan-reviewer": {"provider": "codex", "label": "codexf", "model": "gpt-6-sol", "active": True, "command": ["codexf"]},
+                        "builder": {"provider": "claude", "label": "claudep", "model": "deepseek-v4.1-flash", "active": True, "command": ["claudep"]},
                     },
-                    "opencode_reviewers": [
-                        {"label": "kimi26", "model": "opencode-go/kimi-k2.6"},
-                        {"label": "qwen37", "model": "opencode-go/qwen3.7-max"},
+                    "reviewers": [
+                        {"label": "qwen", "provider": "qwen", "model": "qwen3.8-max", "active": True, "command": ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"]},
+                        {"label": "claudeg", "provider": "claude", "model": "glm-5.3", "active": True, "command": ["claudeg", "--model", "opus", "--tools", "Read,Glob,Grep"]},
+                        {"label": "agyd", "provider": "gemini", "model": "gemini", "active": False, "command": ["agyd"]},
+                        {"label": "mimo", "provider": "opencode", "model": "opencode-go/mimo-v2.6-pro", "active": False, "command": ["opencode"]},
                     ],
                 },
                 "providers": {

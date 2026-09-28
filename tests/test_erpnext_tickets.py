@@ -296,6 +296,23 @@ class CreateTicketTests(unittest.TestCase):
         run(adapter.update_status("TASK-1", "in_progress"))
         self.assertEqual(client.updated[0], ("Task", "TASK-1", {"status": "Working"}))
 
+    def test_tier_s_progress_replaces_own_section_and_escapes_question(self):
+        client = FakeClient()
+        client.docs["TASK-1"] = {"description": "<p>Original</p>"}
+        adapter = make_adapter(client)
+        summary = {"phase": "planner", "status": "waiting", "subplan": 1,
+                   "round": 1, "reviewers": {},
+                   "question": {"text": "Use <script>?", "options": ["A & B", "C"]}}
+        run(adapter.update_tier_s_progress("TASK-1", summary))
+        first = client.updated[-1][2]["description"]
+        self.assertIn("<p>Original</p>", first)
+        self.assertIn("Use &lt;script&gt;?", first)
+        self.assertIn("A &amp; B", first)
+        self.assertNotIn("status", client.updated[-1][2])
+        client.docs["TASK-1"]["description"] = first
+        run(adapter.update_tier_s_progress("TASK-1", {**summary, "phase": "review"}))
+        self.assertEqual(client.updated[-1][2]["description"].count("OPENCEO_TIER_S_BEGIN"), 1)
+
 
 class FakeAdapter:
     """Adapter falso: ejercita las tres ramas sin red."""
@@ -469,6 +486,20 @@ class StatusObserverTests(unittest.TestCase):
         service = self._service(FakeAdapter())
         run(service.observe_task_status(self._task("failed")))
         self.assertEqual(self._queued(service), [])
+
+    def test_espera_operativa_tier_s_no_se_convierte_en_revision_de_negocio(self):
+        service = self._service(FakeAdapter(), status_pushed="in_progress")
+        task = self._task("waiting")
+        task["tier_s_progress"] = {"status": "waiting", "phase": "planner"}
+        run(service.observe_task_status(task))
+        self.assertEqual(self._queued(service), [])
+        for terminal in ("cancelled", "failed"):
+            task["tier_s_progress"] = {"status": terminal, "phase": "planner"}
+            run(service.observe_task_status(task))
+            self.assertEqual(self._queued(service), [])
+        task["tier_s_progress"] = {"status": "completed", "phase": "complete"}
+        run(service.observe_task_status(task))
+        self.assertEqual(self._queued(service)[0]["status"], "waiting")
 
     def test_estado_ya_empujado_no_se_repite(self):
         """Idempotencia: se compara contra el ultimo estado EMPUJADO, no contra la base.

@@ -16,6 +16,24 @@ dev:
   create_pr: true
   pr_body: auto
 
+  tier_s:
+    # El propietario reactiva claudej cuando renueve la suscripcion.
+    roles:
+      planner:
+        active: false
+        command: ["claudej"]
+      plan-reviewer:
+        active: true
+        command: ["codexf"]
+      builder:
+        active: true
+        command: ["claudep"]
+    reviewers:
+      - {label: qwen, provider: qwen, model: qwen3.8-max, active: true, command: ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"]}
+      - {label: claudeg, provider: claude, model: glm-5.3, active: true, command: ["claudeg", "--model", "opus", "--tools", "Read,Glob,Grep"]}
+      - {label: agyd, provider: gemini, model: gemini, active: false, command: ["agyd"]}
+      - {label: mimo, provider: opencode, model: opencode-go/mimo-v2.6-pro, active: false, command: ["opencode"]}
+
   providers:
     codex:
       command: ["/home/develop/.local/bin/codex", "--sandbox", "workspace-write", "-a", "never", "--no-alt-screen"]
@@ -88,5 +106,3 @@ presets:
     number: 5
     prompt: "Audita el código en busca de posibles vulnerabilidades, endpoints expuestos sin autenticación o fugas de configuración."
     description: "Auditoría de seguridad y endpoints"
-
-

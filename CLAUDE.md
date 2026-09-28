@@ -2,6 +2,10 @@
 
 Guía y contrato de arquitectura para agentes y desarrolladores que interactúan con OpenCEO.
 
+**Vault de este proyecto**: `projects/jardal/jardal-openceo` dentro de
+`/home/develop/development/Jardal/jardal-knowledge/vault/` (usar el skill `obsidian-vault-links`).
+Trabajo temporal de tickets: `docs/work/TASK-2026-000NN-tema.md`.
+
 ---
 
 ## 1. Arquitectura y Stack

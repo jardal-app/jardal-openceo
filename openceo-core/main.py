@@ -99,7 +99,7 @@ config_loader = ConfigLoader(settings)
 router = CEORouter(settings)
 rate_monitor = RateMonitor(settings)
 rate_monitor.set_repo(repo)
-dev_step_manager = DevSessionManager(settings, config_loader, rate_monitor=rate_monitor)
+dev_step_manager = DevSessionManager(settings, config_loader, rate_monitor=rate_monitor, repo=repo)
 finance_step_manager = FinanceSessionManager(settings)
 pm_step_manager = PMSessionManager(
     settings,
@@ -122,6 +122,7 @@ graph._notion = notion_manager  # late-bind after creation
 # los tickets, asi que construir el cliente siempre. Construirlo NO abre red (el
 # httpx.AsyncClient es perezoso); si falta configuracion se avisa fuerte al arrancar.
 erpnext_adapter = ERPNextTicketAdapter(settings)
+dev_step_manager._consensus._erpnext = erpnext_adapter
 if not erpnext_adapter.is_enabled:
     logger.error(
         "ERPNext no esta configurado (%s). La creacion de tickets fallara hasta que lo este.",
@@ -196,6 +197,8 @@ async def lifespan(_: FastAPI):
         await repo.mark_interrupted_pm_states()
         await repo.mark_interrupted_tasks()
         await repo.mark_interrupted_dev_sessions()
+        await dev_step_manager._consensus.reconcile_interrupted_runs()
+        await dev_step_manager._consensus.cleanup_expired_all()
         await dev_session_service.startup_reconcile()
         await scheduler.start()
         # Ojo: dentro de ``lifespan`` hay un ``settings = get_settings()`` mas
@@ -1110,6 +1113,82 @@ async def run_task(task_id: str) -> dict:
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
+
+
+@app.post("/api/tasks/{task_id}/tier-s/answer")
+async def answer_tier_s_question(
+    task_id: str,
+    body: dict[str, Any],
+    current_user: UserDocument = Depends(require_permissions("write_tickets")),
+) -> dict:
+    task = await task_service.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not current_user.is_admin and (
+        task.get("project") not in (current_user.allowed_projects or [])
+        or current_user.user_id not in (task.get("involved_user_ids") or [])
+    ):
+        raise HTTPException(status_code=403, detail="Access denied")
+    run = await repo.active_tier_s_run(task_id)
+    if run is None or not run.get("question"):
+        raise HTTPException(status_code=409, detail="No Tier S question is pending")
+    answer = str(body.get("answer") or "").strip()
+    if not answer or len(answer) > 2000 or "\n" in answer or "\r" in answer:
+        raise HTTPException(status_code=400, detail="answer must be one line (1-2000 characters)")
+    accepted = await repo.answer_tier_s_question(task_id, answer)
+    if accepted is None:
+        raise HTTPException(status_code=409, detail="Question already answered or attempt changed")
+    async def resume() -> None:
+        try:
+            await task_service.run_task(task_id, force=True)
+        except Exception:
+            logger.exception("Tier S answer could not resume task %s", task_id)
+            try:
+                active = await repo.active_tier_s_run(task_id)
+                if active and active.get("run_id") == run["run_id"] and active.get("status") == "resuming":
+                    await repo.patch_tier_s_run(run["run_id"], {
+                        "status": "waiting", "waiting_reason": "Error al reanudar; relanza el ticket",
+                    })
+            except Exception:
+                logger.exception("Tier S answer recovery failed for task %s", task_id)
+    asyncio.create_task(resume())
+    return {"run_id": run["run_id"], "status": "resuming"}
+
+
+@app.get("/api/tier-s/waits")
+async def list_tier_s_waits(
+    project: str = Query(..., min_length=1),
+    current_user: UserDocument = Depends(require_permissions("write_tickets")),
+) -> dict:
+    if not current_user.is_admin and project not in (current_user.allowed_projects or []):
+        raise HTTPException(status_code=403, detail="Access denied")
+    runs = await repo.list_tier_s_waits(project)
+    return {"project": project, "count": len(runs), "runs": [
+        {key: run.get(key) for key in (
+            "run_id", "task_id", "session_id", "phase", "subplan", "round",
+            "waiting_reason", "question", "updated_at",
+        )} for run in runs
+    ]}
+
+
+@app.post("/api/tasks/{task_id}/tier-s/cancel")
+async def cancel_tier_s_run(
+    task_id: str,
+    current_user: UserDocument = Depends(require_permissions("write_tickets")),
+) -> dict:
+    task = await task_service.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not current_user.is_admin and (
+        task.get("project") not in (current_user.allowed_projects or [])
+        or current_user.user_id not in (task.get("involved_user_ids") or [])
+    ):
+        raise HTTPException(status_code=403, detail="Access denied")
+    config = config_loader.load_project(str(task.get("project") or ""))
+    if not await dev_step_manager._consensus.cancel_run(task_id, config):
+        raise HTTPException(status_code=409, detail="No active Tier S attempt")
+    await task_service.patch_task(task_id, {"waiting_reason": "Intento TIER S cancelado por el propietario"})
+    return {"status": "cancelled"}
 
 
 @app.post("/api/tasks/{task_id}/workflow")

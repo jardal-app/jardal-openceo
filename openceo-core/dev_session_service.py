@@ -76,7 +76,7 @@ class DevSessionService:
         self._project_service = project_service
         self._hub = realtime_hub
         self._tmux = TmuxRuntime(settings, rate_monitor=rate_monitor)
-        self._consensus = CriticalConsensusOrchestrator(settings, self._tmux, rate_monitor=rate_monitor)
+        self._consensus = CriticalConsensusOrchestrator(settings, self._tmux, rate_monitor=rate_monitor, repo=repo)
         self._project_locks: dict[str, asyncio.Lock] = {}
         self._peer_turn_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -140,7 +140,7 @@ class DevSessionService:
                         session_doc.metadata["execution_mode"] = "tier_s"
                         session_doc.metadata["consensus"] = {
                             "lead": "planner",
-                            "reviewers": ["plan-reviewer", "builder", "gemini-reviewer"],
+                            "reviewers": ["codexf", "qwen", "claudeg"],
                         }
                     except Exception as exc:
                         logger.error("Failed to start Tier S for '%s': %s", project, exc)
@@ -191,7 +191,7 @@ class DevSessionService:
                         f"Sesión tmux '{tmux_name}' creada. "
                         f"Provider: {provider.value}. "
                         + (
-                            "Modo: tier_s. Planner (clauded) → Plan reviewer (codexf) → Builder (claudep) → 3 reviewers × 2 rondas."
+                            "Modo: tier_s. Equipo configurado por suscripciones activas; el planner y el builder son obligatorios."
                             if consensus_mode
                             else "Esperando instrucciones."
                         )
@@ -257,7 +257,8 @@ class DevSessionService:
             self._cancel_async_peer_turn(session_id)
             config = self._config_loader.load_project(project)
             if self._is_consensus_session(session):
-                self._consensus.close_project(project=project, config=config)
+                if not await self._consensus.cancel_run(session_id, config):
+                    self._consensus.close_project(project=project, config=config)
             else:
                 self._tmux.close_session(project)
 
@@ -289,7 +290,8 @@ class DevSessionService:
             self._cancel_async_peer_turn(session_id)
             config = self._config_loader.load_project(project)
             if self._is_consensus_session(session):
-                self._consensus.close_project(project=project, config=config)
+                if not await self._consensus.cancel_run(session_id, config):
+                    self._consensus.close_project(project=project, config=config)
             else:
                 self._tmux.close_session(project)
 
@@ -654,6 +656,9 @@ class DevSessionService:
         session_id = session["session_id"]
         project = session["project"]
         config = self._config_loader.load_project(project)
+        active_run = await self._repo.active_tier_s_run(session_id)
+        if active_run and active_run.get("question"):
+            await self._repo.patch_tier_s_run(active_run["run_id"], {"human_answer": instruction})
 
         async def progress(detail: str) -> None:
             updated = await self._repo.patch_dev_session(
@@ -671,6 +676,7 @@ class DevSessionService:
             instruction=instruction,
             config=config,
             progress=progress,
+            session_id=session_id,
         )
 
         assistant_text = result.summary or "Tier S terminó sin resumen."
@@ -685,7 +691,10 @@ class DevSessionService:
             "last_output": (result.last_output or assistant_text)[-4000:],
             "last_error": result.error,
         }
-        if result.ok:
+        if result.waiting:
+            updates["status"] = DevSessionStatus.WAITING_USER.value
+            updates["waiting_reason"] = result.summary
+        elif result.ok:
             updates["status"] = DevSessionStatus.WAITING_USER.value
             updates["waiting_reason"] = "Tier S listo para la siguiente instrucción"
         else:
@@ -1121,6 +1130,10 @@ class DevSessionService:
         )
         if updated is None:
             return None
+
+        if self._is_consensus_session(session):
+            config = self._config_loader.load_project(str(session.get("project") or ""))
+            await self._consensus.cancel_run(session_id, config)
 
         user_id = str(session.get("user_id") or "").strip()
         project = str(session.get("project") or "").strip()

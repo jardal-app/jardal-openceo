@@ -161,7 +161,7 @@ Not every external integration goes through n8n. Each tool is evaluated case by 
 
 ## Engineering Knowledge and Code Context
 
-The engineering vault lives at `/home/develop/development/Jardal/jardal-knowledge/vault/`. Its [setup guide](../../jardal-knowledge/ENGINEERING_MEMORY_SETUP.md) and the [obsidian-vault-links skill](../../jardal-knowledge/.agents/skills/obsidian-vault-links/SKILL.md) define placement, links, note shape, and validation. Agents access Markdown files directly; Obsidian is an optional viewer, not a runtime dependency.
+The engineering vault lives at `/home/develop/development/Jardal/jardal-knowledge/vault/`. Its [setup guide](../../jardal-knowledge/README.md) and the [obsidian-vault-links skill](../../jardal-knowledge/.agents/skills/obsidian-vault-links/SKILL.md) define placement, links, note shape, and validation. Agents access Markdown files directly; Obsidian is an optional viewer, not a runtime dependency.
 
 Retrieve context in this order:
 
@@ -1979,7 +1979,7 @@ Notes:
 - Finance secrets belong in `openceo-core/.env.finance.local`, not in source files.
 - Each `openceo-core/agents/{name}/.env.example` file documents the skill-local credential contract for packaging and marketplace export.
 - ERPNext adapter credentials and settings follow the Finance/integration contract when implemented; documentation alone does not enable an adapter or add accepted runtime fields. Keep them scoped to permitted operations, outside Git and the vault.
-- Vault paths, qmd setup, and the link checker are documented in the [engineering memory setup](../../jardal-knowledge/ENGINEERING_MEMORY_SETUP.md), not added as a new MCP service.
+- Vault paths, qmd setup, and the link checker are documented in the [engineering memory setup](../../jardal-knowledge/README.md), not added as a new MCP service.
 
 ---
 

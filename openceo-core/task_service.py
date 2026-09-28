@@ -377,6 +377,15 @@ class TaskService:
             return
 
         status = str(task.get("status") or "")
+        tier_s_progress = task.get("tier_s_progress")
+        if (
+            status == TaskStatus.WAITING.value
+            and isinstance(tier_s_progress, dict)
+            and tier_s_progress.get("status") in {"waiting", "cancelled", "failed"}
+        ):
+            # Operational pause (quota/question) is not ERPNext's business review.
+            # The existing Task stays Working; description shows Tier S progress.
+            return
         if status == str(mirror.get("status_pushed") or ""):
             return
         if map_status(status) is None:
