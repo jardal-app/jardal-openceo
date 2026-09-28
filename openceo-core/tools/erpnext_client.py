@@ -37,7 +37,13 @@ logger = logging.getLogger(__name__)
 # el contrato de Finance pide que cada DocType nuevo se justifique por un flujo real.
 # `Task Type` entra solo para lectura: el adapter valida contra el los tipos que existen
 # antes de mandarlos, porque un Link invalido tumbaria la creacion del ticket.
-ALLOWED_DOCTYPES: frozenset[str] = frozenset({"Task", "Project", "Task Type"})
+# Fase B (TASK-2026-00032, gasto ocasional por voz): `Journal Entry` es el unico
+# DocType que `finance.register_expense` crea (idempotencia por `openceo_ref`,
+# ya existente y unico). `Account`, `Cost Center` y `Company` entran solo para
+# lectura de verificacion (Fase A): la clasificacion termina en IDs comprobables.
+ALLOWED_DOCTYPES: frozenset[str] = frozenset(
+    {"Task", "Project", "Task Type", "Journal Entry", "Account", "Cost Center", "Company"}
+)
 
 _DEFAULT_TIMEOUT_SECONDS = 5.0
 _DEFAULT_CONNECT_TIMEOUT_SECONDS = 2.0

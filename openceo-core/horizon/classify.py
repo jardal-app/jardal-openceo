@@ -201,6 +201,15 @@ _IMPORT_PATTERNS = (
     r"\bcarga(?:r|me)?\s+(?:mi|el)\s+contexto\b",
 )
 
+# Nota: `_matches` normaliza antes (sin acentos, `.`, `,` ni `$`: "1.234,56"
+# llega como "1 234 56"), asi que los patrones toleran espacios entre digitos.
+_FINANCE_EXPENSE_PATTERNS = (
+    r"\b(?:registr\w*|anot\w*|apunt\w*|carg\w*|pag\w*|compr\w*|gast\w*)\b"
+    r".*\b\d[\d\s]*\s*(?:bs|bolivianos?|bob|usd|dolares?|usdt)\b",
+    r"\b\d[\d\s]*\s*(?:bs|bolivianos?|bob|usd|dolares?|usdt)\b"
+    r".*\b(?:luz|elfec|electricidad|carne|mercado|comida|alimentos?|gasto|factura|recibo)\b",
+)
+
 # Fase 3: Delegacion, entrega y metricas de supervisión/retrabajo.
 _DELEGATE_PATTERNS = (
     r"\b(?:delega|delegar|encarga|encargar)\s+(?:la\s+|el\s+|esta\s+|este\s+)?(?:siguiente\s+)?(?:acci[oó]n|tarea|ticket)\b",
@@ -339,6 +348,11 @@ def classify(text: str) -> str | None:
     # 0. Metricas de delegacion/retrabajo especificas (gana sobre captura generica).
     if _matches(normalized, _METRICS_PATTERNS):
         return INTENT_METRICS
+
+    # 0b. Gasto ocasional con monto y moneda: pertenece a Finance (ERPNext),
+    # no a Horizon. Devolver None deja que siga el flujo normal (CEO->Finance).
+    if _matches(normalized, _FINANCE_EXPENSE_PATTERNS):
+        return None
 
     # 1. Verbo de registro explicito: gana siempre. Una nota personal declarada
     #    como tal no debe terminar en tmux aunque mencione un ticket.
