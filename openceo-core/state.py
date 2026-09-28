@@ -231,6 +231,10 @@ class TaskDocument(BaseModel):
     status: TaskStatus = TaskStatus.QUEUED
     waiting_reason: str | None = None
     resume_at: datetime | None = None
+    # Intencion de ejecucion: False = registrado sin ejecutar (el scheduler lo salta).
+    # None = legacy sin campo, el scheduler lo trata como True. TASK-2026-00043: el
+    # campo no existia y el False del registro se perdia -> Working fantasma.
+    autorun: bool | None = None
     coding_tier: CodingTier | None = None
     coding_tool: CodingTool | None = None
     coding_session_id: str | None = None
