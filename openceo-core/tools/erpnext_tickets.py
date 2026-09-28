@@ -28,7 +28,7 @@ import re
 from typing import Any
 
 from settings import Settings
-from state import CodingTool
+from state import CodingTool, QAReviewState
 from tools.erpnext_client import (
     ERPNextClient,
     ERPNextDuplicateError,
@@ -43,14 +43,12 @@ SUBJECT_MAX_LENGTH = 140
 #: para que no puedan desincronizarse: si se agrega un provider, se agrega aca solo.
 _CODING_TOOLS: frozenset[str] = frozenset(tool.value for tool in CodingTool)
 
-#: OpenCEO -> ERPNext. `completed` empuja a `Pending Review` (cola de revision),
-#: NO a `Completed`: `docs/ARCHITECTURE_REFERENCE_2026.md` §50/§119 dice que "completed
-#: en un registro de ejecucion no salta una aprobacion de negocio de ERPNext" y que "la
-#: aceptacion de negocio queda sujeta a su workflow". Que un agente termine su trabajo no
-#: es que un humano lo acepte: el ticket sale solo de `Working` y espera en la cola QA,
-#: y el cierre a `Completed` sigue siendo una transicion de negocio explicita en el desk
-#: (camino inverso ya existente). Decision del dueño 2026-09-28 (TASK-2026-00033): no
-#: cerrar tickets a mano uno por uno.
+#: OpenCEO -> ERPNext. `completed` se resuelve por ticket (ver `resolve_erpnext_status`):
+#: con revision humana pendiente -> `Pending Review` (cola QA); sin ella -> `Completed`
+#: directo (Done). Decision del dueño 2026-09-28 (TASK-2026-00040, refina TASK-2026-00033):
+#: para trabajo rutinario el gate tecnico (tests verdes + ausencia de QA requerida)
+#: actua como aceptacion; la aceptacion manual queda para lo marcado. El mapa puro
+#: deja `completed` en `Pending Review` como defecto seguro cuando no hay contexto.
 #: `failed`/`escalated`/`interrupted` tampoco empujan: son resultado de ejecucion, no de negocio.
 _STATUS_MAP: dict[str, str] = {
     "queued": "Open",
@@ -103,6 +101,28 @@ def map_priority(priority: str | None) -> str:
 def map_status(status: str | None) -> str | None:
     """Devuelve el estado de ERPNext, o None si ese estado no debe empujarse."""
     return _STATUS_MAP.get(str(status or "").strip().lower())
+
+
+def task_needs_human_review(task: dict[str, Any] | None) -> bool:
+    """Senal establecida de "necesita ojo humano": QA requerida y sin aprobar.
+
+    Es la misma senal que alimenta `QADashboard` y el gate de `QAReviewService`:
+    no se inventa nada nuevo. Sin contexto (task None) se asume revision, que es
+    el defecto seguro.
+    """
+    if not isinstance(task, dict):
+        return True
+    if not task.get("qa_review_required"):
+        return False
+    return task.get("qa_review_state") != QAReviewState.APPROVED.value
+
+
+def resolve_erpnext_status(task: dict[str, Any] | None) -> str | None:
+    """Estado de ERPNext para un ticket completo, o None si no debe empujarse."""
+    status = str((task or {}).get("status") or "").strip().lower()
+    if status == "completed":
+        return "Pending Review" if task_needs_human_review(task) else "Completed"
+    return _STATUS_MAP.get(status)
 
 
 def normalize_due_date(value: str | None) -> str | None:
@@ -404,9 +424,29 @@ class ERPNextTicketAdapter:
 
         return {"ok": True, "duplicate": False, "task": created, "ref": ref}
 
-    async def update_status(self, name: str, opencero_status: str | None) -> dict[str, Any] | None:
-        """Empuja una transicion de estado. Devuelve None si ese estado no se empuja."""
-        target = map_status(opencero_status)
+    async def update_status(
+        self,
+        name: str,
+        opencero_status: str | None,
+        *,
+        task: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Empuja una transicion de estado. Devuelve None si ese estado no se empuja.
+
+        Para `completed` el destino depende del ticket (QA condicional): con `task`
+        se resuelve (`Pending Review` o `Completed`); sin contexto rige el defecto
+        seguro (`Pending Review`).
+        """
+        status = str(opencero_status or "").strip().lower()
+        if status == "completed":
+            # Sin contexto rige el defecto seguro (cola QA); con ticket se resuelve.
+            target = (
+                "Pending Review"
+                if task is None
+                else resolve_erpnext_status({**task, "status": status})
+            )
+        else:
+            target = map_status(status)
         if target is None or not (name or "").strip():
             return None
         return await self._client.update_doc("Task", name.strip(), {"status": target})

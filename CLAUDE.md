@@ -195,7 +195,7 @@ ignoran, para no crear un bucle.
 
 ### Reglas al tocar esto
 
-1. **`completed` no cierra el ticket en ERPNext a propósito**: la ejecución empuja `Pending Review` (cola QA) y cerrar a `Completed` es una decisión de negocio en el desk.
+1. **`completed` es condicional, no automático a un solo estado**: con revisión humana pendiente (`qa_review_required` sin aprobar) empuja `Pending Review`; sin ella, `Completed` directo. `failed`/`escalated`/`interrupted` no se empujan.
 2. **`status_pushed` guarda el vocabulario de OpenCEO, no el de ERPNext** — comparar `in_progress`
    contra `Working` rompería la idempotencia. Y `str(TaskStatus.QUEUED)` da `'TaskStatus.QUEUED'`:
    usar `.value`.
