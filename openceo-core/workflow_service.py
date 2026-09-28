@@ -123,6 +123,7 @@ class WorkflowToolRegistry:
         # Finance
         self.register("finance.pago_elfec_house", self._finance_pago_elfec_house)
         self.register("finance.register_expense", self._finance_register_expense)
+        self.register("finance.get_scope_summary", self._finance_get_scope_summary)
 
         # CEO / Horizon (espacio personal). Nombres del contrato de la seccion
         # 9.2 punto 3; todos delegan en HorizonService, que es deterministico.
@@ -604,6 +605,33 @@ class WorkflowToolRegistry:
                 parsed, doc, result["duplicate"]
             ),
         }
+
+    async def _finance_get_scope_summary(
+        self,
+        cost_center: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Resumen de saldos/gasto por Scope (TASK-2026-00044). SOLO lectura
+        sobre `GL Entry`: no crea ni modifica ningun documento."""
+        from agents.finance import scope_summary as _scope
+        from tools.erpnext_client import ERPNextClient
+
+        client = ERPNextClient(self._settings)
+        try:
+            summary = await _scope.get_scope_summary(
+                client,
+                cost_center=cost_center or _scope.COST_CENTER,
+                date_from=date_from,
+                date_to=date_to,
+            )
+        finally:
+            await client.aclose()
+        payload = summary.to_dict()
+        payload["ok"] = True
+        payload["summary"] = _scope.build_spoken_summary(summary)
+        return payload
 
     def _cloudflare_upsert_dns(self, hostname: str, **_: Any) -> dict[str, Any]:
         from tools.cloudflare import CloudflareDNSManager
