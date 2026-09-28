@@ -11,6 +11,11 @@ debito a gasto / credito a efectivo, en BOB salvo moneda explicita,
 con `Decimal` (nunca `float`), Company `Jardal` y Cost Center
 `Principal - J`. No crea tickets: el registro es el efecto.
 
+El parseo de dinero vive en `money_text` y la idempotencia del asiento en
+`journal`, compartidos con el flujo de ingreso. Este modulo aporta solo lo
+propio del gasto: su detector, la clasificacion a cuentas de gasto reales y
+el concepto.
+
 No hay ledger paralelo: Mongo guarda como maximo la referencia devuelta.
 `execute_money_movements=false` sigue vigente: esto contabiliza gasto ya
 ocurrido, no mueve dinero externo.
@@ -19,39 +24,33 @@ ocurrido, no mueve dinero externo.
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
-from uuid import uuid4
 
-# Bolivia no observa horario de verano: offset fijo, sin dependencia de tzdata.
-_LA_PAZ = timezone(timedelta(hours=-4))
-
-COMPANY = "Jardal"
-COST_CENTER = "Principal - J"
-CASH_ACCOUNT = "Efectivo - J"
+from agents.finance.journal import new_openceo_ref as _new_ref
+from agents.finance.journal import submit_journal_entry
+from agents.finance.money_text import (  # noqa: F401  (reexport publico)
+    CASH_ACCOUNT,
+    COMPANY,
+    COST_CENTER,
+    CURRENCY_WORD_RE as _CURRENCY_WORD_RE,
+    detect_currency,
+    find_money_match as _find_money_match,
+    has_dev_marker,
+    is_question,
+    looks_like_money_in,
+    norm as _norm,
+    parse_amount,
+    strip_accents as _strip_accents,
+    today_local,
+)
 
 EXPENSE_SERVICIOS_PUBLICOS = "Servicios públicos - J"
 EXPENSE_GASTOS_VARIOS = "Gastos varios - J"
 EXPENSE_TRANSPORTE = "CARGOS DE TRANSITO Y TRANSPORTE - J"
 EXPENSE_TELEFONO = "Cuenta telefonica - J"
-
-_AMOUNT_RE = re.compile(
-    r"(?P<num>\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)"
-    r"(?:\s*(?P<cur>bs\.?|bolivianos?|bob|usd|d[óo]lares?|dolar|usdt|\$))?",
-    flags=re.IGNORECASE,
-)
-_CURRENCY_WORD_RE = re.compile(
-    r"\b(bs\.?|bolivianos?|bob|usd|d[óo]lares?|dolar|usdt|\$)\b",
-    flags=re.IGNORECASE,
-)
-# Cantidades de tiempo ("15 minutos de supervisión") no son dinero.
-_TIME_UNIT_RE = re.compile(
-    r"^\s*(minutos?|min\.?|horas?|hs?\.?)\b",
-    flags=re.IGNORECASE,
-)
+EXPENSE_SALARIOS = "Salario. - J"
 
 _FINANCE_VERB_RE = re.compile(
     r"\b(registr\w*|anot\w*|apunt\w*|carg\w*|pag\w*|compr\w*|gast\w*)\b",
@@ -61,11 +60,6 @@ _FINANCE_NOUN_RE = re.compile(
     r"\b(gastos?|facturas?|recibos?|cuentas?|luz|elfec|electricidad|el[ée]ctrica|"
     r"energ[íi]a|agua|alquiler|carne|mercado|comida|alimentos?|hogar|tienda|"
     r"supermercado|farmacia|pasajes?|transporte|taxi|tel[ée]fono|celular|recarga)\b",
-    flags=re.IGNORECASE,
-)
-_DEV_MARKER_RE = re.compile(
-    r"\b(tickets?|presets?|sesi[óo]n(?:es)?\s+dev|git|commit|branch|merge|deploy|"
-    r"tmux|codex|claude|pytest|tests?|c[óo]digo|refactor|workflow|horizonte|horizon)\b",
     flags=re.IGNORECASE,
 )
 
@@ -78,15 +72,6 @@ _EXPENSE_FILLER_RE = re.compile(
     r"\b(gastos?\s+personales?|gastos?|pago\s+de|pago|pagar|pagu[ée]|de|del?|la|el|en|un|una|por|favor|mi|mis)\b",
     flags=re.IGNORECASE,
 )
-
-
-def _strip_accents(text: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", text)
-    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
-
-
-def _norm(text: str) -> str:
-    return _strip_accents(str(text or "").lower())
 
 
 @dataclass(frozen=True)
@@ -104,51 +89,6 @@ class ParsedExpense:
     remark: str = ""
 
 
-def _find_money_match(text: str) -> re.Match[str] | None:
-    """Primer monto que es dinero, no tiempo ('15 minutos' se salta)."""
-    blob = str(text or "")
-    for match in _AMOUNT_RE.finditer(blob):
-        if _TIME_UNIT_RE.match(blob[match.end(): match.end() + 12]):
-            continue
-        return match
-    return None
-
-
-def detect_currency(text: str, amount_start: int, amount_end: int) -> str:
-    """Moneda explicita cerca del monto; BOB por defecto. USDT != USD."""
-    window = str(text or "")[max(0, amount_start - 12): amount_end + 14]
-    match = _CURRENCY_WORD_RE.search(window)
-    token = _norm(match.group(1)) if match else ""
-    if token in {"usd", "dolar", "dolares", "$"}:
-        return "USD"
-    if token == "usdt":
-        return "USDT"
-    return "BOB"
-
-
-def parse_amount(raw: str) -> Decimal | None:
-    """Convierte '1.234,56'/'1,234.56'/'50' a Decimal. Nunca float."""
-    cleaned = (raw or "").strip()
-    if not cleaned:
-        return None
-    decimal_sep = "."
-    if "," in cleaned and "." in cleaned:
-        decimal_sep = "," if cleaned.rfind(",") > cleaned.rfind(".") else "."
-    elif "," in cleaned:
-        decimal_sep = ","
-    if decimal_sep == ",":
-        normalized = cleaned.replace(".", "").replace(",", ".")
-    else:
-        normalized = cleaned.replace(",", "")
-    try:
-        value = Decimal(normalized)
-    except InvalidOperation:
-        return None
-    if value <= 0:
-        return None
-    return value
-
-
 def classify_expense_account(concept: str) -> str:
     """Naturaleza economica -> Account verificada. Sin inventar cuentas."""
     blob = _norm(concept)
@@ -158,6 +98,8 @@ def classify_expense_account(concept: str) -> str:
         return EXPENSE_TRANSPORTE
     if re.search(r"\b(telefono|celular|recarga|entel|viva|tigo)\b", blob):
         return EXPENSE_TELEFONO
+    if re.search(r"\b(sueldos?|salarios?|nomina|planilla)\b", blob):
+        return EXPENSE_SALARIOS
     return EXPENSE_GASTOS_VARIOS
 
 
@@ -178,9 +120,13 @@ def looks_like_expense(text: str) -> bool:
 
     Exige monto para poder registrar sin preguntar. Sin monto no hay
     registro posible, asi que no se reclama la frase.
+
+    Dos exclusiones protegen el signo del asiento: una frase de dinero que
+    ENTRA ("registra ingreso 500 bs" cumple el verbo `registr*` + monto) no es
+    un gasto, y una pregunta no es una orden de registro.
     """
     blob = str(text or "").strip()
-    if not blob or _DEV_MARKER_RE.search(blob):
+    if not blob or has_dev_marker(blob) or is_question(blob) or looks_like_money_in(blob):
         return False
     amount_match = _find_money_match(blob)
     if amount_match is None:
@@ -204,7 +150,7 @@ def parse_expense(text: str) -> ParsedExpense | None:
     currency = detect_currency(blob, match.start(), match.end())
     concept = extract_concept(blob)
     account = classify_expense_account(concept)
-    today = datetime.now(_LA_PAZ).date().isoformat()
+    today = today_local()
     remark = f"Registro por voz: {concept} - {amount:.2f} {currency} ({today})"
     return ParsedExpense(
         concept=concept,
@@ -217,8 +163,7 @@ def parse_expense(text: str) -> ParsedExpense | None:
 
 
 def new_openceo_ref() -> str:
-    """Identidad idempotente de la operacion. Reintento = mismo valor."""
-    return f"voice-expense:{uuid4().hex}"
+    return _new_ref("voice-expense")
 
 
 def build_journal_entry(parsed: ParsedExpense, ref: str) -> dict[str, Any]:
@@ -248,9 +193,6 @@ def build_journal_entry(parsed: ParsedExpense, ref: str) -> dict[str, Any]:
     }
 
 
-_JOURNAL_FIELDS = ["name", "docstatus", "openceo_ref", "total_debit", "posting_date"]
-
-
 async def register_expense(
     client: Any,
     parsed: ParsedExpense,
@@ -258,50 +200,14 @@ async def register_expense(
     ref: str | None = None,
     submit: bool = True,
 ) -> dict[str, Any]:
-    """Registra el gasto en ERPNext. Idempotente por `ref`.
-
-    Crea el `Journal Entry` en borrador y lo envia (submit) para que
-    llegue al libro mayor. Un reintento con el mismo `ref` choca con el
-    indice unico (HTTP 417): se relee por `ref` y se devuelve como exito
-    idempotente; si quedo en borrador, se envia.
-    """
+    """Registra el gasto en ERPNext. Idempotente por `ref` (ver `journal`)."""
     operation_ref = (ref or "").strip() or new_openceo_ref()
-    try:
-        created = await client.create_doc(
-            "Journal Entry", build_journal_entry(parsed, operation_ref)
-        )
-    except Exception as exc:
-        if getattr(exc, "status_code", None) != 417:
-            raise
-        existing = await find_by_ref(client, operation_ref)
-        if not existing:
-            raise
-        doc = await _ensure_submitted(client, existing, submit)
-        return {"ok": True, "duplicate": True, "doc": doc, "ref": operation_ref}
-
-    doc = await _ensure_submitted(client, created, submit)
-    return {"ok": True, "duplicate": False, "doc": doc, "ref": operation_ref}
-
-
-async def find_by_ref(client: Any, ref: str) -> dict[str, Any] | None:
-    rows = await client.list_docs(
-        "Journal Entry",
-        filters=[["openceo_ref", "=", ref]],
-        fields=_JOURNAL_FIELDS,
-        limit=1,
+    return await submit_journal_entry(
+        client,
+        build_journal_entry(parsed, operation_ref),
+        ref=operation_ref,
+        submit=submit,
     )
-    return rows[0] if rows else None
-
-
-async def _ensure_submitted(client: Any, doc: dict[str, Any], submit: bool) -> dict[str, Any]:
-    if not submit:
-        return doc
-    if int(doc.get("docstatus") or 0) != 0:
-        return doc
-    name = str(doc.get("name") or "").strip()
-    if not name:
-        return doc
-    return await client.update_doc("Journal Entry", name, {"docstatus": 1})
 
 
 def build_spoken_summary(parsed: ParsedExpense, doc: dict[str, Any], duplicate: bool) -> str:

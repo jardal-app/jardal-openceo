@@ -184,37 +184,27 @@ first_layer_gateway = FirstLayerGateway(
 )
 
 
-async def _run_finance_voice_expense(text: str) -> str | None:
-    """Ejecuta un gasto ocasional por voz/chat sin crear tickets.
+async def _run_finance_voice(text: str) -> str | None:
+    """Resuelve por voz/chat los flujos deterministas de Finance, sin tickets.
 
-    El registro en ERPNext es el efecto: la app puede apagarse despues.
-    Tambien atiende consultas de saldo/gasto (TASK-2026-00044, solo lectura):
-    la consulta en ERPNext es el efecto, tampoco crea tickets.
-    Devuelve el resumen breve apto para TTS, o el error en el mismo tono.
+    Ingreso, gasto, saldo y regla del 10%: el registro en ERPNext (o la
+    consulta) es el efecto, asi que la app puede apagarse despues. El despacho
+    lo decide `agents.finance.intent`, un solo orden para los cuatro flujos.
+    Devuelve el resumen breve apto para TTS, o None si no es texto financiero.
     """
     clean = str(text or "").strip()
     try:
-        from agents.finance.scope_summary import (
-            build_spoken_summary as _balance_spoken,
-            get_scope_summary as _get_summary,
-            looks_like_balance_query as _is_balance,
-        )
-        from tools.erpnext_client import ERPNextClient
+        from agents.finance.intent import classify as _classify_finance
 
-        if _is_balance(clean):
-            client = ERPNextClient(settings)
-            try:
-                summary = await _get_summary(client)
-            finally:
-                await client.aclose()
-            return _balance_spoken(summary)
-    except Exception as exc:
-        logger.warning("Finance voice balance failed: %s", exc)
-        return "No pude consultar el saldo ahora mismo. Lo intentamos de nuevo."
+        if _classify_finance(clean) is None:
+            return None
+    except Exception:
+        logger.warning("Finance intent classification failed", exc_info=True)
+        return None
     task = {
         "task_id": f"finance-voice-{uuid4().hex}",
         "project": settings.DEFAULT_PROJECT,
-        "title": clean.splitlines()[0][:120] if clean else "Gasto por voz",
+        "title": clean.splitlines()[0][:120] if clean else "Finanzas por voz",
         "description": clean,
         "attachments": [],
         "priority": TaskPriority.MEDIUM.value,
@@ -222,30 +212,29 @@ async def _run_finance_voice_expense(text: str) -> str | None:
     try:
         result = await finance_step_manager.run(task, {})
     except Exception as exc:
-        logger.warning("Finance voice expense failed: %s", exc)
-        return "No pude registrar el gasto ahora mismo. Lo intentamos de nuevo."
+        logger.warning("Finance voice flow failed: %s", exc)
+        return "No pude resolver eso con finanzas ahora mismo. Lo intentamos de nuevo."
     return result.last_response_summary or result.error
 
 
-def _is_finance_expense_text(text: str) -> bool:
+def _is_finance_text(text: str) -> bool:
     try:
-        from agents.finance.scope_summary import looks_like_balance_query
-        from agents.finance.voice_expense import looks_like_expense
+        from agents.finance.intent import is_finance_text
     except Exception:
         return False
     try:
-        return bool(looks_like_expense(text) or looks_like_balance_query(text))
+        return bool(is_finance_text(text))
     except Exception:
         return False
 
 
-async def _handle_finance_expense_direct(payload: ChatCompletionRequest, message: str) -> dict:
-    summary = await _run_finance_voice_expense(_strip_agent_prefix(message))
-    return _maybe_stream(payload, summary or "No pude registrar el gasto.")
+async def _handle_finance_direct(payload: ChatCompletionRequest, message: str) -> dict:
+    summary = await _run_finance_voice(_strip_agent_prefix(message))
+    return _maybe_stream(payload, summary or "No pude resolver eso con finanzas.")
 
 
 # El dueno habla con el CEO y el CEO deriva a Finance (TASK-2026-00032).
-first_layer_gateway.set_finance_handler(_run_finance_voice_expense)
+first_layer_gateway.set_finance_handler(_run_finance_voice)
 _PM_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 
@@ -1750,9 +1739,9 @@ async def chat_completions(payload: ChatCompletionRequest):
             dispatch_message = _strip_agent_prefix(message)
             if agent_hint == AgentName.PM:
                 return await _handle_openceo_pm_direct(payload, user_id, dispatch_message)
-            if agent_hint == AgentName.FINANCE and _is_finance_expense_text(dispatch_message):
-                # Gasto ocasional: se registra directo, sin ticket por cada gasto.
-                return await _handle_finance_expense_direct(payload, dispatch_message)
+            if agent_hint == AgentName.FINANCE and _is_finance_text(dispatch_message):
+                # Flujo determinista de finanzas: se resuelve directo, sin ticket.
+                return await _handle_finance_direct(payload, dispatch_message)
             task_payload = TaskCreateRequest(
                 project=payload.project or settings.DEFAULT_PROJECT,
                 source=TaskSource.API,
@@ -2561,10 +2550,11 @@ async def _handle_openceo_ceo_model(
     if selected == AgentName.PM:
         return await _handle_openceo_pm_direct(payload, user_id, _strip_agent_prefix(message))
 
-    if selected == AgentName.FINANCE and _is_finance_expense_text(message):
-        # Gasto ocasional por voz/chat: el CEO deriva a Finance y se registra
-        # directo en ERPNext, sin ticket por cada gasto (TASK-2026-00032).
-        return await _handle_finance_expense_direct(payload, message)
+    if selected == AgentName.FINANCE and _is_finance_text(message):
+        # Finanzas por voz/chat: el CEO deriva a Finance y el flujo se resuelve
+        # directo en ERPNext, sin ticket por cada movimiento (TASK-2026-00032,
+        # TASK-2026-00044, TASK-2026-00053, TASK-2026-00054).
+        return await _handle_finance_direct(payload, message)
 
     task_payload = TaskCreateRequest(
         project=project,

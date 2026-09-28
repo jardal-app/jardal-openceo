@@ -361,18 +361,16 @@ class FirstLayerGateway:
                 if handled:
                     return True, reply
 
-        # Gasto ocasional por voz (TASK-2026-00032): el dueno habla con el CEO
-        # y el CEO deriva a Finance. Detector determinista antes del LLM:
-        # no cuesta tokens, funciona con presupuesto agotado y responde en el
-        # mismo turno para poder apagar la app. No crea tickets.
+        # Finanzas por voz (TASK-2026-00032/00044/00053/00054): el dueno habla
+        # con el CEO y el CEO deriva a Finance. Detector determinista antes del
+        # LLM: no cuesta tokens, funciona con presupuesto agotado y responde en
+        # el mismo turno para poder apagar la app. No crea tickets: el registro
+        # (o la consulta) en ERPNext es el efecto.
         if self._finance_handler is not None:
             try:
-                from agents.finance.scope_summary import (
-                    looks_like_balance_query as _looks_like_balance,
-                )
-                from agents.finance.voice_expense import looks_like_expense
+                from agents.finance.intent import is_finance_text
 
-                if looks_like_expense(text) or _looks_like_balance(text):
+                if is_finance_text(text):
                     summary = await self._finance_handler(text)
                     if summary:
                         return True, str(summary)

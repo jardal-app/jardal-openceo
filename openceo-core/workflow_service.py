@@ -123,7 +123,9 @@ class WorkflowToolRegistry:
         # Finance
         self.register("finance.pago_elfec_house", self._finance_pago_elfec_house)
         self.register("finance.register_expense", self._finance_register_expense)
+        self.register("finance.register_income", self._finance_register_income)
         self.register("finance.get_scope_summary", self._finance_get_scope_summary)
+        self.register("finance.get_contribution_10_status", self._finance_get_contribution_10_status)
 
         # CEO / Horizon (espacio personal). Nombres del contrato de la seccion
         # 9.2 punto 3; todos delegan en HorizonService, que es deterministico.
@@ -631,6 +633,71 @@ class WorkflowToolRegistry:
         payload = summary.to_dict()
         payload["ok"] = True
         payload["summary"] = _scope.build_spoken_summary(summary)
+        return payload
+
+    async def _finance_register_income(
+        self,
+        text: str = "",
+        openceo_ref: str | None = None,
+        submit: bool = True,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Registra un ingreso ya cobrado por voz/chat en ERPNext (TASK-2026-00053).
+
+        Espejo de `finance.register_expense`: el mismo `Journal Entry`
+        idempotente por `openceo_ref`, con las dos patas invertidas (debito a
+        efectivo / credito a la cuenta de ingreso). Sin tickets por ingreso.
+        """
+        from agents.finance import voice_income as _voice_income
+        from tools.erpnext_client import ERPNextClient
+
+        parsed = _voice_income.parse_income(text)
+        if parsed is None:
+            return {"ok": False, "error": "no_amount"}
+        client = ERPNextClient(self._settings)
+        try:
+            result = await _voice_income.register_income(
+                client, parsed, ref=openceo_ref, submit=bool(submit)
+            )
+        finally:
+            await client.aclose()
+        doc = result["doc"]
+        return {
+            "ok": True,
+            "duplicate": result["duplicate"],
+            "ref": result["ref"],
+            "journal_entry": doc.get("name"),
+            "docstatus": doc.get("docstatus"),
+            "summary": _voice_income.build_spoken_summary(
+                parsed, doc, result["duplicate"]
+            ),
+        }
+
+    async def _finance_get_contribution_10_status(
+        self,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        cost_center: str | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Estado de la regla del 10% (TASK-2026-00054). SOLO lectura sobre
+        `GL Entry`: no crea ni modifica ningun documento."""
+        from agents.finance import contribution as _contribution
+        from tools.erpnext_client import ERPNextClient
+
+        client = ERPNextClient(self._settings)
+        try:
+            status = await _contribution.get_contribution_10_status(
+                client,
+                cost_center=cost_center or _contribution.COST_CENTER,
+                date_from=date_from,
+                date_to=date_to,
+            )
+        finally:
+            await client.aclose()
+        payload = status.to_dict()
+        payload["ok"] = True
+        payload["summary"] = _contribution.build_spoken_summary(status)
         return payload
 
     def _cloudflare_upsert_dns(self, hostname: str, **_: Any) -> dict[str, Any]:
