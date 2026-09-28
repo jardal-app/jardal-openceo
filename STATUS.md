@@ -4,6 +4,12 @@ Resumen operativo corto del estado real del repo.
 
 ## Continuar aquí (traspaso a la próxima sesión)
 
+Estado al cerrar la sesión del **2026-09-28**: **Finance registra gasto ocasional por voz** (Fase B del contrato, ticket `TASK-2026-00032`, rama `feat/finance-voice-expense-TASK-2026-00032`, commit `9763ddb`, pusheada, **sin merge a `main`**). El servicio sigue corriendo código viejo hasta merge + `scripts/openceo-core-host.sh restart`.
+
+### Qué se hizo (2026-09-28, TASK-2026-00032)
+
+"Registra gasto personal carne 50 bolivianos" / "pago de luz de casa 300 bs" por voz/chat (modelo CEO) se registra directo en ERPNext como `Journal Entry` idempotente (`openceo_ref`, retry = 417 = releer). Sin tickets por gasto. Detalle temporal en `docs/work/TASK-2026-00032-finance-voz-gastos.md` (git-ignored, solo en este working tree); durable en vault `components/finance-erpnext-adapter.md`. Suite: 308 pasan / 7 fallan (preexistentes). En ERPNext quedan `ACC-JV-2026-00011` (Bs 1.00 enviado, registro inaugural) y `ACC-JV-2026-00009` (probe cancelado, neto cero). Siguiente corte recomendado: lectura (`get_cash_position`/resumen por Scope) antes de ingresos o presupuestos. Palabra clave para retomar: **"Continúa con TASK-2026-00032"**.
+
 Estado al cerrar la sesión del **2026-09-24**: **los tickets de OpenCEO se crean en ERPNext** y
 el backlog de `PENDINGS.md` se migró. `PENDINGS.md` ya no es el backlog: quedó como puntero.
 
