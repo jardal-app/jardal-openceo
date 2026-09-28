@@ -328,6 +328,28 @@ class CreateTicketTests(unittest.TestCase):
         self.assertIsNone(resolve_erpnext_status({"status": "failed"}))
         self.assertIsNone(resolve_erpnext_status({"status": "lo-que-sea"}))
 
+    def test_autorun_se_persiste_en_el_documento(self):
+        """TASK-2026-00043: el False del registro se perdia (TaskDocument sin campo)
+        y el scheduler lanzaba el ticket igual -> Working fantasma."""
+        from state import TaskCreateRequest, TaskSource, make_task_document
+
+        def make_doc(**kw):
+            return make_task_document(
+                TaskCreateRequest(source=TaskSource.API, title="t", description="d", **kw))
+
+        self.assertFalse(make_doc(autorun=False).autorun)
+        self.assertTrue(make_doc(autorun=True).autorun)
+        self.assertTrue(make_doc().autorun)
+
+    def test_scheduler_respeta_autorun_false(self):
+        """Registrar con autorun=false nunca ejecuta, ni en el reencolado."""
+        from task_service import TaskService
+
+        service = TaskService.__new__(TaskService)
+        self.assertFalse(service._task_allows_autorun({"autorun": False}))
+        self.assertTrue(service._task_allows_autorun({"autorun": True}))
+        self.assertTrue(service._task_allows_autorun({}))
+
     def test_update_status_empuja_los_que_si(self):
         client = FakeClient()
         adapter = make_adapter(client)

@@ -93,3 +93,38 @@ class ResumeQueuedTicketsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resumed, 1)
         self.assertEqual(patched, ["t1"])
         self.assertEqual(len(scheduled), 1)
+
+    async def test_skips_explicit_autorun_false_with_real_gate(self) -> None:
+        """TASK-2026-00043: registrado sin ejecutar no lo toca el scheduler."""
+        queued = [
+            {"task_id": "t1", "project": "p", "status": "queued", "autorun": False},
+            {"task_id": "t2", "project": "p", "status": "queued"},
+        ]
+        service = object.__new__(TaskService)
+        service._rate_monitor = _FakeRateMonitor()
+        service._repo = _FakeRepo(queued=queued, active=[])
+        patched: list[str] = []
+
+        async def fake_patch_task(task_id: str, updates: dict[str, object]) -> dict[str, object]:
+            patched.append(task_id)
+            return {"task_id": task_id, **updates}
+
+        async def fake_run_task(task_id: str) -> None:
+            pass
+
+        service.patch_task = fake_patch_task
+        service.run_task = fake_run_task
+
+        scheduled: list[asyncio.coroutines] = []
+
+        def fake_create_task(coro):
+            scheduled.append(coro)
+            coro.close()
+            return None
+
+        with patch("task_service.asyncio.create_task", side_effect=fake_create_task):
+            resumed = await TaskService.resume_queued_tickets(service)
+
+        self.assertEqual(resumed, 1)
+        self.assertEqual(patched, ["t2"])
+        self.assertEqual(len(scheduled), 1)
