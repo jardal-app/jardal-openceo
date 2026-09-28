@@ -49,6 +49,16 @@ class FakeLegacyClient(FakeReadClient):
         return await super().list_gl_entries(filters=filters, fields=fields, limit=limit)
 
 
+class StrictReadClient(FakeReadClient):
+    """Si el codigo intenta escribir, falla fuerte en vez de pasar en silencio."""
+
+    async def create_doc(self, doctype: str, body: dict) -> dict:
+        raise AssertionError(f"escritura no permitida: create {doctype}")
+
+    async def update_doc(self, doctype: str, name: str, body: dict) -> dict:
+        raise AssertionError(f"escritura no permitida: update {doctype} {name}")
+
+
 def _row(account: str, debit: str, credit: str, **extra: object) -> dict:
     base = {
         "name": "ACC-GLE-TEST-1",
@@ -102,6 +112,8 @@ class SummaryTests(unittest.TestCase):
         summary = asyncio.run(get_scope_summary(FakeReadClient(rows)))
         self.assertEqual(summary.entries, 0)
         self.assertEqual(summary.net, Decimal("0"))
+        self.assertEqual(summary.excluded_entries, 1)
+        self.assertIn("otra moneda", build_spoken_summary(summary))
 
     def test_fallback_list_docs(self) -> None:
         rows = [_row("Gastos varios - J", "7.50", "0")]
@@ -109,12 +121,18 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary.entries, 1)
         self.assertEqual(summary.net, Decimal("7.50"))
 
+    def test_limit_reached_flag(self) -> None:
+        rows = [_row("Gastos varios - J", "1", "0") for _ in range(3)]
+        summary = asyncio.run(get_scope_summary(FakeReadClient(rows), limit=3))
+        self.assertTrue(summary.limit_reached)
+        summary = asyncio.run(get_scope_summary(FakeReadClient(rows), limit=10))
+        self.assertFalse(summary.limit_reached)
+
     def test_read_only_never_writes(self) -> None:
-        client = FakeReadClient([_row("Gastos varios - J", "1", "0")])
-        asyncio.run(get_scope_summary(client))
-        self.assertEqual(client.writes, 0)
-        self.assertFalse(hasattr(client, "create_doc"))
-        self.assertFalse(hasattr(client, "update_doc"))
+        client = StrictReadClient([_row("Gastos varios - J", "1", "0")])
+        summary = asyncio.run(get_scope_summary(client))
+        self.assertEqual(summary.entries, 1)
+        # Si el codigo intentara escribir, el fake estricto levantaria.
 
     def test_spoken_short_no_ids(self) -> None:
         rows = [_row("Gastos varios - J", "50", "0")]

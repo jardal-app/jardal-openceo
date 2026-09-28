@@ -69,10 +69,6 @@ def _strip_accents(text: str) -> str:
     return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
 
 
-def _norm(text: str) -> str:
-    return _strip_accents(str(text or "").lower())
-
-
 _QUERY_WORD_RE = re.compile(
     r"\b(cu[áa]nto|c[uú]al(?:es)?|dime|dame|mu[ée]strame)\b",
     flags=re.IGNORECASE,
@@ -110,6 +106,8 @@ class ScopeSummary:
     total_credit: Decimal = Decimal("0")
     net: Decimal = Decimal("0")
     entries: int = 0
+    excluded_entries: int = 0
+    limit_reached: bool = False
     by_account: dict[str, Decimal] = field(default_factory=dict)
     voucher_nos: list[str] = field(default_factory=list)
 
@@ -125,6 +123,8 @@ class ScopeSummary:
             "total_credit": f"{self.total_credit:.2f}",
             "net": f"{self.net:.2f}",
             "entries": self.entries,
+            "excluded_entries": self.excluded_entries,
+            "limit_reached": self.limit_reached,
             "by_account": {k: f"{v:.2f}" for k, v in sorted(self.by_account.items())},
             "voucher_nos": self.voucher_nos,
         }
@@ -140,8 +140,9 @@ async def get_scope_summary(
     date_to: str | None = None,
     limit: int = 500,
 ) -> ScopeSummary:
-    """Suma debe-haber del libro mayor. SOLO lectura: usa `list_docs` sobre
-    `GL Entry` (o el lector dedicado del cliente). Nunca crea ni modifica."""
+    """Suma debe-haber del libro mayor. SOLO lectura: usa el lector dedicado
+    `list_gl_entries` del cliente (o `list_docs` en clientes sin ese metodo).
+    Nunca crea ni modifica."""
     filters: list[list[Any]] = [
         ["company", "=", company],
         ["docstatus", "=", 1],
@@ -154,14 +155,16 @@ async def get_scope_summary(
     if date_to:
         filters.append(["posting_date", "<=", date_to])
 
-    rows: Any = None
+    # SOLO lectura: lector dedicado del cliente real, `list_docs` en fakes.
+    # Nunca crea ni modifica.
     list_gl = getattr(client, "list_gl_entries", None)
     if callable(list_gl):
-        rows = await list_gl(filters=filters, fields=_GL_FIELDS, limit=limit)
+        fetched = await list_gl(filters=filters, fields=_GL_FIELDS, limit=limit)
     else:  # clientes falsos en tests: solo exponen list_docs
-        rows = await client.list_docs(
+        fetched = await client.list_docs(
             "GL Entry", filters=filters, fields=_GL_FIELDS, limit=limit
         )
+    rows = list(fetched or [])
     summary = ScopeSummary(
         as_of=datetime.now(_LA_PAZ).isoformat(timespec="seconds"),
         company=company,
@@ -170,8 +173,9 @@ async def get_scope_summary(
         date_from=date_from,
         date_to=date_to,
     )
-    for row in rows or []:
+    for row in rows:
         if str(row.get("account_currency") or "") != currency:
+            summary.excluded_entries += 1
             continue
         debit = _to_decimal(row.get("debit_in_account_currency"))
         credit = _to_decimal(row.get("credit_in_account_currency"))
@@ -184,14 +188,18 @@ async def get_scope_summary(
         if voucher and voucher not in summary.voucher_nos:
             summary.voucher_nos.append(voucher)
     summary.net = summary.total_debit - summary.total_credit
+    summary.limit_reached = len(rows) >= limit
     return summary
 
 
 def build_spoken_summary(summary: ScopeSummary) -> str:
     """Respuesta breve apta para TTS: sin tablas, UUIDs ni URLs."""
     scope = f" en {summary.cost_center}" if summary.cost_center else ""
+    extra = ""
+    if summary.excluded_entries:
+        extra = f" Ojo: {summary.excluded_entries} asientos en otra moneda quedaron fuera."
     return (
         f"Tenemos {summary.net:.2f} {summary.currency} netos{scope}: "
         f"{summary.total_debit:.2f} en debe y {summary.total_credit:.2f} en haber, "
-        f"en {summary.entries} asientos."
+        f"en {summary.entries} asientos.{extra}"
     )
