@@ -15,9 +15,13 @@ aporte es decisión del dueño (cambia qué significa la medición); este módul
 la crea ni la adivina. En cuanto exista, se lista aqui y el estado pasa a `ok`
 sin tocar nada más.
 
-Base elegible: ingresos personales realmente cobrados (créditos a cuentas de
-ingreso en el período). Movimientos entre cuentas propias y deuda nueva no son
-ingreso elegible — no se diezma dos veces el mismo dinero (mandato Horizon).
+Base elegible: creditos a cuentas de ingreso en el periodo. La medicion NO
+comprueba la contrapartida de caja: un devengado (Sales Invoice sometida)
+credita la cuenta de ingreso igual que un cobro, asi que la base son ingresos
+**registrados**, no cobros verificados. Por eso la voz ya no dice "cobramos"
+(la prosa anterior prometia mas de lo que la medicion prueba). Movimientos
+entre cuentas propias y deuda nueva no son ingreso elegible — no se diezma dos
+veces el mismo dinero (mandato Horizon).
 
 Solo lectura: no crea, no envía, no cancela. Cada respuesta lleva fecha de
 corte, Company, moneda y filtros aplicados (§15). Dinero en `Decimal` (§11).
@@ -66,14 +70,29 @@ _GL_FIELDS = [
     "docstatus",
 ]
 
-_CONTRIBUTION_WORD_RE = re.compile(
-    r"\b(diezmos?|aportes?|contribuci[óo]n|donaci[óo]n|regla\s+del\s+10)\b",
+_CONTRIBUTION_STRONG_RE = re.compile(
+    r"\b(diezmos?|regla\s+del\s+10)\b",
+    flags=re.IGNORECASE,
+)
+# "aporte"/"donacion"/"contribucion" son ambiguos: "aporte patronal" y "aporte
+# a la reunion" son otra cosa. Solo cuentan como consulta del 10% si la frase
+# pregunta por ellos y no es una orden de registro de otra cosa.
+_CONTRIBUTION_WEAK_RE = re.compile(
+    r"\b(aport\w+|contribuci[óo]n(?:es)?|donaci[óo]n(?:es)?)\b",
     flags=re.IGNORECASE,
 )
 _PERCENT_RE = re.compile(r"\b10\s*%|diez\s+por\s+ciento", flags=re.IGNORECASE)
+# Verbos de consulta. `registra|anota` NO estan: son ordenes de escritura, y
+# con ellos "registra pago de luz ... con 10 % de recargo" quedaba interceptado
+# por una lectura que no escribe nada.
 _QUERY_VERB_RE = re.compile(
     r"\b(cu[áa]nt[oa]s?|cu[áa]l(?:es)?|estado|c[óo]mo|vamos|deb[oe]s?|falt[ao]|"
-    r"pendiente|resumen|situaci[óo]n|registra|anota)\b",
+    r"pendiente|resumen|situaci[óo]n|llevo)\b",
+    flags=re.IGNORECASE,
+)
+_WRITE_ORDER_RE = re.compile(
+    r"\b(registra(?:r|me)?|anota(?:r|me)?|apunta(?:r|me)?|carga(?:r)?|"
+    r"contabiliza(?:r|me)?|pagu[ée]|pago|gast[ée]|gasto|compr[ée])\b",
     flags=re.IGNORECASE,
 )
 
@@ -84,13 +103,23 @@ def looks_like_contribution_query(text: str) -> bool:
     Va antes que el detector de gasto en el despacho: "registra mi diezmo
     500 bs" no puede terminar en `Gastos varios - J`, y la respuesta honesta
     hoy es que falta la cuenta que recibe el aporte.
+
+    El vocabulario inequivoco ("diezmo", "regla del 10") se reclama siempre.
+    "aporte"/"donacion"/"contribucion" solo cuando la frase pregunta por ellos:
+    con una orden de escritura encima ("registra gasto del aporte patronal
+    1200 bs", "anota mi aporte a la reunion") la frase pertenece al libro
+    mayor o a Horizon, no a esta lectura.
     """
     blob = str(text or "").strip()
     if not blob or has_dev_marker(blob):
         return False
-    if _CONTRIBUTION_WORD_RE.search(blob):
+    if _CONTRIBUTION_STRONG_RE.search(blob):
         return True
-    return bool(_PERCENT_RE.search(blob) and _QUERY_VERB_RE.search(blob))
+    if _PERCENT_RE.search(blob) and _QUERY_VERB_RE.search(blob):
+        return True
+    if not _CONTRIBUTION_WEAK_RE.search(blob):
+        return False
+    return bool(_QUERY_VERB_RE.search(blob)) and not _WRITE_ORDER_RE.search(blob)
 
 
 def current_month_period() -> tuple[str, str]:
@@ -212,6 +241,10 @@ async def get_contribution_10_status(
         date_from=period_from,
         date_to=period_to,
         rate=rate,
+        # Se pasa el valor VIVO del global: el default del dataclass se congela
+        # al importar y el payload decia `contribution_accounts: []` junto a una
+        # aritmetica que si leyo la lista configurada (§15).
+        contribution_accounts=CONTRIBUTION_ACCOUNTS,
     )
     income_total = Decimal("0")
     confirmed_total = Decimal("0")
@@ -260,25 +293,47 @@ async def get_contribution_10_status(
     return status
 
 
+def _honesty_notes(status: ContributionStatus) -> str:
+    """Avisos que la voz no puede omitir: base parcial o moneda excluida.
+
+    Se calculaban y se serializaban en `to_dict()` pero la rama `ok` retornaba
+    antes de contarlos, asi que una base truncada por `limit` (el cliente real
+    pide 500 filas sin paginar) se presentaba como completa.
+    """
+    notes: list[str] = []
+    if status.limit_reached:
+        notes.append(
+            "la consulta se cortó en el límite de filas, así que el total puede ser parcial"
+        )
+    if status.excluded_entries:
+        notes.append(f"{status.excluded_entries} asientos en otra moneda quedaron fuera")
+    if not notes:
+        return ""
+    return " Ojo: " + "; ".join(notes) + "."
+
+
 def build_spoken_summary(status: ContributionStatus) -> str:
-    """Respuesta breve apta para TTS: sin tablas, UUIDs ni URLs."""
+    """Respuesta breve apta para TTS: sin tablas, UUIDs ni URLs.
+
+    Dice "el libro registra" y no "cobramos": la base son créditos a cuentas de
+    ingreso, y un devengado cuenta igual que un cobro. La contrapartida de caja
+    no se verifica (ver docstring del módulo).
+    """
     rate_pct = f"{status.rate * 100:.0f}"
     base = (
-        f"En {status.period_label} cobramos {status.eligible_income:.2f} "
-        f"{status.currency}, así que el {rate_pct}% son "
+        f"En {status.period_label} el libro registra {status.eligible_income:.2f} "
+        f"{status.currency} en cuentas de ingreso, así que el {rate_pct}% son "
         f"{status.target_contribution:.2f}."
     )
+    notes = _honesty_notes(status)
     if status.state == "ok":
         assert status.confirmed_contribution is not None
         assert status.pending_contribution is not None
         return (
             f"{base} Llevamos aportados {status.confirmed_contribution:.2f} y "
-            f"quedan pendientes {status.pending_contribution:.2f}."
+            f"quedan pendientes {status.pending_contribution:.2f}.{notes}"
         )
-    extra = ""
-    if status.excluded_entries:
-        extra = f" Ojo: {status.excluded_entries} asientos en otra moneda quedaron fuera."
     return (
         f"{base} Todavía no podemos confirmar cuánto aportamos: falta definir "
-        f"en ERPNext la cuenta que recibe los aportes.{extra}"
+        f"en ERPNext la cuenta que recibe los aportes.{notes}"
     )

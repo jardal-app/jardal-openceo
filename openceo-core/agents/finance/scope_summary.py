@@ -85,6 +85,41 @@ def looks_like_balance_query(text: str) -> bool:
     return bool(_FINANCE_NOUN_RE.search(blob) or _QUERY_WORD_RE.search(blob))
 
 
+_PERIOD_YESTERDAY_RE = re.compile(r"\bayer\b")
+_PERIOD_TODAY_RE = re.compile(r"\b(hoy|ahora)\b")
+_PERIOD_WEEK_RE = re.compile(r"\b(esta\s+semana|la\s+semana|semana)\b")
+_PERIOD_PAST_MONTH_RE = re.compile(r"\b(mes\s+pasado|mes\s+anterior)\b")
+_PERIOD_MONTH_RE = re.compile(r"\b(este\s+mes|mes)\b")
+_PERIOD_YEAR_RE = re.compile(r"\b(este\s+ano|ano)\b")
+
+
+def period_bounds(text: str) -> tuple[str | None, str | None]:
+    """Cotas de fecha que el dictado pide, en hora de Bolivia.
+
+    Devuelve `(None, None)` cuando la frase no acota período. Antes la ruta de
+    voz no pasaba el texto, así que "cuánto gastamos este mes" respondía el
+    total histórico sin decirlo (el detector sí enruta las palabras de período
+    hacia esta consulta, así que la cotas tienen que derivarse aquí).
+    """
+    blob = _strip_accents(str(text or "")).lower()
+    today = datetime.now(_LA_PAZ).date()
+    if _PERIOD_YESTERDAY_RE.search(blob):
+        day = today - timedelta(days=1)
+        return day.isoformat(), day.isoformat()
+    if _PERIOD_TODAY_RE.search(blob):
+        return today.isoformat(), today.isoformat()
+    if _PERIOD_WEEK_RE.search(blob):
+        return (today - timedelta(days=today.weekday())).isoformat(), today.isoformat()
+    if _PERIOD_PAST_MONTH_RE.search(blob):
+        previous = today.replace(day=1) - timedelta(days=1)
+        return previous.replace(day=1).isoformat(), previous.isoformat()
+    if _PERIOD_MONTH_RE.search(blob):
+        return today.replace(day=1).isoformat(), today.isoformat()
+    if _PERIOD_YEAR_RE.search(blob):
+        return today.replace(month=1, day=1).isoformat(), today.isoformat()
+    return None, None
+
+
 def _to_decimal(value: Any) -> Decimal:
     try:
         return Decimal(str(value if value is not None else "0"))
@@ -192,14 +227,33 @@ async def get_scope_summary(
     return summary
 
 
+def _period_label(summary: ScopeSummary) -> str:
+    if summary.date_from and summary.date_to:
+        if summary.date_from == summary.date_to:
+            return f" del {summary.date_from}"
+        return f" del {summary.date_from} al {summary.date_to}"
+    return " del histórico completo"
+
+
 def build_spoken_summary(summary: ScopeSummary) -> str:
-    """Respuesta breve apta para TTS: sin tablas, UUIDs ni URLs."""
+    """Respuesta breve apta para TTS: sin tablas, UUIDs ni URLs.
+
+    Lleva el período medido (o "histórico completo") y los calificadores que
+    `excluded_entries`/`limit_reached` ya calculaban: sin ellos una base
+    truncada o sin moneda se presentaba como completa.
+    """
     scope = f" en {summary.cost_center}" if summary.cost_center else ""
-    extra = ""
+    notes: list[str] = []
     if summary.excluded_entries:
-        extra = f" Ojo: {summary.excluded_entries} asientos en otra moneda quedaron fuera."
+        notes.append(f"{summary.excluded_entries} asientos en otra moneda quedaron fuera")
+    if summary.limit_reached:
+        notes.append(
+            "la consulta se cortó en el límite de filas, así que el total puede ser parcial"
+        )
+    extra = (" Ojo: " + "; ".join(notes) + ".") if notes else ""
     return (
-        f"Tenemos {summary.net:.2f} {summary.currency} netos{scope}: "
+        f"Tenemos {summary.net:.2f} {summary.currency} netos{scope}"
+        f"{_period_label(summary)}: "
         f"{summary.total_debit:.2f} en debe y {summary.total_credit:.2f} en haber, "
         f"en {summary.entries} asientos.{extra}"
     )

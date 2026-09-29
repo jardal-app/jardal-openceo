@@ -56,7 +56,14 @@ class FakeReadClient:
 
 
 class FakeLegacyClient(FakeReadClient):
-    """Cliente sin lector dedicado: usa el fallback list_docs."""
+    """Cliente sin lector dedicado: usa el fallback list_docs.
+
+    `list_gl_entries = None` es deliberado (R1-15): heredarlo dejaba el
+    fallback sin ejercitar, porque `getattr(...)` encontraba el metodo heredado
+    y `list_docs` quedaba como codigo muerto.
+    """
+
+    list_gl_entries = None
 
     async def list_docs(self, doctype: str, *, filters=None, fields=None, limit=20):
         assert doctype == "GL Entry"
@@ -104,6 +111,27 @@ class DetectorTests(unittest.TestCase):
         for text in cases:
             with self.subTest(text=text):
                 self.assertFalse(looks_like_contribution_query(text))
+
+    def test_expense_orders_are_not_contribution_queries(self) -> None:
+        """R1-9: "aporte"/"donación" sueltos no interceptan una orden de gasto."""
+        cases = [
+            "registra gasto del aporte patronal 1200 bs",
+            "registra pago de luz de casa 300 bs con 10 % de recargo",
+            "anota mi aporte a la reunion de hoy",
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertFalse(looks_like_contribution_query(text))
+
+    def test_ambiguous_words_still_work_as_queries(self) -> None:
+        for text in [
+            "estado del aporte",
+            "cómo vamos con el aporte",
+            "cuánto llevo aportado",
+            "cuánto debo del 10 % de lo que cobré",
+        ]:
+            with self.subTest(text=text):
+                self.assertTrue(looks_like_contribution_query(text))
 
 
 class ContributionMathTests(unittest.TestCase):
@@ -161,19 +189,83 @@ class ContributionMathTests(unittest.TestCase):
         status = asyncio.run(get_contribution_10_status(FakeReadClient(rows)))
         self.assertEqual(status.eligible_income, Decimal("100.00"))
 
+    def test_limit_reached_is_spoken(self) -> None:
+        """R1-11: una base truncada no puede presentarse como completa."""
+        rows = [_row("Servicios - J", "0", "1000") for _ in range(3)]
+        status = asyncio.run(get_contribution_10_status(FakeReadClient(rows), limit=2))
+        self.assertTrue(status.limit_reached)
+        self.assertEqual(status.eligible_income, Decimal("2000.00"))
+        self.assertIn("parcial", build_spoken_summary(status))
+        full = asyncio.run(get_contribution_10_status(FakeReadClient(rows), limit=10))
+        self.assertFalse(full.limit_reached)
+        self.assertNotIn("parcial", build_spoken_summary(full))
+        self.assertEqual(full.eligible_income, Decimal("3000.00"))
+
+    def test_limit_and_currency_notes_also_reach_the_ok_branch(self) -> None:
+        """R1-11: la rama `ok` retornaba antes de contar los avisos."""
+        rows = [
+            _row("Servicios - J", "0", "1000"),
+            _row("Servicios - J", "0", "1000", account_currency="USD"),
+        ]
+        with mock.patch.object(contribution, "CONTRIBUTION_ACCOUNTS", ("Aportes - J",)):
+            status = asyncio.run(get_contribution_10_status(FakeReadClient(rows), limit=2))
+        self.assertEqual(status.state, "ok")
+        self.assertTrue(status.limit_reached)
+        self.assertEqual(status.excluded_entries, 1)
+        spoken = build_spoken_summary(status)
+        self.assertIn("otra moneda", spoken)
+        self.assertIn("parcial", spoken)
+
+    def test_speech_does_not_claim_collected_cash(self) -> None:
+        """R1-17: la medición no verifica la contrapartida de caja.
+
+        Un devengado (débito a Deudores / crédito a la cuenta de ingreso)
+        cuenta igual que un cobro, así que la voz no puede decir "cobramos".
+        """
+        rows = [
+            _row("Deudores - J", "6200", "0"),
+            _row("Servicios - J", "0", "6200"),
+        ]
+        status = asyncio.run(get_contribution_10_status(FakeReadClient(rows)))
+        self.assertEqual(status.eligible_income, Decimal("6200.00"))
+        spoken = build_spoken_summary(status)
+        self.assertNotIn("cobramos", spoken)
+        self.assertIn("cuentas de ingreso", spoken)
+
 
 class UnknownIsNotZeroTests(unittest.TestCase):
-    """Sin cuenta de aportes en el plan real, lo aportado no es medible."""
+    """Sin cuenta de aportes configurada, lo aportado no es medible.
+
+    El estado se fija con `patch` a `()` para que estos tests midan el
+    COMPORTAMIENTO y no el plan de cuentas vivo: poblar la constante —el cambio
+    que la documentación promete— no debe ponerlos rojos como si la lógica de
+    dinero hubiera regresado (R1-16).
+    """
+
+    def setUp(self) -> None:
+        patcher = mock.patch.object(contribution, "CONTRIBUTION_ACCOUNTS", ())
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_no_contribution_account_means_none_not_zero(self) -> None:
         rows = [_row("Servicios - J", "0", "6200")]
-        self.assertEqual(contribution.CONTRIBUTION_ACCOUNTS, ())
         status = asyncio.run(get_contribution_10_status(FakeReadClient(rows)))
         self.assertIsNone(status.confirmed_contribution)
         self.assertIsNone(status.pending_contribution)
         self.assertEqual(status.state, "needs_input")
         self.assertIsNotNone(status.reason)
         self.assertIn("cuenta", status.reason)
+
+    def test_payload_reports_the_accounts_actually_measured(self) -> None:
+        """R1-19: el dataclass congelaba el default y el payload decía `[]`."""
+        rows = [
+            _row("Servicios - J", "0", "6200"),
+            _row("Aportes - J", "620", "0"),
+        ]
+        with mock.patch.object(contribution, "CONTRIBUTION_ACCOUNTS", ("Aportes - J",)):
+            status = asyncio.run(get_contribution_10_status(FakeReadClient(rows)))
+        self.assertEqual(status.state, "ok")
+        self.assertEqual(status.to_dict()["contribution_accounts"], ["Aportes - J"])
 
     def test_to_dict_keeps_unknown_as_null(self) -> None:
         rows = [_row("Servicios - J", "0", "6200")]

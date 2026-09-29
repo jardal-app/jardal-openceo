@@ -203,6 +203,9 @@ El usuario puede expresar estos datos en lenguaje natural; la traducción a valo
 Reglas:
 
 - mismo intento/retry → mismo valor;
+- **mismo re-despacho de la misma tarea → mismo valor**: la referencia se deriva del
+  contexto de la operación (p. ej. `task_id`), no del azar de cada llamada; un re-run
+  tras un timeout o un parche perdido a Mongo no puede acuñar una operación nueva;
 - timeout no genera una nueva referencia;
 - nullable para documentos no originados por OpenCEO;
 - unicidad protegida en base de datos donde el campo exista;
@@ -347,7 +350,10 @@ El LLM puede explicar el resultado; no hace la aritmética autoritativa.
 - conservar moneda explícita;
 - conservar la tasa realmente usada por la transacción;
 - no asumir que la tasa diaria P2P reemplaza la tasa real de una operación;
-- respetar USDT como moneda distinta de USD.
+- respetar USDT como moneda distinta de USD;
+- **sin tasa real no hay asiento**: si la operación viene en una moneda distinta a la
+  de la Company y no hay tasa confirmada, no se contabiliza el mismo número como si
+  fuera la moneda de la Company; se pide la tasa y no se escribe nada (fail-closed).
 
 ---
 

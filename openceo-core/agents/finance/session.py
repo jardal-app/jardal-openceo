@@ -11,6 +11,7 @@ from agents.finance import voice_expense as expense_flow
 from agents.finance import voice_income as income_flow
 from agents.finance.elfec import run_elfec_house_payment_practice
 from agents.finance.intent import BALANCE, CONTRIBUTION, EXPENSE, INCOME, classify
+from agents.finance.money_text import MissingExchangeRateError
 from settings import Settings
 from state import TaskStatus
 
@@ -55,7 +56,7 @@ class FinanceSessionManager:
         if intent == CONTRIBUTION:
             return await self._run_contribution(output)
         if intent == BALANCE:
-            return await self._run_balance(output)
+            return await self._run_balance(output, text)
         if intent == EXPENSE:
             return await self._run_expense(output, text)
 
@@ -127,6 +128,12 @@ class FinanceSessionManager:
                     client, parsed, ref=expense_flow.new_openceo_ref()
                 )
             )
+        except MissingExchangeRateError as exc:
+            detail = str(exc)
+            output.steps.append(self._step("register_expense", "failed", detail))
+            output.status = TaskStatus.FAILED
+            output.error = detail
+            return output
         except Exception as exc:
             detail = f"No pude registrar el gasto en ERPNext: {exc}"
             output.steps.append(self._step("register_expense", "failed", detail))
@@ -162,6 +169,12 @@ class FinanceSessionManager:
                     client, parsed, ref=income_flow.new_openceo_ref()
                 )
             )
+        except MissingExchangeRateError as exc:
+            detail = str(exc)
+            output.steps.append(self._step("register_income", "failed", detail))
+            output.status = TaskStatus.FAILED
+            output.error = detail
+            return output
         except Exception as exc:
             detail = f"No pude registrar el ingreso en ERPNext: {exc}"
             output.steps.append(self._step("register_income", "failed", detail))
@@ -174,11 +187,20 @@ class FinanceSessionManager:
         output.last_response_summary = summary
         return output
 
-    async def _run_balance(self, output: FinanceExecutionOutput) -> FinanceExecutionOutput:
-        """Consulta de saldo/gasto (TASK-2026-00044). Solo lectura."""
+    async def _run_balance(self, output: FinanceExecutionOutput, text: str) -> FinanceExecutionOutput:
+        """Consulta de saldo/gasto (TASK-2026-00044). Solo lectura.
+
+        El texto importa: "cuánto gastamos este mes" acota el período, y sin
+        pasar las cotas la lectura devolvía el total histórico sin avisar.
+        """
         output.steps.append(self._step("resolve_finance_workflow", "ok", "Workflow resuelto: resumen de saldos por Scope"))
+        date_from, date_to = scope_flow.period_bounds(text)
         try:
-            summary = await self._with_client(scope_flow.get_scope_summary)
+            summary = await self._with_client(
+                lambda client: scope_flow.get_scope_summary(
+                    client, date_from=date_from, date_to=date_to
+                )
+            )
         except Exception as exc:
             detail = f"No pude consultar el saldo en ERPNext: {exc}"
             output.steps.append(self._step("get_scope_summary", "failed", detail))
