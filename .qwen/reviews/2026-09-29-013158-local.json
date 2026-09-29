@@ -1,0 +1,528 @@
+{
+  "schemaVersion": 1,
+  "target": "local",
+  "effort": "medium",
+  "verdict": {
+    "bodyTrim": {
+      "sections": 0,
+      "deferralList": false,
+      "fold": false,
+      "truncated": false
+    },
+    "event": "REQUEST_CHANGES",
+    "body": "Partially reviewed — gaps disclosed.\n\nNot reviewed: reverse audit — not run — the balanced (medium) tier skips the second-look pass, so this verdict is capped at Comment rather than Approve.\n\n_— qwen3.8-max via Qwen Code /review (v0.24.3)_",
+    "baseEvent": "REQUEST_CHANGES",
+    "cappedBy": [
+      "unreviewed-dimension"
+    ],
+    "downgraded": false,
+    "downgradedFrom": null,
+    "remediation": [],
+    "waivedFixes": [],
+    "deferredCount": 0,
+    "floorEnforced": [],
+    "postedInline": 18,
+    "postedFresh": 18,
+    "fixedFindings": [],
+    "lowSignal": null,
+    "approachSignal": null,
+    "verdictLine": "Verdict: Request changes"
+  },
+  "findings": [
+    {
+      "id": "R1-9",
+      "severity": "Critical",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "CLASE: el detector de la regla del 10% se activa con la palabra suelta 'aporte'/'donación'/'contribución'/'diezmo' en cualquier posición (sin verbo de consulta, monto ni interrogación) y su rama del '10 %' acepta verbos que son órdenes de escritura (registra|anota están dentro de _QUERY_VERB_RE). Como classify pone CONTRIBUTION antes que EXPENSE, órdenes de gasto y notas personales quedan interceptadas por una lectura que no escribe nada.",
+      "shortSummary": "CLASE: el detector de la regla del 10% se activa con la…",
+      "failureScenario": "A/B con process_turn y session.run reales: 'registra gasto del aporte patronal 1200 bs' -> BASE COMPLETED con débito 'Gastos varios - J' 1200.00; PR dispatch=contribution, WRITE none y respuesta '...falta definir en ERPNext la cuenta que recibe los aportes'. 'registra pago de luz de casa 300 bs con 10 % de recargo' -> BASE EXPENSE 300.00; PR no escribe. 'anota mi aporte a la reunion de hoy' -> BASE route=['horizon:horizon_capture'] (nota guardada); PR horizon=None y route=[finance], o sea la nota dictada se pierde porque el turno se consume. Discrepancia entre módulos del mismo diff: money_text.MONEY_OUT_LEAD_RE lista aportes?|diezmos? como dinero que SALE.",
+      "witness": "Sondas A/B con los cuatro testigos citados; FIX D probado y volteado respetando las dos restricciones del hallazgo (veto después de la rama de vocabulario inequívoco): 'aporte patronal' -> expense con escritura 1200.00, '10 % de recargo' -> expense 300.00, 'aporte a la reunion' -> horizon_capture, y siguen en contribution 'estado del aporte', 'registra mi diezmo 500 bs', 'cómo vamos con el diezmo', 'cuánto debo del 10 % de lo que cobré'. 83 tests, 67 subtests.",
+      "fixWitness": "tests/test_finance_intent.py: classify(\"registra gasto del aporte patronal 1200 bs\") == EXPENSE (hoy contribution); tests/test_finance_contribution.py::DetectorTests con el negativo correspondiente.",
+      "fixConstraint": "tests/test_finance_contribution.py:89-90 fijan 'estado del aporte' (sin monto ni porcentaje) y 'registra mi diezmo 500 bs' como contribution: el veto debe ir después de la rama de palabra explícita o esos dos casos fijados regresan.",
+      "suggestedFix": "Dejar la rama de palabra explícita solo para vocabulario inequívoco de diezmo (diezmo|regla del 10); exigir contexto de lectura para los sustantivos genéricos (_PERCENT_RE, un monto o una palabra de consulta); sacar registra|anota de _QUERY_VERB_RE; y hacer que la rama del porcentaje falle cerrado ante una orden de escritura.",
+      "category": "correctness",
+      "direction": "fails-closed",
+      "baseline": "regression",
+      "locations": [
+        {
+          "file": "openceo-core/agents/finance/contribution.py",
+          "line": 91,
+          "anchor": "if _CONTRIBUTION_WORD_RE.search(blob):"
+        }
+      ]
+    },
+    {
+      "id": "R1-11",
+      "severity": "Critical",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "AGREGADO (3 sitios): los calificadores de honestidad se calculan y se serializan en to_dict() pero nunca llegan a la respuesta hablada — limit_reached en contribution.py y en scope_summary.py, excluded_entries en la rama ok de contribution.py — mientras prompt.md:48-50, añadido por este diff, promete lo contrario ('avisa si quedaron asientos fuera por moneda distinta o si se alcanzó el límite de filas') y session.py:180 descarta to_dict() en la ruta de voz.",
+      "shortSummary": "AGREGADO (3 sitios): los calificadores de honestidad se…",
+      "failureScenario": "Contribution truncada: 3 créditos de 1000 BOB con limit=2 -> eligible_income=2000.00, target=200.00, limit_reached=True y la voz dice 'cobramos 2000.00 BOB, así que el 10% son 200.00' sin ningún aviso (correcto: 3000.00 / 300.00); el control sin truncar da 3000.00/300.00, o sea el comparador ve la diferencia. Disparador real: tools/erpnext_client.py:242 usa limit=500 sin paginación y el tool acepta date_from/date_to, así que 'cuánto debo del 10 % de todo 2026' consulta un año contra ese tope y devuelve una base parcial presentada como completa. Balance truncado: 501 filas con limit=500 -> spoken sin aviso y, como el corte ocurre antes del filtro de moneda, también se pierde el aviso de excluded_entries. Regresión al desbloquear: aplicando solo el cambio que la prosa autoriza (CONTRIBUTION_ACCOUNTS = ('Aportes - J',)), la respuesta pasa de terminar en 'Ojo: 1 asientos en otra moneda quedaron fuera.' a no llevar ningún aviso, porque la rama ok retorna antes de calcular extra.",
+      "witness": "Sondas [1] limit=2 -> spoken sin mención de límite (mentions limit? False) y [1b] sin truncar -> 3000.00/300.00; [2] 501 filas limit=500 -> entries=500 excluded_entries=0 limit_reached=True, spoken sin aviso; [2b] limit=600 sobre la misma población -> excluded_entries=1 con aviso; [3] con cuenta de aportes -> spoken(ok) sin aviso de moneda mientras to_dict excluded_entries=1. FIX E probado: los tres avisos aparecen y siguen verdes assertNotIn('ACC-'), assertNotIn('|') y assertIn('otra moneda').",
+      "fixWitness": "tests/test_finance_contribution.py: caso con rows > limit afirmando limit_reached y que build_spoken_summary menciona el truncado, en ambas ramas (needs_input y ok con CONTRIBUTION_ACCOUNTS parcheado); y un caso equivalente en tests/test_finance_scope_summary.py. Rojos hoy.",
+      "fixConstraint": "tests/test_finance_contribution.py:198-199 fijan assertNotIn('ACC-', spoken) y assertNotIn('|', spoken): los avisos deben seguir siendo prosa apta para TTS, sin vouchers ni tablas. Nota de alcance: §15 sí se cumple en la ruta de tool (to_dict lleva los flags); lo que falla es la ruta determinista de voz, donde build_spoken_summary es toda la respuesta.",
+      "suggestedFix": "Calcular excluded_entries y limit_reached ANTES de la rama if status.state == 'ok' y agregarlos a ambos retornos; espejar el aviso de truncado en scope_summary.build_spoken_summary (que es lo que la ruta de voz reenvía); o, si se juzga que §15 se cumple a nivel de payload, corregir la promesa de prompt.md.",
+      "category": "correctness",
+      "direction": "certifies-falsely",
+      "baseline": "new-surface",
+      "locations": [
+        {
+          "file": "openceo-core/agents/finance/contribution.py",
+          "line": 263,
+          "anchor": "def build_spoken_summary(status: ContributionStatus) -> str:"
+        }
+      ]
+    },
+    {
+      "id": "R1-3",
+      "severity": "Critical",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "La alternativa \\$ de CURRENCY_WORD_RE está dentro de un grupo rodeado por \\b...\\b y por tanto es inalcanzable: detect_currency devuelve BOB para cualquier posición real del signo de dólar.",
+      "shortSummary": "La alternativa \\$ de CURRENCY_WORD_RE está dentro de un…",
+      "failureScenario": "'$500' -> BOB; 'gasto 500 $ en comida' -> BOB; 'gasto 500$ en comida' -> BOB, aunque AMOUNT_RE sí captura '$' en su grupo cur en los dos últimos y el mapa de tokens ya declara que '$' significa USD. End-to-end medido: 'gasto 500 $ en comida' escribe débito 'Gastos varios - J' 500.00 con spoken '...500.00 BOB de comida...'; 'me pagaron $500 del contrato' acredita 'Servicios - J' 500.00 como BOB. Un gasto de $500 queda como Bs 500. La única posición donde matchea hoy es entre caracteres de palabra ('500$bs'), que nadie dicta.",
+      "witness": "CURRENCY_WORD_RE.findall(\"a $ b\") = [] y findall(\"500$bs\") = ['$', 'bs']; BASE se comporta idéntico por gasto (mecanismo preexistente, disparador de ingreso nuevo). Con el fix candidato ($ fuera del grupo con \\b): '$500'->USD, '500 $'->USD, '500$'->USD, '100 usdt'->USDT, '500 dólares'->USD; 83 tests pasan.",
+      "fixWitness": "tests/test_finance_voice_expense.py: afirmar detect_currency(\"$500\", 1, 4)==\"USD\" y el caso 'gasto 500 $ en comida' en su span == \"USD\". Rojos hoy (devuelven BOB).",
+      "fixConstraint": "Comentario en money_text.py:30-31 ('usdt va antes que usd ... queda una \"t\" suelta') y la regla 'USDT no es USD': el detector rehecho debe seguir devolviendo USDT para '100 usdt'.",
+      "suggestedFix": "Sacar \\$ del grupo con \\b (r\"\\b(bs\\.?|bolivianos?|bob|usdt|usd|d[óo]lares?|dolar)\\b|\\$\") y manejar el segundo grupo en detect_currency, o preferir el grupo cur que AMOUNT_RE ya capturó antes de re-buscar en la ventana.",
+      "category": "correctness",
+      "direction": "certifies-falsely",
+      "baseline": "new-surface",
+      "locations": [
+        {
+          "file": "openceo-core/agents/finance/money_text.py",
+          "line": 35,
+          "anchor": "CURRENCY_WORD_RE = re.compile("
+        }
+      ]
+    },
+    {
+      "id": "R1-8",
+      "severity": "Critical",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "is_question usa clases tolerantes a la tilde (c[óo]mo, d[óo]nde, cu[áa]l) buscadas en cualquier posición, así que trata como pregunta las formas declarativas sin tilde ('como' = en calidad de / aproximadamente, 'donde' = en casa de) y descarta órdenes de registro válidas. La entrada normal del sistema es dictado por voz, que no trae tildes.",
+      "shortSummary": "is_question usa clases tolerantes a la tilde (c[óo]mo,…",
+      "failureScenario": "A/B con FirstLayerGateway.process_turn real: 'registra como gasto 50 bs' -> BASE EXPENSE con asiento de 50.00 escrito; PR is_question=True, dispatch=None y la orden de gasto termina archivada como NOTA PERSONAL de Horizon (route=['horizon:horizon_capture']). 'anota el pago del internet 150 bs como servicio' -> igual (horizon_capture). 'compré donde Anita 35 bs' y 'gasté como 50 bs en pan' -> BASE escribía; PR no escribe nada y si llega a session.run muere con 'No encontré un workflow de finanzas compatible'. La guarda en sí es un arreglo real y debe conservarse: en BASE '¿cuándo me pagaron los 500 dólares?' escribía un gasto de 500.00 con signo errado.",
+      "witness": "Sondas A/B sobre el mismo detector y process_turn real, más FIX A probado y volteado: las cuatro frases vuelven a EXPENSE con los importes correctos y los cuatro controles siguen rechazados ('¿cuándo me pagaron los 500 dólares?', '¿cuántos tickets tenemos abiertos?', la variante sin tilde 'cuando me pagaron los 500 dolares', y 'cuánto me pagaron el mes pasado 500 bs' -> balance). 83 tests pasan, 67 subtests.",
+      "fixWitness": "tests/test_finance_voice_expense.py: is_question(\"registra como gasto 50 bs\") is False y looks_like_expense(\"gasté como 50 bs en pan\") is True; deben seguir verdes is_question(\"¿cuándo me pagaron los 500 dólares?\") is True y looks_like_income(\"cuánto me pagaron el mes pasado 500 bs\") is False.",
+      "fixConstraint": "tests/test_finance_voice_income.py:155 fija looks_like_income(\"cuánto me pagaron el mes pasado 500 bs\") is False y esa frase no tiene signo de interrogación, así que cu[áa]nt[oa]s? debe permanecer en el regex; solo c[óo]mo/d[óo]nde (y opcionalmente cu[áa]l) pueden salir o anclarse.",
+      "suggestedFix": "Como la voz no trae tildes ni ¿?, usar la posición: matchear las formas acentuadas en cualquier posición y restringir las variantes sin tilde a inicio de frase (^\\s*(?:cuando|cuanto?s?|cual(?:es)?|como|donde)\\b), conservando la regla de ¿/?. Alternativa: quitar c[óo]mo y d[óo]nde del regex y exigir signo de interrogación para esas palabras.",
+      "category": "correctness",
+      "direction": "fails-closed",
+      "baseline": "regression",
+      "locations": [
+        {
+          "file": "openceo-core/agents/finance/money_text.py",
+          "line": 70,
+          "anchor": "_INTERROGATIVE_RE = re.compile("
+        }
+      ]
+    },
+    {
+      "id": "R1-7",
+      "severity": "Critical",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "CLASE: la frontera ingreso/gasto la decide un vocabulario de palabras sueltas sobre texto libre y se puede engañar para invertir el signo del asiento. INCOME_STRONG_RE incluye verbos en tercera persona sin pronombre (pagaron) e INCOME_NOUN_RE acepta sustantivos ambiguos sin orden ni moneda; como looks_like_expense se inhibe ante money_in y classify mira ingreso primero, frases de egreso se contabilizan como ingreso.",
+      "shortSummary": "CLASE: la frontera ingreso/gasto la decide un vocabulario…",
+      "failureScenario": "A/B end-to-end con FinanceSessionManager.run real: 'pagaron la luz 200 bs' -> BASE escribe débito 'Servicios públicos - J' 200 / crédito 'Efectivo - J' 200 (gasto correcto); PR escribe débito 'Efectivo - J' 200 / crédito 'Servicios - J' 200 (ingreso invertido). 'el sueldo del empleado sube a 3000 el próximo mes' (declarativa, sin orden ni moneda) -> BASE FAILED sin escritura; PR COMPLETED con 3000.00 acreditados a 'Servicios - J'. Mismo vuelco en 'honorarios del contador 1500 bs', 'pasaje al coworking remoto 60 bs' y 'registra el deposito de garantia del alquiler 1500 bs'. Barrido sobre el vocabulario extraído del propio fuente: 11 de 11 tokens de INCOME_NOUN_RE convierten una frase de egreso sin palabra de orden en income. Segundo orden medido: el asiento invertido entra en la base del 10% (eligible_income=200.00, target=20.00).",
+      "witness": "Sondas A/B con prueba de brazo (INCOME_STRONG_RE solo existe en PR; _FINANCE_EXPENSE_PATTERNS 2 veces en BASE, 0 en PR). El arreglo parcial probado (quitar 'pagaron' desnudo y exigir orden o moneda en la rama del sustantivo) voltea 2 de los 5 testigos y deja 3 invertidos ('honorarios del contador', 'pasaje al coworking remoto', 'deposito de garantia'), porque llevan palabra de moneda o prefijo de orden: hace falta la parte estructural.",
+      "fixWitness": "tests/test_finance_intent.py: classify(\"honorarios del contador 1500 bs\") y classify(\"pagaron la luz 200 bs\") no deben ser INCOME (hoy lo son); tests/test_finance_voice_income.py::DetectorTests con negativos nuevos para las frases declarativas. Sin el cierre estructural, rojos.",
+      "fixConstraint": "tests/test_finance_voice_income.py:146 fija 'sueldo 6200 bolivianos' como INGRESO y test_finance_intent.py fija 'me pagaron 500 dólares del contrato' como ingreso y 'pago de sueldo del empleado 3000 bs' como EXPENSE: las tres deben seguir verdes. Quitar honorarios|remoto|depósito de INCOME_NOUN_RE cerraría 3 de 5 pero rompe 'recibí un depósito de 300 bolivianos' (fijado en ese mismo archivo).",
+      "suggestedFix": "Cierre estructural, no más frases: (1) quitar 'pagaron' desnudo de INCOME_STRONG_RE conservando me/nos pagaron; (2) exigir señal explícita de orden o cobro en la rama del sustantivo suelto; (3) simetrizar la exclusión — que looks_like_money_in consulte también el vocabulario de gasto, moviendo ese regex a money_text (que ya se declara casa única de esa frontera); (4) ante dirección ambigua devolver un tercer estado para que el flujo pregunte en vez de elegir signo.",
+      "category": "correctness",
+      "direction": "certifies-falsely",
+      "baseline": "regression",
+      "locations": [
+        {
+          "file": "openceo-core/agents/finance/money_text.py",
+          "line": 110,
+          "anchor": "if INCOME_STRONG_RE.search(blob):"
+        }
+      ]
+    },
+    {
+      "id": "R1-1",
+      "severity": "Critical",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "parse_amount trata un separador de miles como decimal: un monto escrito como se escribe en Bolivia (\"6.200\", \"50.000\") se contabiliza 1000 veces menor, y \"1.234.567\" devuelve None aunque AMOUNT_RE lo acepta.",
+      "shortSummary": "parse_amount trata un separador de miles como decimal: un…",
+      "failureScenario": "\"me pagaron 6.200 bolivianos\" por la ruta de voz real produjo status=COMPLETED, asiento sometido con débito 'Efectivo - J' 6.20 / crédito 'Servicios - J' 6.20 y respuesta hablada \"dejamos registrados 6.20 BOB\". Un sueldo de Bs 6.200 queda como Bs 6.20 en el libro mayor real; \"50.000\" -> 50.00 y \"12.000\" -> 12.00. Todos los totales BOB aguas abajo (scope_summary y la base del 10%) heredan el error.",
+      "witness": "PR (sonda en vivo con transporte falso): 'me pagaron 6.200 bolivianos' -> debit='6.20' credit='6.20' submitted=['ACC-JV-LIVE-00001']; parse_amount('1.234.567')=None con AMOUNT_RE.fullmatch=True. Fix candidato en scratch: amount=6200 debit='6200.00', parse_amount('1.234.567')=Decimal('1234567'), 66 tests de finance verdes. BASE: parse_amount idéntico por bytecode, y 'registra gasto ... 6.200 bolivianos' BASE debit='6.20' (mecanismo preexistente; el disparador de ingreso es superficie nueva).",
+      "fixWitness": "tests/test_finance_voice_expense.py (ya importa parse_amount): añadir parse_amount(\"12.345\")==Decimal(\"12345\"), parse_amount(\"1,234\")==Decimal(\"1234\"), parse_amount(\"1.234.567\")==Decimal(\"1234567\"). Rojos sin el arreglo (hoy devuelven 12.345, 1.234 y None).",
+      "fixConstraint": "money_text.py:138 docstring: \"Convierte '1.234,56'/'1,234.56'/'50' a Decimal. Nunca float.\" Las dos formas mixtas deben seguir dando 1234.56 y el resultado seguir siendo Decimal.",
+      "suggestedFix": "Decidir el separador por la forma que AMOUNT_RE reconoció: si re.fullmatch(r\"\\d{1,3}([.,]\\d{3})+\", cleaned), tratar ese carácter como separador de miles y eliminarlo; solo un grupo final ([.,]\\d{1,2}) es decimal.",
+      "category": "correctness",
+      "direction": "certifies-falsely",
+      "baseline": "new-surface",
+      "locations": [
+        {
+          "file": "openceo-core/agents/finance/money_text.py",
+          "line": 142,
+          "anchor": "decimal_sep = \".\""
+        }
+      ]
+    },
+    {
+      "id": "R1-5",
+      "severity": "Critical",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "_run_balance no recibe el texto y consulta sin date_from/date_to, así que las preguntas acotadas por período se responden con el total histórico y sin calificador de período ni fecha de corte.",
+      "shortSummary": "_run_balance no recibe el texto y consulta sin…",
+      "failureScenario": "Con un ledger falso (agosto 100.00 BOB, septiembre 50.00 BOB), 'cuánto gastamos este mes' clasifica BALANCE, los filtros que llegan al cliente no contienen ningún predicado posting_date y la voz dice 'Tenemos 150.00 BOB netos ... en 2 asientos': el gasto de agosto se reporta dentro de 'este mes' (correcto: 50.00) y el usuario no puede notarlo. El detector de saldo rutea explícitamente palabras de período (mes|semana|día|hoy|ayer|año, scope_summary.py:53-60) hacia esta consulta sin período, y prompt.md:44-49 más el mensaje de ayuda nuevo de session.py:68 publicitan ese ejemplo.",
+      "witness": "ARM A (PR): filters sin posting_date, spoken 150.00. ARM B (fix candidato: pasar text y derivar cotas): filters con posting_date >= 2026-09-01 y <= 2026-09-28, spoken 50.00. Convención hermana dentro del mismo diff: 'cómo vamos con el diezmo' sí lleva las dos cotas de período.",
+      "fixWitness": "Test de sesión que maneje run({\"title\": \"cuánto gastamos este mes\"}) con un cliente falso y afirme que los filtros incluyen posting_date >= primer día del mes y que la fila de agosto queda fuera de last_response_summary. Sin la derivación de período, rojo (la sonda ARM A es esa mutación e imprime 150.00).",
+      "fixConstraint": "scope_summary.get_scope_summary tiene un segundo llamador (workflow_service.py:628 pasa date_from del tool): el arreglo debe pasar fechas explícitas desde la sesión, no cambiar los defaults compartidos. Nota de alcance medida: el handler viejo de main.py tampoco pasaba fechas, así que no es regresión ni superficie nueva; lo que el diff añade es el anuncio y el handler reescrito.",
+      "suggestedFix": "Pasar text a _run_balance y derivar cotas deterministas desde un vocabulario cerrado (hoy/ayer/esta semana/este mes/este año) reutilizando contribution.current_month_period(); si hay palabra de período no mapeable, decirlo en la respuesta en vez de callar, y nombrar siempre el período aplicado.",
+      "category": "correctness",
+      "direction": "certifies-falsely",
+      "locations": [
+        {
+          "file": "openceo-core/agents/finance/session.py",
+          "line": 180,
+          "anchor": "summary = await self._with_client(scope_flow.get_scope_summary)"
+        }
+      ]
+    },
+    {
+      "id": "R1-6",
+      "severity": "Critical",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "parse_income no aplica ninguna de las guardas de escritura del propio módulo (has_dev_marker, is_question, looks_like_money_in), y el tool finance.register_income lo llama con texto crudo: contabiliza preguntas, tráfico dev y frases de egreso con el signo invertido.",
+      "shortSummary": "parse_income no aplica ninguna de las guardas de escritura…",
+      "failureScenario": "Con el wrapper real finance.register_income (extraído del fuente) y transporte falso: '¿cuándo me pagaron los 500 dólares?' -> ok=True, ACC-JV-TOOL-00001 docstatus=1, spoken 'dejamos registrados 500.00 USD de ¿cuándo pagaron ? como ingreso'; 'pago de sueldo del empleado 3000 bs' (que intent.classify rutea a expense) -> débito 'Efectivo - J' 3000.00 / crédito 'Servicios - J' 3000.00, signo invertido; 'registra ingreso del ticket 48 500 bs' -> 48.00 BOB. En los tres casos looks_like_income(text) es False. La ruta determinista de voz sí está protegida porque session.run corre intent.classify antes; la ruta expuesta es la del tool, que está en el catálogo que se entrega al descubridor (workflow_service.py:1393) y cuyo gemelo de gasto ya está cableado a texto crudo en workflows/finance/voice_expense.yaml.",
+      "witness": "Sonda con el wrapper real: las tres frases -> ok=True con asiento sometido; con el fix candidato (if not looks_like_income(blob): return None al inicio de parse_income) -> ok=False error=no_amount, journal_entry=None, submitted=[] y 'me pagaron 6.200 bolivianos' sigue registrando; 58 tests de finance pasan. Cobertura: grep en tests/ muestra que ningún test toca los wrappers.",
+      "fixWitness": "tests/test_finance_voice_income.py::ParseIncomeTests: parse_income(\"¿cuándo me pagaron los 500 dólares?\") is None y parse_income(\"registra ingreso del ticket 48 500 bs\") is None. Rojos hoy (devuelven ParsedIncome).",
+      "fixConstraint": "tests/test_finance_voice_income.py:77/100/105/106 fijan como válidos 'registra ingreso sueldo 6200 bolivianos', 'registra ingreso 1.234,56 bolivianos' y los dos casos freelance usdt/usd — verificado que looks_like_income es True para los seis, así que la guarda los conserva.",
+      "suggestedFix": "Fallar cerrado dentro del camino de escritura: al inicio de parse_income, if not looks_like_income(blob): return None, para que ambos llamadores hereden la guarda.",
+      "category": "security",
+      "direction": "certifies-falsely",
+      "baseline": "new-surface",
+      "locations": [
+        {
+          "file": "openceo-core/agents/finance/voice_income.py",
+          "line": 122,
+          "anchor": "blob = str(text or \"\").strip()"
+        }
+      ]
+    },
+    {
+      "id": "R1-4",
+      "severity": "Critical",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "El monto contabilizado es el primer número del texto, sin ninguna comprobación de que sea dinero: conteos, cuotas, números de factura y fechas se registran como importe.",
+      "shortSummary": "El monto contabilizado es el primer número del texto, sin…",
+      "failureScenario": "Con session.run real y transporte falso (crea y somete): 'recibí 3 pagos de 500 bolivianos' -> débito 'Efectivo - J' 3.00 / crédito 'Servicios - J' 3.00 docstatus=1, spoken 'dejamos registrados 3.00 BOB de pagos 500'; 'me pagaron 2 cuotas de 1500 bs' -> 2.00; 'cobré la factura 12 del cliente 3800 bs' -> 12.00; 'ingreso venta del 15/09 900 bs' -> 15.00 a 'Ventas - J'. Alguien que reporta Bs 1.500 cobrados recibe Bs 3.00 acreditados, sometidos, y ese crédito alimenta la base del 10%.",
+      "witness": "Sonda sobre la ruta de sesión real: las cuatro frases -> intent=income, asientos sometidos con los importes citados; control 'me pagaron el sueldo 6200 bolivianos' -> '6200.00' correcto. Con el fix candidato (rechazar cuando hay más de un candidato numérico y el elegido no lleva moneda mientras otro sí): las cuatro -> parse_income None; 44 tests de finance pasan.",
+      "fixWitness": "tests/test_finance_voice_income.py::ParseIncomeTests: parse_income(\"recibí 3 pagos de 500 bolivianos\") is None (o, si se elige tomar el número con moneda, == Decimal(\"500\")). Rojo hoy (devuelve Decimal(\"3\")).",
+      "fixConstraint": "money_text.find_money_match es compartido (su docstring lo declara casa única del parseo para que gasto e ingreso no diverjan): un rechazo solo de ingreso debe implementarse en voice_income.parse_income sobre el match, no bifurcando el parser. Y tests/test_finance_voice_income.py:117 fija que '15 minutos de supervisión' se siga rechazando.",
+      "suggestedFix": "Cerrar la clase en vez de alargar la lista de saltos: negarse a contabilizar cuando el monto no es inequívocamente el token de dinero y devolver None, para que el flujo pregunte.",
+      "category": "correctness",
+      "direction": "certifies-falsely",
+      "baseline": "new-surface",
+      "locations": [
+        {
+          "file": "openceo-core/agents/finance/voice_income.py",
+          "line": 130,
+          "anchor": "amount = parse_amount(match.group(\"num\"))"
+        }
+      ]
+    },
+    {
+      "id": "R1-2",
+      "severity": "Critical",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "La moneda detectada (USD/USDT) nunca llega al asiento: build_journal_entry no emite account_currency, exchange_rate ni multi_currency, así que un ingreso en dólares se contabiliza como el mismo número en cuentas BOB.",
+      "shortSummary": "La moneda detectada (USD/USDT) nunca llega al asiento:…",
+      "failureScenario": "\"me pagaron 500 dólares del contrato\" —el ejemplo que prompt.md:23 publicita— da currency=USD y un asiento que debita 'Efectivo - J' 500.00 / acredita 'Servicios - J' 500.00 sin moneda ni tasa: ~US$500 queda como Bs 500 (~7x menos). La voz dice \"500.00 USD como ingreso\" y el libro recibe 500 BOB, sin que nada falle. contribution.get_contribution_10_status cuenta ese crédito como ingreso BOB elegible (su exclusión por account_currency != currency no puede disparar porque la fila hereda BOB de la cuenta), así que la meta del 10% se calcula sobre una base que mezcla monedas 1:1.",
+      "witness": "Sonda: parse_income(...) -> currency=USD; payload keys = ['accounts','company','doctype','openceo_ref','posting_date','user_remark','voucher_type']; carries account_currency=False exchange_rate=False multi_currency=False. Ruta de voz en vivo: spoken='...500.00 USD...' y booked debit 'Efectivo - J' '500.00' / credit 'Servicios - J' '500.00' submitted. Downstream (modelo de la derivación de ERPNext, no instancia real): fila con account_currency='BOB' -> eligible=500.00 target=50.00; control con 'USD' -> eligible=0.00 excluded=1.",
+      "fixWitness": "tests/test_finance_voice_income.py::JournalEntryShapeTests: caso USD afirmando que no se produce payload, o que ambas patas llevan moneda/tasa. Rojo hoy (la clase solo ejercita BOB).",
+      "fixConstraint": "tests/test_finance_voice_income.py::test_pago_recibido_en_dolares afirma parsed.currency==\"USD\" y test_usd_and_usdt_distinct_and_no_stray_letter afirma USDT!=USD: la detección debe seguir devolviendo USD/USDT, así que el rechazo o la tasa van en el paso de contabilización, no en detect_currency. El fix fail-closed probado en parse_income rompe esos dos tests; la variante compatible es rechazar en el detector o enviar moneda+tasa.",
+      "suggestedFix": "Fallar cerrado hasta que Fase D traiga la tasa explícita: rechazar currency != \"BOB\" con un error hablado (\"dime el monto en bolivianos o la tasa que usaste\") en vez de crear el asiento; o enviar account_currency + exchange_rate por pata. Hacerlo en journal.py/money_text para que el gemelo de gasto (misma forma) se corrija con él.",
+      "category": "correctness",
+      "direction": "certifies-falsely",
+      "baseline": "new-surface",
+      "locations": [
+        {
+          "file": "openceo-core/agents/finance/voice_income.py",
+          "line": 163,
+          "anchor": "\"account\": parsed.cash_account,"
+        }
+      ]
+    },
+    {
+      "id": "R1-10",
+      "severity": "Critical",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "La guarda de Horizon delega en is_finance_text, que incluye el intent BALANCE, cuyo vocabulario es español ordinario (total, resumen, cuentas, fondos, más hoy|ayer|día|semana|mes|año y dime|dame|muéstrame) y no exige monto ni moneda. Con la guarda en precedencia máxima, Horizon entrega frases personales que antes reclamaba.",
+      "shortSummary": "La guarda de Horizon delega en is_finance_text, que…",
+      "failureScenario": "A/B con FirstLayerGateway.process_turn real: 'tengo que ver las cuentas del banco con mi padre' -> BASE route=['horizon:horizon_capture']; PR route=[finance]. 'me gustaria un resumen del plan de hoy' -> BASE horizon_plan_day; PR finance. 'hoy solo tengo 15 minutos en total' -> BASE horizon_capacity (el patrón que su propio comentario dice haber estrechado a propósito, derrotado por un 'en total' final); PR finance. 'necesito un resumen de mis cuentas del curso' -> BASE horizon_capture; PR finance. El dueño que dicta una nota personal recibe una lectura de caja de ERPNext, la nota no se captura y el turno se consume antes de llegar al LLM.",
+      "witness": "process_turn real en ambos brazos con los mismos handlers grabadores: las cuatro frases cambian de ruta. FIX B probado (return classify(text) in {INCOME, EXPENSE, CONTRIBUTION}): las cuatro vuelven a horizon_capture/plan_day/capacity, y siguen yendo a Finance 'registra ingreso sueldo 6200 bolivianos', 'cómo vamos con el diezmo' y 'cuanto llevo gastado este mes'. Coste medido que el hallazgo no mencionaba: 1 test en rojo — tests/test_finance_intent.py:128 usa una frase de SALDO ('cuánto gastamos este mes') para probar la guarda, así que el arreglo exige re-apuntarla a una frase de libro mayor.",
+      "fixWitness": "tests/test_finance_intent.py::HorizonBoundaryTests::test_horizon_keeps_its_own_phrases con las cuatro frases testigo y sus intents esperados (INTENT_CAPTURE, INTENT_PLAN_DAY, INTENT_CAPACITY, INTENT_CAPTURE). Con is_finance_text como guarda, rojas.",
+      "fixConstraint": "Los cinco assertIsNone de test_money_phrases_are_not_horizon_captures deben seguir verdes (verificado con FIX B), y test_horizon_guard_survives_a_broken_finance_import debe re-apuntar su frase de saldo a una de libro mayor para no bloquear el arreglo.",
+      "suggestedFix": "Que la guarda entregue solo los intents que tocan o nombran el libro mayor: return classify(text) in {INCOME, EXPENSE, CONTRIBUTION}. Las consultas de saldo puras que Horizon no reclama siguen llegando a Finance por la vía de first_layer.",
+      "category": "correctness",
+      "direction": "fails-closed",
+      "baseline": "regression",
+      "locations": [
+        {
+          "file": "openceo-core/horizon/classify.py",
+          "line": 370,
+          "anchor": "if is_finance_operative(text):"
+        }
+      ]
+    },
+    {
+      "id": "R1-12",
+      "severity": "Critical",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "El tool finance.register_income acuña un openceo_ref fresco por llamada, así que la única guarda contra duplicados del camino de escritura no puede disparar nunca: una segunda ejecución del paso contabiliza el mismo ingreso dos veces y ambos resultados reportan duplicate=False.",
+      "shortSummary": "El tool finance.register_income acuña un openceo_ref…",
+      "failureScenario": "Medido con WorkflowService real y modelos de ERPNext/Mongo: (B) misma tarea re-despachada dos veces (lo que hace POST /api/tasks/{id}/run con force=True) -> 2 Journal Entry sometidos con refs distintos y ambos duplicate=False; (C) parche a Mongo perdido justo después de la escritura en ERPNext y re-despacho -> 2 asientos, porque current_step_index solo avanza después de la llamada al tool y del parche; (D) control con openceo_ref estable -> 1 asiento y el segundo duplicate=True, o sea la guarda funciona cuando el llamador reutiliza el ref. Nada delata la doble contabilización: el resumen hablado pierde la rama 'Ya estaba registrado, no lo dupliqué'. Contradice docs/finance-erpnext-integration-contract.md §6.1 ('mismo intento/retry -> mismo valor', 'timeout no genera una nueva referencia') y el docstring de new_openceo_ref ('Reintento = mismo valor').",
+      "witness": "Sonda B: ACC-JV-PROBE-00001 y -00002 con refs voice-income:ddf948... y voice-income:a26118..., ambos docstatus=1. Sonda D (ref estable): 1 asiento, segunda corrida duplicate=True. Fix del propio hallazgo aplicado en brazo separado: B y C pasan de 2 asientos a 1 con duplicate=True. Barrido del catálogo enviado: de 3 tools de escritura registrados, ['finance.register_income'] no tiene ningún llamador; pero la forma de paso idéntica SÍ está viva hoy en voice_expense.yaml (solo text, sin openceo_ref) y el brazo BASE doble-contabiliza igual con refs voice-expense:2cdc43... y voice-expense:fd2614....",
+      "fixWitness": "Test a nivel de registro que llame _finance_register_income dos veces con el mismo context (mismo task_id) y afirme un solo Journal Entry y duplicate=True en la segunda. Sin el ref derivado, rojo (dos documentos, duplicate=False ambos).",
+      "fixConstraint": "Una variante fail-closed ('negarse a escribir sin openceo_ref explícito') rompería el workflow de gasto ya enviado, cuyo paso solo suministra text (workflows/finance/voice_expense.yaml:16, sin clave openceo_ref). Declaración de alcance: verificado contra modelos de ERPNext y Mongo (índice único de openceo_ref -> 417), no contra instancia viva; son las semánticas que el propio fake del PR afirma y para las que journal.py está escrito.",
+      "suggestedFix": "Dar a los tools de escritura una identidad independiente del llamador: declarar context en la firma (_build_kwargs lo inyecta cuando la firma lo nombra) y derivar voice-income:<task_id>, con uuid fresco solo si no hay tarea. Extraer el cuerpo del wrapper a un helper compartido por _finance_register_expense y _finance_register_income, como exige journal.py:8-10, para que la regla del ref no diverja entre los dos flujos.",
+      "category": "correctness",
+      "direction": "certifies-falsely",
+      "baseline": "new-surface",
+      "locations": [
+        {
+          "file": "openceo-core/workflow_service.py",
+          "line": 658,
+          "anchor": "result = await _voice_income.register_income("
+        }
+      ]
+    },
+    {
+      "id": "R1-20",
+      "severity": "Critical",
+      "confidence": "low",
+      "source": "review",
+      "summary": "Hallazgo incidental sin veredicto: AMOUNT_RE no excluye un número seguido de '%', así que find_money_match toma el primer dígito de '10 %' como monto. El diff reubica esas líneas en el módulo compartido por gasto e ingreso, de modo que el parseo defectuoso pasa de un flujo a dos.",
+      "shortSummary": "Hallazgo incidental sin veredicto: AMOUNT_RE no excluye un…",
+      "failureScenario": "'anota el gasto del 10 % de comisión del banco 120 bs' contabiliza 10.00 BOB en vez de 120.00 (medido en BASE y en el brazo con fix de F9: legs 'Gastos varios - J' 10.00 / 'Efectivo - J' 10.00); la forma análoga de ingreso ('registra ingreso 10 % de anticipo 500 bs') contabilizaría 10.00.",
+      "witness": "Corrida BASE y FIX D de la verificación de F9, misma frase, mismo resultado 10.00 en ambos brazos.",
+      "fixWitness": "Test de parseo afirmando que '10 % de comisión 120 bs' rinde 120 y no 10.",
+      "fixConstraint": "Nota de alcance declarada por el verificador: se reproduce idéntico en BASE, así que el comportamiento no es nuevo; lo que el diff cambia es el alcance (módulo compartido por los dos flujos de escritura).",
+      "suggestedFix": "Excluir del candidato monetario todo número seguido de '%' (o de palabras de porcentaje) en find_money_match, y elegir el siguiente candidato.",
+      "category": "correctness",
+      "locations": [
+        {
+          "file": "openceo-core/agents/finance/money_text.py",
+          "line": 28,
+          "anchor": "AMOUNT_RE = re.compile("
+        }
+      ]
+    },
+    {
+      "id": "R1-17",
+      "severity": "Suggestion",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "La base se documenta como 'realmente cobrados' (contribution.py:18, prompt.md:55-57) y la voz lo afirma ('En este mes cobramos...'), pero la medición solo filtra por pertenencia a la cuenta, período, docstatus=1 e is_cancelled=0: nunca comprueba que el crédito se haya liquidado en caja.",
+      "shortSummary": "La base se documenta como 'realmente cobrados'…",
+      "failureScenario": "Sonda con la forma de asiento que ERPNext escribe al someter una Sales Invoice (débito 'Deudores - J' 6200 / crédito 'Servicios - J' 6200): eligible_income=6200.00, target=620.00 y la voz dice 'En este mes cobramos 6200.00 BOB'. Período mixto (6200 cobrado + 3000 facturado sin cobrar) -> 9200.00 / 920.00 con el mismo 'cobramos'. Costo: la prosa autoriza al agente a afirmar como cobrado un valor que la medición nunca probó, así que el dueño reserva el 10% de dinero que no recibió. Los tres textos del propio cambio no coinciden entre sí (STATUS.md describe la base sin la palabra 'cobrados'), y §10 del contrato pide 'política explícita de ingresos elegibles'.",
+      "witness": "Sonda ejecutada con vouchers ['ACC-SINV-2026-00007'] -> eligible 6200.00 / target 620.00 y mixed -> 9200.00 / 920.00. Concesión verificada: para los asientos que este sistema escribe el claim sí se cumple, porque voice_income.build_journal_entry siempre debita 'Efectivo - J'. No verificado: si el libro mayor vivo de Jardal tiene devengados en esas cuatro cuentas (grep de 'Sales Invoice|ACC-SINV|Deudores' sobre el repo da cero coincidencias, así que nada en el árbol los crea ni los espera).",
+      "fixWitness": "tests/test_finance_contribution.py: caso con un par 'Deudores - J'/'Servicios - J' que fije la semántica elegida (eligible_income == 0 en la lectura de caja, o una aserción de que el resumen ya no dice 'cobramos'). Rojo hoy (eligible 6200.00).",
+      "suggestedFix": "Alinear prosa y medición: o documentar 'créditos a cuentas de ingreso del período (cobrados o no: no se verifica la contrapartida de caja)' y cambiar 'cobramos' por 'registramos como ingreso', o, si la política realmente es caja, restringir la base a vouchers cuya pata contraparte sea 'Efectivo - J' y conservar la palabra.",
+      "category": "correctness",
+      "locations": [
+        {
+          "file": "openceo-core/agents/finance/contribution.py",
+          "line": 18,
+          "anchor": "Base elegible: ingresos personales realmente cobrados"
+        }
+      ]
+    },
+    {
+      "id": "R1-13",
+      "severity": "Suggestion",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "El despacho de cuatro vías de FinanceSessionManager y el ciclo de vida del cliente en _with_client no tienen ninguna cobertura: ningún archivo de tests importa FinanceSessionManager, mientras los runtimes hermanos sí se prueban directo.",
+      "shortSummary": "El despacho de cuatro vías de FinanceSessionManager y el…",
+      "failureScenario": "Mutación A (borrar la rama if intent == INCOME:): la orden de ingreso del dueño pasa a responder 'No encontré un workflow de finanzas compatible' con FAILED y sin contabilizar, y la suite sigue verde (143 passed, 67 subtests). Mutación B (borrar finally: await client.aclose()): un cliente httpx fugado por comando de voz, aclose=0 en éxito y en excepción, suite verde. Costo citado por el propio diff: según STATUS.md la regresión que este refactor introdujo en el camino de gasto se detectó con un smoke en vivo contra producción (ACC-JV-2026-00014), escribiendo un asiento real de Bs 1.",
+      "witness": "grep sobre el worktree: FinanceSessionManager solo aparece en main.py, graph.py, apps-sdk-mcp-test/server.js y docs — cero en tests/. Las dos mutaciones ejecutadas dejan la suite verde; el fix propuesto fue escrito y corrido por el verificador (6 passed intacto; 3 failed con mutación A; 2 failed con mutación B), o sea la prueba distingue correcto de roto.",
+      "fixWitness": "El archivo nuevo: borrar la rama INCOME o el finally de aclose debe ponerlo en rojo.",
+      "suggestedFix": "Un test de despacho con FinanceSessionManager(settings=object()) y _with_client stubbeado sobre el fake de tests/test_finance_voice_income.py: una frase por intent afirmando patas del asiento, texto hablado y state, más una aserción de que aclose() se awaited incluso cuando el flujo lanza.",
+      "category": "test-coverage",
+      "locations": [
+        {
+          "file": "openceo-core/agents/finance/session.py",
+          "line": 52,
+          "anchor": "intent = classify(text)"
+        }
+      ]
+    },
+    {
+      "id": "R1-14",
+      "severity": "Suggestion",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "La rama nueva de sueldos en classify_expense_account no tiene ningún test: grep de 'Salario' sobre tests/ da cero coincidencias y ClassifyTests cubre solo servicios públicos, transporte, teléfono y el default.",
+      "shortSummary": "La rama nueva de sueldos en classify_expense_account no…",
+      "failureScenario": "Borrar la rama (o errar el regex, p. ej. nomina sin tilde tras _norm) deja la suite verde (143 passed, 67 subtests) mientras todo gasto de sueldo se contabiliza en 'Gastos varios - J', contradiciendo el contrato que este mismo diff escribe en prompt.md ('sueldos -> Salario. - J') y desdibujando el by_account que reporta finance.get_scope_summary.",
+      "witness": "Barrido intacto vs mutante: 7/7 conceptos de sueldo -> 'Salario. - J' intacto, -> 'Gastos varios - J' con la rama borrada; control 'pago de luz de casa 300 bs' -> 'Servicios públicos - J' en ambos brazos. End-to-end la sesión escribe las patas ['Salario. - J','3000.00'] / ['Efectivo - J','3000.00'].",
+      "fixWitness": "Ese test: borrar la rama lo pone en rojo (cae a 'Gastos varios - J').",
+      "fixConstraint": "voice_expense.py:53 EXPENSE_SALARIOS = \"Salario. - J\" — el nombre lleva un punto después de Salario y debe afirmarse exacto (cuenta real verificada en vivo en esta ronda).",
+      "suggestedFix": "Añadir test_salaries a ClassifyTests con classify_expense_account('sueldo empleado')=='Salario. - J' más las variantes salarios/nomina/planilla, y una aserción end-to-end sobre parse_expense.",
+      "category": "test-coverage",
+      "locations": [
+        {
+          "file": "openceo-core/agents/finance/voice_expense.py",
+          "line": 101,
+          "anchor": "if re.search(r\"\\b(sueldos?|salarios?|nomina|planilla)\\b\", blob):"
+        }
+      ]
+    },
+    {
+      "id": "R1-18",
+      "severity": "Suggestion",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "is_finance_operative tiene dos except Exception que fallan abierto sin dejar ningún registro, y está duplicado byte a byte como main.py:222 _is_finance_text; su docstring afirma que un fallo degrada al comportamiento anterior, lo cual es falso para 9 de las 10 frases que la guarda decide.",
+      "shortSummary": "is_finance_operative tiene dos except Exception que fallan…",
+      "failureScenario": "Rompiendo la cadena de import en el punto más profundo (sys.modules['agents.finance.voice_income'] = None): la guarda devuelve False para las 71 frases del barrido y 'registra gasto luz 100 bs' pasa de ir a Finance (BASE) a archivarse como nota personal de Horizon, sin llegar nunca al libro mayor. Registros emitidos durante toda la corrida: 0 — horizon/classify.py no importa logging, mientras las otras dos entradas a la misma guarda sí loguean (main._run_finance_voice y first_layer.py:376), así que los cuatro accesos son observablemente inconsistentes y los dos silenciosos son copias idénticas entre sí (comparación AST y de bytes).",
+      "witness": "A/B con import roto: BASE classify('registra gasto luz 100 bs') -> None (Finance); PR -> 'horizon_capture'. Barrido de 71 frases reales (todos los literales de los 3 archivos de tests nuevos más los triggers de los YAML enviados): la guarda decide 10, y en 9 de ellas BASE iba a Finance — solo 'cómo vamos con el diezmo' coincide de verdad con el comportamiento anterior. Fix aplicado en brazo separado (logging + main delegando en is_finance_operative): mismas decisiones, test de restricción verde, registros 0 -> 10 con '[WARNING] horizon.classify: Finance intent guard unavailable (import)'.",
+      "fixWitness": "tests/test_finance_intent.py::test_horizon_guard_survives_a_broken_finance_import envolviendo el bloque existente en self.assertLogs('horizon.classify', level='WARNING'). Sin la llamada de logging, rojo.",
+      "fixConstraint": "Ese mismo test afirma assertFalse(is_finance_operative(...)) bajo mock.patch.dict(sys.modules, {'agents.finance.intent': None}): el arreglo debe seguir devolviendo False ante fallo de import, solo añadiendo el registro.",
+      "suggestedFix": "Añadir un logger de módulo en horizon/classify.py y registrar una vez por fallo en ambos handlers; hacer que main._is_finance_text delegue en is_finance_operative (o mover el wrapper a agents/finance/intent.py como safe_is_finance_text) para que haya una sola decisión fail-open; y corregir el docstring.",
+      "category": "quality",
+      "locations": [
+        {
+          "file": "openceo-core/horizon/classify.py",
+          "line": 270,
+          "anchor": "from agents.finance.intent import is_finance_text"
+        }
+      ]
+    },
+    {
+      "id": "R1-15",
+      "severity": "Suggestion",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "FakeLegacyClient hereda list_gl_entries, así que test_fallback_list_docs nunca entra en la rama de fallback que dice probar: el dispatch por getattr/callable encuentra el método heredado y list_docs queda como código muerto.",
+      "shortSummary": "FakeLegacyClient hereda list_gl_entries, así que…",
+      "failureScenario": "Contador sobre el fixture exacto del PR: {'gl': 1, 'docs': 0}. Dos mutantes con el test tal como se envía: borrar la rama else -> 14 passed; cambiar el doctype a 'DOCTYPE EQUIVOCADO' sin kwargs -> 22 passed. O sea que romper el fallback no pone nada en rojo, y cualquier cliente sin list_gl_entries fallaría en runtime dentro de un flujo de dinero de solo lectura. No es Critical porque los dos call sites reales construyen ERPNextClient, que sí define list_gl_entries.",
+      "witness": "Instrumentación del fixture (gl=1, docs=0) más los dos mutantes verdes; fix propuesto ejecutado: con list_gl_entries = None en la subclase el intacto sigue en 14 passed y el mutante 2 ahora muerde (FAILED test_fallback_list_docs ... DOCTYPE EQUIVOCADO, 1 failed 13 passed).",
+      "fixWitness": "test_fallback_list_docs debe ponerse rojo al borrar la rama else de contribution.get_contribution_10_status o al cambiar el doctype; hoy queda verde en ambos casos.",
+      "fixConstraint": "contribution.py:198 despacha por callability (getattr(client, 'list_gl_entries', None)), así que el fake debe exponer un atributo no llamable o ninguno: borrar un override no basta mientras la clase base lo defina. Nota: el patrón hueco preexiste fuera del diff en tests/test_finance_scope_summary.py:44-49.",
+      "suggestedFix": "Que el fake legacy carezca realmente del lector (list_gl_entries = None en la subclase, ya que el dispatch es por callability), o dejar de heredar y darle su propio list_docs con las mismas aserciones de filtros.",
+      "category": "test-coverage",
+      "locations": [
+        {
+          "file": "tests/test_finance_contribution.py",
+          "line": 58,
+          "anchor": "class FakeLegacyClient(FakeReadClient):"
+        }
+      ]
+    },
+    {
+      "id": "R1-16",
+      "severity": "Suggestion",
+      "confidence": "high",
+      "source": "probe",
+      "summary": "Los tests de 'desconocido no es cero' afirman contra la constante viva en vez de una constante parcheada, así que el cambio de datos que la propia documentación promete ('en cuanto exista la cuenta, se lista aquí y el estado pasa a ok sin tocar nada más') los vuelve rojos como si el comportamiento hubiera regresado.",
+      "shortSummary": "Los tests de 'desconocido no es cero' afirman contra la…",
+      "failureScenario": "Aplicando exactamente ese cambio vía mock.patch.object(contribution, 'CONTRIBUTION_ACCOUNTS', ('Aportes - J',)): 3 failed con mensajes que se leen como lógica de dinero rota — \"'0.00' is not None\" y \"'falta definir' not found in '... Llevamos aportados 0.00 y quedan pendientes 620.00.'\". Corriendo el módulo completo en ese brazo el acoplamiento es de 4 tests, no 3 (se suma test_other_currency_excluded). Los dos tests hermanos ya parchean la constante, así que hoy el invariante está clavado al plan de cuentas de ERPNext y no al código.",
+      "witness": "A/B con plugin de pytest que no edita archivos del PR: ARM A 5 passed; ARM B 3 failed / 2 passed (módulo completo: 4 failed / 10 passed). Fix propuesto ejecutado (setUp con patch a ()): ARM A 14 passed; ARM B los 5 UnknownIsNotZeroTests pasan y solo queda el cuarto fallo, que es de producto (ver R1-11) y no de acoplamiento.",
+      "fixWitness": "Esos tests deben seguir verdes cuando CONTRIBUTION_ACCOUNTS esté poblada, mientras test_configured_account_switches_to_ok sigue fijando la rama ok.",
+      "suggestedFix": "Envolver los tests de UnknownIsNotZeroTests en with mock.patch.object(contribution, 'CONTRIBUTION_ACCOUNTS', ()) y quitar la precondición assertEqual, para afirmar 'sin cuenta configurada => None + needs_input' con independencia del plan real.",
+      "category": "test-coverage",
+      "locations": [
+        {
+          "file": "tests/test_finance_contribution.py",
+          "line": 168,
+          "anchor": "self.assertEqual(contribution.CONTRIBUTION_ACCOUNTS, ())"
+        }
+      ]
+    },
+    {
+      "id": "R1-19",
+      "severity": "Suggestion",
+      "confidence": "low",
+      "source": "probe",
+      "summary": "El campo del dataclass que declara qué cuentas se midieron se evalúa al definir la clase y get_contribution_10_status nunca lo pasa, así que la aritmética lee el global vivo mientras el payload reporta el valor congelado en el import.",
+      "shortSummary": "El campo del dataclass que declara qué cuentas se midieron…",
+      "failureScenario": "Con el global fijado en runtime (exactamente lo que hace el test nuevo en tests/test_finance_contribution.py:207): to_dict() devolvió state='ok', confirmed_contribution='620.00' y contribution_accounts=[] — se contradice con los números que tiene al lado, y §15 exige que la respuesta lleve los filtros aplicados. Un LLM que lea ese payload diría que no hay cuenta configurada mientras cita un importe ya aportado. El test enviado no afirma ese campo, así que la contradicción pasa la suite.",
+      "witness": "Sonda: default del campo al import = (), global vivo durante la llamada = ('Aportes - J',), payload contribution_accounts=[]. Fix ejecutado (pasar contribution_accounts=CONTRIBUTION_ACCOUNTS en el constructor): la misma sonda imprime ['Aportes - J'] y el módulo sigue en 14 passed. Confianza baja porque el disparador en producción no se pudo construir: grep de CONTRIBUTION_ACCOUNTS da solo contribution.py y los dos mock.patch de los tests; la vía documentada es editar el fuente, lo que sí re-encadena el default. Aparecería si la lista se configura desde Settings/entorno o se acepta por parámetro.",
+      "fixWitness": "test_configured_account_switches_to_ok añadiendo assertEqual(status.to_dict()['contribution_accounts'], ['Aportes - J']). Rojo hoy (devuelve []).",
+      "fixConstraint": "contribution.py:161 to_dict lee el campo de la instancia, así que hay que setear la instancia, no el global.",
+      "suggestedFix": "Construir el status con el valor realmente usado: ContributionStatus(..., contribution_accounts=CONTRIBUTION_ACCOUNTS) dentro de get_contribution_10_status.",
+      "category": "correctness",
+      "locations": [
+        {
+          "file": "openceo-core/agents/finance/contribution.py",
+          "line": 126,
+          "anchor": "contribution_accounts: tuple[str, ...] = CONTRIBUTION_ACCOUNTS"
+        }
+      ]
+    },
+    {
+      "id": "R1-21",
+      "severity": "Suggestion",
+      "confidence": "low",
+      "source": "review",
+      "summary": "Hallazgo incidental sin veredicto: el rationale de la guarda (docstring de horizon/classify.py:264-267 y STATUS.md:7) describe mal el comportamiento anterior — afirma que sin la guarda esas frases caían en captura personal de Horizon, y en BASE lo que pasaba era peor: Horizon las dejaba ir y Finance las contabilizaba como gasto con el signo invertido.",
+      "shortSummary": "Hallazgo incidental sin veredicto: el rationale de la…",
+      "failureScenario": "Un mantenedor que lea el docstring concluye que la guarda solo evita una nota personal mal archivada y la trata como cosmética; el comportamiento anterior real era un asiento con signo errado ('registra ingreso sueldo 6200 bolivianos' -> BASE looks_like_expense=True, débito 'Gastos varios - J' / crédito 'Efectivo - J' 6200 BOB), que es la justificación fuerte y la que importa cuando alguien proponga simplificar la guarda.",
+      "witness": "Sonda sobre el brazo BASE: horizon.classify=None (no captura personal), looks_like_expense=True, parse_expense con patas invertidas; mismo resultado para 'me pagaron 500 dólares del contrato'. La afirmación sí es cierta del código del PR con la guarda desactivada, así que lo que está mal es solo el marco de 'comportamiento anterior'.",
+      "fixWitness": "N/A (documentación).",
+      "suggestedFix": "Corregir el docstring y el párrafo de STATUS.md: sin la guarda, BASE no capturaba la frase como nota personal sino que la contabilizaba como gasto con signo invertido.",
+      "category": "docs",
+      "locations": [
+        {
+          "file": "openceo-core/horizon/classify.py",
+          "line": 264,
+          "anchor": "bolivianos\" empieza con verbo de captura explicita y \"me pagaron 500"
+        }
+      ]
+    },
+    {
+      "id": "R1-22",
+      "severity": "Nice to have",
+      "confidence": "low",
+      "source": "review",
+      "summary": "Hallazgo incidental sin veredicto: las patas cero del asiento se serializan como float literal (0.0) en un flujo cuyo contrato prohíbe float para dinero; el lado no nulo sí viaja como string formateado desde Decimal.",
+      "shortSummary": "Hallazgo incidental sin veredicto: las patas cero del…",
+      "failureScenario": "Hoy es inocuo (el valor es cero, exactamente representable, y la otra pata lleva el importe): no se observó rechazo de ERPNext ni asiento mal contabilizado. El coste concreto es deriva de contrato en el payload de escritura nuevo (voice_income.py es superficie nueva; voice_expense.py:183 tiene la misma forma pero es preexistente) y que cualquier validación futura de tipo sobre el payload lo rechace, además del riesgo de que alguien copie la línea para una pata con importe.",
+      "witness": "Sonda de F7 sobre el brazo PR: legs=[('Efectivo - J', '6200.00', 0.0), ('Servicios - J', 0.0, '6200.00')].",
+      "fixWitness": "N/A (forma del payload, sin comportamiento que fijar).",
+      "suggestedFix": "Emitir las patas cero como \"0.00\" (string) igual que el lado no nulo, en los dos flujos a la vez.",
+      "category": "quality",
+      "locations": [
+        {
+          "file": "openceo-core/agents/finance/voice_income.py",
+          "line": 166,
+          "anchor": "\"credit_in_account_currency\": 0.0,"
+        }
+      ]
+    }
+  ],
+  "counts": {
+    "total": 22,
+    "bySeverity": {
+      "Critical": 13,
+      "Suggestion": 8,
+      "Nice to have": 1
+    },
+    "byConfidence": {
+      "high": 18,
+      "low": 4
+    },
+    "held": 0
+  },
+  "outcomesRecorded": false,
+  "markdownReportPath": ".qwen/reviews/2026-09-29-013158-local.md"
+}

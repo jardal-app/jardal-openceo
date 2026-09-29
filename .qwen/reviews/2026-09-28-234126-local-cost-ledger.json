@@ -1,0 +1,26 @@
+{
+  "totals": {
+    "calls": 6,
+    "inputTokens": 1882032,
+    "cachedTokens": 1871832,
+    "outputTokens": 3700,
+    "thoughtsTokens": 2797,
+    "firstAt": "2026-09-28T23:38:53.011Z",
+    "lastAt": "2026-09-28T23:41:25.976Z",
+    "wallSeconds": 153
+  },
+  "main": {
+    "id": "main",
+    "label": "main loop",
+    "calls": 6,
+    "inputTokens": 1882032,
+    "cachedTokens": 1871832,
+    "outputTokens": 3700,
+    "thoughtsTokens": 2797,
+    "firstAt": "2026-09-28T23:38:53.011Z",
+    "lastAt": "2026-09-28T23:41:25.976Z"
+  },
+  "agents": [],
+  "priorSessions": 0,
+  "missingStreams": 0
+}

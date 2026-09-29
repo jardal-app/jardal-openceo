@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "target": "local",
+  "effort": "medium",
+  "verdict": {
+    "bodyTrim": {
+      "sections": 0,
+      "deferralList": false,
+      "fold": false,
+      "truncated": false
+    },
+    "event": "COMMENT",
+    "body": "Re-rule of standing findings — no new review ran.\n\nDecided-stop re-rule: the verdict below is the re-rule of the cache ledger's open Criticals against the current tree — no review agents ran this round.\n\n_— qwen3.8-max via Qwen Code /review (v0.24.3)_",
+    "baseEvent": "APPROVE",
+    "cappedBy": [],
+    "downgraded": false,
+    "downgradedFrom": null,
+    "remediation": [],
+    "waivedFixes": [],
+    "deferredCount": 0,
+    "floorEnforced": [],
+    "postedInline": 0,
+    "postedFresh": 0,
+    "fixedFindings": [],
+    "lowSignal": null,
+    "approachSignal": null,
+    "verdictLine": "Verdict: Comment — a decided-stop re-rule reviews nothing new, so a cleared round comments rather than approves"
+  },
+  "findings": [],
+  "counts": {
+    "total": 0,
+    "bySeverity": {
+      "Critical": 0,
+      "Suggestion": 0,
+      "Nice to have": 0
+    },
+    "byConfidence": {
+      "high": 0,
+      "low": 0
+    },
+    "held": 0
+  },
+  "outcomesRecorded": false,
+  "markdownReportPath": ".qwen/reviews/2026-09-28-234126-local.md"
+}
