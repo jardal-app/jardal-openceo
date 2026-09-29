@@ -61,10 +61,30 @@ class PrecedenceTests(unittest.TestCase):
             "registra gasto personal carne 50 bolivianos",
             "pago de luz de casa 300 bs",
             "pago de sueldo del empleado 3000 bs",
+            # R1-7: "pagaron" desnudo y los sustantivos de ingreso sueltos no
+            # pueden invertir un egreso.
+            "pagaron la luz 200 bs",
+            "honorarios del contador 1500 bs",
+            "pasaje al coworking remoto 60 bs",
+            "registra el deposito de garantia del alquiler 1500 bs",
         ]
         for text in cases:
             with self.subTest(text=text):
                 self.assertEqual(classify(text), EXPENSE)
+
+    def test_contribution_words_do_not_swallow_expense_orders(self) -> None:
+        """R1-9: "aporte"/"10 %" sueltos interceptaban ordenes de gasto."""
+        cases = [
+            "registra gasto del aporte patronal 1200 bs",
+            "registra pago de luz de casa 300 bs con 10 % de recargo",
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(classify(text), EXPENSE)
+
+    def test_declarative_money_is_not_a_registration(self) -> None:
+        """R1-7: una declarativa a futuro no contabiliza nada."""
+        self.assertIsNone(classify("el sueldo del empleado sube a 3000 el próximo mes"))
 
     def test_not_finance(self) -> None:
         cases = [
@@ -123,13 +143,44 @@ class HorizonBoundaryTests(unittest.TestCase):
             horizon_classify.INTENT_CAPTURE,
         )
 
+    def test_balance_vocabulary_does_not_hand_personal_phrases_to_finance(self) -> None:
+        """R1-10: el vocabulario de saldo es español ordinario, no una señal."""
+        cases = [
+            ("tengo que ver las cuentas del banco con mi padre", horizon_classify.INTENT_CAPTURE),
+            ("me gustaria un resumen del plan de hoy", horizon_classify.INTENT_PLAN_DAY),
+            ("hoy solo tengo 15 minutos en total", horizon_classify.INTENT_CAPACITY),
+            ("necesito un resumen de mis cuentas del curso", horizon_classify.INTENT_CAPTURE),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertFalse(horizon_classify.is_finance_operative(text))
+                self.assertEqual(horizon_classify.classify(text), expected)
+        # Las lecturas de saldo siguen siendo finanzas para el ruteo del agente.
+        for text in ["cuánto gastamos este mes", "dame el saldo de la caja"]:
+            with self.subTest(text=text):
+                self.assertFalse(horizon_classify.is_finance_operative(text))
+                self.assertTrue(is_finance_text(text))
+
+    def test_horizon_operative_is_ledger_and_contribution_only(self) -> None:
+        for text in [
+            "registra ingreso sueldo 6200 bolivianos",
+            "registra gasto personal carne 50 bolivianos",
+            "cómo vamos con el diezmo",
+        ]:
+            with self.subTest(text=text):
+                self.assertTrue(horizon_classify.is_finance_operative(text))
+
     def test_horizon_guard_survives_a_broken_finance_import(self) -> None:
-        """Si Finance no importa, Horizon conserva la frase (comportamiento anterior)."""
-        self.assertTrue(horizon_classify.is_finance_operative("cuánto gastamos este mes"))
+        """Si Finance no importa, Horizon conserva la frase (fail-open con log)."""
+        ledger_phrase = "registra gasto personal carne 50 bolivianos"
+        self.assertTrue(horizon_classify.is_finance_operative(ledger_phrase))
         with mock.patch.dict(sys.modules, {"agents.finance.intent": None}):
-            self.assertFalse(
-                horizon_classify.is_finance_operative("cuánto gastamos este mes")
-            )
+            with self.assertLogs("horizon.classify", level="WARNING") as captured:
+                self.assertFalse(horizon_classify.is_finance_operative(ledger_phrase))
+        self.assertTrue(
+            any("guard unavailable" in line for line in captured.output),
+            captured.output,
+        )
 
 
 if __name__ == "__main__":

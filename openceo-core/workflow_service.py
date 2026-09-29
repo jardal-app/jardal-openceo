@@ -7,6 +7,7 @@ import re
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -571,11 +572,36 @@ class WorkflowToolRegistry:
             workflow_cfg = dict(params)
         return run_elfec_house_payment_practice(get_settings(), workflow_cfg)
 
+    @staticmethod
+    def _operation_ref(
+        prefix: str,
+        openceo_ref: str | None,
+        context: dict[str, Any] | None,
+    ) -> str | None:
+        """Referencia idempotente del intento: mismo task -> mismo `openceo_ref`.
+
+        El tool acunaba una referencia nueva por llamada, asi que el indice
+        unico de ERPNext no podia frenar nunca un re-despacho (POST /run con
+        `force`) ni un parche a Mongo perdido justo despues de la escritura:
+        quedaban dos asientos sometidos, ambos con `duplicate=False` (contrato
+        §6.1: "mismo intento/retry -> mismo valor").
+        """
+        explicit = (openceo_ref or "").strip()
+        if explicit:
+            return explicit
+        task = (context or {}).get("task") or {}
+        task_id = str(task.get("task_id") or "").strip()
+        if not task_id:
+            return None
+        return f"{prefix}:{task_id}"
+
     async def _finance_register_expense(
         self,
         text: str = "",
         openceo_ref: str | None = None,
         submit: bool = True,
+        exchange_rate: str | None = None,
+        context: dict[str, Any] | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         """Registra un gasto ocasional por voz/chat en ERPNext (TASK-2026-00032).
@@ -584,16 +610,26 @@ class WorkflowToolRegistry:
         que llegue al libro mayor. Sin tickets por gasto.
         """
         from agents.finance import voice_expense as _voice_expense
+        from agents.finance.money_text import MissingExchangeRateError
         from tools.erpnext_client import ERPNextClient
 
-        parsed = _voice_expense.parse_expense(text)
+        rate = _rate_or_none(exchange_rate)
+        parsed = _voice_expense.parse_expense(text, exchange_rate=rate)
         if parsed is None:
             return {"ok": False, "error": "no_amount"}
+        ref = self._operation_ref("voice-expense", openceo_ref, context)
         client = ERPNextClient(self._settings)
         try:
-            result = await _voice_expense.register_expense(
-                client, parsed, ref=openceo_ref, submit=bool(submit)
-            )
+            try:
+                result = await _voice_expense.register_expense(
+                    client, parsed, ref=ref, submit=bool(submit)
+                )
+            except MissingExchangeRateError as exc:
+                return {
+                    "ok": False,
+                    "error": "missing_exchange_rate",
+                    "summary": str(exc),
+                }
         finally:
             await client.aclose()
         doc = result["doc"]
@@ -640,6 +676,8 @@ class WorkflowToolRegistry:
         text: str = "",
         openceo_ref: str | None = None,
         submit: bool = True,
+        exchange_rate: str | None = None,
+        context: dict[str, Any] | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         """Registra un ingreso ya cobrado por voz/chat en ERPNext (TASK-2026-00053).
@@ -649,16 +687,26 @@ class WorkflowToolRegistry:
         efectivo / credito a la cuenta de ingreso). Sin tickets por ingreso.
         """
         from agents.finance import voice_income as _voice_income
+        from agents.finance.money_text import MissingExchangeRateError
         from tools.erpnext_client import ERPNextClient
 
-        parsed = _voice_income.parse_income(text)
+        rate = _rate_or_none(exchange_rate)
+        parsed = _voice_income.parse_income(text, exchange_rate=rate)
         if parsed is None:
             return {"ok": False, "error": "no_amount"}
+        ref = self._operation_ref("voice-income", openceo_ref, context)
         client = ERPNextClient(self._settings)
         try:
-            result = await _voice_income.register_income(
-                client, parsed, ref=openceo_ref, submit=bool(submit)
-            )
+            try:
+                result = await _voice_income.register_income(
+                    client, parsed, ref=ref, submit=bool(submit)
+                )
+            except MissingExchangeRateError as exc:
+                return {
+                    "ok": False,
+                    "error": "missing_exchange_rate",
+                    "summary": str(exc),
+                }
         finally:
             await client.aclose()
         doc = result["doc"]
@@ -1539,6 +1587,20 @@ class WorkflowService:
 def _task_params(task: dict[str, Any]) -> dict[str, Any]:
     params = task.get("params")
     return dict(params) if isinstance(params, dict) else {}
+
+
+def _rate_or_none(value: Any) -> Decimal | None:
+    """Tasa de cambio explicita como `Decimal`, o None si no hay/esta mal.
+
+    Nunca se inventa una tasa: un valor invalido se trata como ausente y el
+    flujo falla cerrado en `money_text.MissingExchangeRateError`.
+    """
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value))
+    except InvalidOperation:
+        return None
 
 
 def _task_context(task: dict[str, Any]) -> dict[str, Any]:

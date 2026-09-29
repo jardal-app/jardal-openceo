@@ -20,11 +20,14 @@ los marcadores tecnicos para no robarle trabajo al flujo dev.
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from datetime import datetime, timezone
 
 from horizon.models import CaptureKind
+
+logger = logging.getLogger(__name__)
 
 # Intents que este clasificador puede devolver.
 INTENT_CAPTURE = "horizon_capture"
@@ -261,19 +264,35 @@ def is_finance_operative(text: str) -> bool:
     La autoridad es el mismo clasificador que usa Finance
     (`agents.finance.intent`), no un vocabulario duplicado aqui: si los dos
     modulos deciden por su cuenta, una frase de dinero termina como nota
-    personal y el libro mayor no se entera. "registra ingreso sueldo 6200
-    bolivianos" empieza con verbo de captura explicita y "me pagaron 500
-    dólares del contrato" encaja en avance: sin esta guarda, Horizon se las
-    queda. El import es perezoso y un fallo degrada a "Horizon conserva la
-    frase", que era el comportamiento anterior.
+    personal y el libro mayor no se entera.
+
+    Solo cuenta la **escritura y la regla del 10%** (ingreso, gasto, aporte):
+    la lectura de saldo (`BALANCE`) se decide por vocabulario ordinario ("total",
+    "resumen", "cuentas", "hoy", "mes") y no exige monto ni moneda, asi que
+    reclamaba frases personales del dueno ("tengo que ver las cuentas del banco
+    con mi padre", "me gustaria un resumen del plan de hoy", "hoy solo tengo 15
+    minutos en total"). Esas frases vuelven a Horizon; el ruteo a Finance de las
+    consultas de saldo sigue vivo en `first_layer`/`main` via `is_finance_text`.
+
+    Sin esta guarda el dano NO era solo una nota mal archivada: en el
+    comportamiento anterior Horizon dejaba pasar la frase y Finance la
+    contabilizaba con el signo invertido ("registra ingreso sueldo 6200
+    bolivianos" -> debito a gasto / credito a efectivo). Ese es el motivo real
+    de la guarda, no la estetica del enrutado. El import es perezoso y un fallo
+    degrada a "Horizon conserva la frase" (fail-open), pero ahora deja registro.
     """
     try:
-        from agents.finance.intent import is_finance_text
-    except Exception:
+        from agents.finance.intent import CONTRIBUTION, EXPENSE, INCOME
+        from agents.finance.intent import classify as classify_finance
+    except Exception as exc:  # pragma: no cover - depende del arbol de imports
+        logger.warning(
+            "Finance intent guard unavailable (%s); Horizon keeps the phrase", exc
+        )
         return False
     try:
-        return bool(is_finance_text(text))
+        return classify_finance(text) in {INCOME, EXPENSE, CONTRIBUTION}
     except Exception:
+        logger.warning("Finance intent guard failed; Horizon keeps the phrase", exc_info=True)
         return False
 
 

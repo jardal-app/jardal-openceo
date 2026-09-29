@@ -16,6 +16,10 @@ El parseo de dinero vive en `money_text` y la idempotencia del asiento en
 propio del gasto: su detector, la clasificacion a cuentas de gasto reales y
 el concepto.
 
+Moneda distinta a la de la Company: igual que en el ingreso, sin tasa real
+confirmada no se escribe nada (`MissingExchangeRateError`); con tasa, el
+asiento se convierte a BOB y la tasa queda en el `user_remark`.
+
 No hay ledger paralelo: Mongo guarda como maximo la referencia devuelta.
 `execute_money_movements=false` sigue vigente: esto contabiliza gasto ya
 ocurrido, no mueve dinero externo.
@@ -33,15 +37,18 @@ from agents.finance.journal import submit_journal_entry
 from agents.finance.money_text import (  # noqa: F401  (reexport publico)
     CASH_ACCOUNT,
     COMPANY,
+    COMPANY_CURRENCY,
     COST_CENTER,
     CURRENCY_WORD_RE as _CURRENCY_WORD_RE,
+    MissingExchangeRateError,
+    company_amount,
     detect_currency,
-    find_money_match as _find_money_match,
     has_dev_marker,
     is_question,
     looks_like_money_in,
     norm as _norm,
     parse_amount,
+    select_money_match as _select_money_match,
     strip_accents as _strip_accents,
     today_local,
 )
@@ -87,6 +94,8 @@ class ParsedExpense:
     cash_account: str = CASH_ACCOUNT
     posting_date: str = ""
     remark: str = ""
+    # Tasa real de la operacion. Obligatoria si `currency != COMPANY_CURRENCY`.
+    exchange_rate: Decimal | None = None
 
 
 def classify_expense_account(concept: str) -> str:
@@ -106,7 +115,7 @@ def classify_expense_account(concept: str) -> str:
 def extract_concept(text: str) -> str:
     """Lo que queda tras quitar orden, monto y relleno: 'carne', 'luz casa'."""
     blob = _COMMAND_PREFIX_RE.sub("", str(text or "").strip())
-    match = _find_money_match(blob)
+    match = _select_money_match(blob)
     if match is not None:
         blob = (blob[: match.start()] + " " + blob[match.end():]).strip()
     blob = _CURRENCY_WORD_RE.sub(" ", blob)
@@ -128,20 +137,27 @@ def looks_like_expense(text: str) -> bool:
     blob = str(text or "").strip()
     if not blob or has_dev_marker(blob) or is_question(blob) or looks_like_money_in(blob):
         return False
-    amount_match = _find_money_match(blob)
-    if amount_match is None:
+    if _select_money_match(blob) is None:
         return False
     if _CURRENCY_WORD_RE.search(blob):
         return True
     return bool(_FINANCE_VERB_RE.search(blob) or _FINANCE_NOUN_RE.search(blob))
 
 
-def parse_expense(text: str) -> ParsedExpense | None:
-    """Interpreta un gasto ocasional. None si falta monto valido."""
+def parse_expense(
+    text: str,
+    *,
+    exchange_rate: Decimal | None = None,
+) -> ParsedExpense | None:
+    """Interpreta un gasto ocasional. None si falta monto o no es un gasto.
+
+    Aplica las mismas guardas que el detector, porque la ruta del tool
+    (`finance.register_expense`) recibe texto crudo.
+    """
     blob = str(text or "").strip()
-    if not blob:
+    if not looks_like_expense(blob):
         return None
-    match = _find_money_match(blob)
+    match = _select_money_match(blob)
     if match is None:
         return None
     amount = parse_amount(match.group("num"))
@@ -151,7 +167,19 @@ def parse_expense(text: str) -> ParsedExpense | None:
     concept = extract_concept(blob)
     account = classify_expense_account(concept)
     today = today_local()
-    remark = f"Registro por voz: {concept} - {amount:.2f} {currency} ({today})"
+    if currency == COMPANY_CURRENCY:
+        remark = f"Registro por voz: {concept} - {amount:.2f} {currency} ({today})"
+    else:
+        rate_text = _format_rate(exchange_rate) if exchange_rate is not None else "sin tasa"
+        converted = (
+            f" = {company_amount(amount, currency, exchange_rate):.2f} {COMPANY_CURRENCY}"
+            if exchange_rate is not None
+            else ""
+        )
+        remark = (
+            f"Registro por voz: {concept} - {amount:.2f} {currency} "
+            f"@ {rate_text}{converted} ({today})"
+        )
     return ParsedExpense(
         concept=concept,
         amount=amount,
@@ -159,7 +187,14 @@ def parse_expense(text: str) -> ParsedExpense | None:
         expense_account=account,
         posting_date=today,
         remark=remark,
+        exchange_rate=exchange_rate,
     )
+
+
+def _format_rate(exchange_rate: Decimal | None) -> str:
+    if exchange_rate is None:
+        return ""
+    return f"{Decimal(exchange_rate).normalize():f}"
 
 
 def new_openceo_ref() -> str:
@@ -168,7 +203,7 @@ def new_openceo_ref() -> str:
 
 def build_journal_entry(parsed: ParsedExpense, ref: str) -> dict[str, Any]:
     """Payload cerrado del asiento. El LLM nunca arma esto a mano."""
-    amount = f"{parsed.amount:.2f}"
+    amount = f"{company_amount(parsed.amount, parsed.currency, parsed.exchange_rate):.2f}"
     return {
         "doctype": "Journal Entry",
         "voucher_type": "Journal Entry",
@@ -180,12 +215,12 @@ def build_journal_entry(parsed: ParsedExpense, ref: str) -> dict[str, Any]:
             {
                 "account": parsed.expense_account,
                 "debit_in_account_currency": amount,
-                "credit_in_account_currency": 0.0,
+                "credit_in_account_currency": "0.00",
                 "cost_center": parsed.cost_center,
             },
             {
                 "account": parsed.cash_account,
-                "debit_in_account_currency": 0.0,
+                "debit_in_account_currency": "0.00",
                 "credit_in_account_currency": amount,
                 "cost_center": parsed.cost_center,
             },

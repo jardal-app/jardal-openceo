@@ -218,13 +218,22 @@ async def _run_finance_voice(text: str) -> str | None:
 
 
 def _is_finance_text(text: str) -> bool:
+    """Ruteo del agente Finance: delegado en el detector unico de `intent`.
+
+    Incluye la lectura de saldo (a diferencia de la guarda de Horizon, que solo
+    reclama escritura y regla del 10%). Un fallo de import degrada a "no es
+    finanzas", pero deja registro: el fail-open silencioso ocultaba que el
+    libro mayor no se enteraba de una orden.
+    """
     try:
         from agents.finance.intent import is_finance_text
-    except Exception:
+    except Exception as exc:  # pragma: no cover - depende del arbol de imports
+        logger.warning("Finance intent guard unavailable (%s)", exc)
         return False
     try:
         return bool(is_finance_text(text))
     except Exception:
+        logger.warning("Finance intent guard failed", exc_info=True)
         return False
 
 

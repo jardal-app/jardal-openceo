@@ -1,0 +1,214 @@
+{
+  "totals": {
+    "calls": 657,
+    "inputTokens": 61642467,
+    "cachedTokens": 59133747,
+    "outputTokens": 725945,
+    "thoughtsTokens": 462366,
+    "firstAt": "2026-09-28T23:54:18.633Z",
+    "lastAt": "2026-09-29T01:31:58.888Z",
+    "wallSeconds": 5860
+  },
+  "main": {
+    "id": "main",
+    "label": "main loop",
+    "calls": 22,
+    "inputTokens": 9323841,
+    "cachedTokens": 8412994,
+    "outputTokens": 69410,
+    "thoughtsTokens": 15602,
+    "firstAt": "2026-09-28T23:54:18.633Z",
+    "lastAt": "2026-09-29T01:31:58.888Z"
+  },
+  "agents": [
+    {
+      "id": "workflow-agent-c5416ea4f318bfb3",
+      "label": "agent verify",
+      "calls": 109,
+      "inputTokens": 11043194,
+      "cachedTokens": 10894370,
+      "outputTokens": 54218,
+      "thoughtsTokens": 28133,
+      "firstAt": "2026-09-29T00:34:02.873Z",
+      "lastAt": "2026-09-29T01:06:44.114Z"
+    },
+    {
+      "id": "workflow-agent-465f3b623494e375",
+      "label": "agent verify",
+      "calls": 89,
+      "inputTokens": 10218591,
+      "cachedTokens": 10033998,
+      "outputTokens": 72789,
+      "thoughtsTokens": 34848,
+      "firstAt": "2026-09-29T00:34:02.974Z",
+      "lastAt": "2026-09-29T01:13:06.555Z"
+    },
+    {
+      "id": "workflow-agent-20834a830381cca9",
+      "label": "agent verify",
+      "calls": 83,
+      "inputTokens": 8713534,
+      "cachedTokens": 8548342,
+      "outputTokens": 61650,
+      "thoughtsTokens": 35753,
+      "firstAt": "2026-09-29T00:34:04.470Z",
+      "lastAt": "2026-09-29T01:06:43.051Z"
+    },
+    {
+      "id": "workflow-agent-4ef973b740d8e285",
+      "label": "agent verify",
+      "calls": 71,
+      "inputTokens": 7289650,
+      "cachedTokens": 7132726,
+      "outputTokens": 63904,
+      "thoughtsTokens": 35842,
+      "firstAt": "2026-09-29T00:34:03.161Z",
+      "lastAt": "2026-09-29T01:06:09.530Z"
+    },
+    {
+      "id": "workflow-agent-a8dd3bd296f3ba6e",
+      "label": "agent prose-exec",
+      "calls": 38,
+      "inputTokens": 3099334,
+      "cachedTokens": 2982899,
+      "outputTokens": 51141,
+      "thoughtsTokens": 36663,
+      "firstAt": "2026-09-29T00:02:48.439Z",
+      "lastAt": "2026-09-29T00:25:12.480Z"
+    },
+    {
+      "id": "workflow-agent-c8d0302f64dff15a",
+      "label": "agent 1c",
+      "calls": 32,
+      "inputTokens": 2494610,
+      "cachedTokens": 2374982,
+      "outputTokens": 45336,
+      "thoughtsTokens": 36255,
+      "firstAt": "2026-09-29T00:04:01.686Z",
+      "lastAt": "2026-09-29T00:24:55.613Z"
+    },
+    {
+      "id": "workflow-agent-5b9cc60be418d7b6",
+      "label": "chunk 2",
+      "calls": 28,
+      "inputTokens": 1520410,
+      "cachedTokens": 1431003,
+      "outputTokens": 41083,
+      "thoughtsTokens": 30331,
+      "firstAt": "2026-09-28T23:55:28.751Z",
+      "lastAt": "2026-09-29T00:14:18.559Z"
+    },
+    {
+      "id": "workflow-agent-0c74aa04a8da5c0f",
+      "label": "agent 1b",
+      "calls": 22,
+      "inputTokens": 1481748,
+      "cachedTokens": 1374138,
+      "outputTokens": 44500,
+      "thoughtsTokens": 36367,
+      "firstAt": "2026-09-28T23:55:29.705Z",
+      "lastAt": "2026-09-29T00:15:12.595Z"
+    },
+    {
+      "id": "workflow-agent-cf404adf2a5207ff",
+      "label": "agent test-matrix",
+      "calls": 21,
+      "inputTokens": 1247024,
+      "cachedTokens": 1157994,
+      "outputTokens": 29149,
+      "thoughtsTokens": 21040,
+      "firstAt": "2026-09-28T23:55:28.292Z",
+      "lastAt": "2026-09-29T00:09:36.639Z"
+    },
+    {
+      "id": "workflow-agent-b07df0d93539346f",
+      "label": "chunk 3",
+      "calls": 26,
+      "inputTokens": 1081514,
+      "cachedTokens": 1017828,
+      "outputTokens": 24753,
+      "thoughtsTokens": 19853,
+      "firstAt": "2026-09-28T23:55:27.833Z",
+      "lastAt": "2026-09-29T00:07:31.938Z"
+    },
+    {
+      "id": "workflow-agent-264670389e3c83c4",
+      "label": "chunk 1",
+      "calls": 24,
+      "inputTokens": 1063788,
+      "cachedTokens": 998450,
+      "outputTokens": 36702,
+      "thoughtsTokens": 29591,
+      "firstAt": "2026-09-28T23:55:29.970Z",
+      "lastAt": "2026-09-29T00:13:42.311Z"
+    },
+    {
+      "id": "workflow-agent-1df75e38853a1f04",
+      "label": "chunk 4",
+      "calls": 18,
+      "inputTokens": 712616,
+      "cachedTokens": 653459,
+      "outputTokens": 22528,
+      "thoughtsTokens": 17117,
+      "firstAt": "2026-09-28T23:55:26.735Z",
+      "lastAt": "2026-09-29T00:05:46.086Z"
+    },
+    {
+      "id": "workflow-agent-d33b10c1041d3b39",
+      "label": "chunk 6",
+      "calls": 18,
+      "inputTokens": 689361,
+      "cachedTokens": 630943,
+      "outputTokens": 23278,
+      "thoughtsTokens": 16350,
+      "firstAt": "2026-09-28T23:55:29.369Z",
+      "lastAt": "2026-09-29T00:06:22.843Z"
+    },
+    {
+      "id": "workflow-agent-8c191867c6d00a7d",
+      "label": "agent 7",
+      "calls": 19,
+      "inputTokens": 571135,
+      "cachedTokens": 535032,
+      "outputTokens": 16810,
+      "thoughtsTokens": 12031,
+      "firstAt": "2026-09-29T00:05:49.268Z",
+      "lastAt": "2026-09-29T00:14:27.451Z"
+    },
+    {
+      "id": "workflow-agent-3cb4bb492cb3323c",
+      "label": "chunk 7",
+      "calls": 18,
+      "inputTokens": 527339,
+      "cachedTokens": 481205,
+      "outputTokens": 18108,
+      "thoughtsTokens": 13690,
+      "firstAt": "2026-09-28T23:55:27.278Z",
+      "lastAt": "2026-09-29T00:03:55.615Z"
+    },
+    {
+      "id": "workflow-agent-65e90a05b8158c02",
+      "label": "chunk 8",
+      "calls": 12,
+      "inputTokens": 323359,
+      "cachedTokens": 282306,
+      "outputTokens": 14875,
+      "thoughtsTokens": 12665,
+      "firstAt": "2026-09-28T23:55:29.577Z",
+      "lastAt": "2026-09-29T00:02:42.616Z"
+    },
+    {
+      "id": "workflow-agent-e86e9170eddb5bf2",
+      "label": "chunk 5",
+      "calls": 7,
+      "inputTokens": 241419,
+      "cachedTokens": 191078,
+      "outputTokens": 35711,
+      "thoughtsTokens": 30235,
+      "firstAt": "2026-09-28T23:55:28.693Z",
+      "lastAt": "2026-09-29T00:11:08.881Z"
+    }
+  ],
+  "priorSessions": 0,
+  "missingStreams": 0
+}
