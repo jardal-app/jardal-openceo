@@ -292,6 +292,35 @@ class ConfigLoader:
                 "workflows": [],
             },
             "notifications": [],
+            "research": {
+                # Politica de research POR PROYECTO. Nace apagada de forma deliberada:
+                # habilitar research es una decision explicita del proyecto, no un
+                # efecto colateral de tener claves de proveedor en el entorno. Los
+                # adaptadores pagados nacen apagados aunque exista clave.
+                "enabled": False,
+                "default_mode": "quick",
+                "allowed_modes": ["quick"],
+                # Techo de clasificacion que este proyecto puede pedir. El servidor
+                # recorta cualquier peticion por encima; el payload no eleva derechos.
+                "classification_ceiling": "public",
+                "adapters": {
+                    "brave": True,
+                    "serper": False,
+                    "firecrawl": False,
+                    "grounding": False,
+                },
+                # Presupuesto pagado aprobado para este proyecto (USD, cadena decimal).
+                # "0.00" significa pago cero: no se llaman proveedores pagados.
+                "paid_budget_usd": "0.00",
+                "limits": {
+                    "quick": {"search_requests": 3, "pages": 5, "steps": 8, "seconds": 120},
+                    "deep": {"search_requests": 15, "pages": 25, "steps": 30, "seconds": 900},
+                    # ``watch`` define lote/periodo por suscripcion (Entrega B).
+                    "watch": {"search_requests": 0, "pages": 10, "steps": 0, "seconds": 60},
+                },
+                # Referencias de cuenta autorizadas. Vacio = ninguna cuenta social.
+                "allowed_account_refs": [],
+            },
         }
         return _deep_merge(defaults, cfg)
 
