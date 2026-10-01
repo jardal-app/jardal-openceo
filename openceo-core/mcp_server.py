@@ -600,7 +600,7 @@ def _register_openceo_tools(
     server.tool(
         openceo_update_ticket,
         name="openceo_update_ticket",
-        description="Edit a ticket's subject, description, priority (low/medium/high/critical) or due_date. Only the given fields change. Status, dependencies and execution are untouched.",
+        description="Edit a ticket's subject, description (plain text or HTML), priority (low/medium/high/critical) or due_date. Only the given fields change. Status, dependencies and execution are untouched.",
     )
     server.tool(
         openceo_get_ticket_thread,

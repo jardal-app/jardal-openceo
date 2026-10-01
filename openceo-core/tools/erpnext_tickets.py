@@ -99,6 +99,30 @@ def to_html_description(text: str) -> str:
     return "<br>".join(html.escape(line) for line in raw.splitlines())
 
 
+#: Etiqueta HTML con nombre (`<b>`, `<a href="x">`). No es un parser: solo decide si lo
+#: que llega **ya es** el HTML del campo o si hay que tratarlo como texto plano.
+_HTML_TAG_PATTERN = re.compile(r"<[a-zA-Z][a-zA-Z0-9]*(\s[^>]*)?>")
+
+
+def to_description_html(text: str) -> str:
+    """HTML si el texto ya es HTML; texto plano escapado con `<br>` si no.
+
+    `Task.description` es un Text Editor (HTML). La creacion recibe texto plano del turno
+    de voz y lo escapa; la edicion puede recibir la descripcion existente ya en HTML, y
+    escaparla mostraria las etiquetas como texto literal. Pasar el HTML tal cual es
+    seguro: **Frappe lo sanea al guardar** (verificado contra el sitio vivo el
+    2026-10-01: `<script>` y los `href="javascript:"` se eliminan y el formato se
+    conserva).
+
+    Regla: si hay una etiqueta con nombre, es HTML; si no, es texto plano. `<3` o un `<b`
+    sin cerrar no cuentan como etiqueta.
+    """
+    raw = str(text or "")
+    if _HTML_TAG_PATTERN.search(raw):
+        return raw.strip()
+    return to_html_description(raw)
+
+
 def map_priority(priority: str | None) -> str:
     return _PRIORITY_MAP.get(str(priority or "").strip().lower(), "Medium")
 
@@ -722,7 +746,7 @@ class ERPNextTicketAdapter:
                 raise ERPNextValidationError("El titulo no puede quedar vacio.", status_code=400)
             body["subject"] = truncate_subject(clean_subject)
         if description is not None:
-            body["description"] = to_html_description(str(description))
+            body["description"] = to_description_html(str(description))
         if priority is not None:
             clean_priority = str(priority).strip().lower()
             if clean_priority not in _PRIORITY_MAP:
