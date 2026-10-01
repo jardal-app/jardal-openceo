@@ -218,6 +218,19 @@ class ProviderDisabledError(MissingConfigError):
     kind = "disabled"
 
 
+class ModelPolicyUnavailableError(AcquisitionError):
+    """No hay ruta de modelo compatible con la clasificacion del trabajo.
+
+    No es un fallo de configuracion que se arregle con otra clave ni un hueco de
+    cobertura del proveedor: es una decision de privacidad. El trabajo no se ejecuta
+    y **no** se cae a la ruta publica, porque esa ruta puede entrenar con los
+    prompts (``TASK-2026-00064``).
+    """
+
+    kind = "model_policy_unavailable"
+    coverage_reason = CoverageReason.MODEL_POLICY_UNAVAILABLE
+
+
 class ProviderAuthError(AcquisitionError):
     """401/403: la credencial no autoriza el acceso."""
 

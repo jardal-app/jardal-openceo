@@ -37,6 +37,7 @@ from .base import (
     DiscoveryItem,
     DiscoveryResult,
     MissingConfigError,
+    ModelPolicyUnavailableError,
     ProviderAmbiguousTimeout,
     ProviderAuthError,
     ProviderCallResult,
@@ -77,6 +78,14 @@ from .http_reader import (
     open_publications,
 )
 from .rss import FeedEntry, FeedOutcome, RssReader, assert_safe_xml, parse_feed
+from .grounded import (
+    GROUNDING_SEARCH_MICRO_USD,
+    GroundedResult,
+    GroundingCitation,
+    GroundingClient,
+    GroundingSource,
+    token_cost_micro,
+)
 from .serper import SERPER_BASE_URL, SERPER_QUERY_MICRO_USD, SerperClient
 
 __all__ = [
@@ -104,8 +113,14 @@ __all__ = [
     "FeedEntry",
     "FeedOutcome",
     "FirecrawlClient",
+    "GROUNDING_SEARCH_MICRO_USD",
+    "GroundedResult",
+    "GroundingCitation",
+    "GroundingClient",
+    "GroundingSource",
     "HttpReader",
     "MissingConfigError",
+    "ModelPolicyUnavailableError",
     "PreviousReading",
     "ProviderAmbiguousTimeout",
     "ProviderAuthError",
@@ -138,4 +153,5 @@ __all__ = [
     "parse_retry_after",
     "run_provider_call",
     "safe_discovery_item",
+    "token_cost_micro",
 ]
