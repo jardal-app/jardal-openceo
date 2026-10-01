@@ -272,6 +272,35 @@ def _register_openceo_tools(
                 row["execution_ticket_number"] = task.get("ticket_number")
         return rows
 
+    def _not_configured() -> dict[str, Any]:
+        return {"ok": False, "status": "not_configured", "message": "ERPNext no esta configurado."}
+
+    def _classify(exc: Exception) -> dict[str, Any]:
+        """Fallo -> estado clasificado: permiso, datos, tamano, disponibilidad."""
+        if isinstance(exc, AttachmentRejected):
+            return {"ok": False, "status": exc.status, "message": str(exc)}
+        if isinstance(exc, ERPNextUnavailable):
+            return {"ok": False, "status": "unavailable", "message": str(exc)}
+        if isinstance(exc, ERPNextPermissionError):
+            return {"ok": False, "status": "forbidden", "message": str(exc)}
+        if isinstance(exc, ERPNextDuplicateError):
+            return {"ok": False, "status": "duplicate", "message": str(exc)}
+        if isinstance(exc, ERPNextValidationError):
+            status = {404: "not_found", 413: "too_large", 400: "invalid_input"}.get(
+                exc.status_code, "invalid_input"
+            )
+            return {"ok": False, "status": status, "message": str(exc)}
+        return {"ok": False, "status": "error", "message": str(exc)}
+
+    async def _guard(operation: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Resuelve el metodo **despues** de comprobar el adapter: `erpnext` puede ser None."""
+        if erpnext is None or not erpnext.is_enabled:
+            return _not_configured()
+        try:
+            return await getattr(erpnext, operation)(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - se clasifica y se devuelve, no se propaga
+            return _classify(exc)
+
     async def openceo_search_tickets(
         query: str | None = None,
         project: str | None = None,
@@ -288,17 +317,24 @@ def _register_openceo_tools(
             return {"ok": False, "status": "error", "message": str(exc)}
         return {"ok": True, "count": len(rows), "tickets": await _enrich_with_execution(rows)}
 
-    async def openceo_get_ticket(identifier: str) -> dict[str, Any]:
+    async def openceo_get_ticket(identifier: str, limit: int = 10) -> dict[str, Any]:
+        """El ticket completo de una vez: datos, ejecucion, comentarios y adjuntos.
+
+        Una sola lectura da todo el contexto. Estuvo separado en `openceo_get_ticket_thread`
+        y se unio aqui (decision del dueño, 2026-10-01): dos tools para entender un ticket
+        obligan al agente a un paso extra en cada turno.
+        """
         if erpnext is None or not erpnext.is_enabled:
-            return {"ok": False, "status": "not_configured", "message": "ERPNext no esta configurado."}
+            return _not_configured()
         try:
             row = await erpnext.get_ticket(identifier)
-        except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "status": "error", "message": str(exc)}
-        if row is None:
-            return {"ok": False, "status": "not_found", "message": f"No existe el ticket {identifier}."}
-        enriched = (await _enrich_with_execution([row]))[0]
-        return {"ok": True, "ticket": enriched}
+            if row is None:
+                return {"ok": False, "status": "not_found", "message": f"No existe el ticket {identifier}."}
+            enriched = (await _enrich_with_execution([row]))[0]
+            thread = await erpnext.thread_of(str(row.get("name") or ""), limit=limit)
+        except Exception as exc:  # noqa: BLE001 - se clasifica y se devuelve, no se propaga
+            return _classify(exc)
+        return {"ok": True, "ticket": enriched, **thread}
 
     def _map_priority(priority: str | None) -> TaskPriority:
         try:
@@ -499,42 +535,13 @@ def _register_openceo_tools(
     server.tool(
         openceo_get_ticket,
         name="openceo_get_ticket",
-        description="Read one ticket plus its execution status. Accepts either the ERPNext name (e.g. 'TASK-2026-00025') or the OpenCEO ref.",
+        description="Read one ticket in full: fields, execution status, comments (newest first) and attachments with download URLs. Accepts the ERPNext name (e.g. 'TASK-2026-00025') or the OpenCEO ref.",
     )
     # --- hilo del ticket: edicion, comentarios y adjuntos (TASK-2026-00079) ----
     #
     # Descripciones cortas a proposito: cada palabra viaja en **cada** peticion de la
     # sesion de codigo (regla de `docs/ARCHITECTURE_REFERENCE_2026.md`), y el esquema de
     # argumentos ya documenta la forma.
-
-    def _not_configured() -> dict[str, Any]:
-        return {"ok": False, "status": "not_configured", "message": "ERPNext no esta configurado."}
-
-    def _classify(exc: Exception) -> dict[str, Any]:
-        """Fallo -> estado clasificado: permiso, datos, tamano, disponibilidad."""
-        if isinstance(exc, AttachmentRejected):
-            return {"ok": False, "status": exc.status, "message": str(exc)}
-        if isinstance(exc, ERPNextUnavailable):
-            return {"ok": False, "status": "unavailable", "message": str(exc)}
-        if isinstance(exc, ERPNextPermissionError):
-            return {"ok": False, "status": "forbidden", "message": str(exc)}
-        if isinstance(exc, ERPNextDuplicateError):
-            return {"ok": False, "status": "duplicate", "message": str(exc)}
-        if isinstance(exc, ERPNextValidationError):
-            status = {404: "not_found", 413: "too_large", 400: "invalid_input"}.get(
-                exc.status_code, "invalid_input"
-            )
-            return {"ok": False, "status": status, "message": str(exc)}
-        return {"ok": False, "status": "error", "message": str(exc)}
-
-    async def _guard(operation: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        """Resuelve el metodo **despues** de comprobar el adapter: `erpnext` puede ser None."""
-        if erpnext is None or not erpnext.is_enabled:
-            return _not_configured()
-        try:
-            return await getattr(erpnext, operation)(*args, **kwargs)
-        except Exception as exc:  # noqa: BLE001 - se clasifica y se devuelve, no se propaga
-            return _classify(exc)
 
     async def openceo_update_ticket(
         ticket: str,
@@ -552,14 +559,14 @@ def _register_openceo_tools(
             due_date=due_date,
         )
 
-    async def openceo_get_ticket_thread(ticket: str, limit: int = 20) -> dict[str, Any]:
-        return await _guard("list_thread", ticket, limit=limit)
-
     async def openceo_add_ticket_comment(ticket: str, content: str) -> dict[str, Any]:
         return await _guard("add_comment", ticket, content)
 
     async def openceo_update_ticket_comment(comment_id: str, content: str) -> dict[str, Any]:
         return await _guard("update_comment", comment_id, content)
+
+    async def openceo_delete_ticket_comment(comment_id: str, ticket: str) -> dict[str, Any]:
+        return await _guard("delete_comment", comment_id, ticket)
 
     async def openceo_attach_ticket_file(
         ticket: str,
@@ -603,11 +610,6 @@ def _register_openceo_tools(
         description="Edit a ticket's subject, description (plain text or HTML), priority (low/medium/high/critical) or due_date. Only the given fields change. Status, dependencies and execution are untouched.",
     )
     server.tool(
-        openceo_get_ticket_thread,
-        name="openceo_get_ticket_thread",
-        description="Read a ticket's timeline: comments (newest first, limit default 20) and attachments. Use before commenting or attaching.",
-    )
-    server.tool(
         openceo_add_ticket_comment,
         name="openceo_add_ticket_comment",
         description="Comment on a ticket; it appears in the ERPNext timeline. Idempotent: identical text from this agent is not posted twice.",
@@ -615,7 +617,12 @@ def _register_openceo_tools(
     server.tool(
         openceo_update_ticket_comment,
         name="openceo_update_ticket_comment",
-        description="Edit a comment by its id. Frappe allows this only to the comment's author, so comments written by a person are not editable.",
+        description="Edit any comment by its id, whoever wrote it.",
+    )
+    server.tool(
+        openceo_delete_ticket_comment,
+        name="openceo_delete_ticket_comment",
+        description="Delete a comment. Requires the id and its ticket.",
     )
     server.tool(
         openceo_attach_ticket_file,
@@ -644,9 +651,9 @@ def _register_openceo_tools(
         "openceo_search_tickets",
         "openceo_get_ticket",
         "openceo_update_ticket",
-        "openceo_get_ticket_thread",
         "openceo_add_ticket_comment",
         "openceo_update_ticket_comment",
+        "openceo_delete_ticket_comment",
         "openceo_attach_ticket_file",
         "openceo_get_ticket_attachment",
         "openceo_update_ticket_attachment",

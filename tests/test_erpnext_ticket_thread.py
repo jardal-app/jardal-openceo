@@ -111,6 +111,11 @@ class RecordingClient:
             raise self.errors["download_bytes"]
         return self.download_result
 
+    async def delete_doc(self, doctype, name):
+        self.calls.append(("delete_doc", doctype, name))
+        if "delete_doc" in self.errors:
+            raise self.errors["delete_doc"]
+
     def called(self, name: str) -> list[tuple]:
         return [call for call in self.calls if call[0] == name]
 
@@ -511,13 +516,84 @@ class UpdateCommentTests(TempRootCase):
                 run(self.adapter.update_comment(*args))
         self.assertEqual(self.client.called("call_method"), [])
 
-    def test_comentario_ajeno_devuelve_permiso(self):
-        """Regla de Frappe: `update_comment` exige que la sesion sea la propietaria."""
+    def test_comentario_ajeno_se_edita_por_recurso(self):
+        """El metodo oficial solo edita lo propio; el rol dedicado permite lo de cualquiera.
+
+        Decision del dueño (2026-10-01): control completo del hilo. La via de reserva
+        comprueba antes que el comentario cuelga de un ticket legible.
+        """
         self.client.errors["frappe.desk.form.utils.update_comment"] = ERPNextPermissionError(
             "Comment can only be edited by the owner", status_code=417
         )
+        self.client.docs["ajeno"] = {
+            "name": "ajeno", "comment_type": "Comment", "owner": "persona@jardal.app",
+            "reference_doctype": "Task", "reference_name": "TASK-2026-00079",
+        }
+        result = run(self.adapter.update_comment("ajeno", "corregido por el MCP"))
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.client.updated[-1], ("Comment", "ajeno", {"content": "corregido por el MCP"}))
+
+    def test_comentario_de_otro_doctype_no_se_toca(self):
+        """El rol abre `Comment` en todo el sitio: la frontera la pone el adapter."""
+        self.client.errors["frappe.desk.form.utils.update_comment"] = ERPNextPermissionError(
+            "solo el autor", status_code=417
+        )
+        self.client.docs["ajeno"] = {
+            "name": "ajeno", "comment_type": "Comment",
+            "reference_doctype": "Journal Entry", "reference_name": "ACC-JV-2026-00001",
+        }
+        with self.assertRaises(ERPNextValidationError) as ctx:
+            run(self.adapter.update_comment("ajeno", "no"))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(self.client.updated, [])
+
+    def test_sin_el_rol_tampoco_puede(self):
+        """Si se revoca el permiso, el fallo es de permiso clasificado, no un 500."""
+        self.client.errors["frappe.desk.form.utils.update_comment"] = ERPNextPermissionError(
+            "solo el autor", status_code=417
+        )
+        self.client.docs["ajeno"] = {
+            "name": "ajeno", "comment_type": "Comment",
+            "reference_doctype": "Task", "reference_name": "TASK-2026-00079",
+        }
+        self.client.errors["update_doc"] = ERPNextPermissionError("sin permiso", status_code=403)
         with self.assertRaises(ERPNextPermissionError):
             run(self.adapter.update_comment("ajeno", "no"))
+
+
+class DeleteCommentTests(TempRootCase):
+    def _comment(self, **overrides) -> dict:
+        return {
+            "name": "c1", "comment_type": "Comment", "owner": "persona@jardal.app",
+            "reference_doctype": "Task", "reference_name": "TASK-2026-00079", **overrides,
+        }
+
+    def test_borra_el_comentario_del_ticket(self):
+        self.client.docs["c1"] = self._comment()
+        result = run(self.adapter.delete_comment("c1", "TASK-2026-00079"))
+        self.assertEqual(result["deleted"], "c1")
+        self.assertEqual(self.client.called("delete_doc"), [("delete_doc", "Comment", "c1")])
+
+    def test_ticket_distinto_se_rechaza_sin_borrar(self):
+        """Un id equivocado no debe borrar el comentario de otro trabajo."""
+        self.client.docs["c1"] = self._comment(reference_name="TASK-2026-00001")
+        self.client.docs["TASK-2026-00001"] = {"name": "TASK-2026-00001", "status": "Open"}
+        with self.assertRaises(ERPNextValidationError) as ctx:
+            run(self.adapter.delete_comment("c1", "TASK-2026-00079"))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(self.client.called("delete_doc"), [])
+
+    def test_registro_que_no_es_comentario_se_rechaza(self):
+        self.client.docs["c1"] = self._comment(comment_type="Attachment")
+        with self.assertRaises(ERPNextValidationError):
+            run(self.adapter.delete_comment("c1", "TASK-2026-00079"))
+        self.assertEqual(self.client.called("delete_doc"), [])
+
+    def test_inexistente_es_not_found(self):
+        with self.assertRaises(ERPNextValidationError) as ctx:
+            run(self.adapter.delete_comment("no-existe", "TASK-2026-00079"))
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertEqual(self.client.called("delete_doc"), [])
 
 
 # ---------------------------------------------------------------------------
@@ -766,9 +842,11 @@ class FakeAdapter:
 
     is_enabled = True
 
-    def __init__(self, *, result: dict | None = None, error: Exception | None = None) -> None:
+    def __init__(self, *, result: dict | None = None, error: Exception | None = None,
+                 results: dict | None = None) -> None:
         self.result = result if result is not None else {"ok": True}
         self.error = error
+        self.results = results or {}
         self.calls: list[tuple] = []
 
     def __getattr__(self, item):
@@ -776,16 +854,16 @@ class FakeAdapter:
             self.calls.append((item, args, kwargs))
             if self.error is not None:
                 raise self.error
-            return self.result
+            return self.results.get(item, self.result)
 
         return call
 
 
 NEW_TOOLS = (
     "openceo_update_ticket",
-    "openceo_get_ticket_thread",
     "openceo_add_ticket_comment",
     "openceo_update_ticket_comment",
+    "openceo_delete_ticket_comment",
     "openceo_attach_ticket_file",
     "openceo_get_ticket_attachment",
     "openceo_update_ticket_attachment",
@@ -805,6 +883,35 @@ class McpSurfaceTests(unittest.TestCase):
         for name in NEW_TOOLS:
             self.assertIn(name, names)
             self.assertIn(name, server.tools)
+
+    def test_no_queda_un_tool_separado_para_el_hilo(self):
+        """Un tool de lectura de menos: el hilo viene dentro de `openceo_get_ticket`."""
+        server, names = self._register(FakeAdapter())
+        self.assertNotIn("openceo_get_ticket_thread", names)
+        self.assertNotIn("openceo_get_ticket_thread", server.tools)
+
+    def test_get_ticket_devuelve_todo_el_contexto_en_una_lectura(self):
+        adapter = FakeAdapter(results={
+            "get_ticket": {"name": "TASK-1", "subject": "s", "status": "Open"},
+            "thread_of": {"comment_count": 2, "attachment_count": 1,
+                          "comments": [{"id": "c1"}, {"id": "c2"}],
+                          "attachments": [{"id": "f1", "download_url": "https://erp.test/private/files/f1"}]},
+        })
+        server, _ = self._register(adapter)
+        result = run(server.tools["openceo_get_ticket"][0](identifier="TASK-1"))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["ticket"]["name"], "TASK-1")
+        self.assertEqual(result["comment_count"], 2)
+        self.assertEqual([c["id"] for c in result["comments"]], ["c1", "c2"])
+        self.assertEqual(result["attachments"][0]["download_url"], "https://erp.test/private/files/f1")
+        self.assertEqual([call[0] for call in adapter.calls], ["get_ticket", "thread_of"])
+
+    def test_get_ticket_de_algo_inexistente_es_not_found(self):
+        adapter = FakeAdapter(results={"get_ticket": None})
+        server, _ = self._register(adapter)
+        result = run(server.tools["openceo_get_ticket"][0](identifier="TASK-9"))
+        self.assertEqual(result["status"], "not_found")
+        self.assertEqual([call[0] for call in adapter.calls], ["get_ticket"])
 
     def test_descripciones_cortas(self):
         """Cada palabra de una descripcion viaja en cada peticion de la sesion de codigo."""
