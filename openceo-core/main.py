@@ -274,6 +274,14 @@ async def lifespan(_: FastAPI):
         )
         if _research_mcp_app is not None:
             await stack.enter_async_context(_research_mcp_app.router.lifespan_context(app))
+        # Broker MCP del worker. Se monta en el mismo lifespan y **antes** de que
+        # cualquier job pueda despacharse: el runtime se niega a lanzar un worker sin
+        # broker, asi que montarlo mas tarde solo produciria jobs fallidos.
+        _research_broker = getattr(research_resources, "broker", None)
+        if _research_broker is not None:
+            app.mount(_research_broker.path, _research_broker.mount.app)
+            await stack.enter_async_context(_research_broker.mount.lifespan())
+            logger.info("Broker de research montado en %s", _research_broker.url)
         await repo.mark_interrupted_pm_states()
         await repo.mark_interrupted_tasks()
         await repo.mark_interrupted_dev_sessions()

@@ -26,6 +26,7 @@ from research.service import ResearchDependencies, ResearchService
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "ProjectEvidence",
     "ResearchRuntimeResources",
     "build_research_service",
     "close_research_service",
@@ -39,10 +40,19 @@ class ResearchRuntimeResources:
     vault: Any | None = None
     runtime: Any | None = None
     http_client: Any | None = None
+    broker: Any | None = None
+    capabilities: Any | None = None
+    read_log: Any | None = None
 
     async def aclose(self) -> None:
         # Los workers y el almacen se cierran antes que el repositorio de Mongo: una
         # escritura suya despues del cierre quedaria huerfana.
+        if self.broker is not None and self.capabilities is not None:
+            # Una capability no debe sobrevivir al proceso que la emitio.
+            try:
+                self.capabilities.revoke_all(reason="broker apagado")
+            except Exception:  # noqa: BLE001
+                logger.warning("No se pudieron revocar las capabilities", exc_info=True)
         if self.runtime is not None and hasattr(self.runtime, "aclose"):
             try:
                 await self.runtime.aclose()
@@ -64,7 +74,7 @@ def _setting(settings: Any, name: str, default: Any = None) -> Any:
     return getattr(settings, name, default)
 
 
-class _ProjectEvidence:
+class ProjectEvidence:
     """Adapta el almacen por proyecto a la dependencia unica del servicio.
 
     El servicio no conoce el proyecto al construirse, pero la evidencia si: la ruta y
@@ -93,19 +103,40 @@ def _build_evidence(settings: Any) -> tuple[Any, Any]:
     except Exception:  # noqa: BLE001 - sin almacen el servicio sigue, con su causa
         logger.warning("No se pudo abrir el almacen de evidencias de research", exc_info=True)
         return None, None
-    return _ProjectEvidence(vault), vault
+    return ProjectEvidence(vault), vault
 
 
 def _build_discovery(settings: Any, ledger: Any) -> Any | None:
+    """Descubrimiento como **callable**, que es el contrato que el servicio usa.
+
+    `BraveClient` expone `search_web(query, ...)`; el servicio invoca su dependencia
+    como `discover(question=..., research_id=..., project_key=...)`. Entregar el
+    cliente sin adaptar no falla al construir ni al arrancar: falla **en el primer
+    job con busqueda**, con un `TypeError` que el dispatcher reduce a un `failed`
+    generico. Se adapta aqui, una sola vez, y el mismo callable lo comparte el broker.
+    """
     if not _setting(settings, "RESEARCH_BRAVE_API_KEY", ""):
+        return None
+    if not bool(_setting(settings, "RESEARCH_BRAVE_ENABLED", True)):
         return None
     try:
         from research.acquisition.brave import BraveClient
 
-        return BraveClient(settings=settings, ledger=ledger)
+        client = BraveClient(settings=settings, ledger=ledger)
     except Exception:  # noqa: BLE001
         logger.warning("No se pudo construir el cliente de Brave", exc_info=True)
         return None
+
+    async def discover(*, question: str, research_id: str, project_key: str, **kwargs: Any) -> Any:
+        return await client.search_web(
+            question,
+            research_id=research_id,
+            project_key=project_key,
+            count=int(kwargs.get("count") or 10),
+            deadline=kwargs.get("deadline"),
+        )
+
+    return discover
 
 
 def _build_reader(settings: Any) -> Any | None:
@@ -129,19 +160,30 @@ def _build_reader(settings: Any) -> Any | None:
             project_key=project_key,
             deadline=kwargs.get("deadline"),
         )
+        text = getattr(outcome, "text", "") or ""
+        # `outcome.content_hash` describe el **cuerpo crudo** descargado; el almacen de
+        # evidencias valida que el hash declare el contenido que guarda, que es el texto
+        # extraido. Reenviarlo tal cual hacia fallar **toda** lectura HTML con
+        # `EvidenceHashMismatch` (el extractor quita etiquetas, luego los bytes no
+        # coinciden). Se publica el hash del texto que se almacena y se conserva el del
+        # cuerpo aparte, como dato de transporte.
+        from research.evidence import content_hash_of, normalize_content
+
+        body_hash = getattr(outcome, "content_hash", None)
         return {
             "url": getattr(outcome, "final_url", None) or url,
-            "text": getattr(outcome, "text", "") or "",
+            "text": text,
             "observed_at": getattr(outcome, "observed_at", None),
             "published_at": getattr(outcome, "published_at", None),
-            "content_hash": getattr(outcome, "content_hash", None),
+            "content_hash": content_hash_of(normalize_content(text)) if text else None,
+            "body_hash": body_hash,
             "provider": reader.provider,
         }
 
     return read
 
 
-def _build_runtime(settings: Any) -> Any | None:
+def _build_runtime(settings: Any, *, broker_url: str = "") -> Any | None:
     cli = str(_setting(settings, "RESEARCH_OPENCODE_CLI_PATH", "") or "")
     if not cli:
         return None
@@ -151,7 +193,7 @@ def _build_runtime(settings: Any) -> Any | None:
 
             return OpenCodeRuntime(
                 settings=settings,
-                broker_url=str(_setting(settings, "RESEARCH_BROKER_URL", "") or ""),
+                broker_url=broker_url or str(_setting(settings, "RESEARCH_BROKER_URL", "") or ""),
                 broker_bearer=str(_setting(settings, "RESEARCH_BROKER_BEARER", "") or ""),
             )
         except Exception:  # noqa: BLE001
@@ -167,7 +209,20 @@ def build_research_service(
     *,
     clock: Any = None,
 ) -> tuple[ResearchService, ResearchRuntimeResources]:
-    """Construye el servicio y sus recursos. Funciona aunque falten claves."""
+    """Construye el servicio y sus recursos. Funciona aunque falten claves.
+
+    Incluye el **broker** del worker: sin el montado, el runtime se niega a lanzar
+    (no hay adquisicion posible) y el circuito modelo -> tool MCP no existe. El
+    broker comparte lector, evidencias y ledger con el servicio; no tiene claves ni
+    red propias.
+    """
+    from research.broker_mount import (
+        BrokerReadLog,
+        build_broker_operations,
+        build_research_broker_mount,
+    )
+    from research.worker.capabilities import CapabilityStore
+
     resources = ResearchRuntimeResources()
 
     ledger = None
@@ -180,7 +235,38 @@ def build_research_service(
     evidence, vault = _build_evidence(settings)
     resources.vault = vault
 
-    runtime = _build_runtime(settings)
+    # Una sola tabla de capacidades por proceso: la emite el servicio para cada job y
+    # la autentica el broker. Si fueran dos instancias, ninguna autenticaria nada.
+    capabilities = CapabilityStore()
+    resources.capabilities = capabilities
+
+    reader = _build_reader(settings)
+    discover = _build_discovery(settings, ledger)
+
+    # Montura del broker. Se construye antes que el runtime porque la URL que el
+    # worker necesita sale de la ruta real de la montura, no de una suposicion.
+    read_log = BrokerReadLog()
+    resources.read_log = read_log
+    broker = build_research_broker_mount(
+        settings=settings,
+        capabilities=capabilities,
+        deps=build_broker_operations(
+            reader=reader,
+            evidence=evidence,
+            discover=discover,
+            # Grounding pagado sigue apagado: el adaptador se expone y responde
+            # `missing_config`, que es una respuesta honesta y no un fake.
+            grounded=None,
+            read_log=read_log,
+        ),
+    )
+    resources.broker = broker
+
+    broker_url = str(_setting(settings, "RESEARCH_BROKER_URL", "") or "")
+    if not broker_url and broker is not None:
+        broker_url = broker.url
+
+    runtime = _build_runtime(settings, broker_url=broker_url)
     resources.runtime = runtime
 
     deps = ResearchDependencies(
@@ -188,8 +274,10 @@ def build_research_service(
         ledger=ledger,
         evidence=evidence,
         runtime=runtime,
-        discover=_build_discovery(settings, ledger),
-        read=_build_reader(settings),
+        discover=discover,
+        read=reader,
+        capabilities=capabilities,
+        broker_reads=read_log,
     )
     service = ResearchService(settings=settings, deps=deps, clock=clock)
     return service, resources

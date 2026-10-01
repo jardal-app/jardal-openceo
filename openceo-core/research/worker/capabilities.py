@@ -228,6 +228,20 @@ class CapabilityStore:
                 revoked += 1
         return revoked
 
+    def revoke_all(self, *, reason: str = "broker apagado") -> int:
+        """Revoca todo lo emitido. Se llama al apagar el proceso del broker.
+
+        Una capability no debe sobrevivir al proceso que la emitio: si el broker
+        vuelve a arrancar, el token viejo no debe encontrar un almacen que lo acepte.
+        """
+        revoked = 0
+        for stored in self._by_digest.values():
+            if not stored.revoked:
+                stored.revoked = True
+                stored.revoked_reason = reason
+                revoked += 1
+        return revoked
+
     def purge_expired(self) -> int:
         """Retira capacidades vencidas. No hay barrido de fondo: se llama al operar."""
         now = self._clock()

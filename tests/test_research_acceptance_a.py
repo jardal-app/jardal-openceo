@@ -62,7 +62,7 @@ from research.policies import (  # noqa: E402
 )
 from research.runtimes.base import RuntimeOutcome  # noqa: E402
 from research.service import ResearchDependencies, ResearchService  # noqa: E402
-from research.wiring import _ProjectEvidence  # noqa: E402
+from research.wiring import ProjectEvidence  # noqa: E402
 from settings import Settings  # noqa: E402
 
 OWNER = "usr_acceptance"
@@ -183,7 +183,7 @@ class AcceptanceATests(unittest.IsolatedAsyncioTestCase):
             deps=ResearchDependencies(
                 repo=self.repo,
                 ledger=self.ledger,
-                evidence=_ProjectEvidence(self.vault),
+                evidence=ProjectEvidence(self.vault),
                 runtime=self.runtime,
                 discover=self.discovery,
                 read=self.reader,

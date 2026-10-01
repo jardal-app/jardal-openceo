@@ -45,22 +45,46 @@ FACADE_TOOLS = (
 )
 
 
+def _http_headers() -> dict[str, str]:
+    """Encabezados del transporte HTTP, **incluida** `Authorization`.
+
+    `fastmcp` >= 3 excluye `authorization` del valor por defecto de
+    `get_http_headers()` (lo trata como encabezado de proxy para no reenviarlo). Con
+    el defecto, esta fachada rechazaba con `unauthenticated` **todas** las llamadas de
+    un consumidor legitimo: la credencial viaja en ese encabezado por contrato, asi
+    que hay que pedirlo de forma explicita. Se prueban las tres formas porque la firma
+    cambio entre 2.x y 3.x.
+    """
+    try:
+        from fastmcp.server.dependencies import get_http_headers
+    except Exception:  # noqa: BLE001 - sin fastmcp no hay transporte MCP
+        return {}
+    for kwargs in ({"include": {"authorization"}}, {"include_all": True}, {}):
+        try:
+            headers = get_http_headers(**kwargs) or {}
+        except TypeError:  # firma distinta en esta version
+            continue
+        if headers:
+            return {str(k).lower(): v for k, v in headers.items()}
+    # Ultimo recurso: la peticion HTTP cruda, que nunca filtra encabezados.
+    try:
+        from fastmcp.server.dependencies import get_http_request
+
+        request = get_http_request()
+        return {str(k).lower(): v for k, v in request.headers.items()}
+    except Exception:  # noqa: BLE001 - transporte sin HTTP o sin contexto
+        return {}
+
+
 def transport_consumer_token() -> str:
     """Lee la credencial del encabezado del transporte MCP.
 
     En un transporte sin HTTP no hay encabezado: se devuelve cadena vacia y el
     llamante rechaza. No se busca la credencial en argumentos ni en `_meta`.
     """
-    try:
-        from fastmcp.server.dependencies import get_http_headers
-
-        headers = get_http_headers() or {}
-    except Exception:  # noqa: BLE001 - transporte sin HTTP o sin contexto
-        return ""
-    for name, value in headers.items():
-        if str(name).lower() == "authorization" and isinstance(value, str):
-            if value.lower().startswith("bearer "):
-                return value[7:].strip()
+    value = _http_headers().get("authorization")
+    if isinstance(value, str) and value.lower().startswith("bearer "):
+        return value[7:].strip()
     return ""
 
 

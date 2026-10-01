@@ -81,13 +81,17 @@ class _FakeBackend:
     def available(self) -> bool:
         return True
 
-    def plan(self, *, argv, workspace, worker_home, worker_config, env, allow_network):
+    def plan(self, *, argv, workspace, worker_home, worker_config, env, allow_network, extra_read_only=()):
         return IsolationPlan(
             backend=self.name,
             argv=[self.name, "--", *argv],
             env=dict(env),
             cwd=str(workspace),
-            network="broker" if allow_network else "none",
+            network="unrestricted" if allow_network else "none",
+            # El backend de prueba se declara aislado en ficheros: es lo que el
+            # runtime exige para ejecutar. El egress tampoco se restringe en el.
+            filesystem_isolated=True,
+            egress_restricted=False,
             notes=["backend de prueba"],
         )
 

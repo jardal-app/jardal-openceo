@@ -116,18 +116,32 @@ class BrokerEndpoint:
 def broker_server_config(*, endpoint: BrokerEndpoint, deadline_seconds: float) -> dict[str, Any]:
     """Entrada ``mcp.servers`` del worker para el broker.
 
-    ``timeout`` es un objeto con connect/request: el runtime no debe quedarse con su
-    valor por defecto, que puede superar el deadline del job.
+    Tres campos que se comprobaron contra el CLI real y su documentacion:
+
+    * ``oauth: false`` — un servidor remoto usa **OAuth por defecto**
+      (<https://opencode.ai/v2/docs/mcp-servers>). El broker no habla OAuth: su
+      credencial viaja en la cabecera ``Authorization``. Sin desactivarlo, el CLI
+      intenta descubrir un servidor de autorizacion, falla y deja las tools fuera de la
+      sesion: el modelo responde que "la herramienta no esta disponible".
+    * ``timeout`` con las claves de V2 (``startup``/``catalog``/``execution``), no con
+      las de V1 (``connect``/``request``). Todas caben en el deadline del job.
+    * ``codemode: false`` para que el catalogo sea directo y auditable.
     """
-    budget_ms = max(1000, int(float(deadline_seconds) * 1000))
-    connect_ms = min(5_000, max(500, budget_ms // 10))
-    request_ms = max(1000, min(budget_ms - connect_ms, 60_000))
+    deadline_ms = max(1000, int(float(deadline_seconds) * 1000))
+    startup_ms = min(30_000, max(500, deadline_ms // 10))
+    catalog_ms = min(30_000, max(500, deadline_ms // 10))
+    execution_ms = max(1000, deadline_ms - startup_ms)
     server: dict[str, Any] = {
         "type": "remote",
         "url": endpoint.url,
         "disabled": False,
+        "oauth": False,
         "codemode": False,
-        "timeout": {"connect": connect_ms, "request": request_ms},
+        "timeout": {
+            "startup": startup_ms,
+            "catalog": catalog_ms,
+            "execution": execution_ms,
+        },
     }
     headers = endpoint.headers()
     if headers:
@@ -282,8 +296,14 @@ def assert_worker_config_is_closed(config: dict[str, Any]) -> list[str]:
         if name != BROKER_SERVER_NAME:
             problems.append(f"servidor MCP no autorizado: {name}")
         timeout = server.get("timeout")
-        if not isinstance(timeout, dict) or "connect" not in timeout or "request" not in timeout:
-            problems.append(f"{name}: timeout debe ser un objeto con connect y request")
+        if not isinstance(timeout, dict) or not {"startup", "catalog", "execution"} <= set(timeout):
+            problems.append(
+                f"{name}: timeout debe ser un objeto V2 con startup, catalog y execution"
+            )
+        if server.get("oauth") is not False:
+            # Un remoto con OAuth activo (el defecto del CLI) intenta autenticarse
+            # contra el broker y deja las tools fuera de la sesion.
+            problems.append(f"{name}: oauth debe ser false (el broker usa cabecera Bearer)")
         if server.get("codemode") not in (False,):
             problems.append(f"{name}: codemode debe ser false")
         if server.get("disabled") is True:

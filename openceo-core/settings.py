@@ -237,6 +237,12 @@ class Settings(BaseSettings):
     # runtime se niega a lanzar el worker en vez de ejecutarlo sin adquisicion.
     RESEARCH_BROKER_URL: str = ""
     RESEARCH_BROKER_BEARER: str = ""
+    # Montura del broker dentro de la propia aplicacion. Apagada por defecto, igual
+    # que la fachada MCP de consumidores: abrir un endpoint es una decision de
+    # despliegue. Al activarla sin URL explicita, el servicio sirve el broker en esta
+    # ruta y el runtime del worker la usa por loopback.
+    RESEARCH_BROKER_ENABLED: bool = False
+    RESEARCH_BROKER_PATH: str = "/internal/mcp-research-broker"
 
     # Concurrencia global y por recurso (techos iniciales, ajustables tras medir).
     RESEARCH_MAX_ACTIVE_JOBS: int = 2

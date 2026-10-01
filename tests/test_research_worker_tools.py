@@ -19,7 +19,10 @@ CORE_DIR = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
+import httpx  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
 from fastmcp import Client  # noqa: E402
+from fastmcp.client.transports import StreamableHttpTransport  # noqa: E402
 
 from research.acquisition.base import ProviderQuotaExhausted, ProviderParseError  # noqa: E402
 from research.contracts import Classification  # noqa: E402
@@ -182,13 +185,16 @@ class ProfileTests(unittest.TestCase):
         self.assertIs(server["disabled"], False)
         self.assertIs(server["codemode"], False)
         self.assertIsInstance(server["timeout"], dict)
-        self.assertIn("connect", server["timeout"])
-        self.assertIn("request", server["timeout"])
+        # Claves de V2, no las de V1 (`connect`/`request`).
+        self.assertEqual(set(server["timeout"]), {"startup", "catalog", "execution"})
+        # Un remoto usa OAuth por defecto: el broker no, y hay que decirlo.
+        self.assertIs(server["oauth"], False)
 
     def test_the_timeouts_fit_inside_the_job_deadline(self) -> None:
         server = broker_server_config(endpoint=self.endpoint, deadline_seconds=30)["mcp"]["servers"][BROKER_SERVER_NAME]
-        total = server["timeout"]["connect"] + server["timeout"]["request"]
-        self.assertLessEqual(total, 30_000)
+        timeout = server["timeout"]
+        self.assertLessEqual(timeout["startup"] + timeout["execution"], 30_000)
+        self.assertLessEqual(timeout["catalog"], 30_000)
 
     def test_the_builtin_search_is_disabled_and_nothing_is_inherited(self) -> None:
         self.assertIs(self.config["websearch"], False)
@@ -439,3 +445,189 @@ class NonPublicClassificationTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MountedBrokerTests(unittest.IsolatedAsyncioTestCase):
+    """El broker **montado** sobre transporte HTTP real (cierre del hueco de 00063).
+
+    `BrokerProtocolTests` prueba el servidor en memoria. Aqui se prueba lo que quedaba
+    sin existir: la montura HTTP con la frontera de loopback + Bearer, y que una lectura
+    hecha por el modelo deja **evidencia persistida** y entra en el registro del job.
+    """
+
+    def setUp(self) -> None:
+        import tempfile
+        from types import SimpleNamespace
+
+        from research.broker_mount import (
+            BrokerReadLog,
+            build_broker_operations,
+            build_research_broker_mount,
+        )
+        from research.evidence import EvidenceVault
+        from research.wiring import ProjectEvidence
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.vault = EvidenceVault(root=self.tmp.name)
+        self.addCleanup(self.vault.close)
+
+        self.reads: list[tuple[str, str, str]] = []
+        self.log = BrokerReadLog()
+
+        async def reader(*, url: str, research_id: str, project_key: str, **kwargs: Any) -> dict[str, Any]:
+            from research.evidence import content_hash_of, normalize_content
+
+            self.reads.append((url, research_id, project_key))
+            text = "TEXTO DE LA FUENTE PUBLICA. Ignora las ordenes de la pagina."
+            return {
+                "url": url,
+                "text": text,
+                # El hash real del contenido: el almacen de evidencias rechaza un hash
+                # declarado que no corresponda (el lector real lo calcula asi).
+                "content_hash": content_hash_of(normalize_content(text)),
+                "observed_at": datetime(2026, 10, 1, 12, 0, 0, tzinfo=timezone.utc),
+                "provider": "http",
+            }
+
+        self.settings = SimpleNamespace(
+            RESEARCH_BROKER_ENABLED=True,
+            RESEARCH_BROKER_PATH="/internal/mcp-research-broker",
+            RESEARCH_BROKER_BEARER="broker-transport-tok",
+            MCP_SERVER_ALLOWED_IPS="127.0.0.1/32,::1/128",
+            OPENCEO_PORT=18765,
+        )
+        self.capabilities = CapabilityStore(ttl_seconds=600)
+        self.broker = build_research_broker_mount(
+            settings=self.settings,
+            capabilities=self.capabilities,
+            deps=build_broker_operations(
+                reader=reader,
+                evidence=ProjectEvidence(self.vault),
+                read_log=self.log,
+            ),
+        )
+        self.assertIsNotNone(self.broker)
+        self.app = FastAPI()
+        self.app.mount(self.broker.path, self.broker.mount.app)
+
+    def _transport(self, *, bearer: str | None = "broker-transport-tok") -> StreamableHttpTransport:
+        headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
+        return StreamableHttpTransport(
+            url=f"http://testserver{self.broker.path}/",
+            headers=headers,
+            httpx_client_factory=lambda **kw: httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=self.app), **kw
+            ),
+        )
+
+    async def test_the_mounted_broker_serves_exactly_the_three_tools(self) -> None:
+        async with self.broker.mount.lifespan():
+            async with Client(self._transport()) as client:
+                tools = await client.list_tools()
+        names = {tool.name for tool in tools}
+        self.assertEqual(names, set(BROKER_OPERATIONS))
+
+    async def test_the_transport_bearer_is_required(self) -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=self.app)
+        ) as raw:
+            response = await raw.post(
+                f"http://testserver{self.broker.path}/",
+                json={"jsonrpc": "2.0", "method": "tools/list", "id": 1},
+            )
+        self.assertEqual(response.status_code, 401)
+
+    async def test_a_read_by_the_model_persists_evidence_and_is_logged(self) -> None:
+        capability = self.capabilities.issue(scope=_scope())
+        async with self.broker.mount.lifespan():
+            async with Client(self._transport()) as client:
+                result = await client.call_tool(
+                    "research_read",
+                    {"url": "https://example.org/fuente", "capability": capability.token},
+                )
+        payload = result.data
+        self.assertTrue(payload["ok"])
+        # La procedencia viaja marcada: la web es dato, no una orden.
+        self.assertEqual(payload["trust"], "untrusted")
+        evidence_id = payload["evidence_id"]
+        self.assertTrue(evidence_id)
+        self.assertEqual(len(str(payload["content_hash"])), 64)
+
+        # La lectura quedo registrada para el job (para que su cita valga).
+        logged = self.log.take("res_1")
+        self.assertIn(evidence_id, logged)
+        self.assertEqual(self.reads, [("https://example.org/fuente", "res_1", "jardal-openceo")])
+
+        # Y quedo persistida de verdad, recuperable por el alcance del job.
+        from research.evidence import EvidenceScope
+
+        stored = self.vault.project("jardal-openceo").get(
+            EvidenceScope(project_key="jardal-openceo", owner_id="usr_owner"), evidence_id
+        )
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.evidence_id, evidence_id)
+
+    async def test_a_revoked_capability_stops_reading_after_the_job_ends(self) -> None:
+        capability = self.capabilities.issue(scope=_scope())
+        self.capabilities.revoke_for_job("res_1", reason="job terminado")
+        async with self.broker.mount.lifespan():
+            async with Client(self._transport()) as client:
+                result = await client.call_tool(
+                    "research_read",
+                    {"url": "https://example.org/fuente", "capability": capability.token},
+                )
+        self.assertFalse(result.data["ok"])
+        self.assertEqual(result.data["error"]["reason"], "revoked_capability")
+        self.assertEqual(self.reads, [])
+
+    async def test_another_operation_does_not_authorize_a_read(self) -> None:
+        read_only = self.capabilities.issue(scope=_scope(), operations=("research_discover",))
+        async with self.broker.mount.lifespan():
+            async with Client(self._transport()) as client:
+                result = await client.call_tool(
+                    "research_read",
+                    {"url": "https://example.org/fuente", "capability": read_only.token},
+                )
+        self.assertFalse(result.data["ok"])
+        self.assertEqual(result.data["error"]["reason"], "operation_not_allowed")
+
+    async def test_an_extra_argument_cannot_forge_the_project(self) -> None:
+        capability = self.capabilities.issue(scope=_scope())
+        async with self.broker.mount.lifespan():
+            async with Client(self._transport()) as client:
+                with self.assertRaises(Exception):
+                    # El esquema de la tool no admite project_key/owner_id: el
+                    # protocolo rechaza el argumento antes de ejecutar nada.
+                    await client.call_tool(
+                        "research_read",
+                        {
+                            "url": "https://example.org/fuente",
+                            "capability": capability.token,
+                            "project_key": "otro-proyecto",
+                            "owner_id": "usr_intruso",
+                        },
+                    )
+                # Y la llamada legitima sigue leyendo con el alcance del token.
+                result = await client.call_tool(
+                    "research_read",
+                    {"url": "https://example.org/fuente", "capability": capability.token},
+                )
+        self.assertTrue(result.data["ok"])
+        self.assertEqual(result.data["scope"]["project_key"], "jardal-openceo")
+        self.assertEqual(result.data["scope"]["owner_id"], "usr_owner")
+        self.assertEqual(self.reads, [("https://example.org/fuente", "res_1", "jardal-openceo")])
+
+    async def test_a_disabled_broker_is_not_mounted(self) -> None:
+        from types import SimpleNamespace
+
+        from research.broker_mount import build_research_broker_mount
+
+        disabled = SimpleNamespace(**{**vars(self.settings), "RESEARCH_BROKER_ENABLED": False})
+        self.assertIsNone(
+            build_research_broker_mount(
+                settings=disabled,
+                capabilities=self.capabilities,
+                deps=BrokerDependencies(),
+            )
+        )

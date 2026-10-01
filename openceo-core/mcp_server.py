@@ -131,21 +131,55 @@ def _build_mcp(
 
     server = FastMCP(name)
     tool_names = register_fn(server, settings)
-
-    if bearer_token is None:
-        logger.warning("%s enabled without Bearer token; loopback restriction is the only control", name)
-
-    protected_app = _InternalOnlyBearerWrapper(
-        allowed_networks=allowed_networks,
-        bearer_token=bearer_token,
-    )
-    return MountedMCPServer(
+    return build_mounted_mcp_server(
         path=path,
-        app=protected_app,
+        name=name,
         server=server,
+        bearer_token=bearer_token,
+        allowed_networks=allowed_networks,
         transport=transport,
         tool_names=tool_names,
         internal_url=_build_internal_url(settings, path),
+        stateless_http=stateless_http,
+        json_response=json_response,
+    )
+
+
+def build_mounted_mcp_server(
+    *,
+    path: str,
+    name: str,
+    server: Any,
+    bearer_token: str | None,
+    allowed_networks: tuple[ipaddress._BaseNetwork, ...] | None = None,
+    transport: str = "streamable-http",
+    tool_names: tuple[str, ...] = (),
+    internal_url: str = "",
+    stateless_http: bool = False,
+    json_response: bool = False,
+) -> MountedMCPServer:
+    """Protege y monta un servidor FastMCP ya construido.
+
+    Existe para que una montura que **no** se arma con `_build_mcp` (p. ej. el broker
+    de research, cuyas tools necesitan dependencias inyectadas) no duplique — ni
+    olvide — la unica frontera que importa: loopback + Bearer. Sin esta funcion, una
+    montura nueva tendria que copiar `_InternalOnlyBearerWrapper` a mano, que es
+    exactamente como se acaba publicando un endpoint sin proteccion.
+    """
+    if allowed_networks is None:
+        allowed_networks = _parse_allowed_networks(_DEFAULT_ALLOWED_IPS)
+    if bearer_token is None:
+        logger.warning("%s enabled without Bearer token; loopback restriction is the only control", name)
+    return MountedMCPServer(
+        path=_normalize_path(path),
+        app=_InternalOnlyBearerWrapper(
+            allowed_networks=allowed_networks,
+            bearer_token=bearer_token,
+        ),
+        server=server,
+        transport=_normalize_transport(transport),
+        tool_names=tool_names,
+        internal_url=internal_url,
         bearer_token=bearer_token,
         stateless_http=stateless_http,
         json_response=json_response,

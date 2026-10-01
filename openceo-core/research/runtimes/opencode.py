@@ -383,6 +383,24 @@ class OpenCodeRuntime:
             return Path(path).exists()
         return shutil.which(path) is not None
 
+    def _engine_paths(self) -> list[Path]:
+        """Rutas que hay que montar en solo lectura para que el motor arranque.
+
+        El binario de OpenCode no vive en `/usr/bin`: en este host esta en
+        `~/.opencode/bin/opencode`. Se resuelve el symlink a su ruta real porque bwrap
+        monta el destino, no el enlace.
+        """
+        path = self.cli_path
+        if not path:
+            return []
+        resolved = shutil.which(path) if os.path.sep not in path else path
+        if not resolved:
+            return []
+        try:
+            return [Path(resolved).resolve()]
+        except OSError:  # pragma: no cover - ruta irresoluble
+            return []
+
     def _backend(self) -> IsolationBackend | None:
         if not self._isolation_checked:
             self._isolation = detect_isolation_backend()
@@ -450,6 +468,7 @@ class OpenCodeRuntime:
             worker_home=paths["home"],
             worker_config=paths["config"],
             broker_url=self._broker_url,
+            tool_credential=request.tool_credential or None,
         )
         plan = backend.plan(
             argv=argv,
@@ -458,7 +477,19 @@ class OpenCodeRuntime:
             worker_config=paths["config"],
             env=env,
             allow_network=True,
+            # El CLI vive fuera de las rutas del sistema (p. ej.
+            # `~/.opencode/bin/opencode`). Sin montarlo en solo lectura el worker no
+            # arranca; montarlo concede el **ejecutable**, no el home que lo contiene.
+            extra_read_only=self._engine_paths(),
         )
+        if not plan.filesystem_isolated:
+            # Un backend que no monta nada (p. ej. `unshare` sin bind mounts) deja el
+            # home, los repos y el vault del host visibles. Ejecutar ahi no seria
+            # aislamiento: seria el fallo silencioso que este runtime existe para evitar.
+            raise IsolationUnavailable(
+                f"El backend {plan.backend!r} no acredita aislamiento de ficheros "
+                f"({'; '.join(plan.notes) or 'sin detalle'})"
+            )
 
         self._cancelled.discard(request.research_id)
         process = await self._spawn(plan.argv, cwd=plan.cwd, env=plan.env)
@@ -531,6 +562,7 @@ class OpenCodeRuntime:
             stderr=stderr_text[:4000],
             version_verified=status.verified,
             isolation=plan.backend,
+            egress_restricted=plan.egress_restricted,
         )
 
     async def _drain(

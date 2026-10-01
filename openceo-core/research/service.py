@@ -59,7 +59,12 @@ from research.contracts import (
 )
 from research.money import format_micro
 from research.policies import EffectivePolicy, ResearchAccessDenied, derive_effective_policy
-from research.worker.capabilities import CapabilityScope, CapabilityStore
+from research.worker.capabilities import (
+    BROKER_OPERATIONS,
+    Capability,
+    CapabilityScope,
+    CapabilityStore,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +179,10 @@ class ResearchDependencies:
     discover: Callable[..., Awaitable[Any]] | None = None
     read: Callable[..., Awaitable[dict[str, Any]]] | None = None
     capabilities: CapabilityStore | None = None
+    # Lecturas que el modelo hizo por el broker durante el job. Se unen a la evidencia
+    # del informe: una fuente abierta por el worker es tan real como una leida por el
+    # servicio, y su cita no puede rechazarse por venir de otro camino.
+    broker_reads: Any | None = None
     slots: JobSlots = field(default_factory=JobSlots)
 
 
@@ -470,7 +479,8 @@ class ResearchService:
             )
             return None
 
-        prompt = self._build_prompt(job, evidence_rows)
+        capability = self._issue_broker_capability(job, scope, budget)
+        prompt = self._build_prompt(job, evidence_rows, capability=capability)
         await self._deps.slots.acquire_call()
         try:
             from research.runtimes.base import RuntimeRequest
@@ -485,6 +495,7 @@ class ResearchService:
                     model=str(getattr(self._settings, "RESEARCH_OPENCODE_TEST_MODEL", "")),
                     timeout_seconds=int(budget.remaining_seconds) or 1,
                     allow_session_resume=False,
+                    tool_credential=capability.token if capability is not None else "",
                 )
             )
         except Exception as exc:  # noqa: BLE001 - el runtime es sustituible y puede fallar
@@ -499,6 +510,17 @@ class ResearchService:
         finally:
             await self._deps.slots.release_call()
 
+        # Lo que el modelo abrio por el broker entra en la evidencia del job antes de
+        # validar el informe: si no, su propia cita se leeria como ajena.
+        if self._deps.broker_reads is not None:
+            try:
+                for evidence_id, row in (
+                    self._deps.broker_reads.take(job["research_id"]) or {}
+                ).items():
+                    evidence_rows.setdefault(evidence_id, row)
+            except Exception:  # noqa: BLE001 - el registro es auxiliar
+                logger.warning("No se pudo recoger la evidencia del broker", exc_info=True)
+
         text = getattr(outcome, "text", "") or ""
         result = self._parse_report(job, text, evidence_rows, coverage)
         return result
@@ -509,15 +531,56 @@ class ResearchService:
         base = Path(str(getattr(self._settings, "RESEARCH_WORKSPACE_DIR", "/tmp/research")))
         return base / job["research_id"]
 
-    def _build_prompt(self, job: dict[str, Any], evidence_rows: dict[str, dict[str, Any]]) -> str:
+    def _issue_broker_capability(
+        self, job: dict[str, Any], scope: CapabilityScope, budget: StepBudget
+    ) -> Capability | None:
+        """Emite la capability que el worker presentara al broker.
+
+        El TTL cubre el deadline del job con margen y **no** sobrevive al job: se
+        revoca al terminar o cancelar. Sin capabilities configuradas no se inventa una:
+        el worker corre sin broker y el modelo no puede abrir fuentes.
+        """
+        if self._deps.capabilities is None:
+            return None
+        try:
+            return self._deps.capabilities.issue(
+                scope=scope,
+                operations=BROKER_OPERATIONS,
+                ttl_seconds=max(60, int(budget.remaining_seconds) + 30),
+            )
+        except Exception:  # noqa: BLE001 - sin capability el job sigue, sin adquisicion
+            logger.warning("No se pudo emitir la capability del job %s", job.get("research_id"), exc_info=True)
+            return None
+
+    def _build_prompt(
+        self,
+        job: dict[str, Any],
+        evidence_rows: dict[str, dict[str, Any]],
+        *,
+        capability: Capability | None = None,
+    ) -> str:
         lines = [
             "Investiga la pregunta y devuelve SOLO un JSON con esta forma:",
             '{"summary": "...", "claims": [{"id": "c1", "statement": "...", "kind": "fact", '
             '"evidence_ids": ["e1"], "support": [{"extract": "..."}]}]}',
             "Cada afirmacion material debe citar el id de evidencia que la respalda y un extracto.",
-            f"Pregunta: {job['question']}",
-            "Evidencia disponible:",
         ]
+        if capability is not None:
+            # El worker solo tiene el broker de adquisicion: sin esta credencial no
+            # puede abrir nada, y sin la instruccion no la usaria. La capability es
+            # corta, ligada a este job y de solo lectura.
+            lines.extend(
+                [
+                    "Tienes el broker de adquisicion como herramienta MCP "
+                    "(research_discover y research_read).",
+                    f"Credencial de este job (capability): {capability.token}",
+                    "Antes de afirmar algo material, abre la fuente con research_read "
+                    "pasando esa capability y la url; cita el evidence_id que devuelva. "
+                    "No inventes ids de evidencia.",
+                ]
+            )
+        lines.append(f"Pregunta: {job['question']}")
+        lines.append("Evidencia disponible:")
         for evidence_id, row in evidence_rows.items():
             extract = str(row.get("text") or "")[:400]
             lines.append(f"[{evidence_id}] {row.get('url')} :: {extract}")

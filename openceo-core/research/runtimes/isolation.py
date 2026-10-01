@@ -107,7 +107,15 @@ def sanitized_worker_env(
 
 @dataclass(frozen=True)
 class IsolationPlan:
-    """argv/entorno/cwd efectivos que se ejecutan, y que las pruebas pueden afirmar."""
+    """argv/entorno/cwd efectivos que se ejecutan, y que las pruebas pueden afirmar.
+
+    `filesystem_isolated` y `egress_restricted` declaran **lo que la frontera hace de
+    verdad**, no lo que el backend pretende. Un backend que no monta nada (el caso de
+    `unshare` sin bind mounts) deja el arbol de ficheros del host visible: marcarlo como
+    aislado seria exactamente el "degradado en silencio" que este modulo previene. Y
+    ningun backend de esta lista restringe destinos de red: `allow_network=True` entrega
+    la red del host, asi que la limitacion de egress se declara aparte y no se finge.
+    """
 
     backend: str
     argv: list[str]
@@ -115,6 +123,8 @@ class IsolationPlan:
     cwd: str
     read_only_paths: tuple[str, ...] = ()
     network: str = "none"
+    filesystem_isolated: bool = False
+    egress_restricted: bool = False
     notes: list[str] = field(default_factory=list)
 
     def to_doc(self) -> dict[str, Any]:
@@ -124,6 +134,8 @@ class IsolationPlan:
             "cwd": self.cwd,
             "read_only_paths": list(self.read_only_paths),
             "network": self.network,
+            "filesystem_isolated": self.filesystem_isolated,
+            "egress_restricted": self.egress_restricted,
             "notes": list(self.notes),
         }
 
@@ -144,6 +156,7 @@ class IsolationBackend(Protocol):
         worker_config: Path,
         env: Mapping[str, str],
         allow_network: bool,
+        extra_read_only: Sequence[Path] = (),
     ) -> IsolationPlan:  # pragma: no cover - interfaz
         ...
 
@@ -164,6 +177,7 @@ class BubblewrapBackend:
         worker_config: Path,
         env: Mapping[str, str],
         allow_network: bool,
+        extra_read_only: Sequence[Path] = (),
     ) -> IsolationPlan:
         command = [
             "bwrap",
@@ -192,19 +206,59 @@ class BubblewrapBackend:
             "/proc",
             "--dev",
             "/dev",
-            "--bind",
-            str(workspace),
-            str(workspace),
-            "--chdir",
-            str(workspace),
-            "--setenv",
-            "HOME",
-            str(worker_home),
-            "--setenv",
-            "XDG_CONFIG_HOME",
-            str(worker_config),
-            "--unshare-all",
+            # /tmp privado y efimero: el CLI necesita un temporal escribible y no debe
+            # ver el /tmp del host (donde viven sockets y ficheros de otras sesiones).
+            "--tmpfs",
+            "/tmp",
         ]
+        # `--ro-bind /etc /etc` no basta para el DNS: en muchos hosts
+        # `/etc/resolv.conf` es un **enlace** a `/run/...`, y `/run` no se monta, asi
+        # que el fichero desaparece dentro de la frontera y toda resolucion falla
+        # (`getaddrinfo ETIMEOUT`). Se copia el resolutor real a un fichero propio del
+        # worker y se monta encima, sin exponer `/run`.
+        resolver = _worker_resolver_file(worker_home)
+        if resolver is not None:
+            command.extend(_resolver_bind_args(worker_home))
+        read_only = ["/usr", "/bin", "/lib", "/lib64", "/etc"]
+        # El motor (CLI de OpenCode) vive fuera de las rutas del sistema. Sin montarlo
+        # en solo lectura el worker no puede ni arrancar; montarlo es conceder el
+        # ejecutable, no el home que lo contiene.
+        for path in extra_read_only:
+            resolved = str(Path(path).resolve())
+            if not resolved or resolved in read_only:
+                continue
+            command.extend(["--ro-bind", resolved, resolved])
+            read_only.append(resolved)
+        command.extend(
+            [
+                "--bind",
+                str(workspace),
+                str(workspace),
+            ]
+        )
+        # El home y la config del worker son **suyos** (directorios 0700 dedicados al
+        # job) y deben verse dentro de la frontera: la config es donde vive
+        # `opencode.json` con el perfil cerrado. Sin este bind el CLI arrancaria con
+        # `XDG_CONFIG_HOME` apuntando a un directorio inexistente y `--agent
+        # investigator` volveria a morir con "Agent not found".
+        for dedicated in (worker_home, worker_config):
+            command.extend(["--bind", str(dedicated), str(dedicated)])
+        command.extend(
+            [
+                "--chdir",
+                str(workspace),
+                "--setenv",
+                "HOME",
+                str(worker_home),
+                "--setenv",
+                "XDG_CONFIG_HOME",
+                str(worker_config),
+                "--setenv",
+                "TMPDIR",
+                "/tmp",
+                "--unshare-all",
+            ]
+        )
         if allow_network:
             command.append("--share-net")
         command.append("--")
@@ -214,9 +268,17 @@ class BubblewrapBackend:
             argv=command,
             env=dict(env),
             cwd=str(workspace),
-            read_only_paths=("/usr", "/bin", "/lib", "/lib64", "/etc"),
-            network="broker" if allow_network else "none",
-            notes=["El home del host, los repos y el vault no se montan."],
+            read_only_paths=tuple(read_only),
+            network="unrestricted" if allow_network else "none",
+            filesystem_isolated=True,
+            # `--share-net` entrega la red del host: el worker alcanza el broker **y
+            # cualquier otro destino**. Afirmar "solo el broker" seria falso.
+            egress_restricted=False,
+            notes=[
+                "El home del host, los repos y el vault no se montan.",
+                "La red no esta restringida por destino: el egress se limita en el broker "
+                "(EgressGuard) y no en la frontera del sistema operativo.",
+            ],
         )
 
 
@@ -249,6 +311,7 @@ class UnshareBackend:
         worker_config: Path,
         env: Mapping[str, str],
         allow_network: bool,
+        extra_read_only: Sequence[Path] = (),
     ) -> IsolationPlan:
         command = [
             "unshare",
@@ -269,8 +332,15 @@ class UnshareBackend:
             argv=command,
             env=dict(env),
             cwd=str(workspace),
-            network="broker" if allow_network else "none",
-            notes=["Sin bind mounts: la separacion de ficheros depende del cwd y del entorno."],
+            network="unrestricted" if allow_network else "none",
+            # Sin bind mounts el arbol de ficheros del host sigue visible: este backend
+            # no acredita aislamiento de ficheros y el runtime se niega a usarlo.
+            filesystem_isolated=False,
+            egress_restricted=False,
+            notes=[
+                "Sin bind mounts: el arbol de ficheros del host sigue visible; no se "
+                "acredita aislamiento de ficheros.",
+            ],
         )
 
 
@@ -294,6 +364,7 @@ class ContainerBackend:
         worker_config: Path,
         env: Mapping[str, str],
         allow_network: bool,
+        extra_read_only: Sequence[Path] = (),
     ) -> IsolationPlan:
         command = [
             self._binary,
@@ -304,6 +375,15 @@ class ContainerBackend:
             "none" if not allow_network else "bridge",
             "--volume",
             f"{workspace}:{workspace}",
+            "--volume",
+            f"{worker_home}:{worker_home}",
+            "--volume",
+            f"{worker_config}:{worker_config}",
+            *(
+                arg
+                for path in extra_read_only
+                for arg in ("--volume", f"{Path(path).resolve()}:{Path(path).resolve()}:ro")
+            ),
             "--workdir",
             str(workspace),
             "--env",
@@ -316,9 +396,66 @@ class ContainerBackend:
             argv=command,
             env=dict(env),
             cwd=str(workspace),
-            network="broker" if allow_network else "none",
-            notes=["Contenedor desechable; sin socket de Docker ni home del host."],
+            network="unrestricted" if allow_network else "none",
+            filesystem_isolated=True,
+            egress_restricted=False,
+            notes=[
+                "Contenedor desechable; sin socket de Docker ni home del host.",
+                "La red, si se concede, no se filtra por destino.",
+            ],
         )
+
+
+def _worker_resolver_file(worker_home: Path) -> Path | None:
+    """Copia el resolutor real a un fichero propio del worker.
+
+    Devuelve `None` si no hay resolutor legible: en ese caso no se monta nada y el
+    fallo de DNS queda a la vista en lugar de falsificarse.
+    """
+    source = Path("/etc/resolv.conf")
+    try:
+        if not source.exists():  # sigue enlaces; un enlace roto no existe
+            return None
+        content = source.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    target = Path(worker_home) / "resolv.conf"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        os.chmod(target, 0o644)
+    except OSError:
+        return None
+    return target
+
+
+def _resolver_bind_args(worker_home: Path) -> list[str]:
+    """argv de bwrap para que el DNS funcione dentro de la frontera.
+
+    `--ro-bind /etc /etc` deja `/etc/resolv.conf` como **enlace** a `/run/...`, ruta que
+    no se monta: el fichero no existe dentro y toda resolucion falla con
+    `getaddrinfo ETIMEOUT`. Montar el resolutor propio sobre el enlace tampoco vale,
+    porque bwrap intenta crear el destino siguiendo el enlace y no puede.
+
+    La solucion es montar el **destino real** del enlace sobre un `/run` (o el
+    directorio superior que sea) propio del sandbox. Asi el enlace del host sigue
+    resolviendo y no se expone `/run` del host.
+    """
+    resolver = _worker_resolver_file(worker_home)
+    if resolver is None:
+        return []
+    source = Path("/etc/resolv.conf")
+    try:
+        real = source.resolve()
+    except OSError:  # pragma: no cover - enlace irresoluble
+        return []
+    if real == source or not real.is_absolute():
+        return ["--ro-bind", str(resolver), "/etc/resolv.conf"]
+    top = Path("/") / real.parts[1]
+    if str(top) in {"/proc", "/dev", "/sys", "/etc", "/usr", "/bin", "/lib", "/lib64"}:
+        # El destino vive bajo una ruta ya montada: no se puede superponer un tmpfs.
+        return ["--ro-bind", str(resolver), "/etc/resolv.conf"]
+    return ["--tmpfs", str(top), "--ro-bind", str(resolver), str(real)]
 
 
 def _probe_unshare() -> bool:

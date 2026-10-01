@@ -97,6 +97,10 @@ class RuntimeRequest:
     max_output_bytes: int = 2_000_000
     session_id: str | None = None
     allow_session_resume: bool = True
+    # Credencial corta que el worker presenta al broker en cada llamada de
+    # herramienta. No es una clave de proveedor: es una capability ligada a este job
+    # (proyecto, owner y research_id), con operaciones explicitas y vencimiento.
+    tool_credential: str = ""
 
     @property
     def session_scope(self) -> tuple[str, str, str]:
@@ -114,6 +118,9 @@ class RuntimeOutcome:
     timed_out: bool = False
     version_verified: bool = False
     isolation: str = ""
+    # Si el backend restringe destinos de red. Hoy ninguno de los disponibles lo hace:
+    # se declara para que nadie lea "aislado" como "sin egress".
+    egress_restricted: bool = False
 
     def to_doc(self) -> dict[str, Any]:
         return {
@@ -124,6 +131,7 @@ class RuntimeOutcome:
             "timed_out": self.timed_out,
             "version_verified": self.version_verified,
             "isolation": self.isolation,
+            "egress_restricted": self.egress_restricted,
             "event_types": [e.get("type") for e in self.events],
         }
 
