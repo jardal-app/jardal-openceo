@@ -33,6 +33,8 @@ local.properties
 **/.env.*
 !**/.env.example
 !**/.env.finance.local.example
+# Credenciales del desk de ERPNext que el dueño dejó en la raíz para los agentes.
+user_pass.md
 
 # Certificates / keys
 *.key
