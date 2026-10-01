@@ -301,6 +301,13 @@ class Settings(BaseSettings):
     RESEARCH_OPENCODE_PROD_MODEL: str = "meta/muse-spark-1.3-contributor"
     RESEARCH_OPENCODE_TIMEOUT_SECONDS: int = 300
 
+    # Fachada MCP de research. Nace **apagada**: montarla expone un endpoint nuevo cuyo
+    # control de acceso son las credenciales de consumidor (no el Bearer compartido de
+    # las monturas internas, que protege el transporte pero no identifica al owner).
+    # Activarla es una decision explicita de despliegue.
+    RESEARCH_MCP_ENABLED: bool = False
+    RESEARCH_MCP_PATH: str = "/internal/mcp-research"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

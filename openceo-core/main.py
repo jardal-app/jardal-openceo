@@ -31,6 +31,10 @@ from dev_session_service import DevSessionService
 from events import RealtimeHub
 from first_layer import FirstLayerGateway
 from graph import OpenCEOGraph
+from research.consumers import ConsumerRegistry
+from research.mcp_facade import build_research_mcp_facade
+from research.router import build_research_router
+from research.wiring import build_research_service, close_research_service
 from integrations.openwebui_compat import (
     chat_response,
     extract_latest_user_message,
@@ -256,6 +260,20 @@ async def lifespan(_: FastAPI):
             await stack.enter_async_context(global_mcp.lifespan())
 
         await repo.connect()
+        # Research: se construye SIEMPRE, aunque falten claves o CLI, para poder
+        # explicar el motivo de indisponibilidad en vez de desaparecer sin traza. La
+        # flag de capacidad no modifica el contrato de ERPNext (siempre activo).
+        research_service, research_resources = build_research_service(get_settings(), repo)
+        app.state.research_service = research_service
+        app.state.research_consumers = _research_consumers
+        _research_available, _research_reason = research_service.available()
+        logger.info(
+            "Research %s: %s",
+            "habilitado" if _research_available else "deshabilitado",
+            _research_reason,
+        )
+        if _research_mcp_app is not None:
+            await stack.enter_async_context(_research_mcp_app.router.lifespan_context(app))
         await repo.mark_interrupted_pm_states()
         await repo.mark_interrupted_tasks()
         await repo.mark_interrupted_dev_sessions()
@@ -318,6 +336,9 @@ async def lifespan(_: FastAPI):
         await dev_session_service.shutdown()
         if erpnext_adapter is not None:
             await erpnext_adapter.aclose()
+        # Research cierra sus workers y su almacen de evidencias ANTES que el
+        # repositorio: una escritura suya despues del cierre quedaria huerfana.
+        await close_research_service(research_resources)
         await repo.close()
 
 
@@ -333,6 +354,61 @@ app.add_middleware(
 
 # Mount auth router
 app.include_router(auth_router)
+
+
+# ---------------------------------------------------------------- Research
+# Fachada HTTP del investigador compartido (TASK-2026-00056, Entrega A). El servicio
+# vive en `app.state.research_service` y se construye en el lifespan; aqui solo se
+# expone el router, que resuelve la identidad con el mismo middleware que el resto.
+async def _research_dispatch_loop(service: Any) -> None:
+    """Despachador unico: drena la cola hasta vaciarla.
+
+    Se despierta al admitir (no hay barrido periodico). Cada `run_once` toma **un**
+    job con lease; el bucle sigue mientras queden trabajos encolados, de modo que
+    admitir dos jobs no deja al segundo esperando a nadie.
+    """
+    while True:
+        try:
+            document = await service.run_once()
+        except Exception:  # noqa: BLE001 - un fallo no puede matar el proceso
+            logger.warning("El despachador de research fallo", exc_info=True)
+            return
+        if document is None:
+            return
+
+
+_research_dispatch_task: asyncio.Task | None = None
+
+
+def _wake_research_dispatcher(_research_id: str):
+    """Programa el despacho si no hay uno vivo. Devuelve la corrutina o None."""
+    global _research_dispatch_task
+    service = getattr(app.state, "research_service", None)
+    if service is None:
+        return None
+    if _research_dispatch_task is not None and not _research_dispatch_task.done():
+        # Ya hay un despachador drenando: el trabajo esta persistido y lo vera.
+        return None
+    _research_dispatch_task = asyncio.ensure_future(_research_dispatch_loop(service))
+    return None
+
+
+app.include_router(build_research_router(get_service=lambda request: getattr(
+    request.app.state, "research_service", None
+)))
+
+# Montura MCP de research, apagada por defecto: su control de acceso son las
+# credenciales de consumidor, no el Bearer compartido de las monturas internas.
+_research_mcp_app = None
+_research_consumers = None
+if get_settings().RESEARCH_MCP_ENABLED:
+    _research_consumers = ConsumerRegistry()
+    _research_mcp_server = build_research_mcp_facade(
+        consumers=_research_consumers,
+        get_service=lambda: getattr(app.state, "research_service", None),
+    )
+    _research_mcp_app = _research_mcp_server.http_app(path="/")
+    app.mount(get_settings().RESEARCH_MCP_PATH, _research_mcp_app)
 
 # Auth DB accessor for middleware
 _auth_db = None
