@@ -41,8 +41,14 @@ logger = logging.getLogger(__name__)
 # genera el submit del `Journal Entry`, y abrirlo ahi permitiria crearlo a
 # mano. La lectura Fase A (TASK-2026-00044, `finance.get_scope_summary`)
 # usa el lector dedicado `list_gl_entries` (solo GET), sin abrir escritura.
+#
+# `File` entra por TASK-2026-00079, y solo para renombrar o cambiar la privacidad de un
+# adjunto ya existente: subir y borrar adjuntos van por los metodos oficiales de Frappe
+# (`upload_file`, `frappe.desk.form.utils.remove_attach`), que no pasan por la allowlist.
+# `Comment` NO entra: no se toca por `/api/resource`, solo por los metodos de la linea de
+# tiempo, que comprueban permiso sobre el ticket.
 ALLOWED_DOCTYPES: frozenset[str] = frozenset(
-    {"Task", "Project", "Task Type", "Journal Entry", "Account", "Cost Center", "Company"}
+    {"Task", "Project", "Task Type", "Journal Entry", "Account", "Cost Center", "Company", "File"}
 )
 
 _DEFAULT_TIMEOUT_SECONDS = 5.0
@@ -70,6 +76,19 @@ class ERPNextUnavailable(ERPNextError):
 
 class ERPNextValidationError(ERPNextError):
     """ERPNext rechazo los datos. Fallo duro: reintentar no cambia el resultado."""
+
+
+class ERPNextPermissionError(ERPNextValidationError):
+    """ERPNext nego el acceso (401/403): falta un rol, o el permiso es del autor.
+
+    Subclase de `ERPNextValidationError` para no cambiar el contrato de los llamadores
+    existentes (los dos son fallos duros, no se reintentan); se separa porque el
+    llamador necesita distinguir "los datos estan mal" de "no tienes permiso" al
+    clasificar el error. Caso real verificado el 2026-10-01: el principal de la API
+    (`Projects User` + `Accounts User`) puede leer y crear comentarios por los metodos
+    de la linea de tiempo, pero NO editar el comentario de otra persona ni borrar
+    ninguno: Frappe solo da ese permiso a `System Manager` / `Website Manager`.
+    """
 
 
 class ERPNextDuplicateError(ERPNextError):
@@ -118,12 +137,14 @@ class ERPNextClient:
 
     def _get_http(self) -> httpx.AsyncClient:
         if self._http is None or self._http.is_closed:
+            # Sin `Content-Type` fijo: httpx lo pone cuando se manda `json=`, y un
+            # encabezado fijo aqui romperia el multipart de `upload_file` (que necesita
+            # el boundary que genera httpx).
             self._http = httpx.AsyncClient(
                 timeout=self._timeout,
                 headers={
                     "Authorization": f"token {self._api_key}:{self._api_secret}",
                     "Accept": "application/json",
-                    "Content-Type": "application/json",
                 },
             )
         return self._http
@@ -140,7 +161,11 @@ class ERPNextClient:
         *,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        attempts: int = _MAX_ATTEMPTS,
     ) -> dict[str, Any]:
+        """Una peticion. `attempts=1` en las escrituras que **crean**: ver abajo."""
         config_error = self.config_error()
         if config_error:
             raise ERPNextValidationError(config_error)
@@ -149,13 +174,16 @@ class ERPNextClient:
         client = self._get_http()
         delay = _INITIAL_RETRY_DELAY_SECONDS
         last_error: Exception | None = None
+        max_attempts = max(1, int(attempts))
 
-        for attempt in range(_MAX_ATTEMPTS):
+        for attempt in range(max_attempts):
             try:
-                response = await client.request(method, url, params=params, json=json)
+                response = await client.request(
+                    method, url, params=params, json=json, files=files, data=data
+                )
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_error = exc
-                if attempt < _MAX_ATTEMPTS - 1:
+                if attempt < max_attempts - 1:
                     await asyncio.sleep(delay + random.uniform(0, 0.2))
                     delay *= 2
                     continue
@@ -165,7 +193,7 @@ class ERPNextClient:
 
             # 429 y 5xx son transitorios: reintentar. 4xx (salvo 417) es culpa de los datos.
             if status == 429 or status >= 500:
-                if attempt < _MAX_ATTEMPTS - 1:
+                if attempt < max_attempts - 1:
                     retry_after = response.headers.get("Retry-After")
                     try:
                         wait = float(retry_after) if retry_after else delay
@@ -175,11 +203,16 @@ class ERPNextClient:
                     delay *= 2
                     continue
                 raise ERPNextUnavailable(
-                    f"ERPNext devolvio HTTP {status} tras {_MAX_ATTEMPTS} intentos. {self._format_error(response)}"
+                    f"ERPNext devolvio HTTP {status} tras {max_attempts} intentos. {self._format_error(response)}"
                 )
 
             if status == 417:
                 raise ERPNextDuplicateError(
+                    self._format_error(response), status_code=status, payload=self._safe_json(response)
+                )
+
+            if status in (401, 403):
+                raise ERPNextPermissionError(
                     self._format_error(response), status_code=status, payload=self._safe_json(response)
                 )
 
@@ -233,6 +266,113 @@ class ERPNextClient:
         self._check_doctype(doctype)
         payload = await self.request("PUT", f"/api/resource/{doctype}/{name}", json=body)
         return payload.get("data") or {}
+
+    # --- metodos oficiales de Frappe (linea de tiempo) -------------------
+    #
+    # Comentarios y adjuntos NO se escriben por `/api/resource/Comment|File`: eso exigiria
+    # abrir `Comment` en la allowlist y dar al principal permiso de doctype, que Frappe
+    # reserva a `System Manager`/`Website Manager`. Se usan los metodos que el propio desk
+    # usa, que comprueban permiso sobre el **ticket**:
+    #   - `frappe.desk.form.utils.add_comment`      (POST, exige leer el doc)
+    #   - `frappe.desk.form.utils.update_comment`   (POST, solo el autor)
+    #   - `frappe.desk.form.utils.remove_attach`    (POST, borra el File)
+    #   - `frappe.desk.form.load.get_docinfo`       (GET, lee comentarios y adjuntos)
+    #   - `upload_file`                             (multipart, exige escribir el doc)
+
+    async def call_method(
+        self,
+        method: str,
+        *,
+        http_method: str = "POST",
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        attempts: int = _MAX_ATTEMPTS,
+    ) -> dict[str, Any]:
+        """Llama a un metodo whitelisted. Devuelve el cuerpo crudo de Frappe.
+
+        Los metodos devuelven `{"message": ...}` o escriben claves propias en
+        `frappe.response` (`get_docinfo` devuelve `{"docinfo": ...}`), asi que quien
+        llama decide donde mirar.
+        """
+        return await self.request(
+            http_method,
+            f"/api/method/{method}",
+            params=params,
+            json=json,
+            attempts=attempts,
+        )
+
+    async def upload_file(
+        self,
+        *,
+        filename: str,
+        content: bytes,
+        doctype: str,
+        docname: str,
+        is_private: bool,
+        folder: str = "Home/Attachments",
+    ) -> dict[str, Any]:
+        """`upload_file` oficial. Un solo intento a proposito.
+
+        El POST **crea** un `File` nuevo en cada llamada (`content_hash` reutiliza el
+        archivo en disco, no el documento), asi que un reintento automatico tras un
+        timeout ambiguo duplicaria el adjunto. La deduplicacion vive en el adapter, que
+        comprueba el `content_hash` antes de subir: asi un reintento del llamador no
+        duplica.
+        """
+        self._check_doctype(doctype)
+        body = await self.request(
+            "POST",
+            "/api/method/upload_file",
+            data={
+                "doctype": doctype,
+                "docname": docname,
+                "is_private": "1" if is_private else "0",
+                "folder": folder,
+            },
+            files={"file": (filename, content, "application/octet-stream")},
+            attempts=1,
+        )
+        message = body.get("message")
+        return message if isinstance(message, dict) else body
+
+    async def download_bytes(self, path: str, *, max_bytes: int) -> bytes:
+        """Descarga el contenido de un `file_url` del sitio (`/private/files/...`).
+
+        `path` es una **ruta relativa** del sitio, nunca una URL: por construccion este
+        metodo no puede alcanzar otro host, asi que no hay SSRF que validar. Un adjunto
+        remoto (`is_remote_file`, guardado con `file_url = http://...`) se rechaza aqui
+        por la misma razon: no se sigue.
+        """
+        config_error = self.config_error()
+        if config_error:
+            raise ERPNextValidationError(config_error)
+        raw = str(path or "").strip()
+        if not raw.startswith("/") or raw.startswith("//") or "://" in raw:
+            raise ERPNextValidationError(f"Ruta de archivo no descargable: {raw or '(vacia)'}")
+
+        client = self._get_http()
+        try:
+            async with client.stream("GET", f"{self._base_url}{raw}") as response:
+                status = response.status_code
+                if status in (401, 403):
+                    raise ERPNextPermissionError(
+                        f"ERPNext nego el acceso al archivo (HTTP {status}).", status_code=status
+                    )
+                if status >= 400:
+                    raise ERPNextValidationError(
+                        f"ERPNext devolvio HTTP {status} al leer el archivo.", status_code=status
+                    )
+                chunks = bytearray()
+                async for chunk in response.aiter_bytes():
+                    chunks.extend(chunk)
+                    if len(chunks) > max_bytes:
+                        raise ERPNextValidationError(
+                            f"El archivo supera {max_bytes} bytes.", status_code=413
+                        )
+                return bytes(chunks)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise ERPNextUnavailable(f"ERPNext no respondio: {exc}") from exc
 
     async def list_gl_entries(
         self,

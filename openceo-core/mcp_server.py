@@ -9,6 +9,13 @@ from typing import Any, Literal
 
 from settings import Settings
 from tools.cloudflare import CloudflareDNSManager
+from tools.erpnext_client import (
+    ERPNextDuplicateError,
+    ERPNextPermissionError,
+    ERPNextUnavailable,
+    ERPNextValidationError,
+)
+from tools.erpnext_tickets import AttachmentRejected
 from state import CodingTier, CodingTool, TaskCreateRequest, TaskPriority, TaskSource
 
 logger = logging.getLogger(__name__)
@@ -494,12 +501,156 @@ def _register_openceo_tools(
         name="openceo_get_ticket",
         description="Read one ticket plus its execution status. Accepts either the ERPNext name (e.g. 'TASK-2026-00025') or the OpenCEO ref.",
     )
+    # --- hilo del ticket: edicion, comentarios y adjuntos (TASK-2026-00079) ----
+    #
+    # Descripciones cortas a proposito: cada palabra viaja en **cada** peticion de la
+    # sesion de codigo (regla de `docs/ARCHITECTURE_REFERENCE_2026.md`), y el esquema de
+    # argumentos ya documenta la forma.
+
+    def _not_configured() -> dict[str, Any]:
+        return {"ok": False, "status": "not_configured", "message": "ERPNext no esta configurado."}
+
+    def _classify(exc: Exception) -> dict[str, Any]:
+        """Fallo -> estado clasificado: permiso, datos, tamano, disponibilidad."""
+        if isinstance(exc, AttachmentRejected):
+            return {"ok": False, "status": exc.status, "message": str(exc)}
+        if isinstance(exc, ERPNextUnavailable):
+            return {"ok": False, "status": "unavailable", "message": str(exc)}
+        if isinstance(exc, ERPNextPermissionError):
+            return {"ok": False, "status": "forbidden", "message": str(exc)}
+        if isinstance(exc, ERPNextDuplicateError):
+            return {"ok": False, "status": "duplicate", "message": str(exc)}
+        if isinstance(exc, ERPNextValidationError):
+            status = {404: "not_found", 413: "too_large", 400: "invalid_input"}.get(
+                exc.status_code, "invalid_input"
+            )
+            return {"ok": False, "status": status, "message": str(exc)}
+        return {"ok": False, "status": "error", "message": str(exc)}
+
+    async def _guard(operation: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Resuelve el metodo **despues** de comprobar el adapter: `erpnext` puede ser None."""
+        if erpnext is None or not erpnext.is_enabled:
+            return _not_configured()
+        try:
+            return await getattr(erpnext, operation)(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - se clasifica y se devuelve, no se propaga
+            return _classify(exc)
+
+    async def openceo_update_ticket(
+        ticket: str,
+        subject: str | None = None,
+        description: str | None = None,
+        priority: Literal["low", "medium", "high", "critical"] | None = None,
+        due_date: str | None = None,
+    ) -> dict[str, Any]:
+        return await _guard(
+            "update_ticket",
+            ticket,
+            subject=subject,
+            description=description,
+            priority=priority,
+            due_date=due_date,
+        )
+
+    async def openceo_get_ticket_thread(ticket: str, limit: int = 20) -> dict[str, Any]:
+        return await _guard("list_thread", ticket, limit=limit)
+
+    async def openceo_add_ticket_comment(ticket: str, content: str) -> dict[str, Any]:
+        return await _guard("add_comment", ticket, content)
+
+    async def openceo_update_ticket_comment(comment_id: str, content: str) -> dict[str, Any]:
+        return await _guard("update_comment", comment_id, content)
+
+    async def openceo_attach_ticket_file(
+        ticket: str,
+        source_path: str | None = None,
+        content_base64: str | None = None,
+        file_name: str | None = None,
+        private: bool = True,
+    ) -> dict[str, Any]:
+        return await _guard(
+            "attach_file",
+            ticket,
+            source_path=source_path,
+            content_base64=content_base64,
+            file_name=file_name,
+            private=private,
+        )
+
+    async def openceo_get_ticket_attachment(attachment: str, include_content: bool = False) -> dict[str, Any]:
+        return await _guard("get_attachment", attachment, include_content=include_content)
+
+    async def openceo_update_ticket_attachment(
+        attachment: str,
+        ticket: str,
+        file_name: str | None = None,
+        private: bool | None = None,
+    ) -> dict[str, Any]:
+        return await _guard(
+            "update_attachment",
+            attachment,
+            ticket,
+            file_name=file_name,
+            private=private,
+        )
+
+    async def openceo_delete_ticket_attachment(attachment: str, ticket: str) -> dict[str, Any]:
+        return await _guard("delete_attachment", attachment, ticket)
+
+    server.tool(
+        openceo_update_ticket,
+        name="openceo_update_ticket",
+        description="Edit a ticket's subject, description, priority (low/medium/high/critical) or due_date. Only the given fields change. Status, dependencies and execution are untouched.",
+    )
+    server.tool(
+        openceo_get_ticket_thread,
+        name="openceo_get_ticket_thread",
+        description="Read a ticket's timeline: comments (newest first, limit default 20) and attachments. Use before commenting or attaching.",
+    )
+    server.tool(
+        openceo_add_ticket_comment,
+        name="openceo_add_ticket_comment",
+        description="Comment on a ticket; it appears in the ERPNext timeline. Idempotent: identical text from this agent is not posted twice.",
+    )
+    server.tool(
+        openceo_update_ticket_comment,
+        name="openceo_update_ticket_comment",
+        description="Edit a comment by its id. Frappe allows this only to the comment's author, so comments written by a person are not editable.",
+    )
+    server.tool(
+        openceo_attach_ticket_file,
+        name="openceo_attach_ticket_file",
+        description="Attach a file to a ticket. Give exactly one of source_path (local file inside the allowed root) or content_base64. Private by default, deduplicated by content, name sanitized.",
+    )
+    server.tool(
+        openceo_get_ticket_attachment,
+        name="openceo_get_ticket_attachment",
+        description="Read one attachment by its id: metadata and authenticated download_url. include_content=true also returns text or base64 when it fits in 256 KiB.",
+    )
+    server.tool(
+        openceo_update_ticket_attachment,
+        name="openceo_update_ticket_attachment",
+        description="Rename an attachment (file_name) or change its privacy (private). Requires the id and its ticket.",
+    )
+    server.tool(
+        openceo_delete_ticket_attachment,
+        name="openceo_delete_ticket_attachment",
+        description="Delete an attachment. Requires the id and its ticket.",
+    )
     return (
         "openceo_create_ticket",
         "openceo_create_tickets_batch",
         "openceo_create_pm_tickets_batch",
         "openceo_search_tickets",
         "openceo_get_ticket",
+        "openceo_update_ticket",
+        "openceo_get_ticket_thread",
+        "openceo_add_ticket_comment",
+        "openceo_update_ticket_comment",
+        "openceo_attach_ticket_file",
+        "openceo_get_ticket_attachment",
+        "openceo_update_ticket_attachment",
+        "openceo_delete_ticket_attachment",
     )
 
 
