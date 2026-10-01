@@ -150,7 +150,10 @@ class _Runtime:
                 }
             ],
         }
-        return RuntimeOutcome(text=json.dumps(report), session_id="ses_fake")
+        return RuntimeOutcome(
+            text=json.dumps(report).replace("\"e1\"", f"\"{request.research_id}-e1\""),
+            session_id="ses_fake",
+        )
 
 
 @unittest.skipUnless(support.MONGO_AVAILABLE, "Mongo no disponible en este entorno")
@@ -217,12 +220,13 @@ class AcceptanceATests(unittest.IsolatedAsyncioTestCase):
         result = document["result"]
         self.assertEqual(result["status"], "completed")
         self.assertEqual(len(result["claims"]), 1)
-        self.assertEqual(result["claims"][0]["evidence_ids"], ["e1"])
+        scoped_id = f"{document['research_id']}-e1"
+        self.assertEqual(result["claims"][0]["evidence_ids"], [scoped_id])
 
         # La evidencia existe de verdad en el almacen, no solo en el informe.
         repository = self.vault.project(PROJECT)
         stored = await repository.aget(
-            EvidenceScope(project_key=PROJECT, owner_id=OWNER), "e1"
+            EvidenceScope(project_key=PROJECT, owner_id=OWNER), scoped_id
         )
         self.assertIsNotNone(stored)
         self.assertIn("example.org", stored.evidence.url)
@@ -231,26 +235,60 @@ class AcceptanceATests(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_evidence_index_is_queryable_with_real_fts(self) -> None:
         await self._submit()
-        await self.service.run_once()
+        document = await self.service.run_once()
         repository = self.vault.project(PROJECT)
         hits = await repository.asearch(
             EvidenceScope(project_key=PROJECT, owner_id=OWNER), "observado"
         )
         self.assertTrue(hits)
-        self.assertEqual(hits[0].evidence.id, "e1")
+        self.assertEqual(hits[0].evidence.id, f"{document['research_id']}-e1")
 
     async def test_evidence_of_another_owner_is_not_visible(self) -> None:
         await self._submit()
-        await self.service.run_once()
+        document = await self.service.run_once()
         repository = self.vault.project(PROJECT)
         foreign = await repository.aget(
-            EvidenceScope(project_key=PROJECT, owner_id="usr_ajeno"), "e1"
+            EvidenceScope(project_key=PROJECT, owner_id="usr_ajeno"),
+            f"{document['research_id']}-e1",
         )
         self.assertIsNone(foreign)
         hits = await repository.asearch(
             EvidenceScope(project_key=PROJECT, owner_id="usr_ajeno"), "observado"
         )
         self.assertEqual(hits, [])
+
+    async def test_two_jobs_of_the_same_project_do_not_collide_on_evidence(self) -> None:
+        """Regresion del defecto hallado al correr el circuito por la API.
+
+        El almacen de evidencias es **por proyecto** y el servicio usaba ids `e1`, `e2`...
+        solo unicos dentro del job: un segundo job del mismo proyecto (otro owner)
+        fallaba con `EvidenceConflict`. Los ids llevan ahora el `research_id`.
+        """
+        first = await self.service.submit(
+            ResearchJobRequest(
+                project_key=PROJECT, purpose="brief", mode="quick", question="Primera"
+            ),
+            principal=_principal(owner=OWNER),
+            project_cfg=_cfg(),
+        )
+        second = await self.service.submit(
+            ResearchJobRequest(
+                project_key=PROJECT, purpose="brief", mode="quick", question="Segunda"
+            ),
+            principal=_principal(owner="usr_segundo"),
+            project_cfg=_cfg(),
+        )
+        first_done = await self.service.run_once()
+        second_done = await self.service.run_once()
+        self.assertEqual(first_done["status"], ResearchJobStatus.COMPLETED.value)
+        self.assertEqual(second_done["status"], ResearchJobStatus.COMPLETED.value)
+        first_ids = {row["id"] for row in first_done["result"]["evidence"]}
+        second_ids = {row["id"] for row in second_done["result"]["evidence"]}
+        self.assertTrue(first_ids and second_ids)
+        self.assertEqual(first_ids & second_ids, set())
+        self.assertTrue(
+            all(row["id"].startswith(first["research_id"]) for row in first_done["result"]["evidence"])
+        )
 
     async def test_research_does_not_create_business_tickets(self) -> None:
         await self._submit()

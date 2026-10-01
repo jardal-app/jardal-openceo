@@ -143,7 +143,14 @@ def build_broker_operations(
             read_log.record(
                 scope.research_id,
                 evidence_id,
-                {"url": final_url, "text": text, "stored": stored is not None},
+                {
+                    "url": final_url,
+                    "text": text,
+                    "stored": stored is not None,
+                    # El hash del texto almacenado viaja al informe: la aceptacion pide
+                    # poder revisar la afirmacion material contra el contenido guardado.
+                    "content_hash": content_hash,
+                },
             )
         return untrusted_payload(
             url=final_url,

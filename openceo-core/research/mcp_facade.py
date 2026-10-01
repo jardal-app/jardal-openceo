@@ -151,9 +151,16 @@ def build_research_mcp_facade(
         purpose: str,
         question: str,
         mode: str = "quick",
+        seed_urls: list[str] | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Admite una investigacion y devuelve su identificador de inmediato."""
+        """Admite una investigacion y devuelve su identificador de inmediato.
+
+        `seed_urls` son fuentes conocidas que el consumidor ya tiene. Sin buscador
+        configurado (sin clave de Brave/Serper) son la **unica** via de adquisicion: sin
+        ellas la peticion publica no tendria evidencia que leer y el informe no podria
+        apoyarse en nada. No son identidad ni alcance, asi que no relajan la autorizacion.
+        """
         grant = _authenticate("submit")
         if isinstance(grant, dict):
             return grant
@@ -170,6 +177,7 @@ def build_research_mcp_facade(
                 purpose=purpose,
                 question=question,
                 mode=mode,
+                seed_urls=[url for url in (seed_urls or []) if isinstance(url, str)],
                 idempotency_key=idempotency_key,
             )
         except Exception as exc:  # noqa: BLE001 - validacion del contrato

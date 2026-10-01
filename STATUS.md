@@ -4,6 +4,28 @@ Resumen operativo corto del estado real del repo.
 
 ## Continuar aquí (traspaso a la próxima sesión)
 
+**CIERRE de la sesión de research (2026-10-01, cierre 11): ENTREGA A CUMPLIDA.** `TASK-2026-00062`, `00063`, `00065`, `00066` y `00067` quedan **Completed** en ERPNext, con el resultado verificado escrito en cada ticket. El épico `TASK-2026-00056` sigue **Open** a propósito: faltan las Entregas B, C y D.
+
+**Lo que se demostró (ejecutado, no deducido):**
+- **Circuito real por la API y por la fachada MCP**, con consumidores de prueba: `scripts/research_facade_probe.py --path both` da `ok=true`; en ambos caminos el job termina `completed` con **2 afirmaciones que citan su propio `evidence_id`** y las citas resuelven contra la evidencia persistida del job. Modelo: el candidato libre del épico (`opencode/muse-spark-1.3-contributor-free`) con **perfil cerrado** y versión del CLI **verificada** (2.0.20).
+- **Aislamiento real**: canario fuera del workspace **inaccesible** y **destino prohibido bloqueado** (egress filtrado por destino). Evidencia: `scripts/research_circuit_probe.py` y `tests/test_research_isolation.py` (9 tests, con smoke real opt-in `RESEARCH_EGRESS_SMOKE=1`).
+- **Broker montado** en la aplicación real: 401 sin Bearer, `tools/list` con las tres tools exactas, apagado (404) por defecto; del worker aislado sale `mcp connected server=research-broker tools=3`.
+- **Suite del repo: 848 pasan / 8 fallan / 2 skipped.** Los 8 son los preexistentes de entorno; cero regresiones.
+
+**Hallazgo que desbloqueó todo (no obvio y medido):** la frontera de *deny por defecto* del worker va en **`experimental.policies`**, no en `agents.*.permissions`. La capa libre de OpenCode responde `403 "free tier can only be used from within OpenCode"` ante **cualquier** regla `deny` de agente — reproducido con 5 modelos libres y 5 variantes de perfil. `policies` es binaria, nunca pregunta y solo endurece, y el CLI sí la acepta. **Si alguien mueve el deny a `permissions`, el worker se queda sin modelo.** `assert_worker_config_is_closed()` rechaza explícitamente esa forma.
+
+**Defectos reales corregidos** (todos visibles solo al ejecutar): credencial de consumidor anulada por `fastmcp` 3.x (`authorization` excluido por defecto); motor no montado en bwrap; config del worker invisible; DNS roto (`/etc/resolv.conf` es un enlace a `/run`, no montado); plan que afirmaba una frontera de red inexistente + backend `unshare` sin aislamiento de ficheros; `PATH` saneado sin `/usr/sbin`, que impedía aplicar `iptables`; hash del lector HTTP que rompía toda lectura HTML; `_build_discovery` no invocable; esquema MCP (`oauth`, claves de `timeout`); informe exigido en JSON puro; y **colisión de ids de evidencia entre jobs del mismo proyecto** (`EvidenceConflict`), con test de regresión.
+
+**Siguiente sesión (research):** Entrega B (`00068`–`00070`, scheduler persistido y suscripciones) y después C y D. Opcional: endurecer el arranque en despliegue — el filtrado de egress es **opt-in** (`RESEARCH_ISOLATION_BACKEND=container` + gateway + `RESEARCH_BROKER_ALLOWED_IPS` con la subred); `scripts/research_worker_image.sh` prepara imagen y red e imprime ajustes y regla de UFW. Sin ese ajuste el plan corre con bwrap y **declara** `egress_restricted=false`.
+
+**Cambios de infraestructura en el host (no son código; revertibles):** red docker `openceo-research-egress` (172.31.240.0/24), imagen `openceo-research-worker:latest` y **dos reglas UFW** (`172.31.240.0/24` → 18765 broker y → 18899 probe). No publican nada hacia fuera.
+
+**Pendiente de tu aprobación:** borrar `docs/work/TASK-2026-00056-investigator-elite.md` (temporal, git-ignored). Lo durable ya está en los tickets y en este `STATUS.md`.
+
+**Plan de cierre de Tier S registrado el 2026-10-01:** se amplió **`TASK-2026-00030`** con la aceptación del flujo base: activación de `claudej` tras la renovación comunicada por el dueño, modelos efectivos, protección de lectura de revisores, piloto completo, preguntas/reanudación y proyección a ERPNext real. Sigue **`Open`** porque esa aceptación no se ha cumplido; su ejecución `failed` del 26-09 fue un ruteo a Finance, no una ejecución del consenso. El motor está integrado en `main` (`3128146`), pero `projects/jardal-openceo/project.yaml` todavía conserva `planner.active=false`.
+
+Se crearon **`TASK-2026-00078`** (adaptador OpenCode V2 de revisión de solo lectura y piloto con modelo gratuito) y **`TASK-2026-00079`** (comentarios y adjuntos de tickets por MCP, funcionalidad futura independiente de Tier S), ambos **`Open`**, ejecución **`queued`**, **`autorun=false`**. El piloto base se conserva en `00030` y puede cerrarse con su roster actual; `00078` amplía después el consenso con OpenCode y `00079` no es una dependencia del cierre. `TASK-2026-00042` sigue siendo el ruteo de revisión humana, sin dependencia del piloto técnico. Los detalles y criterios viven en ERPNext; esta actualización solo registra la planificación, sin implementación, activación, pruebas ni modelos.
+
 **Actualización de la misma sesión (cierre 11, segunda tanda): el bloqueo de modelo está resuelto y el circuito real CIERRA con el perfil cerrado.** La aceptación exigía *deny por defecto* en el perfil del worker, y la capa libre del proveedor rechazaba cualquier perfil con deny (`403 "OpenCode's free tier can only be used from within OpenCode"`). Se reprodujo con **cinco modelos libres y cinco variantes de perfil**: dispara **cualquier** regla `deny` en `agents.*.permissions`, no una acción concreta. OpenCode V2 separa dos capas ([policies](https://opencode.ai/v2/docs/policies)): `permissions` (por agente, allow/deny/ask) y **`experimental.policies`**, que es **binaria, nunca pregunta y solo endurece** lo que permisos y proveedores ya permiten — no la levanta una regla de agente ni una aprobación guardada. La frontera del worker vive ahora ahí (deny global primero + `allow` de las tres tools del broker) y `agents.*.permissions` queda en `allow` **a propósito**: el deny de agente no era defensa en profundidad, era el fallo que dejaba al worker sin modelo. `assert_worker_config_is_closed()` valida la capa de policies y **rechaza explícitamente** un `deny` en la capa de agente con el motivo real.
 
 Con eso, el modelo candidato del epic (`opencode/muse-spark-1.3-contributor-free`, **libre**) ejecuta el circuito completo: `ok=true`, `tool_called=true`, `cites_broker_evidence=true`, lectura real de `https://example.com/` vía HTTP, evidencia persistida en SQLite/FTS5 (`br-d80791d09dfd0edfeec0e213`, `content_hash=db1730df…`, `observed_at`, `access_method=http`), **extracto citado verificado contra el texto almacenado**, y el worker **no puede ejecutar shell ni leer el canario** fuera del workspace (`DENEGADO`). El CLI registra `mcp connected server=research-broker tools=3`. Reproducible: `./.venv/bin/python scripts/research_circuit_probe.py --model opencode/muse-spark-1.3-contributor-free`.
@@ -682,24 +704,15 @@ Trabajo de infraestructura hecho **fuera de OpenCEO** (en `/home/develop/deploym
 
 ### Tier S
 
-- Activo cuando `project.yaml` define `coding_tool: tier_s` y el usuario no fuerza provider
-- Proyecto con default actual: `jardal-trading`
-- Levanta 4 sesiones tmux: `dev-{project}-claude|codex|gemini|opencode` (el reviewer `gemini` corre `agyd` con `--dangerously-skip-permissions`, evitando diálogos de confirmación en escritura de archivos)
-- Claude lidera; reviewers escriben en `FEEDBACK-*.md`
-- El reviewer `opencode` sigue siendo un solo slot de Tier S, pero ya no usa el team runtime experimental
-- OpenCode corre 5 reviewers headless one-shot mediante `opencode run --agent build --model ... --format json`, con scheduler híbrido por tandas y compilación final separada
-- Scheduler OpenCode actual: `GLM-5 + Kimi` en paralelo, luego `M2.5 + M2.7` en paralelo; `DeepSeek Reasoner` corre aparte desde el inicio y el compilador arranca solo cuando terminan los 5 reviewers
-- Reviewers OpenCode actuales: `GLM-5`, `Kimi K2.5`, `MiniMax M2.5`, `MiniMax M2.7`, `DeepSeek Reasoner`
-- Los modelos OpenCode Go del consenso ya no están hardcodeados: salen de `openceo-core/.env` vía `OPENCODE_GO_MODEL_*`
-- `OPENCODE_MODEL_OVERRIDE` puede forzar el modelo efectivo del provider `opencode` sin editar `project.yaml`; hoy queda desactivado para respetar el modelo configurado por proyecto
-- Los prompts de reviewers OpenCode comparten un armazón común, pero cada modelo tiene `Suggested strength areas`, `context_focus` y `specialty` propios; esas fortalezas son sugerencias, no límites duros del review
-- El consenso OpenCode ya no lo hace un team lead global: después de los 5 reviewers corre 1 compilador headless separado con `--agent build --model opencode-go/minimax-m2.7`, que deduplica findings y escribe `FEEDBACK-opencode.md`
-- Los artifacts intermedios viven en `.opencode-team-review/step-XX-iteration-YY/`; solo `FEEDBACK-opencode.md` es consumido por OpenCEO
-- Cada reviewer OpenCode y el compilador rescatan su `sessionID` desde la salida JSON y lo persisten en archivos `.opencode-session-opencode-reviewer-*.id` y `.opencode-session-opencode-compiler.id`; en las siguientes rondas se reutiliza con `--session` para mantener contexto acumulado del Tier S
-- OpenCEO ya no reparte timeouts dinámicos por batch; cada reviewer OpenCode puede correr hasta 10 minutos y el compilador hasta 10 minutos antes de corte forzado
-- Si la compilación final sale bien, se limpian los artifacts intermedios; al cerrar la sesión Tier S se limpian también los `session_id` persistidos de reviewers y compilador
-- La orquestación avanza por señales deterministas: `.consensus-status`, `REVIEW_DONE_*`, `OPENCEO_FINAL_BEGIN/END`
-- Pre-launch check de rate limits: Tier S requiere Claude + Codex disponibles antes de iniciar
+- Motor base integrado en `main` (`3128146`, `TASK-2026-00030`). El informe de implementación registra 87 pruebas correctas; el piloto real de principio a fin y la proyección a ERPNext vivo siguen pendientes. No confundir esa evidencia lógica con aceptación completa.
+- Entrada por `task.coding_tool=tier_s` o por el modo Dev del proyecto/sesión. El proveedor general de `jardal-openceo` permanece en `codex`; su piloto debe seleccionar Tier S explícitamente.
+- Roster actual: `claudej` planner, `codexf` revisor obligatorio de plan/código, `claudep` builder y `qwen` + `claudeg` revisores adicionales. `agyd` y OpenCode/MiMo están declarados inactivos. El dueño comunicó la compra de Claude Pro, pero la configuración aún conserva `planner.active=false`; la continuación de `00030` debe activarlo y verificar modelos/comandos efectivos.
+- Se exige revisión válida del plan antes del build; cada ronda intenta todos los revisores activos y necesita Codex más otro modelo independiente. Fallos, cuota, reportes inválidos o hallazgos bloqueantes conservan una espera recuperable y no equivalen a aprobación.
+- El builder escribe código; los revisores inspeccionan snapshots Git en worktrees temporales. Un cambio de snapshot invalida el reporte, pero el worktree no es una barrera del sistema operativo contra escrituras por rutas absolutas: esa protección debe validarse/reforzarse en `00030`.
+- MongoDB `tier_s_runs` conserva fase, roster, pregunta y checkpoints. Los artefactos locales están en `.tier-s/` (`CURRENT_PLAN.md`, `BUILD_SUMMARY_N.md`, `REVIEW-*.md`, señales y archivo de intentos); no se crea `status.json`. La atención y el progreso se proyectan al mismo Task de ERPNext.
+- API: `POST /api/tasks/{task_id}/tier-s/answer`, `POST /api/tasks/{task_id}/tier-s/cancel` y `GET /api/tier-s/waits?project=...`. El piloto debe verificar pregunta real, respuesta por opción/texto libre y reanudación del mismo intento.
+- OpenCode todavía no tiene adaptador de revisión de lectura en este consenso: `TASK-2026-00078` cubre su integración y piloto gratuito. Una configuración heredada no vacía `opencode_reviewers` produce espera explícita y debe migrarse a `reviewers` con adaptador verificado. El circuito Research con policies restrictivas es un antecedente útil, no evidencia de una revisión Tier S ya funcional.
+- Seguimiento: `TASK-2026-00030` y `TASK-2026-00078` permanecen `Open`, sin lanzamiento automático. El contrato temporal y el informe están en `docs/work/TASK-2026-00030-tier-s.md` y `docs/reviews/TASK-2026-00030-tier-s-review.md`; los criterios de cierre vigentes están en ERPNext.
 
 ### Legacy Ticket Tier 3
 

@@ -186,6 +186,44 @@ class ResearchDependencies:
     slots: JobSlots = field(default_factory=JobSlots)
 
 
+def extract_report_payload(text: str) -> dict[str, Any] | None:
+    """Extrae el objeto JSON del informe aunque el modelo lo envuelva en prosa.
+
+    Los modelos libres suelen escribir una frase antes del JSON o meterlo en un bloque de
+    codigo. Exigir `json.loads(texto_completo)` convertia esa prosa en un `failed` sin
+    sintesis, cuando el informe **si** venia. No se inventa nada: se buscan objetos
+    balanceados y se prefiere el que tiene `claims` o `summary`; si no hay ninguno, no hay
+    informe y el job sigue fallando con su causa.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    candidates: list[dict[str, Any]] = []
+    for start, char in enumerate(raw):
+        if char != "{":
+            continue
+        depth = 0
+        for end in range(start, len(raw)):
+            if raw[end] == "{":
+                depth += 1
+            elif raw[end] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        payload = json.loads(raw[start : end + 1])
+                    except (ValueError, TypeError):
+                        break
+                    if isinstance(payload, dict):
+                        candidates.append(payload)
+                    break
+    if not candidates:
+        return None
+    for payload in candidates:
+        if payload.get("claims") or payload.get("summary"):
+            return payload
+    return candidates[-1]
+
+
 def reactive_dispatch_note() -> str:
     return (
         "Un unico despachador por despliegue: la toma es atomica (find_one_and_update "
@@ -413,7 +451,10 @@ class ResearchService:
                     ResearchCoverageGap(source=exc.provider or "read", reason=exc.coverage_reason, detail=exc.detail)
                 )
                 continue
-            evidence_id = f"e{index}"
+            # El almacen es **por proyecto**, no por job: `e1` se repetiria en cada
+            # investigacion y dos jobs del mismo proyecto colisionarian (o, peor, el
+            # segundo reutilizaria la evidencia del primero). El id incluye el job.
+            evidence_id = f"{job['research_id']}-e{index}"
             stored = await self._store_evidence(
                 job, scope, evidence_id=evidence_id, page=page
             )
@@ -593,23 +634,13 @@ class ResearchService:
         evidence_rows: dict[str, dict[str, Any]],
         coverage: list[ResearchCoverageGap],
     ) -> ResearchJobResult | None:
-        try:
-            payload = json.loads(text)
-        except (ValueError, TypeError):
+        payload = extract_report_payload(text)
+        if payload is None:
             coverage.append(
                 ResearchCoverageGap(
                     source="runtime",
                     reason=CoverageReason.SOURCE_UNAVAILABLE,
                     detail="La sintesis no devolvio JSON interpretable",
-                )
-            )
-            return None
-        if not isinstance(payload, dict):
-            coverage.append(
-                ResearchCoverageGap(
-                    source="runtime",
-                    reason=CoverageReason.SOURCE_UNAVAILABLE,
-                    detail="La sintesis no devolvio un objeto",
                 )
             )
             return None
@@ -637,6 +668,14 @@ class ResearchService:
                 )
             )
 
+        def _hash_of(row: dict[str, Any]) -> str | None:
+            declared = row.get("content_hash")
+            if isinstance(declared, str) and declared:
+                return declared
+            stored = row.get("stored")
+            stored_hash = getattr(stored, "content_hash", None)
+            return stored_hash if isinstance(stored_hash, str) and stored_hash else None
+
         evidence_models = [
             ResearchEvidence(
                 id=evidence_id,
@@ -644,6 +683,7 @@ class ResearchService:
                 access_method=AccessMethod.HTTP,
                 visibility=Classification(str(job.get("classification") or "public")),
                 observed_at=self._clock(),
+                content_hash=_hash_of(row),
                 project_key=job["project_key"],
                 owner_id=job["owner_id"],
             )

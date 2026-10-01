@@ -163,7 +163,9 @@ class _FakeRuntime:
                         }
                     ],
                 }
-                text = json.dumps(report)
+                # El id de evidencia incluye el job: el fake cita lo que el prompt le
+                # dio, igual que un modelo real.
+                text = json.dumps(report).replace("\"e1\"", f"\"{request.research_id}-e1\"")
             return RuntimeOutcome(text=text, session_id="ses_1")
         finally:
             self.concurrent -= 1
