@@ -22,9 +22,13 @@ Notas de esquema verificadas contra el sitio vivo (2026-09-24):
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import html
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 from settings import Settings
@@ -33,6 +37,7 @@ from tools.erpnext_client import (
     ERPNextClient,
     ERPNextDuplicateError,
     ERPNextError,
+    ERPNextValidationError,
 )
 
 logger = logging.getLogger(__name__)
@@ -166,6 +171,146 @@ def tags_footer(tags: list[str] | None) -> str:
     return f"<br><br><i>Etiquetas: {html.escape(value)}</i>"
 
 
+# ---------------------------------------------------------------------------
+# Adjuntos (TASK-2026-00079)
+# ---------------------------------------------------------------------------
+
+#: Extensiones que no se aceptan. No es una lista blanca de tipos —bloquear por
+#: extension nunca es exhaustivo—, sino el corte de lo que se ejecuta o se sirve con
+#: scripts: un HTML/SVG adjunto servido desde el mismo origen de ERPNext es un XSS
+#: almacenado si el archivo se vuelve publico.
+_BLOCKED_ATTACHMENT_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        "app", "apk", "bat", "cmd", "com", "dll", "dmg", "exe", "htm", "html", "jar",
+        "js", "mjs", "msi", "ps1", "scr", "sh", "so", "svg", "xhtml",
+    }
+)
+
+_ATTACHMENT_NAME_MAX = 120
+_FALLBACK_ATTACHMENT_NAME = "adjunto"
+
+#: Tope de contenido que se devuelve **dentro** de una respuesta MCP. Un adjunto de
+#: 10 MiB en base64 son millones de tokens en el contexto del agente: por encima de
+#: esto se devuelve solo la referencia autenticada.
+INLINE_CONTENT_MAX_BYTES = 256 * 1024
+
+
+class AttachmentRejected(ValueError):
+    """Archivo local rechazado antes de salir hacia ERPNext.
+
+    `status` es la clasificacion que devuelve el MCP: `invalid_input`, `forbidden`
+    (fuera de las raices autorizadas), `not_found`, `too_large` o `unsupported_media`.
+    """
+
+    def __init__(self, message: str, *, status: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+def sanitize_file_name(name: str | None) -> str:
+    """Nombre de archivo seguro: sin ruta, sin control, sin ocultos, acotado.
+
+    Impide traversal por construccion: solo sobrevive el ultimo segmento, y despues se
+    limpia lo que Frappe guarda como nombre visible.
+    """
+    raw = str(name or "").replace("\\", "/").split("\x00")[0]
+    base = raw.split("/")[-1]
+    base = "".join(ch for ch in base if ch.isprintable() and ch not in '<>:"|?*')
+    base = re.sub(r"\s+", " ", base).strip().strip(".")
+    base = base.lstrip(".")
+    if not base:
+        return _FALLBACK_ATTACHMENT_NAME
+    if len(base) <= _ATTACHMENT_NAME_MAX:
+        return base
+    stem, dot, extension = base.rpartition(".")
+    if not dot:
+        return base[:_ATTACHMENT_NAME_MAX]
+    keep = _ATTACHMENT_NAME_MAX - len(extension) - 1
+    return f"{stem[:keep]}.{extension}" if keep > 0 else base[:_ATTACHMENT_NAME_MAX]
+
+
+def attachment_extension(name: str | None) -> str:
+    return str(name or "").rpartition(".")[2].strip().lower() if "." in str(name or "") else ""
+
+
+def assert_attachment_name_allowed(name: str) -> None:
+    extension = attachment_extension(name)
+    if extension in _BLOCKED_ATTACHMENT_EXTENSIONS:
+        raise AttachmentRejected(
+            f"Tipo de archivo no permitido como adjunto: .{extension}", status="unsupported_media"
+        )
+
+
+def content_md5(content: bytes) -> str:
+    """El mismo hash que Frappe guarda en `File.content_hash` (md5 del contenido).
+
+    Es la clave de deduplicacion: un reintento con el mismo contenido devuelve el
+    adjunto existente en vez de crear otro. Frappe reutiliza el archivo en disco por
+    `content_hash`, pero **siempre** crea un documento `File` nuevo.
+    """
+    return hashlib.md5(content, usedforsecurity=False).hexdigest()
+
+
+def resolve_attachment_path(path: str | None, roots: list[str]) -> Path:
+    """Resuelve una ruta local y la confina a las raices autorizadas.
+
+    Se resuelve el enlace **y** se comprueba el prefijo: una ruta con `..` o un enlace
+    simbolico que apunte fuera del alcance autorizado se rechaza.
+    """
+    raw = str(path or "").strip()
+    if not raw:
+        raise AttachmentRejected("Falta source_path o content_base64.", status="invalid_input")
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        raise AttachmentRejected("source_path debe ser una ruta absoluta.", status="invalid_input")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise AttachmentRejected(f"No existe el archivo {raw}.", status="not_found") from None
+    if not resolved.is_file():
+        raise AttachmentRejected(f"{raw} no es un archivo regular.", status="invalid_input")
+    if not any(resolved == Path(root).resolve() or Path(root).resolve() in resolved.parents for root in roots):
+        raise AttachmentRejected(
+            "source_path esta fuera del alcance autorizado de adjuntos "
+            f"({', '.join(roots)}).",
+            status="forbidden",
+        )
+    return resolved
+
+
+def comment_plain_text(value: str | None) -> str:
+    """Texto comparable de un comentario.
+
+    La lectura (`get_docinfo`) devuelve el contenido convertido de markdown a HTML y la
+    escritura guarda el HTML tal cual, asi que la deduplicacion compara texto sin
+    etiquetas y con espacios colapsados.
+    """
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", str(value or ""), flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", html.unescape(text)).strip()
+
+
+#: Autor que se muestra en la linea de tiempo del ticket por los comentarios del agente.
+COMMENT_AUTHOR_LABEL = "OpenCEO"
+
+_ATTACHMENT_FIELDS = [
+    "name",
+    "file_name",
+    "file_url",
+    "file_type",
+    "file_size",
+    "is_private",
+    "is_folder",
+    "attached_to_doctype",
+    "attached_to_name",
+    "attached_to_field",
+    "content_hash",
+    "folder",
+    "owner",
+    "creation",
+]
+
+
 class ERPNextTicketAdapter:
     """Superficie semantica de tickets. Envuelve al cliente HTTP."""
 
@@ -175,6 +320,15 @@ class ERPNextTicketAdapter:
         self._company = (settings.ERPNEXT_TICKETS_PROJECT_COMPANY or "Jardal").strip()
         self._projects_cache: dict[str, str] = {}
         self._task_types: frozenset[str] | None = None
+        # `getattr` con default porque los tests construyen el adapter con un
+        # `SimpleNamespace` minimo; un campo nuevo no debe romperlos.
+        roots = str(getattr(settings, "ERPNEXT_ATTACHMENT_ALLOWED_ROOTS", "") or "").strip()
+        self._attachment_roots = [root.strip() for root in roots.split(",") if root.strip()]
+        self._attachment_max_bytes = int(
+            getattr(settings, "ERPNEXT_ATTACHMENT_MAX_BYTES", 0) or 10 * 1024 * 1024
+        )
+        self._base_url = str(getattr(settings, "ERPNEXT_URL", "") or "").strip().rstrip("/")
+        self._author = str(getattr(settings, "ERPNEXT_USER", "") or "").strip()
 
     @property
     def client(self) -> ERPNextClient:
@@ -500,3 +654,421 @@ class ERPNextTicketAdapter:
             detail += "<ul>" + "".join(f"<li>{html.escape(str(option))}</li>" for option in options) + "</ul>"
         body = description.rstrip() + f"\n<p>{start}</p>{detail}<p>{end}</p>"
         await self._client.update_doc("Task", name.strip(), {"description": body})
+
+    # --- edicion del ticket (TASK-2026-00079) -----------------------------
+
+    async def resolve_task(self, identifier: str) -> dict[str, Any]:
+        """Resuelve `TASK-2026-000NN` u `openceo_ref` a la fila del ticket.
+
+        Se hace antes de leer o escribir: un identificador adivinado nunca debe ser el
+        destino de un comentario, un adjunto o una edicion. No comprueba el proyecto
+        contra una lista —el MCP sirve a varias sesiones y no conoce "el proyecto
+        activo"—; devuelve `project` y `openceo_ref` para que quien llama lo compruebe.
+        """
+        key = (identifier or "").strip()
+        if not key:
+            raise ERPNextValidationError(
+                "Falta el ticket: usa TASK-2026-000NN u openceo_ref.", status_code=400
+            )
+        if key.upper().startswith("TASK-"):
+            try:
+                row = await self._client.get_doc("Task", key)
+            except ERPNextError as exc:
+                if exc.status_code == 404:
+                    raise self._ticket_not_found(key) from None
+                raise
+        else:
+            row = await self.find_by_ref(key)
+            if row is None:
+                raise self._ticket_not_found(key)
+        return row
+
+    @staticmethod
+    def _ticket_not_found(identifier: str) -> ERPNextValidationError:
+        return ERPNextValidationError(f"No existe el ticket {identifier}.", status_code=404)
+
+    def _ticket_view(self, task: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "name": task.get("name"),
+            "subject": task.get("subject"),
+            "status": task.get("status"),
+            "priority": task.get("priority"),
+            "project": task.get("project"),
+            "openceo_ref": task.get("openceo_ref"),
+        }
+
+    async def update_ticket(
+        self,
+        identifier: str,
+        *,
+        subject: str | None = None,
+        description: str | None = None,
+        priority: str | None = None,
+        due_date: str | None = None,
+    ) -> dict[str, Any]:
+        """Edita los campos de contenido del ticket. No toca el estado.
+
+        El estado y las dependencias son una maquina de estados de negocio, no un campo
+        de edicion: los mueve la ejecucion (o el desk), y escribirlos aqui saltaria la
+        contabilidad de `status_pushed` del observador y podria rebotar con el webhook.
+        """
+        task = await self.resolve_task(identifier)
+        name = str(task.get("name") or "").strip()
+        body: dict[str, Any] = {}
+
+        if subject is not None:
+            clean_subject = str(subject).strip()
+            if not clean_subject:
+                raise ERPNextValidationError("El titulo no puede quedar vacio.", status_code=400)
+            body["subject"] = truncate_subject(clean_subject)
+        if description is not None:
+            body["description"] = to_html_description(str(description))
+        if priority is not None:
+            clean_priority = str(priority).strip().lower()
+            if clean_priority not in _PRIORITY_MAP:
+                raise ERPNextValidationError(
+                    f"Prioridad invalida: {priority}. Usa {'/'.join(_PRIORITY_MAP)}.", status_code=400
+                )
+            body["priority"] = map_priority(clean_priority)
+        if due_date is not None:
+            normalized = normalize_due_date(str(due_date))
+            if not normalized:
+                raise ERPNextValidationError("Fecha de vencimiento invalida.", status_code=400)
+            body["exp_end_date"] = normalized
+
+        if not body:
+            raise ERPNextValidationError(
+                "Nada que actualizar: indica subject, description, priority o due_date.",
+                status_code=400,
+            )
+
+        updated = await self._client.update_doc("Task", name, body)
+        # Se devuelve la vista corta, no el documento entero: cada campo de la respuesta
+        # viaja al contexto del agente. `changed` dice que se toco.
+        return {"ok": True, "changed": sorted(body), "ticket": self._ticket_view({**task, **(updated or {})})}
+
+    # --- hilo del ticket: comentarios -------------------------------------
+
+    def _author_email(self) -> str:
+        return self._author or "openceo@jardal.app"
+
+    async def _docinfo(self, task_name: str) -> dict[str, Any]:
+        """Lee el hilo del ticket con el cargador del desk (`get_docinfo`).
+
+        Es el unico camino de lectura de comentarios y adjuntos que tiene este
+        principal: `Comment` no es legible por rol (`Projects User` + `Accounts User`) y
+        la lista de `File` esta acotada al propietario. `get_docinfo` comprueba permiso
+        de lectura sobre el **ticket** y devuelve exactamente lo que muestra la linea de
+        tiempo.
+        """
+        body = await self._client.call_method(
+            "frappe.desk.form.load.get_docinfo",
+            http_method="GET",
+            params={"doctype": "Task", "name": task_name},
+        )
+        info = body.get("docinfo")
+        if not isinstance(info, dict):
+            message = body.get("message")
+            info = message.get("docinfo") if isinstance(message, dict) else None
+        return info if isinstance(info, dict) else {}
+
+    def _comment_view(self, row: dict[str, Any]) -> dict[str, Any]:
+        author = str(row.get("owner") or row.get("comment_email") or "")
+        return {
+            "id": row.get("name"),
+            "author": author,
+            "creation": row.get("creation"),
+            "content": row.get("content"),
+            "editable": bool(self._author) and author.lower() == self._author.lower(),
+        }
+
+    def _attachment_view(self, row: dict[str, Any]) -> dict[str, Any]:
+        url = str(row.get("file_url") or "")
+        view: dict[str, Any] = {
+            "id": row.get("name"),
+            "file_name": row.get("file_name"),
+            "file_type": row.get("file_type"),
+            "size": row.get("file_size"),
+            "private": bool(row.get("is_private")),
+            "file_url": url,
+            "download_url": f"{self._base_url}{url}" if url.startswith("/") else url,
+        }
+        # El listado del hilo (`get_docinfo`) no devuelve estos dos campos, y el listado
+        # propio si: se omiten cuando no se saben, en vez de afirmar `null`.
+        if row.get("attached_to_name"):
+            view["attached_to"] = row["attached_to_name"]
+        if row.get("content_hash"):
+            view["content_hash"] = row["content_hash"]
+        return view
+
+    async def list_thread(self, identifier: str, *, limit: int = 20) -> dict[str, Any]:
+        """Comentarios y adjuntos visibles en la linea de tiempo del ticket."""
+        task = await self.resolve_task(identifier)
+        info = await self._docinfo(str(task.get("name") or ""))
+        top = max(1, min(int(limit or 20), 200))
+        comments = [row for row in (info.get("comments") or []) if isinstance(row, dict)]
+        attachments = [row for row in (info.get("attachments") or []) if isinstance(row, dict)]
+        comments.sort(key=lambda row: str(row.get("creation") or ""), reverse=True)
+        return {
+            "ok": True,
+            "ticket": self._ticket_view(task),
+            "comment_count": len(comments),
+            "attachment_count": len(attachments),
+            "comments": [self._comment_view(row) for row in comments[:top]],
+            "attachments": [self._attachment_view(row) for row in attachments],
+        }
+
+    def _find_identical_comment(self, info: dict[str, Any], content: str) -> dict[str, Any] | None:
+        """Deduplicacion comprobable de comentarios: mismo autor y mismo texto.
+
+        Un reintento tras un timeout ambiguo no debe duplicar el comentario, y Frappe no
+        da donde guardar una clave: el comentario se inserta por el metodo oficial, que
+        no acepta campos extra. Se compara el texto normalizado contra los comentarios
+        del mismo autor en este ticket, y se devuelve el existente. El costo es el mismo
+        texto repetido a proposito en el mismo ticket: se evita añadiendo algo al final.
+        """
+        wanted = comment_plain_text(content)
+        if not wanted:
+            return None
+        for row in info.get("comments") or []:
+            if not isinstance(row, dict):
+                continue
+            author = str(row.get("owner") or row.get("comment_email") or "")
+            if self._author and author.lower() != self._author.lower():
+                continue
+            if comment_plain_text(row.get("content")) == wanted:
+                return self._comment_view(row)
+        return None
+
+    async def add_comment(self, identifier: str, content: str) -> dict[str, Any]:
+        """Publica un comentario en el ticket, idempotente por contenido."""
+        task = await self.resolve_task(identifier)
+        text = str(content or "").strip()
+        if not text:
+            raise ERPNextValidationError("El comentario no puede estar vacio.", status_code=400)
+        name = str(task.get("name") or "").strip()
+        info = await self._docinfo(name)
+        existing = self._find_identical_comment(info, text)
+        if existing is not None:
+            return {"ok": True, "duplicate": True, "ticket": self._ticket_view(task), "comment": existing}
+
+        body = await self._client.call_method(
+            "frappe.desk.form.utils.add_comment",
+            json={
+                "reference_doctype": "Task",
+                "reference_name": name,
+                "content": text,
+                "comment_email": self._author_email(),
+                "comment_by": COMMENT_AUTHOR_LABEL,
+            },
+            attempts=1,  # crea: un reintento automatico duplicaria
+        )
+        message = body.get("message")
+        created = message if isinstance(message, dict) else {}
+        return {
+            "ok": True,
+            "duplicate": False,
+            "ticket": self._ticket_view(task),
+            "comment": self._comment_view({**created, "owner": created.get("owner") or self._author_email()}),
+        }
+
+    async def update_comment(self, comment_id: str, content: str) -> dict[str, Any]:
+        """Edita un comentario. Frappe solo lo permite a su autor.
+
+        La regla no es nuestra: `frappe.desk.form.utils.update_comment` exige que la
+        sesion sea la propietaria del comentario (o `Administrator`). Un comentario
+        escrito por una persona en el desk no se puede editar con este principal, y se
+        devuelve como error de permiso clasificado.
+        """
+        key = str(comment_id or "").strip()
+        if not key:
+            raise ERPNextValidationError("Falta el id del comentario.", status_code=400)
+        text = str(content or "").strip()
+        if not text:
+            raise ERPNextValidationError("El comentario no puede estar vacio.", status_code=400)
+        await self._client.call_method(
+            "frappe.desk.form.utils.update_comment",
+            json={"name": key, "content": text},
+            attempts=1,  # no es idempotente por contenido: no reintentar a ciegas
+        )
+        return {"ok": True, "comment_id": key, "content": text}
+
+    # --- hilo del ticket: adjuntos ----------------------------------------
+
+    def _read_attachment_source(
+        self,
+        *,
+        source_path: str | None,
+        content_base64: str | None,
+        file_name: str | None,
+    ) -> tuple[bytes, str]:
+        """Obtiene (contenido, nombre saneado) de las dos formas aceptadas."""
+        given = [bool(str(source_path or "").strip()), bool(str(content_base64 or "").strip())]
+        if sum(given) != 1:
+            raise AttachmentRejected(
+                "Da exactamente uno: source_path (ruta local autorizada) o content_base64.",
+                status="invalid_input",
+            )
+
+        if given[0]:
+            resolved = resolve_attachment_path(source_path, self._attachment_roots)
+            name = file_name or resolved.name
+            try:
+                content = resolved.read_bytes()
+            except OSError as exc:
+                raise AttachmentRejected(f"No se pudo leer {resolved}: {exc}", status="invalid_input") from exc
+        else:
+            try:
+                content = base64.b64decode(str(content_base64), validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise AttachmentRejected(f"content_base64 no es base64 valido: {exc}", status="invalid_input") from exc
+            name = file_name or None
+
+        if not content:
+            raise AttachmentRejected("El archivo esta vacio.", status="invalid_input")
+        if len(content) > self._attachment_max_bytes:
+            raise AttachmentRejected(
+                f"El archivo pesa {len(content)} bytes y el limite es {self._attachment_max_bytes}.",
+                status="too_large",
+            )
+        clean_name = sanitize_file_name(name)
+        assert_attachment_name_allowed(clean_name)
+        return content, clean_name
+
+    async def attach_file(
+        self,
+        identifier: str,
+        *,
+        source_path: str | None = None,
+        content_base64: str | None = None,
+        file_name: str | None = None,
+        private: bool = True,
+    ) -> dict[str, Any]:
+        """Adjunta un archivo al ticket, idempotente por `content_hash`."""
+        task = await self.resolve_task(identifier)
+        name = str(task.get("name") or "").strip()
+        content, clean_name = self._read_attachment_source(
+            source_path=source_path, content_base64=content_base64, file_name=file_name
+        )
+        digest = content_md5(content)
+
+        # La lista de `File` esta acotada al propietario (condicion de permiso de
+        # Frappe), asi que esto deduplica los adjuntos que sube este principal. Un
+        # archivo identico subido por una persona no se ve desde aqui.
+        existing = await self._client.list_docs(
+            "File",
+            filters=[
+                ["attached_to_doctype", "=", "Task"],
+                ["attached_to_name", "=", name],
+                ["content_hash", "=", digest],
+            ],
+            fields=_ATTACHMENT_FIELDS,
+            limit=1,
+        )
+        if existing:
+            return {
+                "ok": True,
+                "duplicate": True,
+                "ticket": self._ticket_view(task),
+                "attachment": self._attachment_view(existing[0]),
+            }
+
+        created = await self._client.upload_file(
+            filename=clean_name,
+            content=content,
+            doctype="Task",
+            docname=name,
+            is_private=bool(private),
+        )
+        return {
+            "ok": True,
+            "duplicate": False,
+            "ticket": self._ticket_view(task),
+            "attachment": self._attachment_view({**created, "content_hash": digest}),
+        }
+
+    async def get_attachment(self, attachment: str, *, include_content: bool = False) -> dict[str, Any]:
+        """Lee un adjunto: metadatos, referencia autenticada y contenido opcional."""
+        key = str(attachment or "").strip()
+        if not key:
+            raise ERPNextValidationError("Falta el id del adjunto.", status_code=400)
+        try:
+            row = await self._client.get_doc("File", key)
+        except ERPNextError as exc:
+            if exc.status_code == 404:
+                raise ERPNextValidationError(f"No existe el adjunto {key}.", status_code=404) from None
+            raise
+        view = self._attachment_view(row)
+        if not include_content:
+            return {"ok": True, "attachment": view}
+
+        url = str(row.get("file_url") or "")
+        if not url.startswith("/") or row.get("is_folder"):
+            raise AttachmentRejected("El adjunto no tiene contenido descargable.", status="invalid_input")
+        if int(row.get("file_size") or 0) > INLINE_CONTENT_MAX_BYTES:
+            raise AttachmentRejected(
+                f"El adjunto supera {INLINE_CONTENT_MAX_BYTES} bytes: usa download_url.",
+                status="too_large",
+            )
+        content = await self._client.download_bytes(url, max_bytes=INLINE_CONTENT_MAX_BYTES)
+        try:
+            return {"ok": True, "attachment": {**view, "content_text": content.decode("utf-8")}}
+        except UnicodeDecodeError:
+            return {"ok": True, "attachment": {**view, "content_base64": base64.b64encode(content).decode("ascii")}}
+
+    async def _linked_attachment(self, attachment: str, identifier: str) -> tuple[str, dict[str, Any]]:
+        """Comprueba que un adjunto existe y cuelga **de ese** ticket.
+
+        Antes de renombrar o borrar: un id adivinado no debe alcanzar el archivo de otro
+        ticket, y el ticket se resuelve igual que en las demas operaciones.
+        """
+        key = str(attachment or "").strip()
+        if not key:
+            raise ERPNextValidationError("Falta el id del adjunto.", status_code=400)
+        task = await self.resolve_task(identifier)
+        name = str(task.get("name") or "").strip()
+        try:
+            row = await self._client.get_doc("File", key)
+        except ERPNextError as exc:
+            if exc.status_code == 404:
+                raise ERPNextValidationError(f"No existe el adjunto {key}.", status_code=404) from None
+            raise
+        if row.get("is_folder"):
+            raise ERPNextValidationError(f"{key} es una carpeta, no un adjunto.", status_code=400)
+        if str(row.get("attached_to_doctype") or "") != "Task" or str(row.get("attached_to_name") or "") != name:
+            raise ERPNextValidationError(
+                f"El adjunto {key} no cuelga del ticket {name}.", status_code=400
+            )
+        return name, row
+
+    async def update_attachment(
+        self,
+        attachment: str,
+        ticket: str,
+        *,
+        file_name: str | None = None,
+        private: bool | None = None,
+    ) -> dict[str, Any]:
+        """Renombra un adjunto o cambia su privacidad."""
+        _, row = await self._linked_attachment(attachment, ticket)
+        body: dict[str, Any] = {}
+        if file_name is not None:
+            clean_name = sanitize_file_name(file_name)
+            assert_attachment_name_allowed(clean_name)
+            body["file_name"] = clean_name
+        if private is not None:
+            body["is_private"] = 1 if private else 0
+        if not body:
+            raise ERPNextValidationError("Nada que actualizar: indica file_name o private.", status_code=400)
+        updated = await self._client.update_doc("File", str(row.get("name")), body)
+        return {"ok": True, "attachment": self._attachment_view(updated or row)}
+
+    async def delete_attachment(self, attachment: str, ticket: str) -> dict[str, Any]:
+        """Borra un adjunto con el metodo oficial del desk."""
+        _, row = await self._linked_attachment(attachment, ticket)
+        await self._client.call_method(
+            "frappe.desk.form.utils.remove_attach",
+            json={"fid": str(row.get("name"))},
+            attempts=1,  # borrar ya lo hizo: un reintento informaria un falso fallo
+        )
+        return {"ok": True, "deleted": str(row.get("name")), "file_name": row.get("file_name")}

@@ -105,6 +105,11 @@ class Settings(BaseSettings):
     ERPNEXT_TICKETS_PROJECT_COMPANY: str = "Jardal"
     # Secreto compartido que ERPNext debe enviar en sus webhooks de vuelta (camino inverso).
     ERPNEXT_WEBHOOK_SECRET: str = ""
+    # Adjuntos de tickets (TASK-2026-00079). Dos limites, uno por lado:
+    # los bytes que aceptamos subir y las raices locales de las que se puede leer un
+    # archivo. La raiz es el "alcance autorizado" del ticket: fuera de ella, se rechaza.
+    ERPNEXT_ATTACHMENT_MAX_BYTES: int = 10 * 1024 * 1024
+    ERPNEXT_ATTACHMENT_ALLOWED_ROOTS: str = "/home/develop/development/Jardal"
 
     # Shared infrastructure tools
     CLOUDFLARE_API_TOKEN: str = ""

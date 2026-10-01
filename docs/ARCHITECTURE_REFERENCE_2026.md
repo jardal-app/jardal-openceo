@@ -1392,10 +1392,31 @@ Both endpoints share the same security layer (loopback IP restriction + optional
 | `openceo_create_ticket(title, ...)` | Register a ticket through `TaskService`, with source identity and runtime policy. |
 | `openceo_create_tickets_batch(tickets)` | Register a structured JSON batch through the same service. |
 | `openceo_create_pm_tickets_batch(project, source_id, tickets, ...)` | Register a PM batch with explicit project and source context. |
+| `openceo_search_tickets(query, project, status, limit)` | Read business tickets in ERPNext before creating new ones. |
+| `openceo_get_ticket(identifier)` | Read one ticket plus its execution status. |
+| `openceo_update_ticket(ticket, subject, description, priority, due_date)` | Edit a ticket's content fields. Never status, dependencies or execution. |
+| `openceo_get_ticket_thread(ticket, limit)` | Read the timeline: comments (newest first) and attachments. |
+| `openceo_add_ticket_comment(ticket, content)` | Comment on a ticket; idempotent by text and author. |
+| `openceo_update_ticket_comment(comment_id, content)` | Edit a comment. Frappe allows only its author. |
+| `openceo_attach_ticket_file(ticket, source_path \| content_base64, file_name, private)` | Attach a file; private by default, deduplicated by content. |
+| `openceo_get_ticket_attachment(attachment, include_content)` | Read one attachment: metadata, download URL, optional small content. |
+| `openceo_update_ticket_attachment(attachment, ticket, file_name, private)` | Rename an attachment or change its privacy. |
+| `openceo_delete_ticket_attachment(attachment, ticket)` | Delete an attachment. |
 
 These names reflect `openceo-core/mcp_server.py`. Their existing Mongo/Notion behavior is a compatibility implementation, not an ERPNext adapter. Legacy `notion_create_*` references do not authorize direct writes around OpenCEO. The direction's `ticket.create()`/`ticket.transition()` vocabulary describes semantics; it does not rename deployed tools by documentation alone.
 
-**Design rule for MCP tool descriptions:** keep them as short as possible. Every token in a tool description is sent on every request to the coding CLI. Verbose descriptions waste subscription limits. The function parameter schema already documents the structure — no need for a separate discovery tool.
+#### Ticket thread: edits, comments and attachments (TASK-2026-00079)
+
+Verified against the live site (Frappe 16.35.0 / ERPNext 16.36.0, compañía Jardal, 2026-10-01) with the API principal (`Projects User` + `Accounts User`), which is what shapes every decision here:
+
+- **No generic write to `Comment` or `File`.** `Comment` has no `All` role permission: Frappe grants it only to `System Manager` / `Website Manager`, and `File` listing is restricted to its owner. The tools use the **desk's own timeline methods** instead — `frappe.desk.form.utils.add_comment` / `update_comment` / `remove_attach`, `frappe.desk.form.load.get_docinfo` and `upload_file` — which check permission against the **ticket**. `Comment` stays out of the client's DocType allowlist; `File` enters only for the rename/privacy update.
+- **Real limits of the principal, surfaced as classified errors** (`forbidden`, not silent failure): a comment can be edited only by its **author** (so comments written by a person in the desk are not editable through MCP), and **comment deletion is not available at all** — Frappe requires `System Manager`/`Website Manager` even in the desk. Attachments do support delete, because `File` delete resolves through the attached `Task`.
+- **Attachments are private by default**, capped at `ERPNEXT_ATTACHMENT_MAX_BYTES` (10 MiB), read from `ERPNEXT_ATTACHMENT_ALLOWED_ROOTS`, with the name sanitized to a single path-free segment and executable/scripted extensions (`.html`, `.svg`, `.sh`, `.exe`, `.js`, …) rejected — a scripted attachment served from ERPNext's own origin is stored XSS once it is public. No URL ingestion: `file_url` is only ever a site-relative path, so there is no SSRF surface.
+- **Idempotency, because `upload_file` always creates a new `File` document** (its `content_hash` reuses the file on disk, not the record): attaching is keyed on `md5(content)` + ticket, and a retry returns the existing attachment. Comments are keyed on author + normalized text. The creating POSTs are sent with a **single attempt**, so the client never duplicates on its own retry.
+- **Ticket editing excludes status.** State transitions belong to the execution (or the desk) and are tracked by `status_pushed`; writing them here would bypass that bookkeeping and could bounce against the `on_update` webhook. A comment or attachment never changes status, priority, dependencies or execution.
+- **Responses stay short**: the ticket view is six fields, and attachment listings omit fields the source does not return rather than asserting `null`.
+
+**Design rule for MCP tool descriptions:** keep them as short as possible. Every token in a tool description is sent on every request to the coding CLI. Verbose descriptions waste subscription limits. The function parameter schema already documents the structure — no need for a separate discovery tool. A test enforces this: each new ticket-thread description stays under 220 characters and 32 words.
 
 ### What is NOT exposed
 
