@@ -189,10 +189,20 @@ def _build_runtime(settings: Any, *, broker_url: str = "") -> Any | None:
         return None
     if Path(cli).exists() or cli in {"opencode"}:
         try:
+            from research.runtimes.isolation import ContainerBackend
             from research.runtimes.opencode import OpenCodeRuntime, probe_cli_version
 
+            run_as = str(_setting(settings, "RESEARCH_WORKER_RUN_AS", "") or "")
+            container = ContainerBackend(
+                "docker",
+                str(_setting(settings, "RESEARCH_WORKER_IMAGE", "") or "openceo-research-worker:latest"),
+                network=str(_setting(settings, "RESEARCH_WORKER_NETWORK", "") or "openceo-research-egress"),
+                run_user=run_as,
+            )
             return OpenCodeRuntime(
                 settings=settings,
+                preferred_backend=str(_setting(settings, "RESEARCH_ISOLATION_BACKEND", "") or ""),
+                container_backend=container,
                 # La version fijada se **comprueba** contra el binario: sin esta sonda
                 # el pin era una declaracion y una version distinta ejecutaba igual.
                 version_probe=probe_cli_version,

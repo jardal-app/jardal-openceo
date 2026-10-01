@@ -242,8 +242,14 @@ def build_research_broker_mount(
         name=BROKER_NAME,
         server=server,
         bearer_token=bearer,
+        # Redes desde las que se acepta al worker. Loopback por defecto; un worker en
+        # contenedor llega desde su red dedicada y esa subred se declara en el ajuste.
         allowed_networks=_parse_allowed_networks(
-            str(getattr(settings, "MCP_SERVER_ALLOWED_IPS", "") or "127.0.0.1/32,::1/128")
+            str(
+                getattr(settings, "RESEARCH_BROKER_ALLOWED_IPS", "")
+                or getattr(settings, "MCP_SERVER_ALLOWED_IPS", "")
+                or "127.0.0.1/32,::1/128"
+            )
         ),
         stateless_http=True,
         json_response=True,

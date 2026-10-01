@@ -32,6 +32,7 @@ import signal
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
+from urllib.parse import urlparse, urlunparse
 
 from research.runtimes.base import (
     IsolationUnavailable,
@@ -379,8 +380,12 @@ class OpenCodeRuntime:
         base_env: Mapping[str, str] | None = None,
         broker_url: str | None = None,
         broker_bearer: str = "",
+        preferred_backend: str = "",
+        container_backend: Any | None = None,
     ) -> None:
         self._settings = settings
+        self._preferred_backend = preferred_backend
+        self._container_backend = container_backend
         self._isolation = isolation_backend
         self._isolation_checked = isolation_backend is not None
         self._spawn = spawn or _default_spawn
@@ -431,9 +436,49 @@ class OpenCodeRuntime:
 
     def _backend(self) -> IsolationBackend | None:
         if not self._isolation_checked:
-            self._isolation = detect_isolation_backend()
+            self._isolation = detect_isolation_backend(
+                self._preferred_backend or None,
+                container_backend=self._container_backend,
+            )
             self._isolation_checked = True
         return self._isolation
+
+    def _effective_broker_url(self, backend: IsolationBackend | None) -> str:
+        """URL del broker **tal como la ve el worker**.
+
+        Un worker en contenedor no alcanza el `127.0.0.1` del host: su red dedicada llega
+        al servicio por el gateway. Cambiar solo la URL del contenedor evita publicar el
+        broker en interfaces de mas.
+        """
+        url = self._broker_url or ""
+        gateway = str(getattr(self._settings, "RESEARCH_WORKER_NETWORK_GATEWAY", "") or "")
+        if not url or not gateway or backend is None or backend.name != "container":
+            return url
+        parsed = urlparse(url)
+        if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            return url
+        netloc = f"{gateway}:{parsed.port}" if parsed.port else gateway
+        return urlunparse(parsed._replace(netloc=netloc))
+
+    def _egress_policy(self, backend: IsolationBackend | None, broker_url: str) -> Any | None:
+        """Lista blanca de salida, o `None` si el backend no puede aplicarla."""
+        gateway = str(getattr(self._settings, "RESEARCH_WORKER_NETWORK_GATEWAY", "") or "")
+        if backend is None or backend.name != "container" or not gateway:
+            return None
+        from research.runtimes.isolation import EgressPolicy
+
+        hosts = tuple(
+            host.strip()
+            for host in str(getattr(self._settings, "RESEARCH_WORKER_EGRESS_HOSTS", "") or "").split(",")
+            if host.strip()
+        )
+        parsed = urlparse(broker_url)
+        return EgressPolicy(
+            provider_hosts=hosts,
+            broker_host=gateway,
+            broker_port=int(parsed.port or 0),
+            gateway=gateway,
+        )
 
     async def pinned_version_status(self) -> PinnedVersion:
         if self._version_probe is None:
@@ -467,6 +512,7 @@ class OpenCodeRuntime:
                 "--standalone y un cwd propio no son un sandbox: se niega a ejecutar."
             )
 
+        broker_url = self._effective_broker_url(backend)
         paths = ensure_worker_paths(self._state_dir, request.research_id)
         workspace = Path(request.workspace) if request.workspace else paths["workspace"]
         workspace.mkdir(parents=True, exist_ok=True)
@@ -478,7 +524,7 @@ class OpenCodeRuntime:
             config_dir=paths["config"],
             model=request.model,
             deadline_seconds=request.timeout_seconds,
-            broker_url=self._broker_url or "",
+            broker_url=broker_url,
             broker_bearer=self._broker_bearer,
             agent=request.agent,
         )
@@ -495,9 +541,10 @@ class OpenCodeRuntime:
             self._base_env,
             worker_home=paths["home"],
             worker_config=paths["config"],
-            broker_url=self._broker_url,
+            broker_url=broker_url,
             tool_credential=request.tool_credential or None,
         )
+        egress = self._egress_policy(backend, broker_url)
         plan = backend.plan(
             argv=argv,
             workspace=workspace,
@@ -505,6 +552,7 @@ class OpenCodeRuntime:
             worker_config=paths["config"],
             env=env,
             allow_network=True,
+            egress=egress,
             # El CLI vive fuera de las rutas del sistema (p. ej.
             # `~/.opencode/bin/opencode`). Sin montarlo en solo lectura el worker no
             # arranca; montarlo concede el **ejecutable**, no el home que lo contiene.

@@ -33,6 +33,7 @@ from typing import Any, Mapping, Protocol, Sequence
 
 __all__ = [
     "BubblewrapBackend",
+    "EgressPolicy",
     "IsolationBackend",
     "IsolationPlan",
     "ContainerBackend",
@@ -140,6 +141,76 @@ class IsolationPlan:
         }
 
 
+@dataclass(frozen=True)
+class EgressPolicy:
+    """Destinos que el worker **puede** alcanzar. Es una lista blanca, no una negra.
+
+    Un backend que no sepa aplicarla no debe declarar `egress_restricted=True`: la
+    politica se construye aqui, pero **quien la hace cumplir** la declara.
+
+    ``provider_hosts`` son los hosts del modelo (se resuelven a IPs en el arranque del
+    worker); ``broker_host``/``broker_port`` es el unico servicio interno autorizado, y
+    ``dns`` permite la resolucion contra el resolutor del propio contenedor.
+    """
+
+    provider_hosts: tuple[str, ...] = ()
+    broker_host: str = ""
+    broker_port: int = 0
+    dns: bool = True
+    gateway: str = ""
+
+
+def _egress_script(policy: EgressPolicy, *, run_user: str = "") -> str:
+    """Script de arranque del worker: aplica la lista blanca y ejecuta el CLI.
+
+    Se genera de forma determinista (no se lee nada de disco) y corre **antes** del
+    motor. `iptables -P OUTPUT DROP` es el deny por defecto; despues se autoriza solo lo
+    necesario: loopback, conexiones ya establecidas, DNS al resolutor del contenedor, el
+    broker y los hosts del modelo resueltos en ese momento. Un destino que no esta en la
+    lista no tiene salida: no depende de que el modelo "decida" no conectarse.
+
+    El CLI se ejecuta al final con `exec "$@"`; si se indica `run_user` se baja de
+    privilegios con `setpriv` **despues** de aplicar las reglas, para que los ficheros
+    del host conserven su dueño real y no queden como root.
+    """
+    lines = [
+        "set -e",
+        # El entorno del worker es una allowlist (PATH=/usr/bin:/bin); `iptables` vive en
+        # /usr/sbin, asi que sin esto el filtro no se aplicaria y el worker quedaria sin
+        # salida **pero sin saber por que**. El PATH se amplia solo para este arranque.
+        'export PATH="/usr/sbin:/sbin:$PATH"',
+        "iptables -F OUTPUT || true",
+        "iptables -P OUTPUT DROP",
+        "iptables -A OUTPUT -o lo -j ACCEPT",
+        "iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT",
+    ]
+    if policy.dns:
+        lines.append("iptables -A OUTPUT -p udp --dport 53 -j ACCEPT")
+        lines.append("iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT")
+    if policy.broker_host and policy.broker_port:
+        lines.append(
+            "iptables -A OUTPUT -p tcp -d "
+            f"{policy.broker_host} --dport {policy.broker_port} -j ACCEPT"
+        )
+    if policy.provider_hosts:
+        hosts = " ".join(policy.provider_hosts)
+        lines.append(
+            f"for host in {hosts}; do"
+            " for ip in $(getent ahostsv4 \"$host\" | awk '{print $1}' | sort -u); do"
+            " iptables -A OUTPUT -p tcp -d \"$ip\" --dport 443 -j ACCEPT;"
+            " iptables -A OUTPUT -p tcp -d \"$ip\" --dport 80 -j ACCEPT;"
+            " done; done"
+        )
+    if run_user:
+        parts = run_user.split(":")
+        uid = parts[0].strip()
+        gid = parts[1].strip() if len(parts) > 1 and parts[1].strip() else uid
+        lines.append(f'exec setpriv --reuid={uid} --regid={gid} --clear-groups "$@"')
+    else:
+        lines.append('exec "$@"')
+    return "\n".join(lines)
+
+
 class IsolationBackend(Protocol):
     name: str
 
@@ -157,6 +228,7 @@ class IsolationBackend(Protocol):
         env: Mapping[str, str],
         allow_network: bool,
         extra_read_only: Sequence[Path] = (),
+        egress: "EgressPolicy | None" = None,
     ) -> IsolationPlan:  # pragma: no cover - interfaz
         ...
 
@@ -178,6 +250,7 @@ class BubblewrapBackend:
         env: Mapping[str, str],
         allow_network: bool,
         extra_read_only: Sequence[Path] = (),
+        egress: "EgressPolicy | None" = None,
     ) -> IsolationPlan:
         command = [
             "bwrap",
@@ -312,6 +385,7 @@ class UnshareBackend:
         env: Mapping[str, str],
         allow_network: bool,
         extra_read_only: Sequence[Path] = (),
+        egress: "EgressPolicy | None" = None,
     ) -> IsolationPlan:
         command = [
             "unshare",
@@ -345,11 +419,34 @@ class UnshareBackend:
 
 
 class ContainerBackend:
+    """Contenedor desechable con **filtrado de egress aplicado por el propio worker**.
+
+    Es el unico backend disponible que puede restringir destinos de verdad. La red del
+    contenedor es una red dedicada (no la del host): el unico servicio interno autorizado
+    es el broker, y el resto de destinos se abre resolviendo los hosts del modelo en el
+    arranque. `--cap-add NET_ADMIN` es para que el **propio contenedor** aplique sus
+    reglas dentro de su espacio de red; no se toca el cortafuegos del host ni se concede
+    capacidad al proceso del modelo mas alla del arranque.
+
+    Sin `EgressPolicy` (o sin gateway) el backend no puede aislar el egress y lo declara:
+    ejecuta con la red del contenedor sin filtro, con `egress_restricted=False`. No hay
+    modo "degradado en silencio".
+    """
+
     name = "container"
 
-    def __init__(self, binary: str = "podman", image: str = "openceo-research-worker:latest") -> None:
+    def __init__(
+        self,
+        binary: str = "podman",
+        image: str = "openceo-research-worker:latest",
+        *,
+        network: str = "openceo-research-egress",
+        run_user: str = "",
+    ) -> None:
         self._binary = binary
         self._image = image
+        self._network = network
+        self._run_user = run_user
 
     @property
     def available(self) -> bool:
@@ -365,14 +462,15 @@ class ContainerBackend:
         env: Mapping[str, str],
         allow_network: bool,
         extra_read_only: Sequence[Path] = (),
+        egress: "EgressPolicy | None" = None,
     ) -> IsolationPlan:
-        command = [
-            self._binary,
-            "run",
-            "--rm",
-            "--interactive",
+        restricted = bool(allow_network and egress is not None and egress.gateway)
+        command: list[str] = [self._binary, "run", "--rm", "--interactive"]
+        if restricted:
+            command.append("--cap-add=NET_ADMIN")
+        command += [
             "--network",
-            "none" if not allow_network else "bridge",
+            self._network if restricted else ("bridge" if allow_network else "none"),
             "--volume",
             f"{workspace}:{workspace}",
             "--volume",
@@ -387,22 +485,45 @@ class ContainerBackend:
             "--workdir",
             str(workspace),
             "--env",
-            "HOME=/worker",
-            self._image,
-            *argv,
+            f"HOME={worker_home}",
+            "--env",
+            f"XDG_CONFIG_HOME={worker_config}",
+            "--env",
+            "TMPDIR=/tmp",
         ]
+        for key, value in env.items():
+            if key in {"HOME", "XDG_CONFIG_HOME", "TMPDIR"}:
+                continue
+            command += ["--env", f"{key}={value}"]
+        command.append(self._image)
+        if restricted:
+            # El filtro corre dentro del contenedor, antes del motor.
+            script = _egress_script(egress, run_user=self._run_user)
+            command += ["/bin/bash", "-c", script, "worker", *argv]
+        else:
+            command += list(argv)
+        notes = [
+            "Contenedor desechable; solo se montan workspace, home y config del worker.",
+            "Sin home del host, sin socket de Docker ni credenciales heredadas.",
+        ]
+        if restricted:
+            notes.append(
+                "Egress con deny por defecto y lista blanca (broker + hosts del modelo) "
+                "aplicada dentro del contenedor."
+            )
+        else:
+            notes.append(
+                "La red no se filtra por destino: no hay politica de egress aplicable."
+            )
         return IsolationPlan(
             backend=self.name,
             argv=command,
             env=dict(env),
             cwd=str(workspace),
-            network="unrestricted" if allow_network else "none",
+            network="restricted" if restricted else ("unrestricted" if allow_network else "none"),
             filesystem_isolated=True,
-            egress_restricted=False,
-            notes=[
-                "Contenedor desechable; sin socket de Docker ni home del host.",
-                "La red, si se concede, no se filtra por destino.",
-            ],
+            egress_restricted=restricted,
+            notes=notes,
         )
 
 
@@ -473,16 +594,28 @@ def _probe_unshare() -> bool:
         return False
 
 
-def detect_isolation_backend(preferred: str | None = None) -> IsolationBackend | None:
+def detect_isolation_backend(
+    preferred: str | None = None,
+    *,
+    container_backend: "IsolationBackend | None" = None,
+) -> IsolationBackend | None:
     """Devuelve el primer backend realmente disponible, o `None`.
 
     `None` no es un modo degradado: el runtime lo trata como motivo para no ejecutar.
+
+    `container_backend` permite inyectar un backend de contenedor ya configurado (imagen,
+    red dedicada, usuario). `bwrap` sigue siendo el preferido por defecto porque acredita
+    aislamiento de ficheros sin depender del demonio; el contenedor se elige cuando se
+    necesita **filtrar el egress por destino**, que es lo unico que bwrap no puede.
     """
+    containers: list[IsolationBackend] = (
+        [container_backend] if container_backend is not None
+        else [ContainerBackend("podman"), ContainerBackend("docker")]
+    )
     candidates: list[IsolationBackend] = [
         BubblewrapBackend(),
         UnshareBackend(),
-        ContainerBackend("podman"),
-        ContainerBackend("docker"),
+        *containers,
     ]
     if preferred:
         ordered = sorted(candidates, key=lambda b: 0 if b.name == preferred else 1)

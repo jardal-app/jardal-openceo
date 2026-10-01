@@ -37,8 +37,12 @@ if str(CORE) not in sys.path:
 os.environ.setdefault("HOME", "/home/develop")
 
 
-def _settings(state_dir: Path, model: str, broker_url: str, broker_bearer: str) -> SimpleNamespace:
+def _settings(
+    state_dir: Path, model: str, broker_url: str, broker_bearer: str, *, allowed_ips: str = "127.0.0.1/32,::1/128"
+) -> SimpleNamespace:
     return SimpleNamespace(
+        RESEARCH_BROKER_ALLOWED_IPS=allowed_ips,
+        RESEARCH_WORKER_NETWORK_GATEWAY="",
         RESEARCH_OPENCODE_CLI_PATH=os.environ.get(
             "RESEARCH_OPENCODE_CLI_PATH", "/home/develop/.opencode/bin/opencode"
         ),
@@ -55,14 +59,20 @@ def _settings(state_dir: Path, model: str, broker_url: str, broker_bearer: str) 
     )
 
 
+def _engine_paths_for(runtime) -> list[Path]:
+    """Rutas del motor que hay que montar en solo lectura (el CLI vive fuera de /usr)."""
+    engine = getattr(runtime, "_engine_paths", None)
+    return engine() if callable(engine) else []
+
+
 def _iso(moment: Any) -> str | None:
     return moment.isoformat() if hasattr(moment, "isoformat") else (str(moment) if moment else None)
 
 
-async def _serve(app, port: int):
+async def _serve(app, port: int, host: str = "127.0.0.1"):
     import uvicorn
 
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
     task = asyncio.ensure_future(server.serve())
     for _ in range(100):
@@ -81,6 +91,14 @@ async def main() -> int:
     parser.add_argument("--timeout", type=int, default=240)
     parser.add_argument("--ttl", type=int, default=600)
     parser.add_argument("--port", type=int, default=18899)
+    parser.add_argument("--bind", default="127.0.0.1", help="interfaz del broker de prueba")
+    parser.add_argument("--backend", default="", choices=["", "bwrap", "unshare", "container"],
+                        help="backend de aislamiento (vacio = deteccion automatica)")
+    parser.add_argument("--network", default="openceo-research-egress")
+    parser.add_argument("--gateway", default="", help="gateway de la red del worker (activa el filtro)")
+    parser.add_argument("--egress-hosts", default="opencode.ai")
+    parser.add_argument("--run-as", default="")
+    parser.add_argument("--subnet", default="172.31.240.0/24")
     parser.add_argument("--keep", action="store_true", help="no borrar el estado del job")
     parser.add_argument("--json-out", default="")
     parser.add_argument(
@@ -110,7 +128,12 @@ async def main() -> int:
     state_dir.mkdir(parents=True, exist_ok=True)
     report["state_dir"] = str(state_dir)
 
-    backend = detect_isolation_backend()
+    from research.runtimes.isolation import ContainerBackend
+
+    container = ContainerBackend(
+        "docker", network=args.network, run_user=args.run_as
+    )
+    backend = detect_isolation_backend(args.backend or None, container_backend=container)
     report["isolation_backend"] = backend.name if backend else None
     if backend is None:
         report["error"] = "sin backend de aislamiento"
@@ -119,7 +142,11 @@ async def main() -> int:
 
     broker_bearer = "circuit-probe-token"
     broker_url = f"http://127.0.0.1:{args.port}/internal/mcp-research-broker/"
-    settings = _settings(state_dir, args.model, broker_url, broker_bearer)
+    allowed = "127.0.0.1/32,::1/128" + (f",{args.subnet}" if args.gateway else "")
+    settings = _settings(state_dir, args.model, broker_url, broker_bearer, allowed_ips=allowed)
+    settings.RESEARCH_WORKER_NETWORK_GATEWAY = args.gateway
+    settings.RESEARCH_WORKER_EGRESS_HOSTS = args.egress_hosts
+    settings.RESEARCH_ISOLATION_BACKEND = args.backend
 
     vault = EvidenceVault(root=str(state_dir / "evidence"))
     read_log = BrokerReadLog()
@@ -145,7 +172,7 @@ async def main() -> int:
 
     app = FastAPI(lifespan=lifespan)
     app.mount(mount.path, mount.mount.app)
-    server, server_task = await _serve(app, args.port)
+    server, server_task = await _serve(app, args.port, args.bind)
     report["broker_url"] = broker_url
 
     scope = CapabilityScope(
@@ -219,6 +246,8 @@ async def main() -> int:
         broker_url=broker_url,
         broker_bearer=broker_bearer,
         version_probe=probe_cli_version,
+        preferred_backend=args.backend,
+        container_backend=container,
     )
 
     # Preflight: el broker debe ser alcanzable **desde dentro** de la frontera. Si no
@@ -228,36 +257,35 @@ async def main() -> int:
     from research.runtimes.isolation import ensure_worker_paths, sanitized_worker_env
 
     paths = ensure_worker_paths(state_dir, "res_circuit_1")
-    preflight_py = paths["workspace"] / "preflight.py"
-    preflight_py.write_text(
-        "import json,sys,urllib.request\n"
-        f"url={broker_url!r}\n"
-        "body=json.dumps({'jsonrpc':'2.0','id':1,'method':'initialize','params':"
-        "{'protocolVersion':'2025-06-18','capabilities':{},'clientInfo':{'name':'preflight','version':'1'}}}).encode()\n"
-        "req=urllib.request.Request(url, data=body, headers={'Content-Type':'application/json',"
-        f"'Accept':'application/json, text/event-stream','Authorization':'Bearer {broker_bearer}'" + "})\n"
-        "try:\n"
-        "    r=urllib.request.urlopen(req, timeout=15)\n"
-        "    print('PREFLIGHT', r.status, r.read()[:120].decode('utf-8','replace'))\n"
-        "except Exception as exc:\n"
-        "    print('PREFLIGHT_FAIL', type(exc).__name__, getattr(exc,'code',''))\n"
-        "    sys.exit(1)\n",
+    # El preflight se escribe en shell: la imagen del worker no trae python, y `wget` si.
+    worker_broker_url = runtime._effective_broker_url(backend)
+    preflight_sh = paths["workspace"] / "preflight.sh"
+    preflight_sh.write_text(
+        "set -u\n"
+        f'BROKER="{worker_broker_url}"\n'
+        f'if wget -q -S -O /dev/null --timeout=8 --header="Authorization: Bearer {broker_bearer}" '
+        '"$BROKER" 2>&1 | grep -q "HTTP/"; then echo PREFLIGHT_BROKER_OK; else echo PREFLIGHT_BROKER_FAIL; fi\n'
+        'if wget -q -O /dev/null --timeout=8 https://example.com/ 2>/dev/null; '
+        "then echo FORBIDDEN_OK; else echo FORBIDDEN_BLOCKED; fi\n",
         encoding="utf-8",
     )
     pf_env = sanitized_worker_env(
         dict(os.environ),
         worker_home=paths["home"],
         worker_config=paths["config"],
-        broker_url=broker_url,
+        broker_url=worker_broker_url,
     )
     pf_plan = backend.plan(
-        argv=["python3", str(preflight_py)],
+        argv=["/bin/sh", str(preflight_sh)],
         workspace=paths["workspace"],
         worker_home=paths["home"],
         worker_config=paths["config"],
         env=pf_env,
         allow_network=True,
+        extra_read_only=_engine_paths_for(runtime),
+        egress=runtime._egress_policy(backend, worker_broker_url),
     )
+    report["egress_policy_applied"] = bool(pf_plan.egress_restricted)
     # El preflight NO puede bloquear el bucle de eventos: uvicorn sirve el broker desde
     # este mismo bucle, asi que un subprocess.run sincrono lo deja sin atender y el
     # resultado seria un falso "el broker no es alcanzable".
@@ -271,7 +299,8 @@ async def main() -> int:
     pf_out, pf_err = await asyncio.wait_for(pf_process.communicate(), timeout=60)
     report["broker_preflight_rc"] = pf_process.returncode
     report["broker_preflight"] = (pf_out or pf_err).decode("utf-8", "replace").strip()[:300]
-    report["broker_reachable_from_worker"] = pf_process.returncode == 0
+    report["broker_reachable_from_worker"] = "PREFLIGHT_BROKER_OK" in report["broker_preflight"]
+    report["forbidden_destination_blocked"] = "FORBIDDEN_BLOCKED" in report["broker_preflight"]
     request = RuntimeRequest(
         research_id="res_circuit_1",
         project_key="jardal-openceo",

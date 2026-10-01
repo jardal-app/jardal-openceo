@@ -18,6 +18,7 @@ frontera, y decir lo contrario seria el fallo que este ticket previene.
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import sys
@@ -211,7 +212,7 @@ class NoFilesystemIsolationTests(unittest.IsolatedAsyncioTestCase):
         def available(self) -> bool:
             return True
 
-        def plan(self, *, argv, workspace, worker_home, worker_config, env, allow_network, extra_read_only=()):
+        def plan(self, *, argv, workspace, worker_home, worker_config, env, allow_network, extra_read_only=(), egress=None):
             return IsolationPlan(
                 backend=self.name,
                 argv=list(argv),
@@ -254,3 +255,132 @@ class NoFilesystemIsolationTests(unittest.IsolatedAsyncioTestCase):
             )
             with self.assertRaises(IsolationUnavailable):
                 await runtime.run(request)
+
+
+class ContainerEgressTests(unittest.TestCase):
+    """El contenedor es el unico backend que puede filtrar el egress por destino."""
+
+    def _plan(self, *, egress=None, run_user=""):
+        from research.runtimes.isolation import ContainerBackend
+
+        backend = ContainerBackend("docker", network="red-test", run_user=run_user)
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            paths = ensure_worker_paths(base / "state", "res_egress")
+            env = sanitized_worker_env(
+                {"PATH": "/usr/bin:/bin"},
+                worker_home=paths["home"],
+                worker_config=paths["config"],
+            )
+            plan = backend.plan(
+                argv=["opencode", "run", "hola"],
+                workspace=paths["workspace"],
+                worker_home=paths["home"],
+                worker_config=paths["config"],
+                env=env,
+                allow_network=True,
+                egress=egress,
+            )
+            return plan
+
+    def test_without_a_gateway_the_backend_does_not_claim_the_boundary(self) -> None:
+        from research.runtimes.isolation import EgressPolicy
+
+        plan = self._plan(egress=EgressPolicy(provider_hosts=("opencode.ai",), gateway=""))
+        self.assertFalse(plan.egress_restricted)
+        self.assertEqual(plan.network, "unrestricted")
+        self.assertTrue(any("no se filtra" in note for note in plan.notes))
+
+    def test_with_a_gateway_the_plan_denies_by_default(self) -> None:
+        from research.runtimes.isolation import EgressPolicy
+
+        plan = self._plan(
+            egress=EgressPolicy(
+                provider_hosts=("opencode.ai",),
+                broker_host="172.31.240.1",
+                broker_port=18765,
+                gateway="172.31.240.1",
+            )
+        )
+        self.assertTrue(plan.egress_restricted)
+        self.assertEqual(plan.network, "restricted")
+        argv = " ".join(plan.argv)
+        # Deny por defecto y despues solo lo listado: loopback, DNS, broker y modelo.
+        self.assertIn("iptables -P OUTPUT DROP", argv)
+        self.assertIn("-o lo -j ACCEPT", argv)
+        self.assertIn("-d 172.31.240.1 --dport 18765 -j ACCEPT", argv)
+        self.assertIn("for host in opencode.ai; do", argv)
+        self.assertIn("--cap-add=NET_ADMIN", argv)
+        self.assertIn("--network red-test", argv)
+        # Nada de la red del host.
+        self.assertNotIn("--network host", argv)
+
+    def test_the_container_is_the_only_backend_that_reports_egress_restricted(self) -> None:
+        from research.runtimes.isolation import BubblewrapBackend, EgressPolicy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            paths = ensure_worker_paths(base / "state", "res_egress")
+            env = sanitized_worker_env(
+                {"PATH": "/usr/bin:/bin"}, worker_home=paths["home"], worker_config=paths["config"]
+            )
+            bwrap = BubblewrapBackend().plan(
+                argv=["/bin/true"],
+                workspace=paths["workspace"],
+                worker_home=paths["home"],
+                worker_config=paths["config"],
+                env=env,
+                allow_network=True,
+                egress=EgressPolicy(provider_hosts=("opencode.ai",), gateway="172.31.240.1"),
+            )
+        # bwrap acredita ficheros, no egress: declararlo seria la mentira que el ticket evita.
+        self.assertTrue(bwrap.filesystem_isolated)
+        self.assertFalse(bwrap.egress_restricted)
+
+
+class ContainerEgressSmokeTest(unittest.TestCase):
+    """Smoke real del filtro: opt-in, porque exige imagen, red y regla de cortafuegos."""
+
+    def setUp(self) -> None:
+        if os.environ.get("RESEARCH_EGRESS_SMOKE") != "1":
+            self.skipTest("smoke de egress desactivado (RESEARCH_EGRESS_SMOKE=1 para activarlo)")
+        self.gateway = os.environ.get("RESEARCH_WORKER_NETWORK_GATEWAY", "172.31.240.1")
+        self.network = os.environ.get("RESEARCH_WORKER_NETWORK", "openceo-research-egress")
+
+    def test_a_forbidden_destination_is_blocked_and_the_provider_is_allowed(self) -> None:
+        from research.runtimes.isolation import ContainerBackend, EgressPolicy
+
+        backend = ContainerBackend("docker", network=self.network)
+        self.assertTrue(backend.available, "docker no disponible")
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            paths = ensure_worker_paths(base / "state", "res_egress")
+            env = sanitized_worker_env(
+                {"PATH": "/usr/bin:/bin"}, worker_home=paths["home"], worker_config=paths["config"]
+            )
+            script = (
+                'if wget -q -O /dev/null --timeout=6 https://example.com/ 2>/dev/null; '
+                "then echo FORBIDDEN_OK; else echo FORBIDDEN_BLOCKED; fi; "
+                'if wget -q -O /dev/null --timeout=8 https://opencode.ai 2>/dev/null; '
+                "then echo PROVIDER_OK; else echo PROVIDER_FAIL; fi"
+            )
+            plan = backend.plan(
+                argv=["/bin/sh", "-c", script],
+                workspace=paths["workspace"],
+                worker_home=paths["home"],
+                worker_config=paths["config"],
+                env=env,
+                allow_network=True,
+                egress=EgressPolicy(
+                    provider_hosts=("opencode.ai",),
+                    broker_host=self.gateway,
+                    broker_port=18765,
+                    gateway=self.gateway,
+                ),
+            )
+            self.assertTrue(plan.egress_restricted)
+            result = subprocess.run(
+                plan.argv, cwd=plan.cwd, env=plan.env, capture_output=True, text=True, timeout=180
+            )
+        self.assertIn("FORBIDDEN_BLOCKED", result.stdout, result.stderr[-400:])
+        self.assertIn("PROVIDER_OK", result.stdout, result.stderr[-400:])

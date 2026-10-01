@@ -81,7 +81,7 @@ class _FakeBackend:
     def available(self) -> bool:
         return True
 
-    def plan(self, *, argv, workspace, worker_home, worker_config, env, allow_network, extra_read_only=()):
+    def plan(self, *, argv, workspace, worker_home, worker_config, env, allow_network, extra_read_only=(), egress=None):
         return IsolationPlan(
             backend=self.name,
             argv=[self.name, "--", *argv],

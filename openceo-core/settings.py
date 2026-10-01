@@ -243,6 +243,24 @@ class Settings(BaseSettings):
     # ruta y el runtime del worker la usa por loopback.
     RESEARCH_BROKER_ENABLED: bool = False
     RESEARCH_BROKER_PATH: str = "/internal/mcp-research-broker"
+    # Redes desde las que se acepta al worker del broker. Por defecto solo loopback; un
+    # worker en contenedor llega desde la subred de su red dedicada y hay que declararla.
+    RESEARCH_BROKER_ALLOWED_IPS: str = "127.0.0.1/32,::1/128"
+
+    # Aislamiento del worker. `container` es el unico backend que puede filtrar el egress
+    # por destino: su red dedicada deja al broker como unico servicio interno y abre solo
+    # los hosts del modelo. Vacio = deteccion automatica (bwrap preferido).
+    RESEARCH_ISOLATION_BACKEND: str = ""
+    RESEARCH_WORKER_IMAGE: str = "openceo-research-worker:latest"
+    RESEARCH_WORKER_NETWORK: str = "openceo-research-egress"
+    # Gateway de esa red (p. ej. 172.31.240.1). Sin el no hay filtro aplicable y el plan
+    # lo declara (`egress_restricted=False`) en vez de fingirlo.
+    RESEARCH_WORKER_NETWORK_GATEWAY: str = ""
+    # Hosts del modelo a los que el worker puede salir (lista blanca, separada por comas).
+    RESEARCH_WORKER_EGRESS_HOSTS: str = "opencode.ai"
+    # UID:GID con el que corre el CLI dentro del contenedor (el usuario del host), para
+    # que el estado del job no quede con dueño root.
+    RESEARCH_WORKER_RUN_AS: str = ""
 
     # Concurrencia global y por recurso (techos iniciales, ajustables tras medir).
     RESEARCH_MAX_ACTIVE_JOBS: int = 2
