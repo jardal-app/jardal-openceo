@@ -189,10 +189,13 @@ def _build_runtime(settings: Any, *, broker_url: str = "") -> Any | None:
         return None
     if Path(cli).exists() or cli in {"opencode"}:
         try:
-            from research.runtimes.opencode import OpenCodeRuntime
+            from research.runtimes.opencode import OpenCodeRuntime, probe_cli_version
 
             return OpenCodeRuntime(
                 settings=settings,
+                # La version fijada se **comprueba** contra el binario: sin esta sonda
+                # el pin era una declaracion y una version distinta ejecutaba igual.
+                version_probe=probe_cli_version,
                 broker_url=broker_url or str(_setting(settings, "RESEARCH_BROKER_URL", "") or ""),
                 broker_bearer=str(_setting(settings, "RESEARCH_BROKER_BEARER", "") or ""),
             )

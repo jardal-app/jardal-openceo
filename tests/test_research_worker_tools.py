@@ -40,6 +40,7 @@ from research.worker.capabilities import (  # noqa: E402
     RevokedCapability,
 )
 from research.worker.profiles import (  # noqa: E402
+    worker_policies,
     BROKER_SERVER_NAME,
     DENIED_ACTIONS,
     DENIED_BUILTIN_TOOLS,
@@ -147,31 +148,48 @@ class ProfileTests(unittest.TestCase):
             deadline_seconds=120,
         )
 
-    def test_permissions_are_an_ordered_v2_rule_list_denied_by_default(self) -> None:
-        """V2 espera una lista ordenada de reglas `{action, resource, effect}`.
+    def test_the_boundary_is_a_policy_denied_by_default(self) -> None:
+        """La frontera va en V2 `experimental.policies`: binaria y solo endurece.
 
-        El dict de V1 hace que el CLI descarte el agente entero ("Agent not found"):
-        se comprobo contra el binario v2.0.20 (tests/fixtures/README.md).
+        Medido contra el CLI real: con el deny en `agents.*.permissions` la capa libre
+        del proveedor responde 403 y el worker se queda sin modelo. El deny va aqui.
         """
-        permissions = worker_permissions()
-        self.assertIsInstance(permissions, list)
-        self.assertNotIsInstance(permissions, dict)
+        policies = worker_policies()
+        self.assertIsInstance(policies, list)
         self.assertEqual(
-            permissions[0], {"action": "*", "resource": "*", "effect": "deny"}
+            policies[0], {"action": "permission", "resource": "*", "effect": "deny"}
         )
-        # Gana la ultima regla que coincide, asi que los allow van despues del deny.
-        allows = {rule["action"] for rule in permissions if rule["effect"] == "allow"}
+        allowed = {
+            str(s["resource"]).split(":", 1)[0]
+            for s in policies
+            if s["effect"] == "allow"
+        }
         for tool in RESEARCH_TOOLS:
-            self.assertIn(tool, allows, tool)
-            self.assertIn(f"{BROKER_SERVER_NAME}_{tool}", allows, tool)
-        for action in DENIED_ACTIONS:
-            matching = [r for r in permissions if r["action"] == action]
-            self.assertTrue(matching, action)
-            for rule in matching:
-                self.assertEqual(rule["effect"], "deny", action)
-        for rule in permissions:
+            self.assertIn(tool, allowed, tool)
+            self.assertIn(f"{BROKER_SERVER_NAME}_{tool}", allowed, tool)
+        for rule in policies:
             if rule["effect"] == "allow":
-                self.assertNotIn(rule["action"], DENIED_BUILTIN_TOOLS)
+                self.assertNotIn(
+                    str(rule["resource"]).split(":", 1)[0], DENIED_BUILTIN_TOOLS
+                )
+                # El allow solo vale si el deny global va antes (gana la ultima).
+                self.assertLess(
+                    policies.index({"action": "permission", "resource": "*", "effect": "deny"}),
+                    policies.index(rule),
+                )
+
+    def test_the_agent_permissions_never_deny(self) -> None:
+        """Regresion del 403: un deny en la capa de agente deja al worker sin modelo."""
+        permissions = worker_permissions()
+        self.assertEqual(permissions, [{"action": "*", "resource": "*", "effect": "allow"}])
+
+    def test_the_verifier_reports_a_deny_in_the_agent_permissions(self) -> None:
+        tampered = build_worker_config(model="m", endpoint=self.endpoint, deadline_seconds=60)
+        tampered["agents"]["investigator"]["permissions"] = [
+            {"action": "*", "resource": "*", "effect": "deny"}
+        ]
+        problems = assert_worker_config_is_closed(tampered)
+        self.assertTrue(any("sin modelo" in p for p in problems), problems)
 
     def test_the_agent_is_a_primary_v2_agent(self) -> None:
         profile = self.config["agents"]["investigator"]
@@ -214,8 +232,8 @@ class ProfileTests(unittest.TestCase):
         tampered = build_worker_config(
             model="m", endpoint=self.endpoint, deadline_seconds=60
         )
-        tampered["agents"]["investigator"]["permissions"].append(
-            {"action": "bash", "resource": "*", "effect": "allow"}
+        tampered["experimental"]["policies"].append(
+            {"action": "permission", "resource": "bash:*", "effect": "allow"}
         )
         self.assertTrue(any("bash" in p for p in assert_worker_config_is_closed(tampered)))
 
@@ -228,16 +246,16 @@ class ProfileTests(unittest.TestCase):
 
     def test_the_verifier_requires_the_deny_all_rule(self) -> None:
         tampered = build_worker_config(model="m", endpoint=self.endpoint, deadline_seconds=60)
-        tampered["agents"]["investigator"]["permissions"] = [
-            {"action": "research_read", "resource": "*", "effect": "allow"}
+        tampered["experimental"]["policies"] = [
+            {"action": "permission", "resource": "research_read:*", "effect": "allow"}
         ]
         problems = assert_worker_config_is_closed(tampered)
-        self.assertTrue(any("deny por defecto" in p for p in problems), problems)
+        self.assertTrue(any("deny global" in p for p in problems), problems)
 
     def test_an_allow_placed_before_the_deny_all_rule_is_reported(self) -> None:
         tampered = build_worker_config(model="m", endpoint=self.endpoint, deadline_seconds=60)
-        rules = tampered["agents"]["investigator"]["permissions"]
-        rules.insert(0, {"action": "research_read", "resource": "*", "effect": "allow"})
+        statements = tampered["experimental"]["policies"]
+        statements.insert(0, {"action": "permission", "resource": "research_read:*", "effect": "allow"})
         problems = assert_worker_config_is_closed(tampered)
         self.assertTrue(any("debe ir despues" in p for p in problems), problems)
 

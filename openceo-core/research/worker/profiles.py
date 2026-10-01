@@ -44,6 +44,7 @@ __all__ = [
     "build_worker_config",
     "broker_server_config",
     "worker_permissions",
+    "worker_policies",
 ]
 
 BROKER_SERVER_NAME = "research-broker"
@@ -149,23 +150,50 @@ def broker_server_config(*, endpoint: BrokerEndpoint, deadline_seconds: float) -
     return {"mcp": {"servers": {endpoint.server_name: server}}}
 
 
-def worker_permissions(*, server_name: str = BROKER_SERVER_NAME) -> list[dict[str, str]]:
-    """Permisos de V2: deny por defecto y allow solo para las tools del broker.
+def worker_policies(*, server_name: str = BROKER_SERVER_NAME) -> list[dict[str, str]]:
+    """Frontera real del worker: deny por defecto en la capa de **policies**.
 
-    Devuelve la **lista ordenada** que espera ``agents.<nombre>.permissions`` en
-    OpenCode V2. La regla ``*`` va primero y las excepciones despues, porque gana la
-    ultima regla que coincide.
+    OpenCode V2 separa dos capas (<https://opencode.ai/v2/docs/policies>):
 
-    Las tools se autorizan por **nombre normalizado**: el nombre desnudo y la forma
-    ``<servidor>_<tool>``, porque el runtime puede exponer una u otra.
+    * ``agents.<n>.permissions`` — reglas por agente con efecto ``allow``/``deny``/``ask``.
+    * ``experimental.policies`` — declaraciones **binarias, nunca preguntan**, que solo
+      pueden **endurecer** lo que permisos y proveedores ya permiten; no las levanta una
+      regla de agente ni una aprobacion guardada.
+
+    La frontera va aqui, y no en ``permissions``, por una razon **medida** contra el CLI
+    real v2.0.20: la capa libre del proveedor ``opencode`` responde
+    ``provider.auth 403 "OpenCode's free tier can only be used from within OpenCode"``
+    cuando el agente tiene **cualquier** regla ``deny`` — se reprodujo con cinco modelos
+    libres y cinco variantes de perfil (solo ``*``, solo ``shell``, solo ``read``, sin
+    ``*``...). Con la frontera en policies, el mismo modelo libre ejecuta el circuito y
+    **no** puede ejecutar shell. Quien lea esto y mueva el deny a ``permissions``
+    devuelve el circuito a cero.
+
+    Orden: primero el deny global y despues las excepciones (gana la ultima que coincide);
+    las tools se autorizan por **nombre normalizado**, desnudo y ``<servidor>_<tool>``.
     """
-    rules: list[dict[str, str]] = [{"action": "*", "resource": "*", "effect": "deny"}]
-    for action in DENIED_ACTIONS:
-        rules.append({"action": action, "resource": "*", "effect": "deny"})
+    statements: list[dict[str, str]] = [
+        {"action": "permission", "resource": "*", "effect": "deny"}
+    ]
     for tool in RESEARCH_TOOLS:
-        rules.append({"action": tool, "resource": "*", "effect": "allow"})
-        rules.append({"action": f"{server_name}_{tool}", "resource": "*", "effect": "allow"})
-    return rules
+        statements.append(
+            {"action": "permission", "resource": f"{tool}:*", "effect": "allow"}
+        )
+        statements.append(
+            {"action": "permission", "resource": f"{server_name}_{tool}:*", "effect": "allow"}
+        )
+    return statements
+
+
+def worker_permissions(*, server_name: str = BROKER_SERVER_NAME) -> list[dict[str, str]]:
+    """Permisos del agente: **solo** el allow global.
+
+    No es un descuido: al no haber ninguna regla ``deny`` en esta capa, el proveedor
+    libre no corta la sesion. La seguridad efectiva la impone ``worker_policies``, que
+    endurece cualquier allow de aqui. Un ``deny`` aqui **no** es defensa en profundidad:
+    es el fallo que deja al worker sin modelo (ver ``worker_policies``).
+    """
+    return [{"action": "*", "resource": "*", "effect": "allow"}]
 
 
 def agent_profiles(*, model: str, server_name: str = BROKER_SERVER_NAME) -> dict[str, Any]:
@@ -216,6 +244,9 @@ def build_worker_config(
         raise ValueError("El worker necesita al menos un agente configurado")
     config: dict[str, Any] = {
         "agents": selected,
+        # La frontera del worker. `policies` es binaria, no pregunta y solo endurece;
+        # `agents.*.permissions` queda en allow a proposito (ver `worker_policies`).
+        "experimental": {"policies": worker_policies(server_name=endpoint.server_name)},
         # El buscador integrado no implementa nuestra politica de coste y permisos:
         # la adquisicion pasa por el broker.
         "websearch": False,
@@ -228,11 +259,16 @@ def build_worker_config(
 
 
 def _permission_problems(agent_name: str, permissions: Any) -> list[str]:
-    """Comprueba la lista ordenada de reglas de un agente."""
+    """Comprueba los permisos del agente: lista V2 y **sin** reglas deny.
+
+    Una regla ``deny`` aqui no endurece nada que la policy no endurezca ya, y en cambio
+    hace que la capa libre del proveedor corte la sesion con 403. Se rechaza de forma
+    explicita para que nadie la reintroduzca creyendo que suma defensa.
+    """
     problems: list[str] = []
     if isinstance(permissions, dict):
-        # Este es el defecto real encontrado con v2.0.20: el CLI no avisa del esquema,
-        # simplemente descarta el agente y responde "Agent not found".
+        # Defecto real con v2.0.20: el CLI no avisa del esquema, descarta el agente y
+        # responde "Agent not found".
         problems.append(
             f"{agent_name}: permissions debe ser una lista de reglas V2, no un dict "
             "(V1 descarta el agente: 'Agent not found')"
@@ -241,43 +277,63 @@ def _permission_problems(agent_name: str, permissions: Any) -> list[str]:
     if not isinstance(permissions, list) or not permissions:
         problems.append(f"{agent_name}: permissions debe ser una lista de reglas no vacia")
         return problems
-
-    deny_all_index: int | None = None
-    allowed: set[str] = set()
     for index, rule in enumerate(permissions):
         if not isinstance(rule, dict):
             problems.append(f"{agent_name}: cada regla debe ser un objeto")
             continue
-        action = rule.get("action")
-        resource = rule.get("resource")
         effect = rule.get("effect")
         if effect not in ("allow", "ask", "deny"):
             problems.append(f"{agent_name}: efecto invalido en la regla {index}: {effect!r}")
-        if effect == "deny" and action == "*" and resource == "*" and deny_all_index is None:
-            deny_all_index = index
-        if effect == "allow" and isinstance(action, str):
-            allowed.add(action)
-
-    if deny_all_index is None:
-        problems.append(f"{agent_name}: falta la regla deny por defecto {{'*','*','deny'}}")
-    for action in allowed:
-        if action in DENIED_BUILTIN_TOOLS or action in DENIED_ACTIONS:
-            problems.append(f"{agent_name}: {action} no puede estar permitido")
-        # Una excepcion solo vale si existe el deny global y va antes.
-        if deny_all_index is None or deny_all_index > _first_allow_index(permissions, action):
-            problems.append(f"{agent_name}: el allow de {action} debe ir despues del deny global")
-
-    for tool in RESEARCH_TOOLS:
-        if tool not in allowed:
-            problems.append(f"{agent_name}: falta autorizar {tool}")
+        if effect == "deny":
+            problems.append(
+                f"{agent_name}: un deny en permissions deja al worker sin modelo "
+                "(403 de la capa libre); la frontera va en experimental.policies"
+            )
     return problems
 
 
-def _first_allow_index(permissions: list[Any], action: str) -> int:
-    for index, rule in enumerate(permissions):
-        if isinstance(rule, dict) and rule.get("action") == action and rule.get("effect") == "allow":
-            return index
-    return len(permissions)
+def _policy_problems(policies: Any) -> list[str]:
+    """Comprueba la frontera: deny global primero y solo las tools del broker despues."""
+    problems: list[str] = []
+    if not isinstance(policies, list) or not policies:
+        problems.append("experimental.policies debe declarar la frontera (deny por defecto)")
+        return problems
+    deny_all_index: int | None = None
+    allowed: set[str] = set()
+    for index, statement in enumerate(policies):
+        if not isinstance(statement, dict):
+            problems.append(f"policies: la declaracion {index} debe ser un objeto")
+            continue
+        action = statement.get("action")
+        resource = statement.get("resource")
+        effect = statement.get("effect")
+        if action != "permission":
+            problems.append(f"policies: accion no soportada en {index}: {action!r}")
+        if effect not in ("allow", "deny"):
+            problems.append(f"policies: efecto invalido en {index}: {effect!r}")
+        if effect == "deny" and resource == "*" and deny_all_index is None:
+            deny_all_index = index
+        if effect == "allow" and isinstance(resource, str):
+            allowed.add(resource.split(":", 1)[0])
+    if deny_all_index is None:
+        problems.append("policies: falta el deny global {'permission','*','deny'}")
+    for resource in allowed:
+        if resource in DENIED_BUILTIN_TOOLS or resource in DENIED_ACTIONS:
+            problems.append(f"policies: {resource} no puede estar permitido")
+    for tool in RESEARCH_TOOLS:
+        if tool not in allowed and f"{BROKER_SERVER_NAME}_{tool}" not in allowed:
+            problems.append(f"policies: falta autorizar {tool}")
+    # El allow tiene que ir despues del deny global: gana la ultima que coincide.
+    for index, statement in enumerate(policies):
+        if not isinstance(statement, dict) or statement.get("effect") != "allow":
+            continue
+        resource = str(statement.get("resource") or "").split(":", 1)[0]
+        if resource in RESEARCH_TOOLS or resource.startswith(f"{BROKER_SERVER_NAME}_"):
+            if deny_all_index is None or deny_all_index > index:
+                problems.append(
+                    f"policies: el allow de {resource} debe ir despues del deny global"
+                )
+    return problems
 
 
 def assert_worker_config_is_closed(config: dict[str, Any]) -> list[str]:
@@ -289,6 +345,7 @@ def assert_worker_config_is_closed(config: dict[str, Any]) -> list[str]:
     problems: list[str] = []
     if config.get("websearch") is not False:
         problems.append("websearch debe estar deshabilitado")
+    problems.extend(_policy_problems((config.get("experimental") or {}).get("policies")))
     servers = (config.get("mcp") or {}).get("servers") or {}
     if len(servers) != 1 or BROKER_SERVER_NAME not in servers:
         problems.append("solo debe montarse el broker de research")

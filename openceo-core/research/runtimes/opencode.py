@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import signal
 from dataclasses import dataclass
@@ -56,6 +57,7 @@ from research.runtimes.isolation import (
 
 __all__ = [
     "JSONL_ERROR_EVENT_TYPE",
+    "probe_cli_version",
     "JSONL_TEXT_EVENT_TYPES",
     "OpenCodeRuntime",
     "PinnedVersion",
@@ -81,6 +83,32 @@ JSONL_ERROR_EVENT_TYPE = "error"
 
 # Ruta relativa de la configuracion del worker dentro de su XDG_CONFIG_HOME.
 WORKER_CONFIG_RELPATH = Path("opencode") / "opencode.json"
+
+
+
+async def probe_cli_version(cli_path: str, *, timeout: float = 20.0) -> str | None:
+    """Version que reporta el CLI, o `None` si no puede leerse.
+
+    Sin sonda, `pinned_version_status()` devuelve `verified=False` y el runtime ejecuta
+    igual: la version fijada seria una declaracion sin comprobacion. Con sonda, una
+    version distinta de la fijada **aborta** (`RuntimeVersionMismatch`) en vez de
+    presumir compatibilidad del parser de JSONL.
+    """
+    if not cli_path:
+        return None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            cli_path,
+            "--version",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except Exception:  # noqa: BLE001 - sin sonda la version no se presume
+        return None
+    text = (stdout or b"").decode("utf-8", "replace") or (stderr or b"").decode("utf-8", "replace")
+    match = re.search(r"(\d+\.\d+\.\d+)", text)
+    return match.group(1) if match else None
 
 
 @dataclass(frozen=True)
