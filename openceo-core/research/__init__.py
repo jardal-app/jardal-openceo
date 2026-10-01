@@ -11,6 +11,7 @@ Modulos:
 * ``runtimes``    — runtime sustituible; OpenCode V2 con aislamiento obligatorio.
 * ``worker``      — capacidades por job, perfiles V2 cerrados y broker MCP acotado.
 * ``service``     — admission, ciclo quick, cancelacion y partial honesto.
+* ``scheduler``   — schedules persistidos: timer reactivo sin barrido, lease/fencing.
 * ``consumers``   — credenciales de consumidor revocables con grants explicitos.
 * ``router``      — fachada HTTP /api/research con la identidad del proyecto.
 * ``mcp_facade``  — tools openceo_research_* con la credencial leida del transporte.

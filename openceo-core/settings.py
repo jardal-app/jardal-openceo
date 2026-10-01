@@ -338,6 +338,21 @@ class Settings(BaseSettings):
     RESEARCH_MCP_ENABLED: bool = False
     RESEARCH_MCP_PATH: str = "/internal/mcp-research"
 
+    # Scheduler persistido de research (TASK-2026-00068). El timer **no** sondea: sin
+    # vencimiento espera indefinidamente (`RESEARCH_SCHEDULER_MAX_SLEEP_SECONDS = 0`
+    # significa sin tope, que es el defecto correcto). Fijar un tope solo se justifica
+    # como red de seguridad explicita, nunca para reproducir el barrido que AGENTS.md
+    # §5.1 prohibe.
+    RESEARCH_SCHEDULER_ENABLED: bool = False
+    RESEARCH_SCHEDULER_LEASE_SECONDS: int = 120
+    RESEARCH_SCHEDULER_MAX_ATTEMPTS: int = 3
+    RESEARCH_SCHEDULER_BACKOFF_SECONDS: int = 60
+    RESEARCH_SCHEDULER_STALE_RUNNING_SECONDS: int = 900
+    RESEARCH_SCHEDULER_BATCH_LIMIT: int = 20
+    RESEARCH_SCHEDULER_DEADLINE_SECONDS: int = 300
+    # 0 o negativo = sin tope (espera indefinida).
+    RESEARCH_SCHEDULER_MAX_SLEEP_SECONDS: int = 0
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
