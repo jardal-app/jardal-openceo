@@ -122,6 +122,10 @@ class MongoRepository:
         return self.db["research_subscriptions"]
 
     @property
+    def research_schedules(self):
+        return self.db["research_schedules"]
+
+    @property
     def research_sessions(self):
         return self.db["research_sessions"]
 
@@ -365,6 +369,30 @@ class MongoRepository:
         await self.research_sessions.create_index(
             [("research_id", ASCENDING), ("owner_id", ASCENDING)],
             name="idx_research_sessions_scope",
+        )
+        # Schedules (TASK-2026-00068). Sin TTL: la expiracion es un estado explicito y
+        # un TTL borraria schedules activos. La toma es atomica sobre un solo documento,
+        # y (status, run_state, next_run_at) es la unica consulta del timer.
+        await self.research_schedules.create_index(
+            [("schedule_id", ASCENDING)], unique=True, name="idx_research_schedules_identity"
+        )
+        await self.research_schedules.create_index(
+            [("dedupe_key", ASCENDING)],
+            unique=True,
+            partialFilterExpression={"dedupe_key": {"$type": "string"}},
+            name="idx_research_schedules_dedupe",
+        )
+        await self.research_schedules.create_index(
+            [("status", ASCENDING), ("run_state", ASCENDING), ("next_run_at", ASCENDING)],
+            name="idx_research_schedules_due",
+        )
+        await self.research_schedules.create_index(
+            [("project_key", ASCENDING), ("owner_id", ASCENDING), ("created_at", DESCENDING)],
+            name="idx_research_schedules_owner_time",
+        )
+        await self.research_schedules.create_index(
+            [("run_state", ASCENDING), ("lease_expires_at", ASCENDING)],
+            name="idx_research_schedules_lease",
         )
 
     # ------------------------- tasks -------------------------
@@ -1628,6 +1656,197 @@ class MongoRepository:
             {"$set": {"lease_expires_at": now + timedelta(seconds=lease_seconds), "updated_at": now}},
         )
         return bool(getattr(result, "modified_count", 0))
+
+    # --------------- Research schedules (TASK-2026-00068) ---------------
+    # Igual que los jobs: nada de esto escribe en ``tasks`` ni pasa por el observador
+    # de ERPNext. Un tick de schedule es ejecucion, no un ticket de negocio.
+
+    async def create_research_schedule(
+        self, doc: dict[str, Any]
+    ) -> tuple[dict[str, Any], bool]:
+        """Inserta un schedule. Devuelve ``(documento, creado)``.
+
+        Idempotente por ``dedupe_key`` (indice parcial) y por ``schedule_id``. Volver a
+        crear el mismo schedule devuelve el existente; el store decide si el spec
+        incompatible es un conflicto.
+        """
+        payload = dict(doc)
+        payload.pop("_id", None)
+        try:
+            await self.research_schedules.insert_one(dict(payload))
+            return self._clean(dict(payload)), True
+        except DuplicateKeyError:
+            existing = await self._find_research_schedule_by_dedupe(payload.get("dedupe_key"))
+            if existing is None:
+                existing = await self.get_research_schedule(payload.get("schedule_id"))
+            if existing is None:
+                raise
+            return existing, False
+
+    async def get_research_schedule(self, schedule_id: str) -> dict[str, Any] | None:
+        return self._clean(await self.research_schedules.find_one({"schedule_id": schedule_id}))
+
+    async def _find_research_schedule_by_dedupe(
+        self, dedupe_key: str | None
+    ) -> dict[str, Any] | None:
+        if not dedupe_key:
+            return None
+        return self._clean(await self.research_schedules.find_one({"dedupe_key": dedupe_key}))
+
+    async def list_research_schedules(
+        self,
+        *,
+        project_key: str | None = None,
+        owner_id: str | None = None,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        query: dict[str, Any] = {}
+        if project_key is not None:
+            query["project_key"] = project_key
+        if owner_id is not None:
+            query["owner_id"] = owner_id
+        if statuses:
+            query["status"] = {"$in": list(statuses)}
+        rows = (
+            self.research_schedules.find(query, sort=[("next_run_at", ASCENDING)])
+            .limit(max(1, int(limit)))
+        )
+        return [self._clean(row) async for row in rows]
+
+    async def claim_next_research_schedule(
+        self,
+        *,
+        lease_owner: str,
+        lease_seconds: int,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Toma atomica del schedule vencido. Devuelve None si no hay ninguno.
+
+        La condicion es ``(status=active, run_state=idle, next_run_at <= now)`` y la
+        mutacion ocurre en la **misma** operacion sobre el **mismo** documento: dos
+        dispatchers no pueden tomar la misma ocurrencia. ``scheduled_for`` congela el
+        vencimiento ejecutado y el ``fencing_token`` se incrementa para que un ejecutor
+        viejo no cierre una toma que ya no es suya.
+        """
+        moment = now or datetime.now(timezone.utc)
+        row = await self.research_schedules.find_one_and_update(
+            {
+                "status": "active",
+                "run_state": "idle",
+                "next_run_at": {"$lte": moment},
+            },
+            [
+                {
+                    "$set": {
+                        "run_state": "running",
+                        "lease_owner": lease_owner,
+                        "lease_expires_at": moment + timedelta(seconds=lease_seconds),
+                        "scheduled_for": "$next_run_at",
+                        "fencing_token": {"$add": [{"$ifNull": ["$fencing_token", 0]}, 1]},
+                        "updated_at": moment,
+                    }
+                }
+            ],
+            sort=[("next_run_at", ASCENDING), ("priority", DESCENDING)],
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._clean(row)
+
+    async def patch_research_schedule(
+        self,
+        schedule_id: str,
+        updates: dict[str, Any],
+        *,
+        lease_owner: str | None = None,
+        fencing_token: int | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Aplica cambios. Con fencing, solo si la toma sigue siendo la de este ejecutor."""
+        payload = dict(updates)
+        payload.pop("_id", None)
+        payload["updated_at"] = now or datetime.now(timezone.utc)
+        query: dict[str, Any] = {"schedule_id": schedule_id}
+        if lease_owner is not None:
+            query["lease_owner"] = lease_owner
+            query["run_state"] = "running"
+        if fencing_token is not None:
+            query["fencing_token"] = int(fencing_token)
+        row = await self.research_schedules.find_one_and_update(
+            query, {"$set": payload}, return_document=ReturnDocument.AFTER
+        )
+        return self._clean(row)
+
+    async def set_research_schedule_status(
+        self, schedule_id: str, status: str, *, now: datetime | None = None
+    ) -> dict[str, Any] | None:
+        """Pausa, reanuda o cancela. Cancelar libera el lease para no dejar colgado."""
+        moment = now or datetime.now(timezone.utc)
+        payload: dict[str, Any] = {"status": status, "updated_at": moment}
+        if status == "cancelled":
+            payload["run_state"] = "idle"
+            payload["lease_owner"] = None
+            payload["lease_expires_at"] = None
+        row = await self.research_schedules.find_one_and_update(
+            {"schedule_id": schedule_id},
+            {"$set": payload},
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._clean(row)
+
+    async def next_research_schedule_due_at(self) -> datetime | None:
+        """Proximo vencimiento de un schedule activo, sin despertar ni ejecutar nada."""
+        rows = (
+            self.research_schedules.find(
+                {"status": "active", "run_state": "idle"},
+                sort=[("next_run_at", ASCENDING)],
+            ).limit(1)
+        )
+        async for row in rows:
+            return row.get("next_run_at")
+        return None
+
+    async def recover_stale_research_schedules(
+        self, cutoff: datetime, *, now: datetime | None = None
+    ) -> int:
+        """Recupera **solo** leases vencidas al arrancar, con **un** catch-up util."""
+        moment = now or datetime.now(timezone.utc)
+        recovered = 0
+        stale = self.research_schedules.find(
+            {"run_state": "running", "lease_expires_at": {"$lte": cutoff}}
+        )
+        async for row in stale:
+            patch: dict[str, Any] = {
+                "run_state": "idle",
+                "lease_owner": None,
+                "lease_expires_at": None,
+                # La reentrega no se afirma como exactly-once: el handler debe reconciliar
+                # el cursor/la adquisicion antes de repetir gasto.
+                "pending_reconcile": True,
+                "last_error": "recovered_after_restart",
+                "updated_at": moment,
+            }
+            next_at = row.get("next_run_at")
+            if next_at is not None and next_at.tzinfo is None:
+                next_at = next_at.replace(tzinfo=timezone.utc)
+            if row.get("status") == "active" and (next_at is None or next_at <= moment):
+                # Un solo catch-up: se ejecuta una vez ahora y el posterior vencimiento
+                # queda futuro, en vez de una rafaga por cada intervalo perdido.
+                patch["next_run_at"] = moment
+            await self.research_schedules.update_one(
+                {"schedule_id": row.get("schedule_id"), "run_state": "running"},
+                {"$set": patch},
+            )
+            recovered += 1
+        return recovered
+
+    async def expire_research_schedules(self, now: datetime) -> int:
+        """Expira schedules vencidos sin borrarlos: un TTL borraria activos."""
+        result = await self.research_schedules.update_many(
+            {"status": "active", "expires_at": {"$ne": None, "$lte": now}},
+            {"$set": {"status": "expired", "updated_at": now}},
+        )
+        return int(getattr(result, "modified_count", 0) or 0)
 
     @staticmethod
     def _clean(doc: dict[str, Any] | None) -> dict[str, Any] | None:
