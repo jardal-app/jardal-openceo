@@ -585,6 +585,19 @@ class PinnedEgressTransport(httpx.AsyncBaseTransport):
                 "ip": destination.ip,
             }
         )
+        pinned = await self._build_pinned(request, destination)
+        return await self._inner.handle_async_request(pinned)
+
+    async def _build_pinned(
+        self, request: httpx.Request, destination: ValidatedDestination
+    ) -> httpx.Request:
+        """Construye la peticion que se envia al destino ya validado.
+
+        Se expone como metodo propio para poder comprobar **sin red** que el cuerpo
+        resultante es un `AsyncByteStream` valido: pasar el `stream` original tal cual
+        no lo era y el transporte real de httpx lo rechazaba con un assert, algo que
+        los tests con transporte interno falso no detectaban.
+        """
         pinned_url = httpx.URL(
             scheme=destination.scheme,
             host=_format_host_for_url(destination.ip),
@@ -600,14 +613,17 @@ class PinnedEgressTransport(httpx.AsyncBaseTransport):
         headers.append((b"host", destination.host_header.encode("ascii")))
         extensions = dict(request.extensions or {})
         extensions["sni_hostname"] = destination.sni_hostname
-        pinned = httpx.Request(
+        content: bytes | None = None
+        if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+            chunks = [chunk async for chunk in request.stream]
+            content = b"".join(chunks)
+        return httpx.Request(
             method=request.method,
             url=pinned_url,
             headers=headers,
-            content=request.stream,
+            content=content,
             extensions=extensions,
         )
-        return await self._inner.handle_async_request(pinned)
 
     async def aclose(self) -> None:
         await self._inner.aclose()
