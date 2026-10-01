@@ -349,12 +349,28 @@ class UpdateTicketTests(TempRootCase):
         run(self.adapter.update_ticket("TASK-2026-00079", subject="t" * 300))
         self.assertEqual(len(self.client.updated[0][2]["subject"]), 140)
 
-    def test_descripcion_se_escapa(self):
-        run(self.adapter.update_ticket("TASK-2026-00079", description="<b>no html</b> & 5 > 3"))
+    def test_texto_plano_se_escapa_y_conserva_saltos(self):
+        run(self.adapter.update_ticket("TASK-2026-00079", description="sin etiquetas & 5 > 3\nsegunda linea"))
         body = self.client.updated[0][2]["description"]
-        self.assertIn("&lt;b&gt;", body)
         self.assertIn("&amp;", body)
-        self.assertNotIn("<b>", body)
+        self.assertIn("<br>", body)
+
+    def test_descripcion_ya_en_html_no_se_mutila(self):
+        """Leer el HTML del ticket y volverlo a escribir no puede mostrar las etiquetas.
+
+        El campo es un Text Editor: si se escapara, la descripcion entera apareceria con
+        `<br>` literales. Frappe sanea el HTML al guardar (verificado en vivo), asi que
+        pasar el HTML es seguro.
+        """
+        existing = "Linea 1<br><b>Titulo</b><br>Linea 2 &amp; mas"
+        run(self.adapter.update_ticket("TASK-2026-00079", description=existing))
+        self.assertEqual(self.client.updated[0][2]["description"], existing)
+
+    def test_texto_con_menor_que_no_es_etiqueta_se_escapa(self):
+        run(self.adapter.update_ticket("TASK-2026-00079", description="si 3 < 5 y <3"))
+        body = self.client.updated[0][2]["description"]
+        self.assertIn("&lt; 5", body)
+        self.assertIn("&lt;3", body)
 
     def test_prioridad_invalida_se_rechaza_en_vez_de_asumir_medium(self):
         with self.assertRaises(ERPNextValidationError) as ctx:
