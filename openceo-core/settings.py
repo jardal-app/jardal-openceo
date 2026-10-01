@@ -214,6 +214,93 @@ class Settings(BaseSettings):
     HORIZON_TRIGGER_MAX_ATTEMPTS: int = 3
     HORIZON_TRIGGER_BACKOFF_SECONDS: int = 60
 
+    # --- Research (investigador compartido, TASK-2026-00056 Entrega A) ---
+    # Todos los defaults son seguros: el servicio nace apagado y **ningun** adaptador
+    # paga por defecto. La ausencia de claves no rompe `Settings()` ni el arranque;
+    # produce degradacion estructurada (missing_config), no un fallback implicito.
+    #
+    # El gasto pagado por defecto es 0 y no hay compras/recargas automaticas. El saldo
+    # de una cuenta que no se conoce es `null` (cadena vacia), nunca un credito gratis
+    # confirmado. Los importes se declaran como cadena decimal en USD porque
+    # pydantic-settings no debe convertir dinero a float en la frontera de entorno.
+    RESEARCH_ENABLED: bool = False
+
+    # Rutas de estado. El runtime no monta el vault ni los homes personales; estas
+    # carpetas son el workspace/almacen propios del servicio.
+    RESEARCH_STATE_DIR: str = str(CORE_DIR.parent / ".runtime" / "research")
+    RESEARCH_EVIDENCE_DIR: str = str(CORE_DIR.parent / ".runtime" / "research" / "evidence")
+    RESEARCH_WORKER_DIR: str = str(CORE_DIR.parent / ".runtime" / "research" / "worker")
+    RESEARCH_WORKSPACE_DIR: str = str(CORE_DIR.parent / ".runtime" / "research" / "workspaces")
+
+    # Concurrencia global y por recurso (techos iniciales, ajustables tras medir).
+    RESEARCH_MAX_ACTIVE_JOBS: int = 2
+    RESEARCH_MAX_ACTIVE_MODEL_CALLS: int = 2
+    RESEARCH_MAX_ACTIVE_BROWSERS: int = 1
+    RESEARCH_ACCOUNT_CONCURRENCY: int = 1
+
+    # Limites iniciales por modo (seccion 9 del documento del epico).
+    RESEARCH_QUICK_MAX_SEARCHES: int = 3
+    RESEARCH_QUICK_MAX_PAGES: int = 5
+    RESEARCH_QUICK_MAX_STEPS: int = 8
+    RESEARCH_QUICK_MAX_SECONDS: int = 120
+    RESEARCH_DEEP_MAX_SEARCHES: int = 15
+    RESEARCH_DEEP_MAX_PAGES: int = 25
+    RESEARCH_DEEP_MAX_STEPS: int = 30
+    RESEARCH_DEEP_MAX_SECONDS: int = 900
+
+    # Retencion propuesta, subordinada a la politica de cada fuente (seccion 11.2).
+    RESEARCH_PUBLIC_RETENTION_DAYS: int = 7
+    RESEARCH_WATCH_RETENTION_DAYS: int = 90
+    RESEARCH_REPORT_RETENTION_DAYS: int = 180
+    # Una reserva viva sin uso registrado se conserva (conservadora) hasta que la
+    # reconciliacion pueda dictaminar; este plazo solo separa lo "recien iniciado".
+    RESEARCH_ORPHAN_RESERVATION_GRACE_SECONDS: int = 300
+
+    # Politica economica por defecto.
+    RESEARCH_PAID_SPEND_USD: str = "0.00"
+    RESEARCH_AUTO_TOPUPS: bool = False
+
+    # Brave: proveedor habitual. El credito mensual publicado es una referencia
+    # fechada, no saldo medido; su ausencia se representa con cadena vacia.
+    RESEARCH_BRAVE_ENABLED: bool = True
+    RESEARCH_BRAVE_API_KEY: str = ""
+    RESEARCH_BRAVE_ACCOUNT_CEILING_USD: str = "5.00"
+    RESEARCH_BRAVE_MONTHLY_CREDIT_IS_KNOWN: bool = True
+    RESEARCH_BRAVE_PAID_OVERAGE: bool = False
+
+    # Serper: complemento mientras tenga saldo. La cuota inicial publicada no se
+    # presume renovable ni comprable por consulta suelta.
+    RESEARCH_SERPER_ENABLED: bool = True
+    RESEARCH_SERPER_API_KEY: str = ""
+    RESEARCH_SERPER_ACCOUNT_CREDIT_QUERIES: str = ""
+    RESEARCH_SERPER_PAID_PURCHASE: bool = False
+
+    # Firecrawl: adaptador **opcional**. 600/200/200 son objetivos configurables
+    # sobre su saldo real, no tres cuotas independientes.
+    RESEARCH_FIRECRAWL_ENABLED: bool = True
+    RESEARCH_FIRECRAWL_API_KEY: str = ""
+    RESEARCH_FIRECRAWL_PLAN: str = "free"
+    RESEARCH_FIRECRAWL_PAID_TOPUPS: bool = False
+    RESEARCH_FIRECRAWL_CREDIT_TARGET_EXTRACTION: int = 600
+    RESEARCH_FIRECRAWL_CREDIT_TARGET_DISCOVERY: int = 200
+    RESEARCH_FIRECRAWL_CREDIT_TARGET_RESERVE: int = 200
+
+    # Grounding de Meta (Muse): capacidad pagada, apagada por defecto.
+    RESEARCH_MUSE_GROUNDING_ENABLED: bool = False
+    RESEARCH_MUSE_GROUNDING_MONTHLY_BUDGET_USD: str = "0.00"
+    RESEARCH_META_API_KEY: str = ""
+    RESEARCH_META_BASE_URL: str = "https://api.meta.ai/v1"
+    RESEARCH_META_MODEL: str = "muse-spark-1.3-contributor"
+
+    # Runtime OpenCode del investigador. La ruta de prueba del gateway opencode y la
+    # ruta de produccion Meta son credenciales y modelos distintos: no se presume
+    # equivalencia entre ellas.
+    RESEARCH_OPENCODE_CLI_PATH: str = str(CORE_DIR.parent / ".opencode" / "bin" / "opencode")
+    RESEARCH_OPENCODE_VERSION_PIN: str = "2.0.20"
+    RESEARCH_OPENCODE_TEST_MODEL: str = "opencode/muse-spark-1.3-contributor-free"
+    RESEARCH_OPENCODE_PROD_MODEL: str = "meta/muse-spark-1.3-contributor"
+    RESEARCH_OPENCODE_TIMEOUT_SECONDS: int = 300
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -9,6 +9,13 @@ from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from horizon.privacy import mirror_exclusion_filter
+from research.contracts import (
+    TERMINAL_STATUSES,
+    ResearchIdempotencyConflict,
+    ResearchJobStatus,
+    ResearchTransitionError,
+    can_transition,
+)
 from settings import Settings
 from state import DevSessionStatus, TaskStatus
 
@@ -92,6 +99,31 @@ class MongoRepository:
     @property
     def project_presets(self):
         return self.db["project_presets"]
+
+    # ------------------------- Research (TASK-2026-00056) -------------------------
+    # Colecciones propias del servicio research. Deliberadamente separadas de
+    # ``tasks``: un job de research NO es un ticket de negocio y no pasa por el
+    # observador de estado de ERPNext.
+
+    @property
+    def research_jobs(self):
+        return self.db["research_jobs"]
+
+    @property
+    def research_budget_accounts(self):
+        return self.db["research_budget_accounts"]
+
+    @property
+    def research_usage(self):
+        return self.db["research_usage"]
+
+    @property
+    def research_subscriptions(self):
+        return self.db["research_subscriptions"]
+
+    @property
+    def research_sessions(self):
+        return self.db["research_sessions"]
 
     # ------------------------- Horizon (espacio personal) -------------------------
     # Cada documento lleva user_id y su indice. El aislamiento no depende del
@@ -280,6 +312,59 @@ class MongoRepository:
         await self.horizon_triggers.create_index(
             [("user_id", ASCENDING), ("created_at", DESCENDING)],
             name="idx_horizon_triggers_owner_time",
+        )
+
+        # ------------------------- Research -------------------------
+        # Idempotencia de solicitudes: indice **parcial** solo para claves presentes.
+        # Sin clave se admite un job nuevo (no se bloquean consultas nuevas con un
+        # indice unico sobre un campo vacio) y la identidad queda scoped por
+        # proyecto/owner/proposito. El campo se omite en el documento cuando no hay
+        # clave, de modo que ``$type: string`` excluye exactamente esos casos.
+        await self.research_jobs.create_index(
+            [
+                ("project_key", ASCENDING),
+                ("owner_id", ASCENDING),
+                ("purpose", ASCENDING),
+                ("idempotency_key", ASCENDING),
+            ],
+            unique=True,
+            partialFilterExpression={"idempotency_key": {"$type": "string"}},
+            name="idx_research_jobs_idempotency",
+        )
+        await self.research_jobs.create_index(
+            [("research_id", ASCENDING)], unique=True, name="idx_research_jobs_identity"
+        )
+        await self.research_jobs.create_index(
+            [("status", ASCENDING), ("created_at", ASCENDING)],
+            name="idx_research_jobs_queue",
+        )
+        await self.research_jobs.create_index(
+            [("project_key", ASCENDING), ("owner_id", ASCENDING), ("created_at", DESCENDING)],
+            name="idx_research_jobs_owner_time",
+        )
+        await self.research_jobs.create_index(
+            [("lease_expires_at", ASCENDING)],
+            name="idx_research_jobs_lease",
+        )
+        # Libro de uso: append-only e idempotente por operacion. Sin TTL: la
+        # autoridad de gasto no se borra sola.
+        await self.research_usage.create_index([("operation_id", ASCENDING)], unique=True)
+        await self.research_usage.create_index(
+            [("provider", ASCENDING), ("recorded_at", DESCENDING)],
+            name="idx_research_usage_provider_time",
+        )
+        await self.research_usage.create_index(
+            [("project_key", ASCENDING), ("recorded_at", DESCENDING)],
+            name="idx_research_usage_project_time",
+        )
+        # La autoridad de saldo usa ``_id`` como clave natural (proveedor:cuenta).
+        await self.research_subscriptions.create_index(
+            [("project_key", ASCENDING), ("owner_id", ASCENDING), ("purpose", ASCENDING)],
+            name="idx_research_subs_scope",
+        )
+        await self.research_sessions.create_index(
+            [("research_id", ASCENDING), ("owner_id", ASCENDING)],
+            name="idx_research_sessions_scope",
         )
 
     # ------------------------- tasks -------------------------
@@ -1356,6 +1441,193 @@ class MongoRepository:
             return_document=ReturnDocument.AFTER,
         )
         return self._clean(row)
+
+    # ---------------- Research jobs (TASK-2026-00056 / 00058) ----------------
+    # Un job de research NO es un ticket de negocio: ninguna de estas operaciones
+    # escribe en ``tasks`` ni pasa por ``_notify_status_observer``. Deliberadamente
+    # separado, porque mezclarlos haria que un ciclo automatico creara tickets.
+
+    async def create_research_job(self, doc: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Inserta un job. Devuelve ``(documento, creado)``.
+
+        Idempotencia: misma clave + mismo fingerprint devuelve el original; misma
+        clave + fingerprint incompatible lanza conflicto (no es una segunda
+        ejecucion). Sin clave se genera una identidad nueva y no colisiona con nadie.
+        """
+        payload = dict(doc)
+        payload.pop("_id", None)
+        try:
+            await self.research_jobs.insert_one(payload)
+            return self._clean(dict(payload)), True
+        except DuplicateKeyError:
+            existing = await self._find_research_job_by_scope(
+                project_key=payload.get("project_key"),
+                owner_id=payload.get("owner_id"),
+                purpose=payload.get("purpose"),
+                idempotency_key=payload.get("idempotency_key"),
+            )
+            if existing is None:
+                # La colision no vino de la clave idempotente (p. ej. research_id
+                # repetido): no es una deduplicacion, es un fallo real.
+                raise
+            if existing.get("request_fingerprint") != payload.get("request_fingerprint"):
+                raise ResearchIdempotencyConflict(
+                    "La clave idempotente ya existe con un payload distinto"
+                )
+            return existing, False
+
+    async def get_research_job(self, research_id: str) -> dict[str, Any] | None:
+        return self._clean(await self.research_jobs.find_one({"research_id": research_id}))
+
+    async def find_research_job_by_idempotency(
+        self,
+        *,
+        project_key: str,
+        owner_id: str,
+        purpose: str,
+        idempotency_key: str | None,
+    ) -> dict[str, Any] | None:
+        return await self._find_research_job_by_scope(
+            project_key=project_key,
+            owner_id=owner_id,
+            purpose=purpose,
+            idempotency_key=idempotency_key,
+        )
+
+    async def _find_research_job_by_scope(
+        self,
+        *,
+        project_key: str | None,
+        owner_id: str | None,
+        purpose: str | None,
+        idempotency_key: str | None,
+    ) -> dict[str, Any] | None:
+        if not idempotency_key:
+            # Sin clave no hay identidad idempotente que buscar: dos consultas nuevas
+            # iguales son dos jobs distintos por diseno.
+            return None
+        row = await self.research_jobs.find_one(
+            {
+                "project_key": project_key,
+                "owner_id": owner_id,
+                "purpose": purpose,
+                "idempotency_key": idempotency_key,
+            }
+        )
+        return self._clean(row)
+
+    async def transition_research_job(
+        self,
+        research_id: str,
+        new_status: ResearchJobStatus | str,
+        *,
+        updates: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Transicion por CAS: valida la tabla y no pisa una carrera.
+
+        Devuelve el documento nuevo, o ``None`` si el job no existe o si otro
+        escritor gano la carrera (el estado ya no era el leido).
+        """
+        current = await self.get_research_job(research_id)
+        if current is None:
+            return None
+        current_status = ResearchJobStatus(current["status"])
+        target = ResearchJobStatus(new_status)
+        if not can_transition(current_status, target):
+            raise ResearchTransitionError(
+                f"Transicion no permitida {current_status.value} -> {target.value}"
+            )
+        now = datetime.now(timezone.utc)
+        payload: dict[str, Any] = {"status": target.value, "updated_at": now}
+        if target is ResearchJobStatus.RUNNING and not current.get("started_at"):
+            payload["started_at"] = now
+        if target.value in {s.value for s in TERMINAL_STATUSES}:
+            payload["finished_at"] = now
+        if updates:
+            payload.update(updates)
+        payload.pop("_id", None)
+        row = await self.research_jobs.find_one_and_update(
+            {"research_id": research_id, "status": current_status.value},
+            {"$set": payload},
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._clean(row)
+
+    async def patch_research_job(
+        self, research_id: str, updates: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        payload = dict(updates)
+        payload.pop("_id", None)
+        payload.pop("status", None)  # el estado solo cambia por transicion validada
+        payload["updated_at"] = datetime.now(timezone.utc)
+        row = await self.research_jobs.find_one_and_update(
+            {"research_id": research_id},
+            {"$set": payload},
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._clean(row)
+
+    async def claim_next_research_job(
+        self,
+        *,
+        lease_owner: str,
+        lease_seconds: int,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Toma atomica de un job encolado.
+
+        ``find_one_and_update`` evita que dos despachadores tomen el mismo job. No
+        limita por si solo la concurrencia global: eso es un slot que administra el
+        servicio.
+        """
+        moment = now or datetime.now(timezone.utc)
+        row = await self.research_jobs.find_one_and_update(
+            {"status": ResearchJobStatus.QUEUED.value},
+            {
+                "$set": {
+                    "status": ResearchJobStatus.RUNNING.value,
+                    "lease_owner": lease_owner,
+                    "lease_expires_at": moment + timedelta(seconds=lease_seconds),
+                    "started_at": moment,
+                    "updated_at": moment,
+                },
+                "$inc": {"attempts": 1},
+            },
+            sort=[("created_at", ASCENDING)],
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._clean(row)
+
+    async def list_research_jobs_with_expired_lease(
+        self, cutoff: datetime, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Jobs `running` cuya concesion vencio: candidatos a recuperacion tras un crash.
+
+        Acotado por ``limit``: es recuperacion de arranque, no un barrido periodico.
+        """
+        rows = self.research_jobs.find(
+            {
+                "status": ResearchJobStatus.RUNNING.value,
+                "lease_expires_at": {"$lte": cutoff},
+            },
+            sort=[("lease_expires_at", ASCENDING)],
+        ).limit(limit)
+        return [self._clean(row) async for row in rows]
+
+    async def patch_research_job_heartbeat(
+        self, research_id: str, *, lease_owner: str, lease_seconds: int
+    ) -> bool:
+        """Renueva la concesion solo si sigue siendo nuestra (fencing por owner)."""
+        now = datetime.now(timezone.utc)
+        result = await self.research_jobs.update_one(
+            {
+                "research_id": research_id,
+                "status": ResearchJobStatus.RUNNING.value,
+                "lease_owner": lease_owner,
+            },
+            {"$set": {"lease_expires_at": now + timedelta(seconds=lease_seconds), "updated_at": now}},
+        )
+        return bool(getattr(result, "modified_count", 0))
 
     @staticmethod
     def _clean(doc: dict[str, Any] | None) -> dict[str, Any] | None:
