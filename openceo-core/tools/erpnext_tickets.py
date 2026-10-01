@@ -37,6 +37,7 @@ from tools.erpnext_client import (
     ERPNextClient,
     ERPNextDuplicateError,
     ERPNextError,
+    ERPNextPermissionError,
     ERPNextValidationError,
 )
 
@@ -825,22 +826,29 @@ class ERPNextTicketAdapter:
             view["content_hash"] = row["content_hash"]
         return view
 
-    async def list_thread(self, identifier: str, *, limit: int = 20) -> dict[str, Any]:
-        """Comentarios y adjuntos visibles en la linea de tiempo del ticket."""
-        task = await self.resolve_task(identifier)
-        info = await self._docinfo(str(task.get("name") or ""))
+    async def thread_of(self, task_name: str, *, limit: int = 20) -> dict[str, Any]:
+        """Comentarios y adjuntos de un ticket ya resuelto.
+
+        Separado de `list_thread` para que quien ya tiene el ticket (la lectura unica del
+        MCP) no vuelva a resolverlo: un GET menos por lectura.
+        """
+        info = await self._docinfo(str(task_name or ""))
         top = max(1, min(int(limit or 20), 200))
         comments = [row for row in (info.get("comments") or []) if isinstance(row, dict)]
         attachments = [row for row in (info.get("attachments") or []) if isinstance(row, dict)]
         comments.sort(key=lambda row: str(row.get("creation") or ""), reverse=True)
         return {
-            "ok": True,
-            "ticket": self._ticket_view(task),
             "comment_count": len(comments),
             "attachment_count": len(attachments),
             "comments": [self._comment_view(row) for row in comments[:top]],
             "attachments": [self._attachment_view(row) for row in attachments],
         }
+
+    async def list_thread(self, identifier: str, *, limit: int = 20) -> dict[str, Any]:
+        """Comentarios y adjuntos visibles en la linea de tiempo del ticket."""
+        task = await self.resolve_task(identifier)
+        thread = await self.thread_of(str(task.get("name") or ""), limit=limit)
+        return {"ok": True, "ticket": self._ticket_view(task), **thread}
 
     def _find_identical_comment(self, info: dict[str, Any], content: str) -> dict[str, Any] | None:
         """Deduplicacion comprobable de comentarios: mismo autor y mismo texto.
@@ -896,13 +904,56 @@ class ERPNextTicketAdapter:
             "comment": self._comment_view({**created, "owner": created.get("owner") or self._author_email()}),
         }
 
-    async def update_comment(self, comment_id: str, content: str) -> dict[str, Any]:
-        """Edita un comentario. Frappe solo lo permite a su autor.
+    async def _comment_row(self, comment_id: str, ticket: str | None = None) -> dict[str, Any]:
+        """Lee un comentario y comprueba que cuelga de un ticket (y de **ese**, si se da).
 
-        La regla no es nuestra: `frappe.desk.form.utils.update_comment` exige que la
-        sesion sea la propietaria del comentario (o `Administrator`). Un comentario
-        escrito por una persona en el desk no se puede editar con este principal, y se
-        devuelve como error de permiso clasificado.
+        Es la frontera que sustituye a la comprobacion que hace el metodo oficial del desk:
+        con el rol `OpenCEO API` el principal puede escribir cualquier `Comment` del sitio,
+        asi que aqui se acota a los comentarios de un `Task` que se puede leer.
+        """
+        key = str(comment_id or "").strip()
+        if not key:
+            raise ERPNextValidationError("Falta el id del comentario.", status_code=400)
+        try:
+            row = await self._client.get_doc("Comment", key)
+        except ERPNextError as exc:
+            if exc.status_code == 404:
+                raise ERPNextValidationError(f"No existe el comentario {key}.", status_code=404) from None
+            raise
+        if str(row.get("comment_type") or "Comment") != "Comment":
+            raise ERPNextValidationError(
+                f"{key} no es un comentario (es {row.get('comment_type')}).", status_code=400
+            )
+        reference = str(row.get("reference_doctype") or "")
+        if reference != "Task":
+            raise ERPNextValidationError(
+                f"El comentario {key} cuelga de {reference or 'nada'}, no de un ticket.", status_code=400
+            )
+        await self.resolve_task(str(row.get("reference_name") or ""))
+        if ticket:
+            expected = str(ticket).strip()
+            actual = str(row.get("reference_name") or "")
+            if expected.upper().startswith("TASK-"):
+                if actual != expected:
+                    raise ERPNextValidationError(
+                        f"El comentario {key} no cuelga del ticket {expected}.", status_code=400
+                    )
+            else:
+                resolved = await self.resolve_task(expected)
+                if str(resolved.get("name") or "") != actual:
+                    raise ERPNextValidationError(
+                        f"El comentario {key} no cuelga del ticket {expected}.", status_code=400
+                    )
+        return row
+
+    async def update_comment(self, comment_id: str, content: str) -> dict[str, Any]:
+        """Edita un comentario, sea de quien sea.
+
+        Primero por el metodo oficial del desk (`update_comment`), que solo acepta al
+        autor: si lo rechaza, se edita por `/api/resource/Comment`, que el rol dedicado
+        `OpenCEO API` si permite (decision del dueño del 2026-10-01: control completo del
+        hilo). La via de reserva comprueba antes que el comentario cuelga de un ticket
+        legible, para no escribir sobre documentos ajenos al hilo.
         """
         key = str(comment_id or "").strip()
         if not key:
@@ -910,12 +961,29 @@ class ERPNextTicketAdapter:
         text = str(content or "").strip()
         if not text:
             raise ERPNextValidationError("El comentario no puede estar vacio.", status_code=400)
-        await self._client.call_method(
-            "frappe.desk.form.utils.update_comment",
-            json={"name": key, "content": text},
-            attempts=1,  # no es idempotente por contenido: no reintentar a ciegas
-        )
+        try:
+            await self._client.call_method(
+                "frappe.desk.form.utils.update_comment",
+                json={"name": key, "content": text},
+                attempts=1,  # no es idempotente por contenido: no reintentar a ciegas
+            )
+        except ERPNextPermissionError:
+            await self._comment_row(key)
+            await self._client.update_doc("Comment", key, {"content": text})
         return {"ok": True, "comment_id": key, "content": text}
+
+    async def delete_comment(self, comment_id: str, ticket: str) -> dict[str, Any]:
+        """Borra un comentario. Exige el rol `OpenCEO API`: Frappe no tiene metodo publico.
+
+        El metodo del desk solo edita; el borrado de `Comment` lo reserva Frappe a
+        `System Manager`/`Website Manager`. Con el rol dedicado (autorizado por el dueño
+        el 2026-10-01) se puede, y se exige el ticket para que un id equivocado no borre
+        el comentario de otro trabajo.
+        """
+        row = await self._comment_row(comment_id, ticket)
+        key = str(row.get("name") or "").strip()
+        await self._client.delete_doc("Comment", key)
+        return {"ok": True, "deleted": key, "ticket": str(row.get("reference_name") or "")}
 
     # --- hilo del ticket: adjuntos ----------------------------------------
 

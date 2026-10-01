@@ -45,10 +45,15 @@ logger = logging.getLogger(__name__)
 # `File` entra por TASK-2026-00079, y solo para renombrar o cambiar la privacidad de un
 # adjunto ya existente: subir y borrar adjuntos van por los metodos oficiales de Frappe
 # (`upload_file`, `frappe.desk.form.utils.remove_attach`), que no pasan por la allowlist.
-# `Comment` NO entra: no se toca por `/api/resource`, solo por los metodos de la linea de
-# tiempo, que comprueban permiso sobre el ticket.
+#
+# `Comment` entra el 2026-10-01 por decision explicita del dueño: pidio control completo
+# del hilo por el MCP y autorizo el permiso que lo hace posible (rol dedicado
+# `OpenCEO API` con read/write/create/delete sobre `Comment` en ERPNext). Sin ese rol,
+# Frappe solo deja editar un comentario a su autor y no deja borrar ninguno. La escritura
+# sigue siendo semantica y acotada —editar o borrar **un** comentario identificado, nunca
+# un `create_document` generico— y la lectura del hilo sigue yendo por `get_docinfo`.
 ALLOWED_DOCTYPES: frozenset[str] = frozenset(
-    {"Task", "Project", "Task Type", "Journal Entry", "Account", "Cost Center", "Company", "File"}
+    {"Task", "Project", "Task Type", "Journal Entry", "Account", "Cost Center", "Company", "File", "Comment"}
 )
 
 _DEFAULT_TIMEOUT_SECONDS = 5.0
@@ -267,17 +272,22 @@ class ERPNextClient:
         payload = await self.request("PUT", f"/api/resource/{doctype}/{name}", json=body)
         return payload.get("data") or {}
 
+    async def delete_doc(self, doctype: str, name: str) -> None:
+        """Borra un documento. Un solo intento: borrar dos veces informaria un falso fallo."""
+        self._check_doctype(doctype)
+        await self.request("DELETE", f"/api/resource/{doctype}/{name}", attempts=1)
+
     # --- metodos oficiales de Frappe (linea de tiempo) -------------------
     #
-    # Comentarios y adjuntos NO se escriben por `/api/resource/Comment|File`: eso exigiria
-    # abrir `Comment` en la allowlist y dar al principal permiso de doctype, que Frappe
-    # reserva a `System Manager`/`Website Manager`. Se usan los metodos que el propio desk
-    # usa, que comprueban permiso sobre el **ticket**:
+    # Crear un comentario y borrar un adjunto van por los metodos que el propio desk usa,
+    # que comprueban permiso sobre el **ticket**:
     #   - `frappe.desk.form.utils.add_comment`      (POST, exige leer el doc)
     #   - `frappe.desk.form.utils.update_comment`   (POST, solo el autor)
     #   - `frappe.desk.form.utils.remove_attach`    (POST, borra el File)
     #   - `frappe.desk.form.load.get_docinfo`       (GET, lee comentarios y adjuntos)
     #   - `upload_file`                             (multipart, exige escribir el doc)
+    # Editar un comentario ajeno y borrar un comentario si van por `/api/resource/Comment`:
+    # el metodo oficial los reserva a su autor, y el dueño autorizo el rol que lo permite.
 
     async def call_method(
         self,
