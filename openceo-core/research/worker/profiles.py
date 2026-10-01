@@ -6,15 +6,25 @@ autorizado, el broker de adquisicion con alcance por job.
 
 Decisiones que importan
 =======================
-* **Deny por defecto.** Solo se autorizan las herramientas del broker, por nombre
-  normalizado. `bash`, edicion, lectura amplia, `glob`/`grep`, `websearch`,
-  `webfetch`, subagentes y plugins heredados quedan denegados: la lectura web que el
-  investigador necesita pasa por el broker, que aplica egress, politica y ledger.
+* **Deny por defecto.** Solo se autorizan las herramientas del broker. `shell`,
+  edicion, lectura amplia, `glob`/`grep`, `websearch`, `webfetch`, subagentes y
+  skills quedan denegados: la lectura web que el investigador necesita pasa por el
+  broker, que aplica egress, politica y ledger.
 * **El modelo no puede cambiar modelos, cuentas ni `budget_ref`** desde una
   herramienta: esos valores no son argumentos de ninguna tool.
 * **El timeout del servidor MCP es un objeto explicito y cabe en el deadline** del
   job; no se deja el defecto del runtime.
 * `codemode=false` para que el catalogo sea directo y auditable.
+
+Formato de permisos: lista ordenada de reglas, no dict
+=====================================================
+En OpenCode V2 `permissions` es una **lista ordenada** de reglas
+``{"action", "resource", "effect"}`` y gana la ultima que coincide
+(https://opencode.ai/v2/docs/agents). El formato V1 (dict
+``{"bash": "deny"}``) **no** produce un error de validacion: el CLI descarta el
+agente entero y luego falla con ``Agent not found: "investigator"``. Se comprobo
+contra el binario v2.0.20 el 2026-10-01 (``tests/fixtures/README.md``); por eso
+`assert_worker_config_is_closed` rechaza explicitamente el dict.
 """
 
 from __future__ import annotations
@@ -24,8 +34,10 @@ from typing import Any, Iterable
 
 __all__ = [
     "BROKER_SERVER_NAME",
+    "DENIED_ACTIONS",
     "DENIED_BUILTIN_TOOLS",
     "BrokerEndpoint",
+    "RESEARCH_TOOLS",
     "WORKER_AGENTS",
     "agent_profiles",
     "assert_worker_config_is_closed",
@@ -37,9 +49,24 @@ __all__ = [
 BROKER_SERVER_NAME = "research-broker"
 RESEARCH_TOOLS = ("research_discover", "research_read", "research_grounded_lookup")
 
-# Herramientas internas del CLI que se deniegan siempre en el worker. La lista es
-# explicita y se comprueba en los tests: una lista implicita ("lo que no este
-# permitido") se rompe en cuanto el runtime anade una tool nueva con otro nombre.
+# Acciones de V2 que se deniegan ademas del deny global. Es defensa en profundidad:
+# si alguien quitara la regla `*`, estas siguen cerradas.
+DENIED_ACTIONS = (
+    "shell",
+    "edit",
+    "read",
+    "glob",
+    "grep",
+    "webfetch",
+    "websearch",
+    "skill",
+    "subagent",
+)
+
+# Nombres de herramienta del CLI que nunca pueden quedar permitidos. Se comprueba de
+# forma explicita en los tests y en `assert_worker_config_is_closed`: una lista
+# implicita ("lo que no este permitido") se rompe en cuanto el runtime anade una tool
+# nueva con otro nombre.
 DENIED_BUILTIN_TOOLS = (
     "bash",
     "shell",
@@ -108,19 +135,23 @@ def broker_server_config(*, endpoint: BrokerEndpoint, deadline_seconds: float) -
     return {"mcp": {"servers": {endpoint.server_name: server}}}
 
 
-def worker_permissions(*, server_name: str = BROKER_SERVER_NAME) -> dict[str, str]:
-    """Matriz de permisos: deny por defecto, allow solo para las tools del broker.
+def worker_permissions(*, server_name: str = BROKER_SERVER_NAME) -> list[dict[str, str]]:
+    """Permisos de V2: deny por defecto y allow solo para las tools del broker.
+
+    Devuelve la **lista ordenada** que espera ``agents.<nombre>.permissions`` en
+    OpenCode V2. La regla ``*`` va primero y las excepciones despues, porque gana la
+    ultima regla que coincide.
 
     Las tools se autorizan por **nombre normalizado**: el nombre desnudo y la forma
     ``<servidor>_<tool>``, porque el runtime puede exponer una u otra.
     """
-    permissions: dict[str, str] = {"*": "deny"}
-    for tool in DENIED_BUILTIN_TOOLS:
-        permissions[tool] = "deny"
+    rules: list[dict[str, str]] = [{"action": "*", "resource": "*", "effect": "deny"}]
+    for action in DENIED_ACTIONS:
+        rules.append({"action": action, "resource": "*", "effect": "deny"})
     for tool in RESEARCH_TOOLS:
-        permissions[tool] = "allow"
-        permissions[f"{server_name}_{tool}"] = "allow"
-    return permissions
+        rules.append({"action": tool, "resource": "*", "effect": "allow"})
+        rules.append({"action": f"{server_name}_{tool}", "resource": "*", "effect": "allow"})
+    return rules
 
 
 def agent_profiles(*, model: str, server_name: str = BROKER_SERVER_NAME) -> dict[str, Any]:
@@ -128,23 +159,29 @@ def agent_profiles(*, model: str, server_name: str = BROKER_SERVER_NAME) -> dict
 
     En la Entrega A solo se usa `investigator`; los otros dos existen para la
     Entrega D y heredan **el mismo** alcance y consumo, sin ampliar permisos.
+
+    ``mode: primary`` es explicito: el runtime selecciona el agente con `--agent` para
+    una sesion principal, y no se deja al defecto del CLI.
     """
     permissions = worker_permissions(server_name=server_name)
     return {
         "investigator": {
             "model": model,
+            "mode": "primary",
             "description": "Investiga, contrasta y sintetiza con evidencia citada.",
-            "permissions": dict(permissions),
+            "permissions": [dict(rule) for rule in permissions],
         },
         "researcher": {
             "model": model,
+            "mode": "primary",
             "description": "Subtarea acotada de investigacion; mismo alcance y presupuesto.",
-            "permissions": dict(permissions),
+            "permissions": [dict(rule) for rule in permissions],
         },
         "verifier": {
             "model": model,
+            "mode": "primary",
             "description": "Revisa soporte real de las citas en contexto nuevo.",
-            "permissions": dict(permissions),
+            "permissions": [dict(rule) for rule in permissions],
         },
     }
 
@@ -176,6 +213,59 @@ def build_worker_config(
     return config
 
 
+def _permission_problems(agent_name: str, permissions: Any) -> list[str]:
+    """Comprueba la lista ordenada de reglas de un agente."""
+    problems: list[str] = []
+    if isinstance(permissions, dict):
+        # Este es el defecto real encontrado con v2.0.20: el CLI no avisa del esquema,
+        # simplemente descarta el agente y responde "Agent not found".
+        problems.append(
+            f"{agent_name}: permissions debe ser una lista de reglas V2, no un dict "
+            "(V1 descarta el agente: 'Agent not found')"
+        )
+        return problems
+    if not isinstance(permissions, list) or not permissions:
+        problems.append(f"{agent_name}: permissions debe ser una lista de reglas no vacia")
+        return problems
+
+    deny_all_index: int | None = None
+    allowed: set[str] = set()
+    for index, rule in enumerate(permissions):
+        if not isinstance(rule, dict):
+            problems.append(f"{agent_name}: cada regla debe ser un objeto")
+            continue
+        action = rule.get("action")
+        resource = rule.get("resource")
+        effect = rule.get("effect")
+        if effect not in ("allow", "ask", "deny"):
+            problems.append(f"{agent_name}: efecto invalido en la regla {index}: {effect!r}")
+        if effect == "deny" and action == "*" and resource == "*" and deny_all_index is None:
+            deny_all_index = index
+        if effect == "allow" and isinstance(action, str):
+            allowed.add(action)
+
+    if deny_all_index is None:
+        problems.append(f"{agent_name}: falta la regla deny por defecto {{'*','*','deny'}}")
+    for action in allowed:
+        if action in DENIED_BUILTIN_TOOLS or action in DENIED_ACTIONS:
+            problems.append(f"{agent_name}: {action} no puede estar permitido")
+        # Una excepcion solo vale si existe el deny global y va antes.
+        if deny_all_index is None or deny_all_index > _first_allow_index(permissions, action):
+            problems.append(f"{agent_name}: el allow de {action} debe ir despues del deny global")
+
+    for tool in RESEARCH_TOOLS:
+        if tool not in allowed:
+            problems.append(f"{agent_name}: falta autorizar {tool}")
+    return problems
+
+
+def _first_allow_index(permissions: list[Any], action: str) -> int:
+    for index, rule in enumerate(permissions):
+        if isinstance(rule, dict) and rule.get("action") == action and rule.get("effect") == "allow":
+            return index
+    return len(permissions)
+
+
 def assert_worker_config_is_closed(config: dict[str, Any]) -> list[str]:
     """Problemas de aislamiento de la configuracion. Lista vacia = cerrada.
 
@@ -199,13 +289,5 @@ def assert_worker_config_is_closed(config: dict[str, Any]) -> list[str]:
         if server.get("disabled") is True:
             problems.append(f"{name}: el broker no puede estar deshabilitado")
     for agent_name, profile in (config.get("agents") or {}).items():
-        permissions = profile.get("permissions") or {}
-        if permissions.get("*") != "deny":
-            problems.append(f"{agent_name}: los permisos deben ser deny por defecto")
-        for tool in DENIED_BUILTIN_TOOLS:
-            if permissions.get(tool) == "allow":
-                problems.append(f"{agent_name}: {tool} no puede estar permitido")
-        for tool in RESEARCH_TOOLS:
-            if permissions.get(tool) != "allow":
-                problems.append(f"{agent_name}: falta autorizar {tool}")
+        problems.extend(_permission_problems(agent_name, (profile or {}).get("permissions")))
     return problems

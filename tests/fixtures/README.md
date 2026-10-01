@@ -1,16 +1,48 @@
 # Fixtures de research
 
-## `opencode_run_2_0_20.jsonl`
+## Procedencia: REAL, capturada del binario de la version fijada
 
-Muestra el JSONL que consume `research/runtimes/opencode.py`.
+Estas fixtures **no son sinteticas**. Se capturaron de ejecuciones reales de
+`/home/develop/.opencode/bin/opencode` **v2.0.20** (la version fijada en
+`research/runtimes/opencode.py`) con `opencode run --standalone --format json`, el
+2026-10-01, contra el modelo `opencode/muse-spark-1.3-contributor-free`.
 
-**Procedencia: SINTETICA, no capturada del binario.** Este entorno no tiene instalado
-el CLI de OpenCode (`/home/develop/.opencode/bin/opencode` no existe), asi que no fue
-posible capturar una ejecucion real de la version fijada (v2.0.20). La fixture se
-construyo a partir de la forma documentada de eventos e incluye a proposito un tipo de
-evento desconocido para fijar la tolerancia del parser.
+El CLI se invoco con `XDG_CONFIG_HOME` apuntando a un directorio propio, de modo que
+la unica configuracion cargada sea la del worker. No contienen secretos, claves ni
+datos personales: solo eventos del protocolo y texto publico de la respuesta.
 
-Pendiente registrado en TASK-2026-00062: sustituirla por la salida real de
-`opencode run --standalone --agent investigator --format json` de la version fijada,
-ejecutada en un host con el CLI y con aislamiento disponible. El parser no debe
-presumirse compatible con una version distinta de la fijada.
+### `opencode_run_2_0_20.jsonl`
+
+Ejecucion real correcta y minima. Eventos: `step_start`, `text` (con `part.text`).
+Comando:
+
+```
+opencode run --standalone --agent investigator --format json \
+  --model opencode/muse-spark-1.3-contributor-free \
+  "En una frase: que es el protocolo MCP?"
+```
+
+### `opencode_run_2_0_20_tools.jsonl`
+
+Ejecucion real con uso de herramienta. Eventos: `step_start`, `text`, `tool_use`,
+`step_finish` (secuencia completa de tres pasos). Fija la forma real de `tool_use` y
+`step_finish`, que la fixture sintetica anterior inventaba.
+
+### `opencode_run_2_0_20_error.jsonl`
+
+Fallo real del proveedor: `type: error`, `error.type: provider.auth`, `status: 403`,
+`message: "OpenCode's free tier can only be used from within OpenCode"`, con **exit
+code 1 y stderr vacio**. Es el motivo por el que el runtime tiene que leer el error
+del JSONL y no del stderr.
+
+Se reproduce de forma determinista cuando el perfil del agente cierra el worker
+(deny por defecto `{"action":"*","resource":"*","effect":"deny"}`, o denegar `read` o
+`shell`). Ver `docs/work/TASK-2026-00056-investigator-elite.md`.
+
+### `opencode_run_2_0_20_agent_not_found.jsonl`
+
+Fallo real del CLI cuando la definicion del agente no es valida para v2.0.20:
+`Agent not found: "investigator"`. Se reproduce con el formato antiguo de permisos
+(dict `{"bash": "deny"}`) en `opencode.json`: OpenCode **descarta el agente entero**
+en vez de avisar del esquema. Fue el defecto real que encontro la captura del
+2026-10-01 en `research/worker/profiles.py`.

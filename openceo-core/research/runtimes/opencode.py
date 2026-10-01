@@ -36,6 +36,7 @@ from research.runtimes.base import (
     IsolationUnavailable,
     ResearchRuntimeError,
     RuntimeCancelled,
+    RuntimeConfigurationError,
     RuntimeExecutionError,
     RuntimeMalformedOutput,
     RuntimeOutcome,
@@ -54,12 +55,15 @@ from research.runtimes.isolation import (
 )
 
 __all__ = [
+    "JSONL_ERROR_EVENT_TYPE",
     "JSONL_TEXT_EVENT_TYPES",
     "OpenCodeRuntime",
     "PinnedVersion",
     "SessionRegistry",
     "build_run_command",
+    "extract_jsonl_error",
     "parse_jsonl_events",
+    "write_worker_config",
 ]
 
 # Version probada. Una version distinta no se presume compatible: el parser del JSONL
@@ -69,6 +73,14 @@ PINNED_VERSION = "2.0.20"
 # Tipos de evento cuyo contenido textual compone la respuesta final. Un tipo
 # desconocido se conserva como evento crudo en lugar de romper el parseo.
 JSONL_TEXT_EVENT_TYPES = frozenset({"text", "message", "assistant", "result"})
+
+# Tipo de evento con el que el CLI informa de un fallo. Importa porque el CLI lo
+# escribe en **stdout** y deja **stderr vacio** (verificado con v2.0.20): leer solo
+# stderr perderia el motivo real del fallo.
+JSONL_ERROR_EVENT_TYPE = "error"
+
+# Ruta relativa de la configuracion del worker dentro de su XDG_CONFIG_HOME.
+WORKER_CONFIG_RELPATH = Path("opencode") / "opencode.json"
 
 
 @dataclass(frozen=True)
@@ -192,6 +204,84 @@ def _extract_text(event: Mapping[str, Any]) -> str:
     return ""
 
 
+def extract_jsonl_error(events: Sequence[Mapping[str, Any]]) -> str:
+    """Mensaje de error que el CLI escribe en stdout, o cadena vacia.
+
+    El CLI de v2.0.20 informa de los fallos con un evento ``type: error`` en stdout,
+    deja **stderr vacio** y sale con codigo distinto de cero. Sin esto, el motivo real
+    del fallo se perderia y quedaria un ``RuntimeExecutionError`` sin explicacion.
+    """
+    messages: list[str] = []
+    for event in events:
+        if event.get("type") != JSONL_ERROR_EVENT_TYPE:
+            continue
+        error = event.get("error")
+        if isinstance(error, Mapping):
+            parts = [
+                str(error.get(key))
+                for key in ("type", "message")
+                if isinstance(error.get(key), str) and error.get(key)
+            ]
+            status = error.get("status")
+            if isinstance(status, int):
+                parts.append(f"status={status}")
+            if parts:
+                messages.append(": ".join(parts[:1]) + (" " + " ".join(parts[1:]) if len(parts) > 1 else ""))
+                continue
+            messages.append(json.dumps(dict(error), ensure_ascii=False)[:400])
+        elif isinstance(error, str) and error:
+            messages.append(error[:400])
+        else:
+            messages.append("error sin detalle")
+    return " | ".join(messages)
+
+
+def write_worker_config(
+    *,
+    config_dir: Path,
+    model: str,
+    deadline_seconds: float,
+    broker_url: str,
+    broker_bearer: str = "",
+    agent: str = "investigator",
+) -> Path:
+    """Escribe la configuracion **cerrada** del worker dentro de su XDG_CONFIG_HOME.
+
+    Sin este paso el CLI arranca con su configuracion global (o con ninguna) y
+    ``--agent investigator`` falla con ``Agent not found``. Ademas se **valida** antes
+    de escribir: si el perfil no esta cerrado, el worker no arranca.
+    """
+    from research.worker.profiles import (  # import local: evita acoplar la carga
+        BrokerEndpoint,
+        assert_worker_config_is_closed,
+        build_worker_config,
+    )
+
+    if not broker_url:
+        raise RuntimeConfigurationError(
+            "El worker necesita el broker de research: sin el no hay adquisicion "
+            "posible y la configuracion no podria estar cerrada"
+        )
+    endpoint = BrokerEndpoint(url=broker_url, bearer=broker_bearer)
+    config = build_worker_config(
+        model=model,
+        endpoint=endpoint,
+        deadline_seconds=deadline_seconds,
+        agents=[agent],
+    )
+    problems = assert_worker_config_is_closed(config)
+    if problems:
+        raise RuntimeConfigurationError(
+            "La configuracion del worker no esta cerrada: " + "; ".join(problems)
+        )
+    target = Path(config_dir) / WORKER_CONFIG_RELPATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(target.parent, 0o700)
+    target.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+    os.chmod(target, 0o600)
+    return target
+
+
 class SessionRegistry:
     """Relacion validada `(project_key, owner_id, research_id) -> session_id`.
 
@@ -260,6 +350,7 @@ class OpenCodeRuntime:
         state_dir: Path | None = None,
         base_env: Mapping[str, str] | None = None,
         broker_url: str | None = None,
+        broker_bearer: str = "",
     ) -> None:
         self._settings = settings
         self._isolation = isolation_backend
@@ -270,6 +361,7 @@ class OpenCodeRuntime:
         self._state_dir = Path(state_dir or getattr(settings, "RESEARCH_STATE_DIR", "/tmp/research"))
         self._base_env = dict(base_env if base_env is not None else os.environ)
         self._broker_url = broker_url
+        self._broker_bearer = broker_bearer
         self._running: dict[str, Any] = {}
         self._cancelled: set[str] = set()
 
@@ -333,6 +425,18 @@ class OpenCodeRuntime:
         workspace = Path(request.workspace) if request.workspace else paths["workspace"]
         workspace.mkdir(parents=True, exist_ok=True)
 
+        # La configuracion del worker se materializa **antes** de lanzar el CLI: sin
+        # ella el agente `investigator` no existe para v2.0.20 ("Agent not found") y el
+        # proceso heredaria la configuracion global. Se escribe solo si esta cerrada.
+        write_worker_config(
+            config_dir=paths["config"],
+            model=request.model,
+            deadline_seconds=request.timeout_seconds,
+            broker_url=self._broker_url or "",
+            broker_bearer=self._broker_bearer,
+            agent=request.agent,
+        )
+
         session_id = request.session_id or await self._sessions.resolve(request)
         argv = build_run_command(
             cli_path=self.cli_path,
@@ -384,19 +488,29 @@ class OpenCodeRuntime:
 
         exit_code = process.returncode if process.returncode is not None else await process.wait()
         stderr_text = stderr.decode("utf-8", "replace")
-        if exit_code != 0:
-            raise RuntimeExecutionError(
-                f"OpenCode termino con codigo {exit_code}",
-                exit_code=int(exit_code),
-                stderr=stderr_text[:4000],
-            )
-
         events, text, parsed_session, malformed = parse_jsonl_events(
             stdout.decode("utf-8", "replace")
         )
+        # El CLI reporta los fallos por stdout (evento `type: error`) y deja stderr
+        # vacio: se extrae aqui para que el error no quede sin explicacion.
+        reported_error = extract_jsonl_error(events)
+        if exit_code != 0:
+            detail = f": {reported_error}" if reported_error else ""
+            raise RuntimeExecutionError(
+                f"OpenCode termino con codigo {exit_code}{detail}",
+                exit_code=int(exit_code),
+                stderr=stderr_text[:4000],
+                runtime_error=reported_error,
+            )
+
         if not text:
+            reason = (
+                f"OpenCode reporto un error sin texto util: {reported_error}"
+                if reported_error
+                else "Exit 0 sin texto util: un codigo de salida correcto no acredita un informe"
+            )
             raise RuntimeMalformedOutput(
-                "Exit 0 sin texto util: un codigo de salida correcto no acredita un informe",
+                reason,
                 malformed_lines=malformed,
                 raw=stdout[:2000].decode("utf-8", "replace"),
             )

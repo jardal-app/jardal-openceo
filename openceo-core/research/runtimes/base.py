@@ -40,13 +40,31 @@ class RuntimeCancelled(ResearchRuntimeError):
     """La ejecucion fue cancelada explicitamente."""
 
 
+class RuntimeConfigurationError(ResearchRuntimeError):
+    """La configuracion del worker no es ejecutable o no esta cerrada.
+
+    Es un fallo de construccion, no del modelo: falta el broker, o el perfil concede
+    algo que el worker no debe tener. Se falla **antes** de lanzar el proceso.
+    """
+
+
 class RuntimeExecutionError(ResearchRuntimeError):
     """El proceso termino con codigo distinto de cero."""
 
-    def __init__(self, message: str, *, exit_code: int, stderr: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        exit_code: int,
+        stderr: str = "",
+        runtime_error: str = "",
+    ) -> None:
         super().__init__(message)
         self.exit_code = exit_code
         self.stderr = stderr
+        # Motivo que el CLI reporto por stdout (evento `type: error`): con v2.0.20 el
+        # stderr va vacio, asi que sin este campo el fallo quedaria sin explicacion.
+        self.runtime_error = runtime_error
 
 
 class RuntimeMalformedOutput(ResearchRuntimeError):

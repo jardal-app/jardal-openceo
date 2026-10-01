@@ -1,0 +1,1 @@
+{"type":"error","timestamp":1790871441226,"sessionID":"ses_f07be79c3ffeMDcUJVi1wxJfw0","error":{"type":"provider.auth","message":"OpenCode's free tier can only be used from within OpenCode","status":403,"response":{"body":"{\"type\":\"error\",\"error\":{\"type\":\"FreeTierError\",\"message\":\"OpenCode's free tier can only be used from within OpenCode\"}}"}}}

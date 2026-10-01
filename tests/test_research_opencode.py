@@ -4,15 +4,17 @@ Lo que se comprueba: la forma exacta del argv (sin `--dir`, sin `--command`), el
 parseo tolerante del JSONL, la frontera de aislamiento **obligatoria**, el deadline
 que mata el arbol de procesos y la reanudacion de sesion solo dentro del mismo scope.
 
-La fixture JSONL es sintetica y esta documentada como tal: este entorno no tiene el
-CLI, asi que no se pudo capturar una ejecucion real de la version fijada.
+Las fixtures JSONL son **reales**: se capturaron del binario v2.0.20 (la version
+fijada) el 2026-10-01. Ver `tests/fixtures/README.md` para el comando exacto.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -24,6 +26,7 @@ if str(CORE_DIR) not in sys.path:
 from research.runtimes.base import (  # noqa: E402
     IsolationUnavailable,
     RuntimeCancelled,
+    RuntimeConfigurationError,
     RuntimeExecutionError,
     RuntimeMalformedOutput,
     RuntimeOutputTooLarge,
@@ -42,11 +45,33 @@ from research.runtimes.opencode import (  # noqa: E402
     OpenCodeRuntime,
     SessionRegistry,
     build_run_command,
+    extract_jsonl_error,
     parse_jsonl_events,
+    write_worker_config,
 )
 from settings import Settings  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "opencode_run_2_0_20.jsonl"
+FIXTURE_TOOLS = (
+    Path(__file__).resolve().parent / "fixtures" / "opencode_run_2_0_20_tools.jsonl"
+)
+FIXTURE_ERROR = (
+    Path(__file__).resolve().parent / "fixtures" / "opencode_run_2_0_20_error.jsonl"
+)
+FIXTURE_AGENT_NOT_FOUND = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "opencode_run_2_0_20_agent_not_found.jsonl"
+)
+
+# Capturados de la ejecucion real; si se recaptura la fixture, se actualizan.
+REAL_TEXT = (
+    "El protocolo MCP (Model Context Protocol) es un estándar abierto que permite a "
+    "los modelos de IA conectarse de forma uniforme a fuentes de datos, herramientas "
+    "y servicios externos."
+)
+REAL_SESSION = "ses_f07bea99affe6Gm5GwAxOIPTcc"
+BROKER_URL = "http://127.0.0.1:9/mcp/research"
 
 
 class _FakeBackend:
@@ -188,20 +213,58 @@ class JsonlParserTests(unittest.TestCase):
     def setUp(self) -> None:
         self.raw = FIXTURE.read_text(encoding="utf-8")
 
-    def test_the_fixture_yields_the_composed_text_in_order(self) -> None:
+    def test_the_real_fixture_yields_the_composed_text(self) -> None:
         events, text, session_id, malformed = parse_jsonl_events(self.raw)
-        self.assertEqual(
-            text, "Primer fragmento de sintesis. Segundo fragmento con cita [e1]."
-        )
-        self.assertEqual(session_id, "ses_fixture_01")
+        self.assertEqual(text, REAL_TEXT)
+        self.assertEqual(session_id, REAL_SESSION)
         self.assertEqual(malformed, 0)
-        self.assertEqual(len(events), 6)
+        self.assertEqual([e.get("type") for e in events], ["step_start", "text"])
+
+    def test_the_real_tool_fixture_keeps_tool_and_step_events(self) -> None:
+        """La forma real de `tool_use`/`step_finish` (v2.0.20), no la inventada."""
+        raw = FIXTURE_TOOLS.read_text(encoding="utf-8")
+        events, text, session_id, malformed = parse_jsonl_events(raw)
+        types = [e.get("type") for e in events]
+        self.assertEqual(malformed, 0)
+        self.assertIn("tool_use", types)
+        self.assertIn("step_finish", types)
+        # El texto compuesto y el sessionID salen del JSONL real.
+        self.assertTrue(text)
+        self.assertTrue(session_id and session_id.startswith("ses_"))
+        tool_events = [e for e in events if e.get("type") == "tool_use"]
+        self.assertIn("part", tool_events[0])
+
+    def test_a_real_provider_error_event_is_extracted(self) -> None:
+        """El CLI reporta el fallo en stdout y deja stderr vacio."""
+        raw = FIXTURE_ERROR.read_text(encoding="utf-8")
+        events, text, _session, malformed = parse_jsonl_events(raw)
+        self.assertEqual(text, "")
+        self.assertEqual(malformed, 0)
+        message = extract_jsonl_error(events)
+        self.assertIn("free tier", message)
+        self.assertIn("provider.auth", message)
+        self.assertIn("status=403", message)
+
+    def test_a_real_agent_not_found_event_is_extracted(self) -> None:
+        raw = FIXTURE_AGENT_NOT_FOUND.read_text(encoding="utf-8")
+        events, _text, _session, _malformed = parse_jsonl_events(raw)
+        self.assertIn('Agent not found: "investigator"', extract_jsonl_error(events))
 
     def test_an_unknown_event_type_is_preserved_not_fatal(self) -> None:
-        events, _text, _session, malformed = parse_jsonl_events(self.raw)
+        raw = (
+            '{"type":"evento_desconocido_de_version_futura","sessionID":"ses_x"}\n'
+            '{"type":"text","part":{"text":"ok"}}\n'
+        )
+        events, text, session, malformed = parse_jsonl_events(raw)
         types = [e.get("type") for e in events]
         self.assertIn("evento_desconocido_de_version_futura", types)
+        self.assertEqual(text, "ok")
+        self.assertEqual(session, "ses_x")
         self.assertEqual(malformed, 0)
+
+    def test_no_error_event_means_no_reported_error(self) -> None:
+        events, _text, _session, _malformed = parse_jsonl_events(self.raw)
+        self.assertEqual(extract_jsonl_error(events), "")
 
     def test_malformed_lines_are_counted_and_do_not_discard_valid_ones(self) -> None:
         raw = '{"type":"text","text":"ok"}\n{esto no es json}\n\n'
@@ -286,6 +349,58 @@ class WorkerPathTests(unittest.TestCase):
                 self.assertEqual(path.stat().st_mode & 0o777, 0o700)
 
 
+class WorkerConfigTests(unittest.TestCase):
+    """La configuracion cerrada del worker se materializa antes de lanzar el CLI."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_a_closed_config_is_written_privately(self) -> None:
+        target = write_worker_config(
+            config_dir=self.tmp / "config",
+            model="opencode/muse-spark-1.3-contributor-free",
+            deadline_seconds=60,
+            broker_url=BROKER_URL,
+            agent="investigator",
+        )
+        self.assertTrue(target.exists())
+        self.assertEqual(target, self.tmp / "config" / "opencode" / "opencode.json")
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        config = json.loads(target.read_text(encoding="utf-8"))
+        self.assertIn("investigator", config["agents"])
+        # Permisos en el formato de lista que exige V2 (no el dict de V1).
+        self.assertIsInstance(config["agents"]["investigator"]["permissions"], list)
+        self.assertIs(config["websearch"], False)
+        self.assertEqual(list(config["mcp"]["servers"]), ["research-broker"])
+
+    def test_a_missing_broker_is_refused(self) -> None:
+        with self.assertRaises(RuntimeConfigurationError):
+            write_worker_config(
+                config_dir=self.tmp / "config",
+                model="m",
+                deadline_seconds=60,
+                broker_url="",
+            )
+
+    def test_an_open_config_is_never_written(self) -> None:
+        with mock.patch(
+            "research.worker.profiles.build_worker_config",
+            return_value={"agents": {}, "websearch": True, "mcp": {"servers": {}}},
+        ):
+            with self.assertRaises(RuntimeConfigurationError):
+                write_worker_config(
+                    config_dir=self.tmp / "config",
+                    model="m",
+                    deadline_seconds=60,
+                    broker_url=BROKER_URL,
+                )
+        self.assertFalse((self.tmp / "config" / "opencode" / "opencode.json").exists())
+
+
 class SessionRegistryTests(unittest.IsolatedAsyncioTestCase):
     def _request(self, **overrides) -> RuntimeRequest:
         payload = {
@@ -339,6 +454,7 @@ class RuntimeRunTests(unittest.IsolatedAsyncioTestCase):
 
     def _runtime(self, process: _FakeProcess, **overrides):
         spawner = _RecordingSpawner(process)
+        overrides.setdefault("broker_url", BROKER_URL)
         runtime = OpenCodeRuntime(
             settings=self.settings,
             isolation_backend=_FakeBackend(),
@@ -352,14 +468,43 @@ class RuntimeRunTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_successful_run_returns_text_and_records_the_session(self) -> None:
         runtime, spawner = self._runtime(_FakeProcess(stdout=self.raw.encode()))
         outcome = await runtime.run(_request(self.tmp))
-        self.assertIn("Primer fragmento", outcome.text)
-        self.assertEqual(outcome.session_id, "ses_fixture_01")
+        self.assertEqual(outcome.text, REAL_TEXT)
+        self.assertEqual(outcome.session_id, REAL_SESSION)
         self.assertEqual(outcome.exit_code, 0)
         self.assertEqual(outcome.isolation, "fake-namespace")
         # El aislamiento envuelve el argv real.
         self.assertEqual(spawner.calls[0]["argv"][0], "fake-namespace")
         self.assertIn("--standalone", spawner.calls[0]["argv"])
         self.assertNotIn("BRAVE_API_KEY", spawner.calls[0]["env"])
+        # La configuracion del worker queda escrita y cerrada en su XDG_CONFIG_HOME.
+        worker_config = (
+            self.tmp / "state" / "worker" / "res_abc" / "config" / "opencode" / "opencode.json"
+        )
+        self.assertTrue(worker_config.exists())
+        written = json.loads(worker_config.read_text(encoding="utf-8"))
+        self.assertIn("investigator", written["agents"])
+        self.assertIs(written["websearch"], False)
+
+    async def test_without_the_broker_the_worker_is_not_launched(self) -> None:
+        """Sin broker la configuracion no puede estar cerrada: no se finge un worker."""
+        runtime, spawner = self._runtime(_FakeProcess(stdout=self.raw.encode()), broker_url="")
+        with self.assertRaises(RuntimeConfigurationError):
+            await runtime.run(_request(self.tmp))
+        self.assertEqual(spawner.calls, [])
+
+    async def test_a_non_closed_worker_config_aborts_before_spawning(self) -> None:
+        runtime, spawner = self._runtime(_FakeProcess(stdout=self.raw.encode()))
+        with mock.patch(
+            "research.worker.profiles.build_worker_config",
+            side_effect=lambda **kwargs: {
+                "agents": {"investigator": {"permissions": {"*": "allow"}}},
+                "websearch": True,
+                "mcp": {"servers": {}},
+            },
+        ):
+            with self.assertRaises(RuntimeConfigurationError):
+                await runtime.run(_request(self.tmp))
+        self.assertEqual(spawner.calls, [])
 
     async def test_exit_zero_without_text_is_malformed_not_success(self) -> None:
         runtime, _ = self._runtime(_FakeProcess(stdout=b'{"type":"step_finish"}\n'))
@@ -374,6 +519,23 @@ class RuntimeRunTests(unittest.IsolatedAsyncioTestCase):
             await runtime.run(_request(self.tmp))
         self.assertEqual(ctx.exception.exit_code, 3)
         self.assertIn("boom", ctx.exception.stderr)
+
+    async def test_the_real_jsonl_error_is_surfaced_despite_empty_stderr(self) -> None:
+        """v2.0.20 escribe el fallo en stdout y deja stderr vacio."""
+        raw = FIXTURE_ERROR.read_bytes()
+        runtime, _ = self._runtime(_FakeProcess(stdout=raw, stderr=b"", returncode=1))
+        with self.assertRaises(RuntimeExecutionError) as ctx:
+            await runtime.run(_request(self.tmp))
+        self.assertEqual(ctx.exception.stderr, "")
+        self.assertIn("free tier", ctx.exception.runtime_error)
+        self.assertIn("free tier", str(ctx.exception))
+
+    async def test_a_real_error_event_with_exit_zero_is_malformed(self) -> None:
+        raw = FIXTURE_AGENT_NOT_FOUND.read_bytes()
+        runtime, _ = self._runtime(_FakeProcess(stdout=raw, stderr=b"", returncode=0))
+        with self.assertRaises(RuntimeMalformedOutput) as ctx:
+            await runtime.run(_request(self.tmp))
+        self.assertIn("Agent not found", str(ctx.exception))
 
     async def test_output_over_the_cap_is_refused(self) -> None:
         runtime, _ = self._runtime(_FakeProcess(stdout=b"x" * 5000))

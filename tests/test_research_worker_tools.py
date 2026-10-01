@@ -38,6 +38,7 @@ from research.worker.capabilities import (  # noqa: E402
 )
 from research.worker.profiles import (  # noqa: E402
     BROKER_SERVER_NAME,
+    DENIED_ACTIONS,
     DENIED_BUILTIN_TOOLS,
     RESEARCH_TOOLS,
     BrokerEndpoint,
@@ -143,14 +144,36 @@ class ProfileTests(unittest.TestCase):
             deadline_seconds=120,
         )
 
-    def test_permissions_are_deny_by_default(self) -> None:
+    def test_permissions_are_an_ordered_v2_rule_list_denied_by_default(self) -> None:
+        """V2 espera una lista ordenada de reglas `{action, resource, effect}`.
+
+        El dict de V1 hace que el CLI descarte el agente entero ("Agent not found"):
+        se comprobo contra el binario v2.0.20 (tests/fixtures/README.md).
+        """
         permissions = worker_permissions()
-        self.assertEqual(permissions["*"], "deny")
-        for tool in DENIED_BUILTIN_TOOLS:
-            self.assertEqual(permissions[tool], "deny", tool)
+        self.assertIsInstance(permissions, list)
+        self.assertNotIsInstance(permissions, dict)
+        self.assertEqual(
+            permissions[0], {"action": "*", "resource": "*", "effect": "deny"}
+        )
+        # Gana la ultima regla que coincide, asi que los allow van despues del deny.
+        allows = {rule["action"] for rule in permissions if rule["effect"] == "allow"}
         for tool in RESEARCH_TOOLS:
-            self.assertEqual(permissions[tool], "allow", tool)
-            self.assertEqual(permissions[f"{BROKER_SERVER_NAME}_{tool}"], "allow", tool)
+            self.assertIn(tool, allows, tool)
+            self.assertIn(f"{BROKER_SERVER_NAME}_{tool}", allows, tool)
+        for action in DENIED_ACTIONS:
+            matching = [r for r in permissions if r["action"] == action]
+            self.assertTrue(matching, action)
+            for rule in matching:
+                self.assertEqual(rule["effect"], "deny", action)
+        for rule in permissions:
+            if rule["effect"] == "allow":
+                self.assertNotIn(rule["action"], DENIED_BUILTIN_TOOLS)
+
+    def test_the_agent_is_a_primary_v2_agent(self) -> None:
+        profile = self.config["agents"]["investigator"]
+        self.assertEqual(profile["mode"], "primary")
+        self.assertEqual(profile["model"], "opencode/muse-spark-1.3-contributor-free")
 
     def test_only_the_broker_is_mounted_and_with_an_explicit_timeout(self) -> None:
         servers = self.config["mcp"]["servers"]
@@ -185,8 +208,32 @@ class ProfileTests(unittest.TestCase):
         tampered = build_worker_config(
             model="m", endpoint=self.endpoint, deadline_seconds=60
         )
-        tampered["agents"]["investigator"]["permissions"]["bash"] = "allow"
+        tampered["agents"]["investigator"]["permissions"].append(
+            {"action": "bash", "resource": "*", "effect": "allow"}
+        )
         self.assertTrue(any("bash" in p for p in assert_worker_config_is_closed(tampered)))
+
+    def test_the_verifier_reports_the_v1_dict_permissions(self) -> None:
+        """Regresion del defecto real: V2 descarta el agente con permisos en dict."""
+        tampered = build_worker_config(model="m", endpoint=self.endpoint, deadline_seconds=60)
+        tampered["agents"]["investigator"]["permissions"] = {"*": "deny", "bash": "deny"}
+        problems = assert_worker_config_is_closed(tampered)
+        self.assertTrue(any("lista de reglas" in p for p in problems), problems)
+
+    def test_the_verifier_requires_the_deny_all_rule(self) -> None:
+        tampered = build_worker_config(model="m", endpoint=self.endpoint, deadline_seconds=60)
+        tampered["agents"]["investigator"]["permissions"] = [
+            {"action": "research_read", "resource": "*", "effect": "allow"}
+        ]
+        problems = assert_worker_config_is_closed(tampered)
+        self.assertTrue(any("deny por defecto" in p for p in problems), problems)
+
+    def test_an_allow_placed_before_the_deny_all_rule_is_reported(self) -> None:
+        tampered = build_worker_config(model="m", endpoint=self.endpoint, deadline_seconds=60)
+        rules = tampered["agents"]["investigator"]["permissions"]
+        rules.insert(0, {"action": "research_read", "resource": "*", "effect": "allow"})
+        problems = assert_worker_config_is_closed(tampered)
+        self.assertTrue(any("debe ir despues" in p for p in problems), problems)
 
     def test_the_verifier_reports_enabled_websearch(self) -> None:
         tampered = build_worker_config(model="m", endpoint=self.endpoint, deadline_seconds=60)

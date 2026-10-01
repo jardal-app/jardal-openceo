@@ -149,7 +149,11 @@ def _build_runtime(settings: Any) -> Any | None:
         try:
             from research.runtimes.opencode import OpenCodeRuntime
 
-            return OpenCodeRuntime(settings=settings)
+            return OpenCodeRuntime(
+                settings=settings,
+                broker_url=str(_setting(settings, "RESEARCH_BROKER_URL", "") or ""),
+                broker_bearer=str(_setting(settings, "RESEARCH_BROKER_BEARER", "") or ""),
+            )
         except Exception:  # noqa: BLE001
             logger.warning("No se pudo construir el runtime de OpenCode", exc_info=True)
     else:

@@ -232,6 +232,12 @@ class Settings(BaseSettings):
     RESEARCH_WORKER_DIR: str = str(CORE_DIR.parent / ".runtime" / "research" / "worker")
     RESEARCH_WORKSPACE_DIR: str = str(CORE_DIR.parent / ".runtime" / "research" / "workspaces")
 
+    # Broker MCP del worker. El worker no recibe claves de buscadores: habla **solo**
+    # con este endpoint, que aplica egress, politica y ledger. Sin URL configurada el
+    # runtime se niega a lanzar el worker en vez de ejecutarlo sin adquisicion.
+    RESEARCH_BROKER_URL: str = ""
+    RESEARCH_BROKER_BEARER: str = ""
+
     # Concurrencia global y por recurso (techos iniciales, ajustables tras medir).
     RESEARCH_MAX_ACTIVE_JOBS: int = 2
     RESEARCH_MAX_ACTIVE_MODEL_CALLS: int = 2

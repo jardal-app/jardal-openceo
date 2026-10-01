@@ -1,6 +1,2 @@
-{"type":"step_start","sessionID":"ses_fixture_01","model":"opencode/muse-spark-1.3-contributor-free"}
-{"type":"text","sessionID":"ses_fixture_01","part":{"type":"text","text":"Primer fragmento de sintesis. "}}
-{"type":"tool_use","sessionID":"ses_fixture_01","tool":"research_discover","input":{"query":"ejemplo"}}
-{"type":"evento_desconocido_de_version_futura","sessionID":"ses_fixture_01","payload":{"campo_nuevo":1}}
-{"type":"text","sessionID":"ses_fixture_01","part":{"type":"text","text":"Segundo fragmento con cita [e1]."}}
-{"type":"step_finish","sessionID":"ses_fixture_01","exitCode":0}
+{"type":"step_start","timestamp":1790871429849,"sessionID":"ses_f07bea99affe6Gm5GwAxOIPTcc","part":{"id":"prt_0f84162d9001D9H7CcrIFpAHbc","sessionID":"ses_f07bea99affe6Gm5GwAxOIPTcc","messageID":"msg_0f8415d1c001SkIBAWjXLcVAAS","type":"step-start"}}
+{"type":"text","timestamp":1790871434338,"sessionID":"ses_f07bea99affe6Gm5GwAxOIPTcc","part":{"id":"prt_0f841714c0017HlSfZw61sQ6lw","sessionID":"ses_f07bea99affe6Gm5GwAxOIPTcc","messageID":"msg_0f8415d1c001SkIBAWjXLcVAAS","type":"text","text":"El protocolo MCP (Model Context Protocol) es un estándar abierto que permite a los modelos de IA conectarse de forma uniforme a fuentes de datos, herramientas y servicios externos.","time":{"start":1790871433548,"end":1790871434338}}}
