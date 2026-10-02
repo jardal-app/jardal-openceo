@@ -43,6 +43,10 @@ class ResearchRuntimeResources:
     broker: Any | None = None
     capabilities: Any | None = None
     read_log: Any | None = None
+    # Piezas que la vigilancia de suscripciones reutiliza: el mismo lector con guard de
+    # egress y el mismo descubrimiento (con su ledger). No hay clientes paralelos.
+    http_reader: Any | None = None
+    discover: Any | None = None
 
     async def aclose(self) -> None:
         # Los workers y el almacen se cierran antes que el repositorio de Mongo: una
@@ -139,7 +143,7 @@ def _build_discovery(settings: Any, ledger: Any) -> Any | None:
     return discover
 
 
-def _build_reader(settings: Any) -> Any | None:
+def _build_http_reader(settings: Any) -> Any | None:
     """Lector HTTP publico con el guard de egress. Sin este, no hay lectura real."""
     try:
         from research.acquisition.http_reader import HttpReader
@@ -150,9 +154,10 @@ def _build_reader(settings: Any) -> Any | None:
     except Exception:  # noqa: BLE001
         logger.warning("No se pudo construir el lector HTTP de research", exc_info=True)
         return None
+    return HttpReader(fetcher=fetcher)
 
-    reader = HttpReader(fetcher=fetcher)
 
+def _reader_callable(reader: Any) -> Any:
     async def read(*, url: str, research_id: str, project_key: str, **kwargs: Any) -> dict[str, Any]:
         outcome = await reader.read(
             url,
@@ -181,6 +186,12 @@ def _build_reader(settings: Any) -> Any | None:
         }
 
     return read
+
+
+def _build_reader(settings: Any) -> Any | None:
+    """Lector como **callable** (contrato del servicio y del broker)."""
+    reader = _build_http_reader(settings)
+    return None if reader is None else _reader_callable(reader)
 
 
 def _build_runtime(settings: Any, *, broker_url: str = "") -> Any | None:
@@ -253,8 +264,11 @@ def build_research_service(
     capabilities = CapabilityStore()
     resources.capabilities = capabilities
 
-    reader = _build_reader(settings)
+    http_reader = _build_http_reader(settings)
+    reader = None if http_reader is None else _reader_callable(http_reader)
     discover = _build_discovery(settings, ledger)
+    resources.http_reader = http_reader
+    resources.discover = discover
 
     # Montura del broker. Se construye antes que el runtime porque la URL que el
     # worker necesita sale de la ruta real de la montura, no de una suposicion.

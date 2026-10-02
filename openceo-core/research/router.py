@@ -20,9 +20,10 @@ fachada no mantiene abierta una peticion durante toda la investigacion.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Awaitable, Callable
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 
 from auth.middleware import require_permissions
 from research.contracts import (
@@ -38,10 +39,20 @@ from research.policies import (
     principal_from_user,
 )
 from research.service import ResearchService, ResearchServiceError
+from research.subscriptions import (
+    ResearchSubscriptions,
+    SubscriptionConflict,
+    SubscriptionError,
+    SubscriptionLimitExceeded,
+    SubscriptionNotFound,
+    SubscriptionRequest,
+    SubscriptionUpdate,
+    SubscriptionValidationError,
+)
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["build_research_router", "public_job_payload"]
+__all__ = ["build_research_router", "is_safe_project_key", "public_job_payload", "subscription_http_error"]
 
 # Campos que la fachada publica de un job. Lista blanca: lo que no esta aqui no sale
 # (ni rutas internas, ni ids de lease, ni documentos crudos de proveedor).
@@ -105,21 +116,51 @@ def _authorized_or_404(principal: Any, document: dict[str, Any] | None) -> dict[
     return document
 
 
+_SAFE_PROJECT_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+def is_safe_project_key(project_key: Any) -> bool:
+    return isinstance(project_key, str) and bool(_SAFE_PROJECT_KEY.match(project_key))
+
+
+def subscription_http_error(exc: Exception) -> HTTPException:
+    """Traduce un error del servicio de suscripciones a su estado HTTP."""
+    mapping = (
+        (SubscriptionNotFound, status.HTTP_404_NOT_FOUND),
+        (SubscriptionConflict, status.HTTP_409_CONFLICT),
+        (SubscriptionValidationError, status.HTTP_422_UNPROCESSABLE_ENTITY),
+        (SubscriptionLimitExceeded, status.HTTP_429_TOO_MANY_REQUESTS),
+        (ResearchAccessDenied, status.HTTP_403_FORBIDDEN),
+        (ResearchPolicyError, status.HTTP_403_FORBIDDEN),
+        (SubscriptionError, status.HTTP_400_BAD_REQUEST),
+    )
+    for kind, code in mapping:
+        if isinstance(exc, kind):
+            return HTTPException(status_code=code, detail=str(exc))
+    raise exc
+
+
 def build_research_router(
     *,
     get_service: Callable[[Request], ResearchService | None],
     project_cfg_for: Callable[[Request, str], dict[str, Any]] | None = None,
     on_admitted: Callable[[str], Awaitable[None] | None] | None = None,
+    get_subscriptions: Callable[[Request], ResearchSubscriptions | None] | None = None,
 ) -> APIRouter:
     """Construye el router de la fachada.
 
     ``get_service`` devuelve el servicio del proceso (o ``None`` si no esta montado);
     ``project_cfg_for`` entrega la politica del proyecto; ``on_admitted`` despierta al
-    despachador sin bloquear la respuesta.
+    despachador sin bloquear la respuesta; ``get_subscriptions`` devuelve el servicio de
+    suscripciones (503 si no esta montado).
     """
     router = APIRouter(prefix="/api/research", tags=["research"])
 
     def _project_cfg(request: Request, project_key: str) -> dict[str, Any]:
+        if not is_safe_project_key(project_key):
+            # La clave llega del cliente y el cargador la usa como nombre de carpeta: una
+            # ruta ("../x") no debe llegar a el. Misma respuesta que un proyecto ajeno.
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proyecto no encontrado")
         if project_cfg_for is not None:
             return project_cfg_for(request, project_key)
         from config_loader import ConfigLoader
@@ -200,5 +241,142 @@ def build_research_router(
         if cancelled is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job no encontrado")
         return public_job_payload(cancelled) or {}
+
+    # ------------------------------------------------------------ suscripciones
+
+    def _subs_or_503(request: Request) -> ResearchSubscriptions:
+        subscriptions = get_subscriptions(request) if get_subscriptions is not None else None
+        if subscriptions is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Servicio de suscripciones no disponible",
+            )
+        # Las suscripciones dependen del mismo interruptor que los jobs.
+        _service_or_503(request, get_service)
+        return subscriptions
+
+    @router.post("/subscriptions")
+    async def create_subscription(
+        payload: SubscriptionRequest,
+        request: Request,
+        response: Response,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        user: Any = Depends(require_permissions(RESEARCH_RUN)),
+    ) -> dict[str, Any]:
+        subscriptions = _subs_or_503(request)
+        if idempotency_key and idempotency_key.strip():
+            payload = payload.model_copy(update={"idempotency_key": idempotency_key.strip()})
+        try:
+            subscription, created = await subscriptions.subscribe(
+                payload, principal=principal_from_user(user),
+                project_cfg=_project_cfg(request, payload.project_key),
+            )
+        except Exception as exc:  # noqa: BLE001 - se traduce o se relanza
+            raise subscription_http_error(exc) from exc
+        response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        response.headers["Location"] = f"/api/research/subscriptions/{subscription['subscription_id']}"
+        return {**subscription, "created": created}
+
+    @router.get("/subscriptions")
+    async def list_subscriptions(
+        request: Request,
+        project_key: str | None = None,
+        status_filter: str | None = Query(default=None, alias="status"),
+        limit: int = Query(default=50, ge=1, le=100),
+        user: Any = Depends(require_permissions(RESEARCH_READ)),
+    ) -> dict[str, Any]:
+        subscriptions = _subs_or_503(request)
+        rows = await subscriptions.list(
+            principal=principal_from_user(user), project_key=project_key,
+            statuses=[status_filter] if status_filter else None, limit=limit,
+        )
+        return {"subscriptions": rows}
+
+    @router.get("/subscriptions/{subscription_id}")
+    async def get_subscription(
+        subscription_id: str,
+        request: Request,
+        user: Any = Depends(require_permissions(RESEARCH_READ)),
+    ) -> dict[str, Any]:
+        subscriptions = _subs_or_503(request)
+        try:
+            return await subscriptions.get(subscription_id, principal=principal_from_user(user))
+        except Exception as exc:  # noqa: BLE001
+            raise subscription_http_error(exc) from exc
+
+    @router.get("/subscriptions/{subscription_id}/events")
+    async def list_subscription_events(
+        subscription_id: str,
+        request: Request,
+        status_filter: str | None = Query(default=None, alias="status"),
+        limit: int = Query(default=50, ge=1, le=200),
+        user: Any = Depends(require_permissions(RESEARCH_READ)),
+    ) -> dict[str, Any]:
+        subscriptions = _subs_or_503(request)
+        try:
+            events = await subscriptions.events(
+                subscription_id, principal=principal_from_user(user),
+                statuses=[status_filter] if status_filter else None, limit=limit,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise subscription_http_error(exc) from exc
+        return {"events": events}
+
+    @router.patch("/subscriptions/{subscription_id}")
+    async def update_subscription(
+        subscription_id: str,
+        payload: SubscriptionUpdate,
+        request: Request,
+        user: Any = Depends(require_permissions(RESEARCH_RUN)),
+    ) -> dict[str, Any]:
+        subscriptions = _subs_or_503(request)
+        try:
+            return await subscriptions.update(
+                subscription_id, payload, principal=principal_from_user(user),
+                project_cfg_for=lambda project: _project_cfg(request, project),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise subscription_http_error(exc) from exc
+
+    # Detener no exige ``run_research``: quien perdio ese permiso (o ya no puede crear) debe
+    # poder seguir deteniendo lo que programo. Es suficiente ser el owner con acceso de lectura.
+    @router.post("/subscriptions/{subscription_id}/pause")
+    async def pause_subscription(
+        subscription_id: str,
+        request: Request,
+        user: Any = Depends(require_permissions(RESEARCH_READ)),
+    ) -> dict[str, Any]:
+        subscriptions = _subs_or_503(request)
+        try:
+            return await subscriptions.pause(subscription_id, principal=principal_from_user(user))
+        except Exception as exc:  # noqa: BLE001
+            raise subscription_http_error(exc) from exc
+
+    @router.post("/subscriptions/{subscription_id}/resume")
+    async def resume_subscription(
+        subscription_id: str,
+        request: Request,
+        user: Any = Depends(require_permissions(RESEARCH_RUN)),
+    ) -> dict[str, Any]:
+        subscriptions = _subs_or_503(request)
+        try:
+            return await subscriptions.resume(
+                subscription_id, principal=principal_from_user(user),
+                project_cfg_for=lambda project: _project_cfg(request, project),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise subscription_http_error(exc) from exc
+
+    @router.post("/subscriptions/{subscription_id}/cancel")
+    async def cancel_subscription(
+        subscription_id: str,
+        request: Request,
+        user: Any = Depends(require_permissions(RESEARCH_READ)),
+    ) -> dict[str, Any]:
+        subscriptions = _subs_or_503(request)
+        try:
+            return await subscriptions.cancel(subscription_id, principal=principal_from_user(user))
+        except Exception as exc:  # noqa: BLE001
+            raise subscription_http_error(exc) from exc
 
     return router

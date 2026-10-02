@@ -1,0 +1,15 @@
+workflow: research.watch_tick
+name: Vigilar una fuente suscrita
+agent: research
+description: >-
+  Lee la fuente de una suscripcion, deduplica contra los eventos ya vistos y admite un
+  job quick solo si hay items nuevos o cambiados que pasen el filtro. Sin cambios
+  pertinentes no hay llamadas al modelo. La identidad, la fuente y el cursor salen del
+  schedule persistido, nunca de este YAML.
+auto_match: false
+triggers: []
+steps:
+  - id: watch
+    tool: research.watch_tick
+    params:
+      subscription: "{{research_request}}"

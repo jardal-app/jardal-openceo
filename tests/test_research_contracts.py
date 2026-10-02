@@ -385,10 +385,48 @@ class ResearchJobPersistenceTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_jobs_have_no_ttl_that_could_break_idempotency(self) -> None:
+    async def test_no_ttl_can_expire_a_live_job_or_its_idempotency_identity(self) -> None:
+        # Unico TTL permitido (TASK-2026-00069): sobre ``expires_at``, un campo que solo
+        # escribe la transicion a un estado terminal. Ningun otro indice (en especial el de
+        # idempotencia y el de la cola) puede expirar documentos.
         info = await self.repo.research_jobs.index_information()
-        for name, spec in info.items():
-            self.assertNotIn("expireAfterSeconds", spec, f"{name} no puede expirar jobs")
+        ttl = {name: spec for name, spec in info.items() if "expireAfterSeconds" in spec}
+        self.assertEqual({name: spec["key"] for name, spec in ttl.items()},
+                         {"idx_research_jobs_ttl": [("expires_at", 1)]})
+        self.assertEqual(ttl["idx_research_jobs_ttl"]["expireAfterSeconds"], 0)
+
+    async def test_only_terminal_jobs_carry_the_ttl_field(self) -> None:
+        live, _ = await self.repo.create_research_job(support.job_doc())
+        self.assertNotIn("expires_at", live)
+        running = await self.repo.transition_research_job(live["research_id"], ResearchJobStatus.RUNNING)
+        self.assertNotIn("expires_at", running)
+        done = await self.repo.transition_research_job(live["research_id"], ResearchJobStatus.COMPLETED)
+        retention = timedelta(days=self.repo._settings.RESEARCH_JOB_RETENTION_DAYS)
+        self.assertEqual(done["expires_at"] - done["finished_at"], retention)
+        # cancelar y fallar desde la cola tambien son terminales
+        for target in (ResearchJobStatus.CANCELLED, ResearchJobStatus.FAILED):
+            doc, _ = await self.repo.create_research_job(support.job_doc())
+            ended = await self.repo.transition_research_job(doc["research_id"], target)
+            self.assertIn("expires_at", ended, target)
+
+    async def test_retention_zero_disables_the_job_ttl(self) -> None:
+        self.repo._settings.RESEARCH_JOB_RETENTION_DAYS = 0
+        doc, _ = await self.repo.create_research_job(support.job_doc())
+        await self.repo.transition_research_job(doc["research_id"], ResearchJobStatus.RUNNING)
+        done = await self.repo.transition_research_job(doc["research_id"], ResearchJobStatus.COMPLETED)
+        self.assertNotIn("expires_at", done)
+
+    async def test_the_idempotency_index_survives_the_ttl_of_a_terminal_job(self) -> None:
+        # Mongo borra el job terminal, no su dedup de ocurrencias (esa vive en eventos): la
+        # clave idempotente vuelve a estar libre, que es el limite documentado de la retencion.
+        req = support.request(idempotency_key="k-ttl")
+        doc, _ = await self.repo.create_research_job(support.job_doc(req))
+        await self.repo.transition_research_job(doc["research_id"], ResearchJobStatus.RUNNING)
+        await self.repo.transition_research_job(doc["research_id"], ResearchJobStatus.COMPLETED)
+        await self.repo.research_jobs.delete_one({"research_id": doc["research_id"]})
+        again, created = await self.repo.create_research_job(support.job_doc(req))
+        self.assertTrue(created)
+        self.assertNotEqual(again["research_id"], doc["research_id"])
 
     async def test_patch_research_job_cannot_change_status(self) -> None:
         doc, _ = await self.repo.create_research_job(support.job_doc())

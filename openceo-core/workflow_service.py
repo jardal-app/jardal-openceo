@@ -63,6 +63,8 @@ class WorkflowToolRegistry:
         self._repo = repo
         self._task_service = task_service
         self._horizon: Any | None = None
+        self._research: Any | None = None
+        self._research_watch: Any | None = None
         self._catalog_provider: Callable[[], dict[str, Any]] | None = None
         self._register_builtin_tools()
 
@@ -153,6 +155,36 @@ class WorkflowToolRegistry:
         """Admite un job quick por ocurrencia con scope autenticado; no crea Tasks."""
         from research.workflows import admit_investigation
         return await admit_investigation(self._research, request, context)
+
+    def set_research_watch(self, engine: Any) -> None:
+        """Monta los ticks de suscripcion. Sin motor no hay tools: nada que fingir."""
+        self._research_watch = engine
+        self.register("research.watch_tick", self._research_watch_tick)
+        self.register("research.discovery_tick", self._research_discovery_tick)
+
+    async def _research_watch_tick(
+        self, subscription: dict[str, Any], context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Lee una fuente, deduplica y admite un job solo si hay cambios pertinentes.
+
+        Sin cambios pertinentes no llama al modelo ni crea Tasks. El cursor avanza
+        despues de persistir los eventos, con fencing del schedule.
+        """
+        from research.execution import require_research_context
+        execution = require_research_context(context)
+        if self._research_watch is None:
+            raise RuntimeError("Motor de vigilancia research no montado")
+        return await self._research_watch.watch_tick(execution, subscription)
+
+    async def _research_discovery_tick(
+        self, subscription: dict[str, Any], context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Busca fuentes nuevas con cupo diario propio; admite un job solo si hay nuevas."""
+        from research.execution import require_research_context
+        execution = require_research_context(context)
+        if self._research_watch is None:
+            raise RuntimeError("Motor de vigilancia research no montado")
+        return await self._research_watch.discovery_tick(execution, subscription)
 
     @staticmethod
     def _coerce_int(value: Any) -> int | None:
@@ -827,30 +859,44 @@ class WorkflowService:
     def set_research_service(self, research_service: Any) -> None:
         self._tools.set_research_service(research_service)
 
+    def set_research_watch(self, engine: Any) -> None:
+        self._tools.set_research_watch(engine)
+
+    # Workflows research ejecutables por el runner de schedules: archivo YAML y nombre
+    # del unico parametro de su unico paso. El nombre del workflow es el de su tool.
+    _RESEARCH_WORKFLOWS = {
+        "research.investigate": ("investigate.yaml", "request"),
+        "research.watch_tick": ("watch_tick.yaml", "subscription"),
+        "research.discovery_tick": ("discovery_tick.yaml", "subscription"),
+    }
+
     async def execute_research_workflow(
         self, workflow_id: str, params: dict[str, Any], *, context: dict[str, Any],
     ) -> dict[str, Any]:
         """Runner de schedules, separado de execute_task_workflow y core.complete.
 
-        Solo el YAML de admision conocido. No escribe workflow_runs de negocio ni
-        realiza discovery LLM. Los demas workflows de 00069 se añaden con sus contratos.
+        Solo los YAML conocidos (admision, vigilancia y descubrimiento), cada uno con un
+        unico paso deterministico. No escribe workflow_runs de negocio ni usa un LLM para
+        decidir que hacer: el modelo solo corre despues, sobre un job ya admitido.
         """
         from research.workflows import require_research_context
         require_research_context(context)
-        if workflow_id != "research.investigate":
+        entry = self._RESEARCH_WORKFLOWS.get(workflow_id)
+        if entry is None:
             raise ValueError("Workflow research no soportado")
-        path = self.workflows_dir / "research" / "investigate.yaml"
+        filename, param_name = entry
+        path = self.workflows_dir / "research" / filename
         workflow = self._parse_workflow_yaml(path.read_text(encoding="utf-8"), source=str(path))
         steps = workflow["steps"]
         if (workflow["workflow"] != workflow_id or workflow.get("auto_match")
                 or workflow.get("triggers") or len(steps) != 1
-                or steps[0].get("tool") != "research.investigate"
+                or steps[0].get("tool") != workflow_id
                 or steps[0].get("type", "tool") != "tool"):
             raise ValueError("El YAML research debe contener solo su tool de admision")
         resolved = _resolve_value(steps[0].get("params") or {}, {**context, "research_request": params})
-        if resolved != {"request": params}:
+        if resolved != {param_name: params}:
             raise ValueError("El YAML research no puede reemplazar los parametros de la ocurrencia")
-        return await self._tools.call("research.investigate", resolved, context)
+        return await self._tools.call(workflow_id, resolved, context)
 
     async def resume_blocked_run_for_task(
         self,

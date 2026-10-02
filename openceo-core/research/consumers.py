@@ -17,22 +17,33 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Iterable
+from typing import Any, Callable, Iterable
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "CONSUMER_OPERATIONS",
+    "DEFAULT_CONSUMER_OPERATIONS",
     "ConsumerAuthError",
     "ConsumerForbidden",
     "ConsumerGrant",
     "ConsumerRegistry",
 ]
 
-# Operaciones que un consumidor puede tener concedidas. Son deliberadamente las tres
-# de la fachada: no hay operacion de escritura ni de tickets.
-CONSUMER_OPERATIONS = ("submit", "get", "cancel")
+# Operaciones que un consumidor puede tener concedidas. No hay operacion de escritura de
+# tickets. Las de suscripcion (TASK-2026-00069) programan trabajo recurrente, asi que se
+# conceden de forma explicita: no forman parte del conjunto por defecto.
+#   subscribe            crear una suscripcion
+#   subscriptions        listar, leer y ver los eventos de las propias
+#   manage_subscription  editar, pausar, reanudar y cancelar las propias
+CONSUMER_OPERATIONS = (
+    "submit", "get", "cancel", "subscribe", "subscriptions", "manage_subscription",
+)
+DEFAULT_CONSUMER_OPERATIONS = ("submit", "get", "cancel")
 
 DEFAULT_TTL_SECONDS = 30 * 24 * 3600
 
@@ -112,6 +123,22 @@ class ConsumerRegistry:
         self._by_digest: dict[str, _StoredConsumer] = {}
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._ttl = int(ttl_seconds)
+        self._revocation_listeners: list[Callable[[str, str], Any]] = []
+
+    def add_revocation_listener(self, listener: Callable[[str, str], Any]) -> None:
+        """Avisa ``(consumer_id, motivo)`` al revocar. Lo usan las suscripciones.
+
+        El registro es en memoria; lo duradero es la cuenta del owner. Pero revocar un
+        consumidor en este proceso debe detener de inmediato lo que programo en su nombre.
+        """
+        self._revocation_listeners.append(listener)
+
+    def _notify_revoked(self, consumer_id: str, reason: str) -> None:
+        for listener in list(self._revocation_listeners):
+            try:
+                listener(consumer_id, reason)
+            except Exception:  # noqa: BLE001 - un oyente roto no puede impedir la revocacion
+                logger.warning("Oyente de revocacion fallo", exc_info=True)
 
     def register(
         self,
@@ -119,7 +146,7 @@ class ConsumerRegistry:
         consumer_id: str,
         owner_id: str,
         projects: Iterable[str],
-        operations: Iterable[str] = CONSUMER_OPERATIONS,
+        operations: Iterable[str] = DEFAULT_CONSUMER_OPERATIONS,
         ttl_seconds: int | None = None,
     ) -> str:
         """Alta de consumidor. Devuelve el token **una sola vez**."""
@@ -174,9 +201,23 @@ class ConsumerRegistry:
         stored = self._by_digest.get(_digest(token or ""))
         if stored is None:
             return False
+        if stored.revoked:
+            return True  # idempotente: ya estaba revocada y ya se aviso
         stored.revoked = True
         stored.revoked_reason = reason
+        # Un consumidor puede tener varias credenciales (rotacion). Solo cuando no le queda
+        # ninguna viva pierde lo que programo; revocar una vieja no detiene al consumidor.
+        if not self._has_live_credential(stored.grant.consumer_id):
+            self._notify_revoked(stored.grant.consumer_id, reason)
         return True
+
+    def _has_live_credential(self, consumer_id: str) -> bool:
+        now = self._clock()
+        return any(
+            stored.grant.consumer_id == consumer_id and not stored.revoked
+            and (stored.grant.expires_at is None or stored.grant.expires_at > now)
+            for stored in self._by_digest.values()
+        )
 
     def revoke_consumer(self, consumer_id: str, *, reason: str = "consumidor revocado") -> int:
         revoked = 0
@@ -186,6 +227,8 @@ class ConsumerRegistry:
             stored.revoked = True
             stored.revoked_reason = reason
             revoked += 1
+        if revoked:
+            self._notify_revoked(consumer_id, reason)
         return revoked
 
     def purge_expired(self) -> int:

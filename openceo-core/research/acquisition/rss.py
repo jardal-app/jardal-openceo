@@ -47,6 +47,7 @@ __all__ = [
     "FeedOutcome",
     "RssReader",
     "assert_safe_xml",
+    "parse_feed_page",
 ]
 
 # Un DTD/entidad en un feed no tiene uso legitimo para nuestro caso y si un riesgo
@@ -111,6 +112,10 @@ class FeedEntry:
     title: str | None = None
     published_at: datetime | None = None
     summary: str | None = None
+    # ``guid`` (RSS) o ``id`` (Atom): la identidad que declara el publicador. Es mas
+    # estable que la URL (que puede cambiar de tracking o de slug) y es la base de la
+    # dedup de las suscripciones. ``None`` si el feed no la declara.
+    entry_id: str | None = None
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -322,6 +327,19 @@ def parse_feed(
     text: str, *, feed_url: str = "", max_entries: int = 25
 ) -> tuple[str | None, tuple[FeedEntry, ...]]:
     """Parsea RSS 2.0 o Atom. Sin descargar nada y tras rechazar DTD/entidades."""
+    title, entries, _total = parse_feed_page(text, feed_url=feed_url, max_entries=max_entries)
+    return title, entries
+
+
+def parse_feed_page(
+    text: str, *, feed_url: str = "", max_entries: int = 25
+) -> tuple[str | None, tuple[FeedEntry, ...], int]:
+    """Como ``parse_feed`` pero informa cuantas entradas traia el documento.
+
+    El tercer valor es el numero de nodos de entrada **antes** de recortar por
+    ``max_entries``: quien vigila una fuente necesita saber si el recorte dejo items
+    fuera para declarar cobertura incompleta en vez de saltarlos en silencio.
+    """
     assert_safe_xml(text)
     try:
         root = ET.fromstring(text)
@@ -358,6 +376,7 @@ def parse_feed(
                     _child_text(node, "pubdate", "published", "updated", "date")
                 ),
                 summary=normalize_text(summary) if summary else None,
+                entry_id=_child_text(node, "guid", "id"),
             )
         )
-    return feed_title, tuple(entries)
+    return feed_title, tuple(entries), len(nodes)

@@ -35,7 +35,9 @@ from research.consumers import ConsumerRegistry
 from research.mcp_facade import build_research_mcp_facade
 from research.router import build_research_router
 from research.wiring import build_research_service, close_research_service
-from research.workflows import ResearchScheduleRuntime
+from research.subscriptions import ResearchSubscriptions
+from research.watch import build_watch_adapters
+from research.workflows import ResearchScheduleRuntime, principal_resolver_for
 from integrations.openwebui_compat import (
     chat_response,
     extract_latest_user_message,
@@ -330,9 +332,39 @@ async def lifespan(_: FastAPI):
             settings=settings,
             project_cfg_for=lambda project: config_loader.load_project(project),
             on_admitted=_wake_research_dispatcher,
+            # Mismo lector con guard de egress y mismo descubrimiento (con su ledger) que
+            # el servicio: la vigilancia no abre clientes ni gasto paralelos.
+            adapters=build_watch_adapters(
+                research_resources.http_reader,
+                max_items=settings.RESEARCH_WATCH_MAX_ITEMS_PER_SOURCE,
+            ),
+            discover=research_resources.discover,
         )
         app.state.research_schedule_store = research_coordinator.store
         app.state.research_scheduler = research_coordinator.scheduler
+        research_subscriptions = ResearchSubscriptions(
+            store=research_coordinator.store, repo=repo, settings=settings,
+            resolve_principal=principal_resolver_for(repo),
+        )
+        app.state.research_subscriptions = research_subscriptions
+        if _research_consumers is not None:
+            # Revocar un consumidor pausa lo que programo en su nombre, de inmediato.
+            _loop = asyncio.get_running_loop()
+
+            async def _pause_consumer(consumer_id: str) -> None:
+                try:
+                    paused = await research_subscriptions.pause_for_consumer(consumer_id, "grant_revoked")
+                    logger.info("Consumidor %s revocado: %d suscripciones pausadas", consumer_id, paused)
+                except Exception:  # noqa: BLE001 - un fallo aqui no puede perderse en silencio
+                    logger.error(
+                        "No se pudieron pausar las suscripciones del consumidor revocado %s",
+                        consumer_id, exc_info=True,
+                    )
+
+            def _pause_consumer_subscriptions(consumer_id: str, _reason: str) -> None:
+                asyncio.run_coroutine_threadsafe(_pause_consumer(consumer_id), _loop)
+
+            _research_consumers.add_revocation_listener(_pause_consumer_subscriptions)
         stack.push_async_callback(research_coordinator.stop)
         research_schedules_started = await research_coordinator.start()
         logger.info("Research scheduler %s", "habilitado" if research_schedules_started else "deshabilitado")
@@ -415,9 +447,10 @@ def _wake_research_dispatcher(_research_id: str):
     return None
 
 
-app.include_router(build_research_router(get_service=lambda request: getattr(
-    request.app.state, "research_service", None
-)))
+app.include_router(build_research_router(
+    get_service=lambda request: getattr(request.app.state, "research_service", None),
+    get_subscriptions=lambda request: getattr(request.app.state, "research_subscriptions", None),
+))
 
 # Montura MCP de research, apagada por defecto: su control de acceso son las
 # credenciales de consumidor, no el Bearer compartido de las monturas internas.
@@ -428,6 +461,7 @@ if get_settings().RESEARCH_MCP_ENABLED:
     _research_mcp_server = build_research_mcp_facade(
         consumers=_research_consumers,
         get_service=lambda: getattr(app.state, "research_service", None),
+        get_subscriptions=lambda: getattr(app.state, "research_subscriptions", None),
     )
     _research_mcp_app = _research_mcp_server.http_app(path="/")
     app.mount(get_settings().RESEARCH_MCP_PATH, _research_mcp_app)
