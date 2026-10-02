@@ -11,7 +11,7 @@ Trabajo temporal de tickets: `docs/work/TASK-2026-000NN-tema.md`.
 ## 1. Arquitectura y Stack
 
 - **Orquestador**: LangGraph (Python) en `openceo-core/`
-- **Gateway Cognitivo (First Layer)**: `openceo-core/first_layer.py` con `DeepSeek v4 Flash` (`CEO_LLM_MODEL`)
+- **Gateway Cognitivo (First Layer)**: `openceo-core/first_layer.py` con `DeepSeek Flash` (`CEO_LLM_MODEL`)
 - **API Server**: FastAPI con endpoints compatibles OpenAI `/v1/chat/completions` en puerto `18765` (host) u `8000` (docker)
 - **Base de Datos**: MongoDB (`tasks`, `dev_sessions`, `user_context`, `project_presets`, `task_reviews`, `workflow_runs`)
 - **Voz en Tiempo Real**: LiveKit + Silero VAD + Groq Whisper STT + OpenAI TTS (`openceo-voice/`)
@@ -21,7 +21,7 @@ Trabajo temporal de tickets: `docs/work/TASK-2026-000NN-tema.md`.
 
 ---
 
-## 2. Primera Capa Cognitiva: DeepSeek v4 Flash (`first_layer.py`)
+## 2. Primera Capa Cognitiva: DeepSeek Flash (`first_layer.py`)
 
 Cualquier mensaje entrante por voz o chat que no tenga prefijo `@` es procesado primero por `FirstLayerGateway`:
 1. **Comprensión contextual**: Conoce los proyectos configurados, el proyecto activo, el ticket en foco, las terminales tmux del servidor y los presets.
@@ -97,9 +97,9 @@ cd openceo-voice-android
 - Ejecución directa secuencial sin gasto de LLM.
 - Se invocan registrando tickets con `params: {"workflow": "<id_workflow>"}` o con `params: {"use_workflow": true}` si el YAML define `auto_match: true` y triggers.
 
-### Autodiscovery de Workflows (`deepseek-v4-flash`)
+### Autodiscovery de Workflows (`deepseek-flash`)
 - Activación explícita con `params: {"discover_workflow": true}`.
-- DeepSeek v4 Flash recibe el catálogo exacto de las 15 herramientas disponibles (`WorkflowToolRegistry.describe()`) y sintetiza una propuesta en YAML libre de alucinaciones.
+- DeepSeek Flash recibe el catálogo exacto de las 15 herramientas disponibles (`WorkflowToolRegistry.describe()`) y sintetiza una propuesta en YAML libre de alucinaciones.
 - Crea un registro en `discovery_runs` (`status: proposed`) y el ticket queda en `waiting`. Al aprobarse, se guarda el YAML en disco como nuevo workflow cristalizado.
 
 ### Human-in-the-Loop (HITL) en YAMLs
@@ -214,7 +214,6 @@ del mismo trabajo. Al cerrar, en orden:
 
 1. **Merge a `main` + push** de la rama del ticket (`git checkout main && git merge --no-ff <rama> && git push origin main`).
 2. **Servicio reiniciado con el código nuevo** (`scripts/openceo-core-host.sh restart` + `status` + smoke del endpoint).
-3. **Ticket en ERPNext en su estado final**: la ejecución a `completed` lo deja solo en `Pending Review`; el `Completed` de negocio se acepta en el desk. Borrar la rama (`-d` + `push --delete`) una vez mergeada.
+3. **Ticket en ERPNext en su estado final** según AGENTS.md: `Completed` si el agente terminó y verificó; `Pending Review` solo si queda una credencial o aprobación humana concreta; `Working` si sigue abierto el trabajo o una dependencia. Pasar el contexto de QA al adaptador y releer el estado de negocio. Borrar la rama local (`-d`) y remota si existe una vez mergeada.
 4. **Docs temporales eliminados**: `docs/work/TASK-2026-000NN-tema.md` se borra con aprobación del dueño una vez verificado que lo durable quedó en el vault y el resultado en el ticket.
 5. **Registro durable**: `STATUS.md` (traspaso), ticket ERPNext (resultado) y vault (solo hechos, decisiones, flujos y conclusiones reutilizables, con el número de ticket como evidencia).
-

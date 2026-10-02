@@ -176,6 +176,8 @@ class ResearchDependencies:
     ledger: Any | None = None
     evidence: Any | None = None
     runtime: Any | None = None
+    deep_model: Any | None = None
+    events: Any | None = None
     discover: Callable[..., Awaitable[Any]] | None = None
     read: Callable[..., Awaitable[dict[str, Any]]] | None = None
     capabilities: CapabilityStore | None = None
@@ -288,6 +290,10 @@ class ResearchService:
             "status": ResearchJobStatus.QUEUED.value,
             "classification": policy.classification.value,
             "budget_ref": policy.budget_ref,
+            "paid_budget_micro_usd": policy.paid_budget_micro_usd,
+            "freshness": request.freshness.model_dump(mode="json"),
+            "adapters": dict(policy.adapters),
+            "read_provider": "firecrawl" if project_cfg.get("research", {}).get("read_provider") == "firecrawl" else "http",
             "effective_limits": {
                 "search_requests": limits.search_requests,
                 "pages": limits.pages,
@@ -306,17 +312,39 @@ class ResearchService:
     async def status(self, research_id: str) -> dict[str, Any] | None:
         return await self._deps.repo.get_research_job(research_id)
 
+    async def result_view(self, document: dict[str, Any]) -> dict[str, Any]:
+        """Read projection: retained reports cannot claim support from expired blobs."""
+        if self._deps.evidence is None or not hasattr(self._deps.evidence, "aget") or not document.get("result"):
+            return document
+        from copy import deepcopy
+        from research.evidence import EvidenceScope
+        scope = EvidenceScope(project_key=document["project_key"], owner_id=document["owner_id"],
+                              max_classification=Classification(document.get("classification", "public")))
+        missing = set()
+        for ev in document["result"].get("evidence", []):
+            if await self._deps.evidence.aget(scope, ev["id"]) is None:
+                missing.add(ev["id"])
+        if not missing:
+            return document
+        view = deepcopy(document)
+        for claim in view["result"].get("claims", []):
+            if missing.intersection(claim.get("evidence_ids", [])):
+                claim["verification"] = "insufficient_evidence"
+        view["result"]["status"] = "partial"
+        view["result"].setdefault("coverage_gaps", []).append({"source": "evidence", "reason": "source_unavailable", "detail": "Evidencia caducada o no accesible"})
+        return view
+
     # ------------------------------------------------------------ despacho
 
     async def run_once(self) -> dict[str, Any] | None:
         """Toma un job encolado y lo ejecuta. Devuelve el documento final o ``None``."""
-        job = await self._deps.repo.claim_next_research_job(
-            lease_owner=self._coordinator, lease_seconds=LEASE_SECONDS, now=self._clock()
-        )
-        if job is None:
-            return None
         await self._deps.slots.acquire_job()
         try:
+            job = await self._deps.repo.claim_next_research_job(
+                lease_owner=self._coordinator, lease_seconds=LEASE_SECONDS, now=self._clock()
+            )
+            if job is None:
+                return None
             return await self._execute(job)
         finally:
             await self._deps.slots.release_job()
@@ -340,9 +368,19 @@ class ResearchService:
         searches = 0
 
         try:
-            candidates, searches = await self._discover(job, scope, budget, limits, coverage)
-            await self._read_pages(job, scope, budget, limits, candidates, evidence_rows, coverage)
-            result = await self._synthesize(job, scope, budget, evidence_rows, coverage)
+            async with asyncio.timeout(budget.remaining_seconds):
+                candidates, searches = await self._discover(job, scope, budget, limits, coverage)
+                await self._read_pages(job, scope, budget, limits, candidates, evidence_rows, coverage)
+                if job.get("mode") == "deep":
+                    from research.deep import DeepResearch
+                    result = await DeepResearch(self, self._deps.deep_model).synthesize(job, budget, evidence_rows, coverage)
+                    if result is None and evidence_rows:
+                        result = self._parse_report(job, '{"summary":"Deep research incompleto","claims":[]}', evidence_rows, coverage)
+                else:
+                    result = await self._synthesize(job, scope, budget, evidence_rows, coverage)
+        except TimeoutError:
+            coverage.append(ResearchCoverageGap(source="service", reason=CoverageReason.BUDGET_EXHAUSTED, detail="Deadline global agotado"))
+            result = self._parse_report(job, '{"summary":"Investigacion incompleta por deadline","claims":[]}', evidence_rows, coverage) if evidence_rows else None
         except asyncio.CancelledError:
             raise
         except AcquisitionError as exc:
@@ -406,6 +444,11 @@ class ResearchService:
                     ResearchCoverageGap(source=exc.provider or "discover", reason=exc.coverage_reason, detail=exc.detail)
                 )
                 break
+            for degradation in getattr(found, "degradations", ()) or ():
+                coverage.append(ResearchCoverageGap(source=degradation.provider,
+                    reason=degradation.coverage_reason, detail=degradation.detail))
+            if getattr(found, "degradations", ()):
+                break
             for item in getattr(found, "items", ()) or ():
                 url = getattr(item, "url", None)
                 if isinstance(url, str) and url not in urls:
@@ -458,9 +501,15 @@ class ResearchService:
             stored = await self._store_evidence(
                 job, scope, evidence_id=evidence_id, page=page
             )
+            if page.get("remote_egress_unattested"):
+                coverage.append(ResearchCoverageGap(source="firecrawl", reason=CoverageReason.SOURCE_UNAVAILABLE,
+                    detail="La API remota no acredita su cadena de redirecciones/DNS; cobertura limitada"))
             evidence_rows[evidence_id] = {
                 "url": page.get("url") or url,
                 "text": page.get("text") or "",
+                "published_at": page.get("published_at"),
+                "observed_at": page.get("observed_at") or self._clock(),
+                "access_method": page.get("access_method", "http"),
                 "stored": stored,
             }
 
@@ -472,7 +521,7 @@ class ResearchService:
         evidence = ResearchEvidence(
             id=evidence_id,
             url=str(page.get("url") or ""),
-            access_method=AccessMethod.HTTP,
+            access_method=AccessMethod(page.get("access_method", "http")),
             visibility=scope.classification,
             observed_at=page.get("observed_at") or self._clock(),
             published_at=page.get("published_at"),
@@ -559,6 +608,9 @@ class ResearchService:
                     self._deps.broker_reads.take(job["research_id"]) or {}
                 ).items():
                     evidence_rows.setdefault(evidence_id, row)
+                    if row.get("remote_egress_unattested"):
+                        coverage.append(ResearchCoverageGap(source="firecrawl", reason=CoverageReason.SOURCE_UNAVAILABLE,
+                            detail="La API remota no acredita su cadena de redirecciones/DNS; cobertura limitada"))
             except Exception:  # noqa: BLE001 - el registro es auxiliar
                 logger.warning("No se pudo recoger la evidencia del broker", exc_info=True)
 
@@ -680,9 +732,10 @@ class ResearchService:
             ResearchEvidence(
                 id=evidence_id,
                 url=str(row.get("url") or ""),
-                access_method=AccessMethod.HTTP,
+                access_method=AccessMethod(row.get("access_method", "http")),
                 visibility=Classification(str(job.get("classification") or "public")),
-                observed_at=self._clock(),
+                observed_at=row.get("observed_at") or self._clock(),
+                published_at=row.get("published_at"),
                 content_hash=_hash_of(row),
                 project_key=job["project_key"],
                 owner_id=job["owner_id"],
@@ -759,6 +812,8 @@ class ResearchService:
             "evidence_ids": sorted((evidence_rows or {}).keys()),
             "coverage_gaps": [g.model_dump(mode="json") for g in (coverage or [])],
         }
+        if "deep_execution" in job:
+            updates["deep_execution"] = job["deep_execution"]
         if result is not None:
             if coverage is not None:
                 result.coverage_gaps = list(coverage)
@@ -768,10 +823,14 @@ class ResearchService:
             result.usage = ResearchUsage(
                 search_requests=searched,
                 pages_read=len(evidence_rows or {}),
-                estimated_micro_usd=result.usage.estimated_micro_usd,
+                model_calls=(job.get("deep_execution") or {}).get("model_calls", result.usage.model_calls),
+                estimated_micro_usd=(job.get("deep_execution") or {}).get("estimated_micro_usd", result.usage.estimated_micro_usd),
                 reconciled_micro_usd=result.usage.reconciled_micro_usd,
+                uncertain=(job.get("deep_execution") or {}).get("uncertain", result.usage.uncertain),
             )
             updates["result"] = result.model_dump(mode="json")
+            if self._deps.events is not None:
+                updates["event_delivery_pending"] = True
         if failure_reason:
             updates["failure_reason"] = failure_reason
         document = await self._deps.repo.transition_research_job(research_id, status, updates=updates)
@@ -780,7 +839,20 @@ class ResearchService:
             # estado real en vez de reescribirlo.
             document = await self._deps.repo.get_research_job(research_id)
         await self._release_capabilities(research_id)
+        if document and document.get("result") and self._deps.events is not None:
+            await self._deps.events.publish(document)
+            document = await self._deps.repo.patch_research_job(research_id, {"event_delivery_pending": False}) or document
         return document or job
+
+    async def recover_event_delivery(self):
+        """One bounded startup reconciliation; no periodic job scan or model retry."""
+        if self._deps.events is None:
+            return 0
+        rows = await self._deps.repo.research_jobs.find({"event_delivery_pending": True}).limit(100).to_list(None)
+        for row in rows:
+            await self._deps.events.publish(row)
+            await self._deps.repo.patch_research_job(row["research_id"], {"event_delivery_pending": False})
+        return len(rows)
 
     # ------------------------------------------------------------ cancelacion
 
@@ -792,6 +864,8 @@ class ResearchService:
         if ResearchJobStatus(current["status"]) in TERMINAL_STATUSES:
             return current
         self._cancelled.add(research_id)
+        if self._deps.deep_model is not None:
+            await self._deps.deep_model.cancel(research_id)
         if self._deps.runtime is not None and hasattr(self._deps.runtime, "cancel"):
             try:
                 await self._deps.runtime.cancel(research_id)

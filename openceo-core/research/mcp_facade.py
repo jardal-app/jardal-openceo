@@ -32,6 +32,7 @@ from research.policies import ResearchAccessDenied, ResearchPolicyError, princip
 from research.policies import Principal
 from research.router import is_safe_project_key, public_job_payload
 from research.service import ResearchService, ResearchServiceError
+from research.events import EventError
 from research.subscriptions import (
     ResearchSubscriptions,
     SubscriptionConflict,
@@ -58,6 +59,7 @@ FACADE_TOOLS = (
     "openceo_research_subscription_events",
     "openceo_research_subscription_update",
     "openceo_research_subscription_control",
+    "openceo_research_events",
 )
 
 
@@ -165,6 +167,31 @@ def build_research_mcp_facade(
 
         return ConfigLoader(get_settings()).load_project(project_key)
 
+    @server.tool(name="openceo_research_events")
+    async def openceo_research_events(project_key: str, after: int = 0) -> dict[str, Any]:
+        """Eventos propios persistidos; replay por cursor y grant events explicito."""
+        grant = _authenticate("events")
+        if isinstance(grant, dict):
+            return grant
+        service = _service()
+        if isinstance(service, dict):
+            return service
+        try:
+            grant.require("events", project_key=project_key)
+            cfg = _cfg(project_key).get("research", {})
+            if not cfg.get("enabled") or service._deps.events is None:
+                return _error("unavailable", "Eventos no configurados", status=503)
+            from research.contracts import Classification
+            rows = await service._deps.events.list(project=project_key, owner=grant.owner_id,
+                ceiling=Classification(cfg.get("classification_ceiling", "public")), after=after)
+            return {"ok": True, "events": rows, "next_cursor": rows[-1]["cursor"] if rows else after}
+        except ConsumerAuthError as exc:
+            return _error(exc.reason, exc.detail, status=exc.status_code)
+        except ResearchAccessDenied:
+            return _error("forbidden", "Proyecto no autorizado", status=403)
+        except (ValueError, EventError):
+            return _error("validation_error", "Cursor o politica invalida", status=422)
+
     @server.tool(name="openceo_research_submit")
     async def openceo_research_submit(
         project_key: str,
@@ -251,7 +278,7 @@ def build_research_mcp_facade(
             return _error("not_found", "Job no encontrado", status=404)
         if not grant.allows("get", project_key=str(document.get("project_key") or "")):
             return _error("not_found", "Job no encontrado", status=404)
-        return {"ok": True, "job": public_job_payload(document)}
+        return {"ok": True, "job": public_job_payload(await service.result_view(document))}
 
     @server.tool(name="openceo_research_cancel")
     async def openceo_research_cancel(research_id: str) -> dict[str, Any]:

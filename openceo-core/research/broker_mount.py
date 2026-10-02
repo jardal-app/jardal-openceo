@@ -128,7 +128,7 @@ def build_broker_operations(
             record = ResearchEvidence(
                 id=evidence_id,
                 url=final_url,
-                access_method=AccessMethod.HTTP,
+                access_method=AccessMethod(page.get("access_method", "http")),
                 visibility=scope.classification,
                 observed_at=observed_at,
                 published_at=page.get("published_at"),
@@ -150,6 +150,10 @@ def build_broker_operations(
                     # El hash del texto almacenado viaja al informe: la aceptacion pide
                     # poder revisar la afirmacion material contra el contenido guardado.
                     "content_hash": content_hash,
+                    "published_at": page.get("published_at"),
+                    "observed_at": observed_at,
+                    "access_method": page.get("access_method", "http"),
+                    "remote_egress_unattested": page.get("remote_egress_unattested", False),
                 },
             )
         return untrusted_payload(

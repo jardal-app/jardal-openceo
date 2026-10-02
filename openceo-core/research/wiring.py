@@ -47,6 +47,7 @@ class ResearchRuntimeResources:
     # egress y el mismo descubrimiento (con su ledger). No hay clientes paralelos.
     http_reader: Any | None = None
     discover: Any | None = None
+    firecrawl: Any | None = None
 
     async def aclose(self) -> None:
         # Los workers y el almacen se cierran antes que el repositorio de Mongo: una
@@ -93,6 +94,9 @@ class ProjectEvidence:
         repository = self._vault.project(evidence.project_key)
         return await repository.asave(evidence, **kwargs)
 
+    async def aget(self, scope: Any, evidence_id: str):
+        return await self._vault.project(scope.project_key).aget(scope, evidence_id)
+
 
 def _build_evidence(settings: Any) -> tuple[Any, Any]:
     from research.evidence import EvidenceVault, RetentionWindows
@@ -110,7 +114,7 @@ def _build_evidence(settings: Any) -> tuple[Any, Any]:
     return ProjectEvidence(vault), vault
 
 
-def _build_discovery(settings: Any, ledger: Any) -> Any | None:
+def _build_discovery(settings: Any, ledger: Any, *, repo=None, firecrawl=None) -> Any | None:
     """Descubrimiento como **callable**, que es el contrato que el servicio usa.
 
     `BraveClient` expone `search_web(query, ...)`; el servicio invoca su dependencia
@@ -119,28 +123,58 @@ def _build_discovery(settings: Any, ledger: Any) -> Any | None:
     job con busqueda**, con un `TypeError` que el dispatcher reduce a un `failed`
     generico. Se adapta aqui, una sola vez, y el mismo callable lo comparte el broker.
     """
-    if not _setting(settings, "RESEARCH_BRAVE_API_KEY", ""):
-        return None
-    if not bool(_setting(settings, "RESEARCH_BRAVE_ENABLED", True)):
-        return None
-    try:
-        from research.acquisition.brave import BraveClient
-
-        client = BraveClient(settings=settings, ledger=ledger)
-    except Exception:  # noqa: BLE001
-        logger.warning("No se pudo construir el cliente de Brave", exc_info=True)
+    from research.acquisition.brave import BraveClient
+    from research.acquisition.serper import SerperClient
+    from research.acquisition.base import DiscoveryResult, ProviderDisabledError, AcquisitionError
+    clients = {}
+    for name, factory in (("brave", BraveClient), ("serper", SerperClient)):
+        if _setting(settings, f"RESEARCH_{name.upper()}_API_KEY", "") and _setting(settings, f"RESEARCH_{name.upper()}_ENABLED", True):
+            clients[name] = factory(settings=settings, ledger=ledger, max_attempts=1)
+    if firecrawl is not None:
+        clients["firecrawl"] = firecrawl
+    if not clients:
         return None
 
     async def discover(*, question: str, research_id: str, project_key: str, **kwargs: Any) -> Any:
-        return await client.search_web(
-            question,
-            research_id=research_id,
-            project_key=project_key,
-            count=int(kwargs.get("count") or 10),
-            deadline=kwargs.get("deadline"),
-        )
+        # Calls from the model carry no authority fields: resolve its persisted job.
+        # Subscription ticks supply policy derived by their authenticated runner.
+        job = await repo.get_research_job(research_id) if repo is not None else None
+        policy = kwargs.get("policy")
+        adapters = (job.get("adapters", {}) if job and job.get("project_key") == project_key
+                    else dict(policy.adapters) if policy is not None and policy.project_key == project_key else {})
+        classification = job.get("classification") if job else getattr(getattr(policy, "classification", None), "value", None)
+        selected = next((name for name in ("brave", "serper", "firecrawl") if adapters.get(name)), None)
+        if classification != "public" or selected not in clients:
+            return DiscoveryResult(provider=selected or "discovery", degradations=(ProviderDisabledError(
+                "No hay proveedor publico autorizado y montado", provider=selected or "discovery").degradation(),))
+        count = int(kwargs.get("count") or 10)
+        common = dict(research_id=research_id, project_key=project_key, deadline=kwargs.get("deadline"))
+        try:
+            if selected == "brave":
+                return await clients[selected].search_web(question, count=count, **common)
+            if selected == "serper":
+                return await clients[selected].search_web(question, num=count, **common)
+            return await clients[selected].search(question, limit=count, **common)
+        except AcquisitionError as exc:
+            return DiscoveryResult(provider=selected, degradations=(exc.degradation(),))
 
     return discover
+
+
+def _build_firecrawl(settings, ledger, repo):
+    """Basic public extraction only, with measured, shared native credits."""
+    import hashlib
+    from research.acquisition.base import parse_optional_int
+    from research.acquisition.firecrawl import FirecrawlClient
+    from research.provider_credits import ProviderCredits
+    key = _setting(settings, "RESEARCH_FIRECRAWL_API_KEY", "")
+    window = _setting(settings, "RESEARCH_FIRECRAWL_CREDIT_WINDOW", "")
+    db = getattr(repo, "db", None)
+    if not key or not window or db is None or not _setting(settings, "RESEARCH_FIRECRAWL_ENABLED", True):
+        return None
+    budget = ProviderCredits(db, provider="firecrawl", account=hashlib.sha256(key.encode()).hexdigest()[:16],
+        capacity=parse_optional_int(_setting(settings, "RESEARCH_FIRECRAWL_ACCOUNT_CREDITS", "")), window=window)
+    return FirecrawlClient(settings=settings, ledger=ledger, credit_budget=budget, max_attempts=1)
 
 
 def _build_http_reader(settings: Any) -> Any | None:
@@ -165,6 +199,12 @@ def _reader_callable(reader: Any) -> Any:
             project_key=project_key,
             deadline=kwargs.get("deadline"),
         )
+        if outcome.degradations:
+            from research.acquisition.base import AcquisitionError
+            gap = outcome.degradations[0]
+            error = AcquisitionError(gap.detail, provider=gap.provider)
+            error.coverage_reason, error.kind = gap.coverage_reason, gap.reason
+            raise error
         text = getattr(outcome, "text", "") or ""
         # `outcome.content_hash` describe el **cuerpo crudo** descargado; el almacen de
         # evidencias valida que el hash declare el contenido que guarda, que es el texto
@@ -266,7 +306,41 @@ def build_research_service(
 
     http_reader = _build_http_reader(settings)
     reader = None if http_reader is None else _reader_callable(http_reader)
-    discover = _build_discovery(settings, ledger)
+    firecrawl = _build_firecrawl(settings, ledger, repo)
+    resources.firecrawl = firecrawl
+    discover = _build_discovery(settings, ledger, repo=repo, firecrawl=firecrawl)
+    http_read = reader
+    if firecrawl is not None:
+        async def selected_read(*, url, research_id, project_key, **kwargs):
+            job = await repo.get_research_job(research_id)
+            if (job is None or job.get("project_key") != project_key or job.get("read_provider") != "firecrawl"):
+                return await http_read(url=url, research_id=research_id, project_key=project_key, **kwargs)
+            from research.acquisition.base import ProviderDisabledError, DestinationBlockedError
+            from research.policies import EgressGuard, EgressError
+            if not job.get("adapters", {}).get("firecrawl") or job.get("classification") != "public":
+                raise ProviderDisabledError("Extraccion Firecrawl no autorizada", provider="firecrawl")
+            # The initial URL and returned URL are checked locally. Firecrawl's own
+            # remote redirect/network path cannot be attested by this API; declare it.
+            guard = EgressGuard()
+            try:
+                await guard.validate(url)
+                outcome = await firecrawl.scrape(url, research_id=research_id, project_key=project_key,
+                                                owner_id=job["owner_id"], deadline=kwargs.get("deadline"))
+                if outcome.degradations:
+                    from research.acquisition.base import AcquisitionError
+                    gap = outcome.degradations[0]
+                    error = AcquisitionError(gap.detail, provider=gap.provider)
+                    error.coverage_reason, error.kind = gap.coverage_reason, gap.reason
+                    raise error
+                await guard.validate(outcome.final_url)
+            except EgressError:
+                raise DestinationBlockedError("Destino no publico", provider="firecrawl") from None
+            from research.evidence import content_hash_of, normalize_content
+            return {"url": outcome.final_url, "text": outcome.text, "provider": "firecrawl",
+                    "access_method": "firecrawl", "observed_at": outcome.observed_at,
+                    "published_at": outcome.published_at, "content_hash": content_hash_of(normalize_content(outcome.text)),
+                    "remote_egress_unattested": True}
+        reader = selected_read
     resources.http_reader = http_reader
     resources.discover = discover
 
@@ -306,6 +380,12 @@ def build_research_service(
         capabilities=capabilities,
         broker_reads=read_log,
     )
+    from research.deep_model import BudgetedDeepModel
+    deps.deep_model = BudgetedDeepModel(settings, ledger)
+    from research.events import ResearchEvents
+    event_db = getattr(repo, "db", None)
+    if event_db is not None:
+        deps.events = ResearchEvents(event_db, evidence, retention_days=int(_setting(settings, "RESEARCH_REPORT_RETENTION_DAYS", 180)))
     service = ResearchService(settings=settings, deps=deps, clock=clock)
     return service, resources
 

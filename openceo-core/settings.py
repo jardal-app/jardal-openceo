@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     # CEO routing LLM
     DEEPSEEK_API_KEY: str = ""
-    CEO_LLM_MODEL: str = "deepseek-v4-flash"
+    CEO_LLM_MODEL: str = "deepseek-flash"
     CEO_LLM_BASE_URL: str = "https://api.deepseek.com/v1"
 
     # Dev coding providers
@@ -293,6 +293,14 @@ class Settings(BaseSettings):
 
     # Politica economica por defecto.
     RESEARCH_PAID_SPEND_USD: str = "0.00"
+    # Optional X session state, outside repository/model workspace/evidence/vault.
+    RESEARCH_SOCIAL_SESSION_DIR: str = ""
+    # Deep uses direct, controlled HTTP phases. Explicit opt-in; no CEO key reuse.
+    RESEARCH_DEEP_API_KEY: str = ""
+    RESEARCH_DEEP_MODEL: str = ""
+    RESEARCH_DEEP_INPUT_USD_PER_MILLION: str = ""
+    RESEARCH_DEEP_OUTPUT_USD_PER_MILLION: str = ""
+    RESEARCH_DEEP_ACCOUNT_CEILING_USD: str = "0.00"
     RESEARCH_AUTO_TOPUPS: bool = False
 
     # Brave: proveedor habitual. El credito mensual publicado es una referencia
@@ -314,6 +322,8 @@ class Settings(BaseSettings):
     # sobre su saldo real, no tres cuotas independientes.
     RESEARCH_FIRECRAWL_ENABLED: bool = True
     RESEARCH_FIRECRAWL_API_KEY: str = ""
+    RESEARCH_FIRECRAWL_ACCOUNT_CREDITS: str = ""
+    RESEARCH_FIRECRAWL_CREDIT_WINDOW: str = ""
     RESEARCH_FIRECRAWL_PLAN: str = "free"
     RESEARCH_FIRECRAWL_PAID_TOPUPS: bool = False
     RESEARCH_FIRECRAWL_CREDIT_TARGET_EXTRACTION: int = 600

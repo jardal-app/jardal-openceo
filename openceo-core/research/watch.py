@@ -981,6 +981,7 @@ class WatchEngine:
         found = await self._discover(
             question=str(params.get("query") or question), research_id=f"disc-{occurrence}",
             project_key=execution.project_key, count=count,
+            policy=policy,
         )
         degradations = tuple(getattr(found, "degradations", ()) or ())
         if degradations:

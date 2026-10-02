@@ -371,6 +371,27 @@ class ResearchClaim(_StrictModel):
     verification: VerificationVerdict | None = None
 
 
+class ResearchEvent(_StrictModel):
+    schema_version: int = 1
+    event_id: str
+    research_id: str
+    project_key: str
+    owner_id: str
+    classification: Classification
+    entity: str
+    event_type: str = "research_result"
+    event_at: datetime | None = None
+    observed_at: datetime
+    version: int = Field(default=1, ge=1)
+    corrects_event_id: str | None = None
+    claims: list[ResearchClaim] = Field(default_factory=list)
+    evidence: list[ResearchEvidence] = Field(default_factory=list)
+    coverage_gaps: list["ResearchCoverageGap"] = Field(default_factory=list)
+    verification_history: list[dict[str, Any]] = Field(default_factory=list)
+    freshness: str = "unknown"
+    status: ResearchJobStatus
+
+
 class ResearchCoverageGap(_StrictModel):
     source: str
     reason: CoverageReason

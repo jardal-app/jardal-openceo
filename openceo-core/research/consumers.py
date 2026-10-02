@@ -41,7 +41,7 @@ __all__ = [
 #   subscriptions        listar, leer y ver los eventos de las propias
 #   manage_subscription  editar, pausar, reanudar y cancelar las propias
 CONSUMER_OPERATIONS = (
-    "submit", "get", "cancel", "subscribe", "subscriptions", "manage_subscription",
+    "submit", "get", "cancel", "subscribe", "subscriptions", "manage_subscription", "events",
 )
 DEFAULT_CONSUMER_OPERATIONS = ("submit", "get", "cancel")
 
