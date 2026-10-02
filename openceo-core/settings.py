@@ -358,6 +358,26 @@ class Settings(BaseSettings):
     # 0 o negativo = sin tope (espera indefinida).
     RESEARCH_SCHEDULER_MAX_SLEEP_SECONDS: int = 0
 
+    # Retencion del **documento** de un job terminal (TASK-2026-00069): TTL de campo
+    # que solo escribe la transicion a un estado terminal. 0 = no caduca. La dedup de
+    # ocurrencias no depende de este documento.
+    RESEARCH_JOB_RETENTION_DAYS: int = 180
+
+    # Suscripciones y vigilancia (TASK-2026-00069). Suscribirse no gasta: estos topes
+    # acotan cuanto trabajo puede programar un owner antes de que la politica del
+    # proyecto y el libro de gasto decidan cada llamada.
+    RESEARCH_SUBSCRIPTIONS_MAX_ACTIVE_PER_OWNER: int = 10
+    RESEARCH_SUBSCRIPTIONS_MIN_INTERVAL_SECONDS: int = 900
+    # Items por lote que un tick admite como job (alineado con las paginas de quick) y
+    # paginas de una fuente que un tick lee antes de declarar cobertura incompleta.
+    RESEARCH_WATCH_MAX_ITEMS_PER_TICK: int = 5
+    RESEARCH_WATCH_MAX_PAGES_PER_TICK: int = 3
+    RESEARCH_WATCH_MAX_ITEMS_PER_SOURCE: int = 200
+    # Descubrimiento: cadencia y busquedas por dia **independientes** de las de
+    # investigacion, para que una suscripcion habladora no consuma el saldo comun.
+    RESEARCH_DISCOVERY_MIN_INTERVAL_SECONDS: int = 21600
+    RESEARCH_DISCOVERY_DAILY_SEARCH_CAP: int = 2
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

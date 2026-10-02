@@ -756,6 +756,12 @@ class MainWiringTests(unittest.TestCase):
                 "/api/research/jobs",
                 "/api/research/jobs/{research_id}",
                 "/api/research/jobs/{research_id}/cancel",
+                "/api/research/subscriptions",
+                "/api/research/subscriptions/{subscription_id}",
+                "/api/research/subscriptions/{subscription_id}/events",
+                "/api/research/subscriptions/{subscription_id}/pause",
+                "/api/research/subscriptions/{subscription_id}/resume",
+                "/api/research/subscriptions/{subscription_id}/cancel",
             },
         )
 

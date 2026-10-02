@@ -6,7 +6,7 @@ from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import BulkWriteError, DuplicateKeyError
 
 from horizon.privacy import mirror_exclusion_filter
 from research.contracts import (
@@ -128,6 +128,10 @@ class MongoRepository:
     @property
     def research_sessions(self):
         return self.db["research_sessions"]
+
+    @property
+    def research_watch_events(self):
+        return self.db["research_watch_events"]
 
     # ------------------------- Horizon (espacio personal) -------------------------
     # Cada documento lleva user_id y su indice. El aislamiento no depende del
@@ -393,6 +397,37 @@ class MongoRepository:
         await self.research_schedules.create_index(
             [("run_state", ASCENDING), ("lease_expires_at", ASCENDING)],
             name="idx_research_schedules_lease",
+        )
+        # Retencion de jobs terminales (TASK-2026-00069). El campo ``expires_at`` solo
+        # lo escribe la transicion a un estado terminal, asi que un job vivo (queued,
+        # running) no tiene el campo y el TTL jamas lo toca. La dedup de ocurrencias
+        # vive en ``research_watch_events``, no aqui: borrar un job no la pierde.
+        await self.research_jobs.create_index(
+            [("expires_at", ASCENDING)],
+            expireAfterSeconds=0,
+            name="idx_research_jobs_ttl",
+        )
+        # Eventos de suscripcion: dedup durable de items. La clave unica es la autoridad
+        # de "ya lo vi"; el TTL es **deslizante** (ver ``touch_research_watch_events``)
+        # para que un item que sigue listado en la fuente no se vuelva a emitir como
+        # nuevo al vencer su registro.
+        await self.research_watch_events.create_index(
+            [("subscription_id", ASCENDING), ("event_key", ASCENDING)],
+            unique=True,
+            name="idx_research_watch_events_identity",
+        )
+        await self.research_watch_events.create_index(
+            [("subscription_id", ASCENDING), ("item_key", ASCENDING)],
+            name="idx_research_watch_events_item",
+        )
+        await self.research_watch_events.create_index(
+            [("subscription_id", ASCENDING), ("status", ASCENDING), ("first_seen_at", ASCENDING)],
+            name="idx_research_watch_events_pending",
+        )
+        await self.research_watch_events.create_index(
+            [("expires_at", ASCENDING)],
+            expireAfterSeconds=0,
+            name="idx_research_watch_events_ttl",
         )
 
     # ------------------------- tasks -------------------------
@@ -1571,6 +1606,10 @@ class MongoRepository:
             payload["started_at"] = now
         if target.value in {s.value for s in TERMINAL_STATUSES}:
             payload["finished_at"] = now
+            retention_days = int(getattr(self._settings, "RESEARCH_JOB_RETENTION_DAYS", 0) or 0)
+            if retention_days > 0:
+                # TTL de campo solo-terminal: un job vivo no tiene ``expires_at``.
+                payload["expires_at"] = now + timedelta(days=retention_days)
         if updates:
             payload.update(updates)
         payload.pop("_id", None)
@@ -1693,6 +1732,11 @@ class MongoRepository:
             return None
         return self._clean(await self.research_schedules.find_one({"dedupe_key": dedupe_key}))
 
+    async def find_research_schedule_by_dedupe(
+        self, dedupe_key: str | None
+    ) -> dict[str, Any] | None:
+        return await self._find_research_schedule_by_dedupe(dedupe_key)
+
     async def list_research_schedules(
         self,
         *,
@@ -1700,6 +1744,8 @@ class MongoRepository:
         owner_id: str | None = None,
         statuses: list[str] | None = None,
         limit: int = 50,
+        workflows: list[str] | None = None,
+        created_by_consumer: str | None = None,
     ) -> list[dict[str, Any]]:
         query: dict[str, Any] = {}
         if project_key is not None:
@@ -1708,6 +1754,10 @@ class MongoRepository:
             query["owner_id"] = owner_id
         if statuses:
             query["status"] = {"$in": list(statuses)}
+        if workflows:
+            query["workflow"] = {"$in": list(workflows)}
+        if created_by_consumer is not None:
+            query["created_by_consumer"] = created_by_consumer
         rows = (
             self.research_schedules.find(query, sort=[("next_run_at", ASCENDING)])
             .limit(max(1, int(limit)))
@@ -1779,17 +1829,37 @@ class MongoRepository:
         return self._clean(row)
 
     async def set_research_schedule_status(
-        self, schedule_id: str, status: str, *, now: datetime | None = None
+        self,
+        schedule_id: str,
+        status: str,
+        *,
+        now: datetime | None = None,
+        reason: str | None = None,
     ) -> dict[str, Any] | None:
-        """Pausa, reanuda o cancela. Cancelar libera el lease para no dejar colgado."""
+        """Pausa, reanuda o cancela. Cancelar libera el lease para no dejar colgado.
+
+        ``reason`` explica por que el sistema (no el owner) detuvo la suscripcion, p. ej.
+        ``access_revoked``. Reanudar lo limpia: un motivo viejo no describe el estado.
+        """
         moment = now or datetime.now(timezone.utc)
-        payload: dict[str, Any] = {"status": status, "updated_at": moment}
+        payload: dict[str, Any] = {
+            "status": status,
+            "status_reason": reason,
+            "updated_at": moment,
+        }
         if status == "cancelled":
             payload["run_state"] = "idle"
             payload["lease_owner"] = None
             payload["lease_expires_at"] = None
+            # Un schedule cancelado libera su identidad: volver a suscribirse a lo mismo crea
+            # una suscripcion nueva en lugar de devolver la cancelada como "idempotente". El
+            # indice es parcial sobre strings, asi que ``None`` lo saca de la unicidad.
+            payload["dedupe_key"] = None
+        # Los terminales son estables: una pausa tardia (p. ej. tras un tick en vuelo) no
+        # puede resucitar un schedule ya cancelado o expirado. La condicion va en la misma
+        # operacion que la mutacion; no hay lectura previa que pueda quedar vieja.
         row = await self.research_schedules.find_one_and_update(
-            {"schedule_id": schedule_id},
+            {"schedule_id": schedule_id, "status": {"$nin": ["cancelled", "expired"]}},
             {"$set": payload},
             return_document=ReturnDocument.AFTER,
         )
@@ -1845,9 +1915,144 @@ class MongoRepository:
         """Expira schedules vencidos sin borrarlos: un TTL borraria activos."""
         result = await self.research_schedules.update_many(
             {"status": "active", "expires_at": {"$ne": None, "$lte": now}},
-            {"$set": {"status": "expired", "updated_at": now}},
+            # Expirar tambien libera la identidad (ver ``set_research_schedule_status``).
+            {"$set": {"status": "expired", "dedupe_key": None, "updated_at": now}},
         )
         return int(getattr(result, "modified_count", 0) or 0)
+
+    # --------------- Research watch events (TASK-2026-00069) ---------------
+    # Un evento es un item de una fuente vigilada que el tick ya vio. Es la autoridad
+    # de dedup y la cola de admision: nada de esto toca ``tasks``.
+
+    async def find_research_watch_events_by_item(
+        self, subscription_id: str, item_keys: list[str]
+    ) -> list[dict[str, Any]]:
+        """Eventos ya vistos para esos items (todas sus versiones de contenido)."""
+        if not item_keys:
+            return []
+        rows = self.research_watch_events.find(
+            {"subscription_id": subscription_id, "item_key": {"$in": list(item_keys)}}
+        )
+        return [self._clean(row) async for row in rows]
+
+    async def insert_research_watch_events(self, docs: list[dict[str, Any]]) -> list[str]:
+        """Inserta eventos nuevos y devuelve los ``event_key`` que **si** se insertaron.
+
+        Un solo viaje (``insert_many`` desordenado) en vez de uno por evento: un baseline de
+        cientos de items no debe consumir el lease del tick. Idempotente: un evento que ya
+        existe (reentrega tras un crash) se ignora por la clave unica sin abortar el resto.
+        """
+        payloads = []
+        for doc in docs:
+            payload = dict(doc)
+            payload.pop("_id", None)
+            payloads.append(payload)
+        if not payloads:
+            return []
+        try:
+            await self.research_watch_events.insert_many(payloads, ordered=False)
+            return [str(p["event_key"]) for p in payloads]
+        except BulkWriteError as exc:
+            errors = (exc.details or {}).get("writeErrors") or []
+            if any(error.get("code") != 11000 for error in errors):
+                raise  # solo los duplicados son esperables; cualquier otra cosa es un fallo real
+            failed = {int(error["index"]) for error in errors}
+            return [str(p["event_key"]) for index, p in enumerate(payloads) if index not in failed]
+
+    async def touch_research_watch_events(
+        self,
+        subscription_id: str,
+        event_keys: list[str],
+        *,
+        seen_at: datetime,
+        expires_at: datetime | None,
+    ) -> int:
+        """TTL deslizante: un item que sigue en la fuente no caduca como "nuevo"."""
+        if not event_keys:
+            return 0
+        update: dict[str, Any] = {"last_seen_at": seen_at}
+        if expires_at is not None:
+            update["expires_at"] = expires_at
+        result = await self.research_watch_events.update_many(
+            {"subscription_id": subscription_id, "event_key": {"$in": list(event_keys)}},
+            {"$set": update},
+        )
+        return int(getattr(result, "modified_count", 0) or 0)
+
+    async def list_pending_research_watch_events(
+        self, subscription_id: str, limit: int
+    ) -> list[dict[str, Any]]:
+        """Eventos por admitir, del mas viejo al mas nuevo: no se saltan items."""
+        rows = (
+            self.research_watch_events.find(
+                {"subscription_id": subscription_id, "status": "pending"},
+                sort=[("first_seen_at", ASCENDING), ("event_key", ASCENDING)],
+            )
+            .limit(max(1, int(limit)))
+        )
+        return [self._clean(row) async for row in rows]
+
+    async def count_research_watch_events(
+        self, subscription_id: str, *, status: str | None = None
+    ) -> int:
+        query: dict[str, Any] = {"subscription_id": subscription_id}
+        if status is not None:
+            query["status"] = status
+        return int(await self.research_watch_events.count_documents(query))
+
+    async def mark_research_watch_events(
+        self,
+        subscription_id: str,
+        event_keys: list[str],
+        status: str,
+        *,
+        research_id: str | None = None,
+        only_from: str | None = None,
+        now: datetime | None = None,
+    ) -> int:
+        """Cambia el estado de un lote. ``only_from`` evita pisar un estado ya decidido."""
+        if not event_keys:
+            return 0
+        query: dict[str, Any] = {
+            "subscription_id": subscription_id,
+            "event_key": {"$in": list(event_keys)},
+        }
+        if only_from is not None:
+            query["status"] = only_from
+        update: dict[str, Any] = {
+            "status": status,
+            "updated_at": now or datetime.now(timezone.utc),
+        }
+        if research_id is not None:
+            update["research_id"] = research_id
+        result = await self.research_watch_events.update_many(query, {"$set": update})
+        return int(getattr(result, "modified_count", 0) or 0)
+
+    async def drop_pending_research_watch_events(
+        self, subscription_id: str, *, now: datetime | None = None
+    ) -> int:
+        """Descarta lo no admitido (al cancelar): un job ya admitido no se toca."""
+        result = await self.research_watch_events.update_many(
+            {"subscription_id": subscription_id, "status": "pending"},
+            {"$set": {"status": "dropped", "updated_at": now or datetime.now(timezone.utc)}},
+        )
+        return int(getattr(result, "modified_count", 0) or 0)
+
+    async def list_research_watch_events(
+        self,
+        subscription_id: str,
+        *,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        query: dict[str, Any] = {"subscription_id": subscription_id}
+        if statuses:
+            query["status"] = {"$in": list(statuses)}
+        rows = (
+            self.research_watch_events.find(query, sort=[("first_seen_at", DESCENDING)])
+            .limit(max(1, int(limit)))
+        )
+        return [self._clean(row) async for row in rows]
 
     @staticmethod
     def _clean(doc: dict[str, Any] | None) -> dict[str, Any] | None:

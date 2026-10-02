@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import math
 from contextlib import suppress
@@ -312,8 +313,13 @@ def build_schedule_document(
     settings: Any = None,
     now: datetime | None = None,
     schedule_id: str | None = None,
+    extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Documento persistible de un schedule, con la intencion ya validada."""
+    """Documento persistible de un schedule, con la intencion ya validada.
+
+    ``extra`` agrega metadatos de origen (p. ej. el consumidor que lo creo). Nunca pisa un
+    campo del schedule: el estado y la identidad los fija esta funcion.
+    """
     request = spec if isinstance(spec, ResearchScheduleRequest) else ResearchScheduleRequest(**spec)
     moment = _aware(now or _utcnow())
     deadline = request.deadline_seconds or int(
@@ -358,8 +364,18 @@ def build_schedule_document(
         "created_at": moment,
         "updated_at": moment,
     }
+    for key, value in (extra or {}).items():
+        document.setdefault(key, value)
     document["next_run_at"] = next_occurrence_after(document, moment)
     return document
+
+
+# Campos del spec que se pueden editar despues de crear el schedule. Identidad
+# (proyecto, owner, proposito, workflow), estado, lease y cursor quedan fuera a proposito.
+_CADENCE_FIELDS = frozenset({"interval_seconds", "daily_at", "timezone"})
+_EDITABLE_FIELDS = _CADENCE_FIELDS | frozenset(
+    {"params", "overlap_policy", "priority", "deadline_seconds", "max_attempts", "expires_at"}
+)
 
 
 def schedule_fingerprint(document: Mapping[str, Any]) -> str:
@@ -371,7 +387,9 @@ def schedule_fingerprint(document: Mapping[str, Any]) -> str:
         "interval_seconds": document.get("interval_seconds"),
         "daily_at": document.get("daily_at"),
     }
-    canonical = repr(sorted(payload.items()))
+    # JSON con claves ordenadas: ``repr`` de un dict anidado depende del orden de
+    # insercion, asi que los mismos params en otro orden daban un 409 falso.
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -406,6 +424,7 @@ class ResearchScheduleStore:
         spec: ResearchScheduleRequest | Mapping[str, Any],
         dedupe_key: str | None = None,
         now: datetime | None = None,
+        extra: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Persiste un schedule y despierta al timer. Idempotente por ``dedupe_key``."""
         document = build_schedule_document(
@@ -416,6 +435,7 @@ class ResearchScheduleStore:
             dedupe_key=dedupe_key,
             settings=self._settings,
             now=now,
+            extra=extra,
         )
         stored, created = await self._repo.create_research_schedule(document)
         if not created:
@@ -438,61 +458,111 @@ class ResearchScheduleStore:
         owner_id: str | None = None,
         statuses: list[str] | None = None,
         limit: int = 50,
+        workflows: list[str] | None = None,
+        created_by_consumer: str | None = None,
     ) -> list[dict[str, Any]]:
+        kwargs: dict[str, Any] = {}
+        if workflows:
+            kwargs["workflows"] = workflows
+        if created_by_consumer is not None:
+            kwargs["created_by_consumer"] = created_by_consumer
         return await self._repo.list_research_schedules(
-            project_key=project_key, owner_id=owner_id, statuses=statuses, limit=limit
+            project_key=project_key, owner_id=owner_id, statuses=statuses, limit=limit, **kwargs
         )
 
     async def update(
         self, schedule_id: str, updates: Mapping[str, Any], *, now: datetime | None = None
     ) -> dict[str, Any] | None:
-        """Edita el spec. Cambiar la cadencia o el workflow recalcula el vencimiento."""
+        """Edita el spec. Cambiar la cadencia recalcula (y **persiste**) el vencimiento.
+
+        Solo se editan campos del spec: identidad, estado, lease y cursor no pasan por
+        aqui. El resultado se valida completo con ``ResearchScheduleRequest``, de modo
+        que un cambio no puede dejar un schedule con dos cadencias o con ninguna.
+        """
         current = await self._repo.get_research_schedule(schedule_id)
         if current is None:
             return None
         payload = dict(updates)
-        changed_cadence = any(
-            key in payload for key in ("interval_seconds", "daily_at", "timezone")
-        )
+        unknown = set(payload) - _EDITABLE_FIELDS
+        if unknown:
+            raise ScheduleValidationError(f"Campos no editables: {sorted(unknown)}")
+        # Fijar una cadencia reemplaza a la otra: ``interval_seconds`` XOR ``daily_at``.
+        if payload.get("interval_seconds") is not None and "daily_at" not in payload:
+            payload["daily_at"] = None
+        if payload.get("daily_at") is not None and "interval_seconds" not in payload:
+            payload["interval_seconds"] = None
         merged = dict(current)
         merged.update(payload)
-        if changed_cadence:
-            # La cadencia nueva manda: el proximo vencimiento se calcula desde ahora, no
-            # desde el anterior, para no arrastrar un calendario que ya no aplica.
-            merged["next_run_at"] = next_occurrence_after(merged, _aware(now or _utcnow()))
-        result = await self._repo.patch_research_schedule(
-            schedule_id, payload, now=now
-        )
+        try:
+            ResearchScheduleRequest(
+                **{key: merged.get(key) for key in _EDITABLE_FIELDS | {"workflow"} if key in merged}
+            )
+        except ValueError as exc:
+            raise ScheduleValidationError(str(exc)) from exc
+        moment = _aware(now or _utcnow())
+        if any(key in payload for key in _CADENCE_FIELDS):
+            # La cadencia nueva manda: el ancla y el proximo vencimiento se calculan
+            # desde ahora, no desde el calendario anterior. Antes el valor se calculaba
+            # y se descartaba: el cambio no tenia efecto hasta el siguiente vencimiento.
+            merged["anchor_at"] = moment
+            payload["anchor_at"] = moment
+            payload["next_run_at"] = next_occurrence_after(merged, moment)
+        result = await self._repo.patch_research_schedule(schedule_id, payload, now=now)
         self.notify()
         return result
 
-    async def pause(self, schedule_id: str, *, now: datetime | None = None) -> dict[str, Any] | None:
-        result = await self._repo.set_research_schedule_status(
-            schedule_id, ResearchScheduleStatus.PAUSED.value, now=now
+    async def pause(
+        self, schedule_id: str, *, now: datetime | None = None, reason: str | None = None
+    ) -> dict[str, Any] | None:
+        return await self._set_status(
+            schedule_id, ResearchScheduleStatus.PAUSED, now=now, reason=reason
         )
-        self.notify()
-        return result
 
     async def resume(self, schedule_id: str, *, now: datetime | None = None) -> dict[str, Any] | None:
-        result = await self._repo.set_research_schedule_status(
-            schedule_id, ResearchScheduleStatus.ACTIVE.value, now=now
-        )
-        self.notify()
-        return result
+        return await self._set_status(schedule_id, ResearchScheduleStatus.ACTIVE, now=now)
 
-    async def cancel(self, schedule_id: str, *, now: datetime | None = None) -> dict[str, Any] | None:
-        result = await self._repo.set_research_schedule_status(
-            schedule_id, ResearchScheduleStatus.CANCELLED.value, now=now
+    async def cancel(
+        self, schedule_id: str, *, now: datetime | None = None, reason: str | None = None
+    ) -> dict[str, Any] | None:
+        return await self._set_status(
+            schedule_id, ResearchScheduleStatus.CANCELLED, now=now, reason=reason
         )
+
+    async def _set_status(
+        self,
+        schedule_id: str,
+        status: ResearchScheduleStatus,
+        *,
+        now: datetime | None,
+        reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        kwargs: dict[str, Any] = {"now": now}
+        if reason is not None:
+            kwargs["reason"] = reason
+        result = await self._repo.set_research_schedule_status(schedule_id, status.value, **kwargs)
         self.notify()
         return result
 
     async def record_cursor(
-        self, schedule_id: str, cursor: Mapping[str, Any], *, now: datetime | None = None
+        self,
+        schedule_id: str,
+        cursor: Mapping[str, Any],
+        *,
+        now: datetime | None = None,
+        lease_owner: str | None = None,
+        fencing_token: int | None = None,
     ) -> dict[str, Any] | None:
-        """Avanza el cursor incremental **solo** tras persistir los items (00069)."""
+        """Avanza el cursor incremental **solo** tras persistir los items (00069).
+
+        Con ``lease_owner``/``fencing_token`` la escritura solo prospera si la toma sigue
+        siendo la de este ejecutor: un tick viejo no puede mover el cursor de otro.
+        """
         return await self._repo.patch_research_schedule(
-            schedule_id, {"cursor": dict(cursor)}, now=now
+            schedule_id,
+            {"cursor": dict(cursor)},
+            lease_owner=lease_owner,
+            fencing_token=fencing_token,
+            now=now,
         )
 
 

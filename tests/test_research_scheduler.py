@@ -35,6 +35,7 @@ from research.scheduler import (  # noqa: E402
     compute_next_run_at,
     execution_key_for,
     next_occurrence_after,
+    schedule_fingerprint,
 )
 
 NOW = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
@@ -154,12 +155,13 @@ class _FakeRepo:
         return dict(row)
 
     async def set_research_schedule_status(
-        self, schedule_id: str, status: str, *, now: datetime | None = None
+        self, schedule_id: str, status: str, *, now: datetime | None = None, reason: str | None = None
     ) -> dict | None:
         row = self.schedules.get(schedule_id)
         if row is None:
             return None
         row["status"] = status
+        row["status_reason"] = reason
         return dict(row)
 
     async def next_research_schedule_due_at(self) -> datetime | None:
@@ -382,6 +384,62 @@ class ScheduleStoreTests(unittest.IsolatedAsyncioTestCase):
             doc["schedule_id"], {"interval_seconds": 3600}, now=NOW + timedelta(minutes=5)
         )
         self.assertGreater(_aware(updated["next_run_at"]), NOW + timedelta(minutes=5))
+
+    async def test_update_persists_the_new_anchor_and_due_time(self) -> None:
+        # Antes el vencimiento se calculaba y se descartaba: el cambio de cadencia no
+        # tenia efecto hasta el siguiente vencimiento del calendario anterior.
+        doc, _ = await self._create(interval_seconds=86400)
+        later = NOW + timedelta(minutes=7)
+        updated = await self.store.update(doc["schedule_id"], {"interval_seconds": 600}, now=later)
+        self.assertEqual(_aware(updated["anchor_at"]), later)
+        self.assertEqual(_aware(updated["next_run_at"]), later + timedelta(seconds=600))
+        stored = await self.repo.get_research_schedule(doc["schedule_id"])
+        self.assertEqual(_aware(stored["next_run_at"]), later + timedelta(seconds=600))
+
+    async def test_update_replaces_the_other_cadence_and_rejects_invalid_results(self) -> None:
+        doc, _ = await self._create()
+        daily = await self.store.update(doc["schedule_id"], {"daily_at": "08:30"}, now=NOW)
+        self.assertEqual((daily["daily_at"], daily["interval_seconds"]), ("08:30", None))
+        back = await self.store.update(doc["schedule_id"], {"interval_seconds": 120}, now=NOW)
+        self.assertEqual((back["daily_at"], back["interval_seconds"]), (None, 120))
+        for bad in [{"interval_seconds": 5}, {"daily_at": "25:00"}, {"timezone": "No/Existe"},
+                    {"params": "no es dict"}, {"max_attempts": 0}]:
+            with self.assertRaises(ScheduleValidationError):
+                await self.store.update(doc["schedule_id"], bad, now=NOW)
+
+    async def test_update_cannot_touch_identity_state_lease_or_cursor(self) -> None:
+        doc, _ = await self._create()
+        for field in ["owner_id", "project_key", "purpose", "workflow", "status", "run_state", "lease_owner",
+                      "fencing_token", "cursor", "next_run_at", "dedupe_key", "attempts"]:
+            with self.assertRaises(ScheduleValidationError):
+                await self.store.update(doc["schedule_id"], {field: "x"}, now=NOW)
+        stored = await self.repo.get_research_schedule(doc["schedule_id"])
+        self.assertEqual(stored["owner_id"], doc["owner_id"])
+
+    async def test_fingerprint_ignores_param_key_order_at_any_depth(self) -> None:
+        base = {"workflow": "w", "timezone": "UTC", "interval_seconds": 60, "daily_at": None}
+        one = schedule_fingerprint({**base, "params": {"a": 1, "b": {"x": [1, 2], "y": 2}}})
+        two = schedule_fingerprint({**base, "params": {"b": {"y": 2, "x": [1, 2]}, "a": 1}})
+        self.assertEqual(one, two)
+        self.assertNotEqual(one, schedule_fingerprint({**base, "params": {"a": 1, "b": {"x": [2, 1], "y": 2}}}))
+
+    async def test_pause_with_a_reason_and_resume_clears_it(self) -> None:
+        doc, _ = await self._create()
+        paused = await self.store.pause(doc["schedule_id"], now=NOW, reason="access_revoked")
+        self.assertEqual((paused["status"], paused["status_reason"]), ("paused", "access_revoked"))
+        resumed = await self.store.resume(doc["schedule_id"], now=NOW)
+        self.assertEqual((resumed["status"], resumed["status_reason"]), ("active", None))
+
+    async def test_record_cursor_with_fencing_rejects_a_stale_writer(self) -> None:
+        doc, _ = await self._create()
+        claimed = await self.repo.claim_next_research_schedule(
+            lease_owner="a", lease_seconds=60, now=NOW + timedelta(hours=2))
+        stored = await self.store.record_cursor(
+            doc["schedule_id"], {"etag": "1"}, lease_owner="a", fencing_token=claimed["fencing_token"])
+        self.assertEqual(stored["cursor"], {"etag": "1"})
+        self.assertIsNone(await self.store.record_cursor(
+            doc["schedule_id"], {"etag": "2"}, lease_owner="a", fencing_token=claimed["fencing_token"] + 1))
+        self.assertEqual((await self.repo.get_research_schedule(doc["schedule_id"]))["cursor"], {"etag": "1"})
 
 
 # =========================================================================
@@ -629,6 +687,45 @@ class ScheduleRepoMongoTests(unittest.IsolatedAsyncioTestCase):
         doc["next_run_at"] = run_at
         stored, _ = await self.repo.create_research_schedule(doc)
         return stored
+
+    async def test_terminal_status_is_stable_and_releases_the_identity(self) -> None:
+        doc = await self._create(dedupe="sub:term")
+        sid = doc["schedule_id"]
+        cancelled = await self.repo.set_research_schedule_status(sid, "cancelled")
+        self.assertEqual((cancelled["status"], cancelled["dedupe_key"]), ("cancelled", None))
+        # ni una pausa tardia ni una reanudacion pueden sacarlo del estado terminal
+        for status in ("paused", "active", "cancelled"):
+            self.assertIsNone(await self.repo.set_research_schedule_status(sid, status, reason="x"))
+        self.assertEqual((await self.repo.get_research_schedule(sid))["status"], "cancelled")
+        # la identidad quedo libre: otro schedule con la misma clave es nuevo, no el cancelado
+        again = await self._create(dedupe="sub:term")
+        self.assertNotEqual(again["schedule_id"], sid)
+        # expirar libera igual y tambien es terminal
+        await self.repo.patch_research_schedule(again["schedule_id"], {"expires_at": NOW - timedelta(hours=1)})
+        self.assertEqual(await self.repo.expire_research_schedules(NOW), 1)
+        expired = await self.repo.get_research_schedule(again["schedule_id"])
+        self.assertEqual((expired["status"], expired["dedupe_key"]), ("expired", None))
+        self.assertIsNone(await self.repo.set_research_schedule_status(again["schedule_id"], "active"))
+        third = await self._create(dedupe="sub:term")
+        self.assertEqual(third["status"], "active")
+
+    async def test_event_insert_is_one_round_trip_and_ignores_only_duplicates(self) -> None:
+        base = {"subscription_id": "s", "owner_id": "o", "project_key": "p", "content_fp": "f",
+                "kind": "new", "status": "pending", "first_seen_at": NOW}
+        docs = [{**base, "event_key": f"k{n}", "item_key": f"k{n}"} for n in range(5)]
+        self.assertEqual(await self.repo.insert_research_watch_events(docs), [f"k{n}" for n in range(5)])
+        replay = docs + [{**base, "event_key": "nuevo", "item_key": "nuevo"}]
+        self.assertEqual(await self.repo.insert_research_watch_events(replay), ["nuevo"])
+        self.assertEqual(await self.repo.insert_research_watch_events([]), [])
+        self.assertEqual(await self.repo.research_watch_events.count_documents({}), 6)
+        # un fallo que no es duplicado no se traga
+        from unittest.mock import AsyncMock, Mock, PropertyMock, patch
+        from pymongo.errors import BulkWriteError
+        failing = Mock()
+        failing.insert_many = AsyncMock(side_effect=BulkWriteError({"writeErrors": [{"index": 0, "code": 121}]}))
+        with patch.object(type(self.repo), "research_watch_events", new_callable=PropertyMock, return_value=failing):
+            with self.assertRaises(BulkWriteError):
+                await self.repo.insert_research_watch_events([{**base, "event_key": "x", "item_key": "x"}])
 
     async def test_claim_is_atomic_and_advances_fencing(self) -> None:
         await self._create(run_at=NOW - timedelta(seconds=1))

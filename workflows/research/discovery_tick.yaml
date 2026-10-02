@@ -1,0 +1,14 @@
+workflow: research.discovery_tick
+name: Descubrir fuentes nuevas de una suscripcion
+agent: research
+description: >-
+  Busca fuentes nuevas para la pregunta de la suscripcion con cupo diario propio,
+  independiente del de las investigaciones. Registra solo el hash de cada URL del
+  buscador y admite un job quick unicamente si aparecen URLs pertinentes no vistas.
+auto_match: false
+triggers: []
+steps:
+  - id: discover
+    tool: research.discovery_tick
+    params:
+      subscription: "{{research_request}}"

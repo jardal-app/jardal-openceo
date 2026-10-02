@@ -90,3 +90,35 @@ def job_doc(
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
     }
+
+
+# --------------------------------------------------------------------------- vigilancia
+# Soporte de los tests de suscripciones (TASK-2026-00069): una fuente guionada y un item.
+
+
+def watch_item(identity: str, title: str = "Vacante", *, url: str | None = None, summary: str | None = None):
+    from research.watch import WatchItem, content_fingerprint, item_key_for
+
+    url = url or f"https://example.org/jobs/{identity}"
+    return WatchItem(item_key=item_key_for(identity, url), content_fp=content_fingerprint(title, summary, url),
+                     url=url, title=title, summary=summary)
+
+
+class ScriptedAdapter:
+    """Fuente guionada: cada llamada devuelve la pagina que dicte ``queue`` o ``pages``."""
+
+    name = "rss"
+
+    def __init__(self) -> None:
+        from research.watch import SourcePage
+
+        self._page_type = SourcePage
+        self.calls: list[dict] = []
+        self.pages: dict = {}
+        self.queue: list = []
+
+    async def fetch_page(self, source, *, page_token, conditional, scope, deadline):
+        self.calls.append({"page_token": page_token, "conditional": dict(conditional or {}), "scope": dict(scope)})
+        if self.queue:
+            return self.queue.pop(0)
+        return self.pages.get(page_token, self._page_type())

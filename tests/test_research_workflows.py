@@ -241,3 +241,178 @@ class ScheduleIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await runtime.stop()
         self.assertIsNone(runtime.scheduler._job)
         self.assertEqual(await self.repo.tasks.count_documents({}), 0)
+
+
+# ---------------------------------------------------------------- vigilancia (TASK-2026-00069)
+
+
+class WatchRegistryTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.repo = Mock()
+        self.service = Mock()
+        self.engine = Mock()
+        self.engine.watch_tick = AsyncMock(return_value={"kind": "watch", "status": "ok"})
+        self.engine.discovery_tick = AsyncMock(return_value={"kind": "discovery", "status": "ok"})
+        self.workflows = WorkflowService(settings=settings(), repo=self.repo, realtime_hub=Mock())
+        self.workflows.set_research_service(self.service)
+        self.workflows.set_research_watch(self.engine)
+
+    def ctx(self, **kw):
+        return {"scope": "research", "research_context": ResearchExecutionContext(
+            project_key=PROJECT, owner_id=OWNER, purpose="watch", principal=principal(),
+            project_cfg=CFG, execution_key="sch_test:occ", schedule={"schedule_id": "sch_test"}, **kw)}
+
+    async def test_yaml_tools_run_with_the_schedule_scope_and_are_documented(self):
+        params = {"source": {"type": "rss", "url": "https://example.org/feed"}, "question": "q"}
+        result = await self.workflows.execute_research_workflow("research.watch_tick", params, context=self.ctx())
+        self.assertEqual(result["status"], "ok")
+        execution, passed = self.engine.watch_tick.call_args.args
+        self.assertEqual((execution.owner_id, execution.project_key, execution.schedule["schedule_id"]),
+                         (OWNER, PROJECT, "sch_test"))
+        self.assertEqual(passed, params)
+        await self.workflows.execute_research_workflow("research.discovery_tick", {"question": "q"}, context=self.ctx())
+        self.engine.discovery_tick.assert_awaited_once()
+        registry = self.workflows.tool_registry()
+        for name in ("research.watch_tick", "research.discovery_tick"):
+            self.assertIn("context", registry[name]["signature"])
+            self.assertTrue(registry[name]["doc"])
+
+    async def test_business_task_context_cannot_reach_the_ticks(self):
+        for tool in ("research.watch_tick", "research.discovery_tick"):
+            for ctx in [{"task": {}}, {**self.ctx(), "task_id": "task_test"}, {"scope": "research"}]:
+                with self.assertRaises(ResearchAccessDenied):
+                    await self.workflows._tools.call(tool, {"subscription": {}}, ctx)
+        self.engine.watch_tick.assert_not_called()
+        self.engine.discovery_tick.assert_not_called()
+
+    async def test_tampered_yaml_is_rejected_for_every_research_workflow(self):
+        for workflow, tool in [("watch_tick", "research.watch_tick"), ("discovery_tick", "research.discovery_tick")]:
+            with tempfile.TemporaryDirectory() as temp:
+                folder = Path(temp) / "research"
+                folder.mkdir()
+                (folder / f"{workflow}.yaml").write_text(
+                    f"workflow: {tool}\nauto_match: false\nsteps:\n  - tool: {tool}\n    params:\n"
+                    "      subscription:\n        owner_id: otro\n")
+                self.workflows._settings.WORKFLOWS_DIR = temp
+                with self.assertRaises(ValueError):
+                    await self.workflows.execute_research_workflow(tool, {"question": "q"}, context=self.ctx())
+        self.engine.watch_tick.assert_not_called()
+        self.engine.discovery_tick.assert_not_called()
+
+    async def test_unmounted_engine_fails_loudly_instead_of_pretending(self):
+        bare = WorkflowService(settings=settings(), repo=self.repo, realtime_hub=Mock())
+        bare._tools.register("research.watch_tick", bare._tools._research_watch_tick)
+        with self.assertRaises(RuntimeError):
+            await bare._tools.call("research.watch_tick", {"subscription": {}}, self.ctx())
+
+
+@unittest.skipUnless(support.MONGO_AVAILABLE, "Mongo required for subscription runtime integration")
+class WatchRuntimeIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    DB = "openceo_test_research_watch_runtime"
+    PARAMS = {"source": {"type": "rss", "url": "https://example.org/jobs.xml"},
+              "question": "Que cambio?", "filter": {"include_terms": ["datos"]}}
+
+    async def asyncSetUp(self):
+        from motor.motor_asyncio import AsyncIOMotorClient
+        self.client = AsyncIOMotorClient(support.MONGO_URL)
+        await self.client.drop_database(self.DB)
+        self.repo = support.build_repo(self.DB)
+        self.repo._client = self.client
+        await self.repo.ensure_indexes()
+        await self.repo.db.users.insert_one({"user_id": OWNER, "is_active": True,
+            "all_permissions": [RESEARCH_RUN], "allowed_projects": [PROJECT]})
+        self.cfg = settings(RESEARCH_SCHEDULER_ENABLED=True, RESEARCH_SCHEDULER_BACKOFF_SECONDS=0)
+        self.service = ResearchService(settings=self.cfg, deps=ResearchDependencies(repo=self.repo))
+        self.workflows = WorkflowService(settings=self.cfg, repo=self.repo, realtime_hub=Mock())
+        self.adapter = support.ScriptedAdapter()
+        self.project_cfg = dict(CFG)
+        self.runtime = ResearchScheduleRuntime(
+            repo=self.repo, workflows=self.workflows, service=self.service, settings=self.cfg,
+            project_cfg_for=lambda _: self.project_cfg, adapters={"rss": self.adapter})
+        self.repo.create_task = AsyncMock(side_effect=AssertionError("business task created"))
+        self.repo.patch_task = AsyncMock(side_effect=AssertionError("business task patched"))
+
+    async def asyncTearDown(self):
+        await self.runtime.stop()
+        await self.client.drop_database(self.DB)
+        self.client.close()
+
+    async def subscribe(self):
+        schedule, _ = await self.runtime.store.create(
+            project_key=PROJECT, owner_id=OWNER, purpose="watch",
+            spec={"workflow": "research.watch_tick", "interval_seconds": 3600, "params": self.PARAMS},
+            now=datetime.now(timezone.utc) - timedelta(hours=1))
+        return schedule["schedule_id"]
+
+    async def wait_for(self, sid, predicate, timeout=5):
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            doc = await self.repo.get_research_schedule(sid)
+            if predicate(doc):
+                return doc
+            await asyncio.sleep(0.02)
+        self.fail(f"condicion no alcanzada: {await self.repo.get_research_schedule(sid)}")
+
+    async def test_due_subscription_ticks_through_yaml_and_stores_its_cursor(self):
+        from research.watch import SourcePage
+        self.adapter.queue = [SourcePage(items=[support.watch_item("a", "Datos 1")], etag='"e1"', content_hash="h1")]
+        sid = await self.subscribe()
+        self.assertTrue(await self.runtime.start())
+        doc = await self.wait_for(sid, lambda d: d.get("last_result"))
+        self.assertEqual((doc["last_result"]["status"], doc["last_result"]["baseline"]), ("ok", True))
+        self.assertTrue(doc["cursor"]["initialized"])
+        self.assertEqual(await self.repo.research_jobs.count_documents({}), 0)
+        self.assertEqual(await self.repo.tasks.count_documents({}), 0)
+
+    async def test_revoked_owner_pauses_the_subscription_with_a_reason_and_stops_ticking(self):
+        await self.repo.db.users.update_one({"user_id": OWNER}, {"$set": {"is_active": False}})
+        sid = await self.subscribe()
+        self.assertTrue(await self.runtime.start())
+        doc = await self.wait_for(sid, lambda d: d["status"] == "paused" and d["run_state"] == "idle")
+        self.assertEqual(doc["status_reason"], "access_revoked")
+        self.assertEqual(doc["last_result"], {"skipped": "access_revoked"})
+        self.assertEqual(doc["attempts"], 0)  # no entro en el bucle de reintentos
+        self.assertEqual(self.adapter.calls, [])
+        # al recuperar el acceso el owner reanuda explicitamente: el motivo se limpia y el
+        # siguiente vencimiento ejecuta
+        await self.repo.db.users.update_one({"user_id": OWNER}, {"$set": {"is_active": True}})
+        from research.watch import SourcePage
+        self.adapter.queue = [SourcePage(items=[support.watch_item("a", "Datos 1")], content_hash="h1")]
+        resumed = await self.runtime.store.resume(sid)
+        self.assertEqual((resumed["status"], resumed["status_reason"]), ("active", None))
+        await self.repo.patch_research_schedule(sid, {"next_run_at": datetime.now(timezone.utc) - timedelta(seconds=1)})
+        self.runtime.scheduler.wake()
+        doc = await self.wait_for(sid, lambda d: (d.get("cursor") or {}).get("initialized"))
+        self.assertEqual(doc["status"], "active")
+
+    async def test_project_policy_disabled_pauses_with_policy_denied(self):
+        self.project_cfg = {"research": {"enabled": False}}
+        sid = await self.subscribe()
+        self.assertTrue(await self.runtime.start())
+        doc = await self.wait_for(sid, lambda d: d["status"] == "paused")
+        self.assertEqual(doc["status_reason"], "policy_denied")
+
+    async def test_transient_source_failure_is_retried_with_the_same_occurrence(self):
+        from research.acquisition.base import ProviderRateLimited
+        from research.watch import SourcePage
+        limited = ProviderRateLimited("429", provider="rss").degradation()
+        self.adapter.queue = [SourcePage(degradations=(limited,)),
+                              SourcePage(items=[support.watch_item("a", "Datos 1")], content_hash="h1")]
+        sid = await self.subscribe()
+        self.assertTrue(await self.runtime.start())
+        doc = await self.wait_for(sid, lambda d: (d.get("cursor") or {}).get("initialized"))
+        self.assertEqual(len(self.adapter.calls), 2)
+        self.assertEqual(doc["cursor"]["consecutive_failures"], 0)
+
+    async def test_cadence_edit_persists_the_recomputed_due_time_while_the_timer_sleeps(self):
+        sid = await self.subscribe()
+        await self.repo.patch_research_schedule(sid, {"next_run_at": datetime.now(timezone.utc) + timedelta(days=1)})
+        self.assertTrue(await self.runtime.start())
+        await asyncio.sleep(0.1)
+        self.assertEqual(self.adapter.calls, [])  # nada vencido: duerme
+        from research.watch import SourcePage
+        self.adapter.queue = [SourcePage(items=[], content_hash="h1")]
+        await self.runtime.store.update(sid, {"interval_seconds": 120})
+        # el cambio de cadencia recalcula y PERSISTE el vencimiento (antes se descartaba)
+        doc = await self.repo.get_research_schedule(sid)
+        self.assertLess(doc["next_run_at"].replace(tzinfo=timezone.utc), datetime.now(timezone.utc) + timedelta(minutes=3))
