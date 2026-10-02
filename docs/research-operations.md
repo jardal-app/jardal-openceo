@@ -5,6 +5,15 @@ proyecto solo puede reducir los límites del servidor. Crear un job no crea un
 ticket de ERPNext. La activación recurrente se decide al terminar el proyecto;
 las pruebas del agente no requieren revisión humana por fase.
 
+Cuando el host está administrado por `openceo-core-host.service`, reiniciar la
+unidad de systemd de usuario. El launcher manual y el runner de esa unidad
+interpretan `.env` con python-dotenv: comillas, referencias `${KEY}` y saltos
+de línea se resuelven como en Settings, sin ejecutar texto del archivo.
+
+```bash
+XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus systemctl --user restart openceo-core-host.service
+```
+
 ## Lectura de X
 
 Instalar la dependencia opcional con el Python del proyecto:
