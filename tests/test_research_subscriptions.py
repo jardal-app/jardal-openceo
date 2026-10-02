@@ -743,7 +743,7 @@ class McpSubscriptionTests(SubscriptionFixture):
             async with Client(self.transport(self.token)) as client:
                 tools = await client.list_tools()
         self.assertEqual({t.name for t in tools}, set(FACADE_TOOLS))
-        self.assertEqual(len(FACADE_TOOLS), 9)
+        self.assertEqual(len(FACADE_TOOLS), 10)
         for tool in tools:
             props = set(((tool.inputSchema or {}).get("properties") or {}))
             self.assertFalse({"owner_id", "session_id", "consumer_id"} & props, tool.name)

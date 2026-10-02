@@ -526,10 +526,8 @@ class HttpReader:
             published_at = parse_datetime(parser.published_hint())
         else:
             text = normalize_text(decoded)
-        if published_at is None:
-            # Last-Modified es una declaracion verificable del servidor, no una
-            # fecha inferida por nosotros.
-            published_at = parse_datetime(page.last_modified)
+        # Last-Modified dates a representation update, not its publication
+        # (RFC 9110 §8.8.2). Keep it for conditional HTTP, never invent published_at.
 
         evidence = ResearchEvidence(
             id=_evidence_id(page.content_hash),

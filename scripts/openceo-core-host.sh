@@ -19,16 +19,19 @@ resolve_runtime_pid() {
 
 load_env() {
   if [[ -f "$ENV_FILE" ]]; then
-    while IFS= read -r line || [[ -n "$line" ]]; do
-      [[ -z "$line" ]] && continue
-      [[ "$line" =~ ^[[:space:]]*# ]] && continue
-      if [[ "$line" == *"="* ]]; then
-        key="${line%%=*}"
-        val="${line#*=}"
-        key="$(printf '%s' "$key" | tr -d '[:space:]')"
-        export "$key=$val"
-      fi
-    done < "$ENV_FILE"
+    # Match Settings' dotenv parsing, including quotes and ${KEY} references.
+    # NUL-delimited values are data, never evaluated as shell commands.
+    while IFS= read -r -d '' key && IFS= read -r -d '' val; do
+      export "$key=$val"
+    done < <("$VENV_PY" - "$ENV_FILE" <<'PY'
+import re
+import sys
+from dotenv import dotenv_values
+for key, value in dotenv_values(sys.argv[1]).items():
+    if value is not None and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        sys.stdout.buffer.write(key.encode() + b"\0" + value.encode() + b"\0")
+PY
+    )
   fi
 
   # Host-mode overrides

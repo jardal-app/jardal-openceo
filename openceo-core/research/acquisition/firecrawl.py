@@ -70,8 +70,8 @@ __all__ = [
 ]
 
 FIRECRAWL_BASE_URL = "https://api.firecrawl.dev"
-_SEARCH_PATH = "/v1/search"
-_SCRAPE_PATH = "/v1/scrape"
+_SEARCH_PATH = "/v2/search"
+_SCRAPE_PATH = "/v2/scrape"
 FIRECRAWL_SEARCH_BLOCK_SIZE = 10
 FIRECRAWL_SEARCH_CREDITS_PER_BLOCK = 2
 FIRECRAWL_SCRAPE_BASIC_CREDITS = 1
@@ -120,6 +120,7 @@ class FirecrawlClient:
         phase_timeout: float = 10.0,
         backoff_seconds: float = 0.5,
         account: str = "default",
+        credit_budget: Any | None = None,
     ) -> None:
         self._settings = settings
         self._client = http_client
@@ -141,6 +142,7 @@ class FirecrawlClient:
         self._phase_timeout = float(phase_timeout)
         self._backoff = float(backoff_seconds)
         self._account = account
+        self._credit_budget = credit_budget
 
     # ------------------------------------------------------------ operaciones
 
@@ -187,7 +189,7 @@ class FirecrawlClient:
             ledger=self._ledger,
             # Sin precio por credito no se inventa techo monetario; si algun dia
             # se configura, el ledger exige techo conocido (conservador).
-            ceiling_micro_usd=None,
+            ceiling_micro_usd=0 if self._micro_per_credit == 0 else None,
             breaker=self._breaker,
             clock=self._clock,
             phase_timeout=self._phase_timeout,
@@ -226,7 +228,8 @@ class FirecrawlClient:
         credits = firecrawl_scrape_credits(formats)
         endpoint_url = self._endpoint.url(_SCRAPE_PATH)
         headers = self._auth_headers()
-        body = {"url": url, "formats": list(formats)}
+        body = {"url": url, "formats": list(formats), "parsers": [], "proxy": "basic",
+                "storeInCache": False, "maxAge": 0}
         cost = CostEstimate(
             amount_micro_usd=credits * self._micro_per_credit,
             credits=credits,
@@ -248,7 +251,7 @@ class FirecrawlClient:
             ledger=self._ledger,
             # Sin precio por credito no se inventa techo monetario; si algun dia
             # se configura, el ledger exige techo conocido (conservador).
-            ceiling_micro_usd=None,
+            ceiling_micro_usd=0 if self._micro_per_credit == 0 else None,
             breaker=self._breaker,
             clock=self._clock,
             phase_timeout=self._phase_timeout,
@@ -288,10 +291,33 @@ class FirecrawlClient:
         json_body: dict[str, Any],
         timeout: float,
     ) -> httpx.Response:
+        reservation = None
+        if self._credit_budget is not None:
+            credits = (firecrawl_scrape_credits(json_body.get("formats")) if url.endswith(_SCRAPE_PATH)
+                       else firecrawl_search_credits(json_body.get("limit", 10)))
+            reservation = await self._credit_budget.reserve(credits)
         if self._client is not None:
-            return await self._client.post(url, headers=headers, json=json_body, timeout=timeout)
-        async with httpx.AsyncClient(timeout=None) as client:
-            return await client.post(url, headers=headers, json=json_body, timeout=timeout)
+            response = await self._client.post(url, headers=headers, json=json_body, timeout=timeout)
+        else:
+            async with httpx.AsyncClient(timeout=None, follow_redirects=False, trust_env=False) as client:
+                async with client.stream("POST", url, headers=headers, json=json_body, timeout=timeout) as incoming:
+                    body = bytearray()
+                    async for chunk in incoming.aiter_bytes():
+                        body.extend(chunk)
+                        if len(body) > 1_000_000:
+                            from .base import ProviderTooLarge
+                            raise ProviderTooLarge("Respuesta Firecrawl supera el limite", provider=self.provider)
+                    decoded_headers = {k: v for k, v in incoming.headers.items()
+                                       if k.lower() not in {"content-encoding", "content-length"}}
+                    response = httpx.Response(incoming.status_code, headers=decoded_headers,
+                                              content=bytes(body), request=incoming.request)
+        if reservation:
+            try:
+                actual = response.json().get("creditsUsed")
+            except (ValueError, AttributeError):
+                actual = None
+            await self._credit_budget.settle(reservation, actual)
+        return response
 
     def _scrape_outcome(
         self,

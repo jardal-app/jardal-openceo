@@ -1,0 +1,2 @@
+# Optional host helper only; never installed in the research model worker.
+twscrape==0.20.1

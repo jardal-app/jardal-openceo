@@ -797,6 +797,14 @@ _ARTICLE = (
 
 
 class HttpReaderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_last_modified_is_not_publication_date(self) -> None:
+        reader, _transport = _guarded_reader(lambda request: (200,
+            {"content-type": "text/html", "last-modified": "Wed, 30 Sep 2026 10:00:00 GMT"},
+            b"<html><body><p>Material without a publication date</p></body></html>"))
+        outcome = await reader.read("https://example.org/a", research_id="res_1", project_key="proj")
+        self.assertIsNone(outcome.published_at)
+        self.assertEqual(outcome.last_modified, "Wed, 30 Sep 2026 10:00:00 GMT")
+
     async def test_public_page_evidence_has_provenance_and_keeps_material_text(self) -> None:
         reader, transport = _guarded_reader(
             lambda request: (200, {"content-type": "text/html; charset=utf-8"}, _ARTICLE),

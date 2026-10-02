@@ -1927,7 +1927,7 @@ CLOUDFLARE_DNS_DEFAULT_TTL=1
 
 # CEO + secretary fallback LLM
 DEEPSEEK_API_KEY=
-CEO_LLM_MODEL=deepseek-v4-flash
+CEO_LLM_MODEL=deepseek-flash
 CEO_LLM_BASE_URL=https://api.deepseek.com/v1
 
 # Dev skill

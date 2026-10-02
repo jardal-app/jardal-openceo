@@ -5,6 +5,7 @@ import hmac
 import logging
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import json
@@ -268,7 +269,22 @@ async def lifespan(_: FastAPI):
         # flag de capacidad no modifica el contrato de ERPNext (siempre activo).
         research_service, research_resources = build_research_service(get_settings(), repo)
         app.state.research_service = research_service
+        if research_service._deps.events is not None:
+            await research_service._deps.events.initialize()
+            await research_service.recover_event_delivery()
         app.state.research_consumers = _research_consumers
+        app.state.research_social = None
+        if get_settings().RESEARCH_SOCIAL_SESSION_DIR:
+            from research.social import SocialBroker, SocialSessions
+            from research.social_x import XReader
+            session_root = Path(get_settings().RESEARCH_SOCIAL_SESSION_DIR).expanduser().resolve()
+            forbidden_roots = [Path(__file__).resolve().parents[1],
+                               Path(get_settings().RESEARCH_WORKSPACE_DIR).expanduser().resolve(),
+                               Path(get_settings().RESEARCH_EVIDENCE_DIR).expanduser().resolve()]
+            if any(session_root.is_relative_to(root) for root in forbidden_roots) or "vault" in session_root.parts:
+                raise RuntimeError("Social session state must be outside repo/workspace/evidence/vault")
+            app.state.research_social = SocialBroker(repo.db, SocialSessions(get_settings().RESEARCH_SOCIAL_SESSION_DIR), adapter=XReader())
+            await app.state.research_social.initialize()
         _research_available, _research_reason = research_service.available()
         logger.info(
             "Research %s: %s",
@@ -450,6 +466,14 @@ def _wake_research_dispatcher(_research_id: str):
 app.include_router(build_research_router(
     get_service=lambda request: getattr(request.app.state, "research_service", None),
     get_subscriptions=lambda request: getattr(request.app.state, "research_subscriptions", None),
+))
+
+from research.social_router import build_social_router
+
+app.include_router(build_social_router(
+    get_broker=lambda request: getattr(request.app.state, "research_social", None),
+    project_cfg_for=lambda request, project: config_loader.load_project(project),
+    enabled=lambda: get_settings().RESEARCH_ENABLED,
 ))
 
 # Montura MCP de research, apagada por defecto: su control de acceso son las

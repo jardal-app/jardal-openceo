@@ -86,6 +86,8 @@ def public_job_payload(document: dict[str, Any] | None) -> dict[str, Any] | None
     result = document.get("result")
     if isinstance(result, dict):
         payload["result"] = result
+    if isinstance(document.get("deep_execution"), dict):
+        payload["deep_execution"] = document["deep_execution"]
     return payload
 
 
@@ -226,6 +228,7 @@ def build_research_router(
         service = _service_or_503(request, get_service)
         principal = principal_from_user(user)
         document = _authorized_or_404(principal, await service.status(research_id))
+        document = await service.result_view(document)
         return public_job_payload(document) or {}
 
     @router.post("/jobs/{research_id}/cancel")
@@ -243,6 +246,22 @@ def build_research_router(
         return public_job_payload(cancelled) or {}
 
     # ------------------------------------------------------------ suscripciones
+    @router.get("/events")
+    async def list_events(request: Request, project_key: str, after: int = Query(0, ge=0),
+                          user: Any = Depends(require_permissions(RESEARCH_READ))):
+        service = _service_or_503(request, get_service)
+        principal = principal_from_user(user)
+        _authorized_or_404(principal, {"owner_id": principal.user_id, "project_key": project_key})
+        cfg = _project_cfg(request, project_key).get("research", {})
+        if not cfg.get("enabled"):
+            raise HTTPException(503, "Research deshabilitado para este proyecto")
+        from research.contracts import Classification
+        if service._deps.events is None:
+            raise HTTPException(503, "Eventos no configurados")
+        events = await service._deps.events.list(project=project_key, owner=principal.user_id,
+            ceiling=Classification(cfg.get("classification_ceiling", "public")), after=after)
+        return {"events": events, "next_cursor": events[-1]["cursor"] if events else after}
+
 
     def _subs_or_503(request: Request) -> ResearchSubscriptions:
         subscriptions = get_subscriptions(request) if get_subscriptions is not None else None

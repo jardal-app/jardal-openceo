@@ -180,6 +180,8 @@ async def main() -> int:
     async def lifespan(_app):
         # Cada montura tiene su propio ciclo de vida: sin entrar el de la fachada, su
         # gestor de sesiones MCP no arranca y `initialize` responde 500.
+        if service._deps.events is not None:
+            await service._deps.events.initialize()
         async with resources.broker.mount.lifespan():
             async with facade_app.router.lifespan_context(_app):
                 yield
