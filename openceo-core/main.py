@@ -5,7 +5,6 @@ import hmac
 import logging
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import datetime, timezone
-from pathlib import Path
 from uuid import uuid4
 
 import json
@@ -35,7 +34,7 @@ from graph import OpenCEOGraph
 from research.consumers import ConsumerRegistry
 from research.mcp_facade import build_research_mcp_facade
 from research.router import build_research_router
-from research.wiring import build_research_service, close_research_service
+from research.wiring import build_research_service, build_social_broker, close_research_service
 from research.subscriptions import ResearchSubscriptions
 from research.watch import build_watch_adapters
 from research.workflows import ResearchScheduleRuntime, principal_resolver_for
@@ -273,18 +272,8 @@ async def lifespan(_: FastAPI):
             await research_service._deps.events.initialize()
             await research_service.recover_event_delivery()
         app.state.research_consumers = _research_consumers
-        app.state.research_social = None
-        if get_settings().RESEARCH_SOCIAL_SESSION_DIR:
-            from research.social import SocialBroker, SocialSessions
-            from research.social_x import XReader
-            session_root = Path(get_settings().RESEARCH_SOCIAL_SESSION_DIR).expanduser().resolve()
-            forbidden_roots = [Path(__file__).resolve().parents[1],
-                               Path(get_settings().RESEARCH_WORKSPACE_DIR).expanduser().resolve(),
-                               Path(get_settings().RESEARCH_EVIDENCE_DIR).expanduser().resolve()]
-            if any(session_root.is_relative_to(root) for root in forbidden_roots) or "vault" in session_root.parts:
-                raise RuntimeError("Social session state must be outside repo/workspace/evidence/vault")
-            app.state.research_social = SocialBroker(repo.db, SocialSessions(get_settings().RESEARCH_SOCIAL_SESSION_DIR), adapter=XReader())
-            await app.state.research_social.initialize()
+        # Opcional: si su directorio de sesiones no es valido solo se apaga la ruta social.
+        app.state.research_social, _social_reason = await build_social_broker(get_settings(), repo.db)
         _research_available, _research_reason = research_service.available()
         logger.info(
             "Research %s: %s",

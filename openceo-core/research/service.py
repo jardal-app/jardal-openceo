@@ -57,6 +57,7 @@ from research.contracts import (
     new_research_id,
     utcnow,
 )
+from research.events import EventError
 from research.money import format_micro
 from research.policies import EffectivePolicy, ResearchAccessDenied, derive_effective_policy
 from research.worker.capabilities import (
@@ -840,19 +841,44 @@ class ResearchService:
             document = await self._deps.repo.get_research_job(research_id)
         await self._release_capabilities(research_id)
         if document and document.get("result") and self._deps.events is not None:
-            await self._deps.events.publish(document)
-            document = await self._deps.repo.patch_research_job(research_id, {"event_delivery_pending": False}) or document
+            document = await self._deliver_event(document) or document
         return document or job
 
+    async def _deliver_event(self, document: dict[str, Any]) -> dict[str, Any] | None:
+        """Publish a terminal job's event. Delivery is auxiliary to the job: never raises.
+
+        A deterministic refusal (scope or schema) is recorded on the job and not retried, so
+        one poisoned row cannot stop the service from starting at every boot. Anything else
+        keeps ``event_delivery_pending`` for the next bounded startup reconciliation.
+        """
+        research_id = document["research_id"]
+        try:
+            await self._deps.events.publish(document)
+        except (EventError, ValueError, KeyError, TypeError) as exc:
+            # pydantic's ValidationError is a ValueError: a malformed stored result lands here.
+            reason = (str(exc) if isinstance(exc, EventError) else exc.__class__.__name__)[:80]
+            logger.warning("Research %s: evento no publicable (%s)", research_id, reason)
+            return await self._deps.repo.patch_research_job(
+                research_id, {"event_delivery_pending": False, "event_delivery_failed": reason})
+        except Exception:  # noqa: BLE001 - transient: the mark stays and startup retries it
+            logger.warning("Research %s: fallo transitorio al publicar el evento", research_id, exc_info=True)
+            return None
+        return await self._deps.repo.patch_research_job(research_id, {"event_delivery_pending": False})
+
     async def recover_event_delivery(self):
-        """One bounded startup reconciliation; no periodic job scan or model retry."""
+        """One bounded startup reconciliation; no periodic job scan or model retry.
+
+        Never raises: this runs inside the service lifespan, so a row that cannot be
+        delivered must not take the whole core down. Returns how many events were published.
+        """
         if self._deps.events is None:
             return 0
         rows = await self._deps.repo.research_jobs.find({"event_delivery_pending": True}).limit(100).to_list(None)
+        delivered = 0
         for row in rows:
-            await self._deps.events.publish(row)
-            await self._deps.repo.patch_research_job(row["research_id"], {"event_delivery_pending": False})
-        return len(rows)
+            updated = await self._deliver_event(row)
+            delivered += int(bool(updated) and not updated.get("event_delivery_failed"))
+        return delivered
 
     # ------------------------------------------------------------ cancelacion
 
