@@ -2,10 +2,16 @@
 
 The CLI/model never receives this database or its pathname. Third-party logging,
 telemetry, inherited proxies, global account pools and retry/rotation are excluded.
+
+Request shape, paging and parsing are the pinned library's own. The helper only
+swaps the library's ``QueueClient`` for one that performs a single authenticated
+request, so a search carries exactly the parameters the library sends (including
+``fieldToggles``) instead of a hand-copied variant that drifts on a version bump.
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import signal
@@ -15,6 +21,9 @@ from pathlib import Path
 from research.social import SocialError
 
 TWSCRAPE_VERSION = "0.20.1"
+# Below the parent's 25 s kill: a slow read unwinds by itself and releases the
+# library's account lock instead of being killed holding it.
+HELPER_DEADLINE = 20
 
 
 class XReader:
@@ -47,7 +56,8 @@ class XReader:
             raise SocialError("source_timeout" if proc.returncode is None else "source_unavailable") from None
         finally:
             if proc.returncode is None:
-                os.killpg(proc.pid, signal.SIGKILL)
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
             await proc.wait()
 
 
@@ -77,68 +87,92 @@ async def _worker(payload):
     # umask also protects SQLite journals created by the library, in this process only.
     os.umask(0o077)
     from twscrape import API
-    from twscrape.api import GQL_FEATURES, GQL_URL, encode_params
-    from twscrape.queue_client import QueueClient
+    from twscrape import api as twscrape_api
     from twscrape.accounts_pool import NoAccountError
+    from twscrape.http import HttpError, HttpStatusError
+    from twscrape.queue_client import AbortReqError, QueueClient
+    from twscrape.xclid import XClIdAccountError, XClIdParseError
     from loguru import logger
     logger.remove()
 
     class SingleRequest(QueueClient):
+        """One authenticated request per client.
+
+        The library's own paging asks ``get`` for more pages; the second call gets
+        ``None``, which its generators read as "no more data". Its retry, account
+        rotation and ban bookkeeping (``_check_rep``) are skipped on purpose: causes
+        are classified here and the broker owns pause and cooldown state.
+        """
+        _requested = False
+
         async def req(self, method, url, params=None):
+            if self._requested:
+                return None
+            self._requested = True
             ctx = await self._get_ctx()
             if ctx is None:
                 raise SocialError("account_busy")
-            rep = await ctx.req(method, url, params=params)
+            try:
+                rep = await ctx.req(method, url, params=params)
+            except XClIdAccountError:
+                # X served its logged-out web app: the session is no longer accepted.
+                raise SocialError("login_required") from None
+            except HttpStatusError as exc:
+                raise SocialError("rate_limited" if exc.response.status_code == 429
+                                  else "source_unavailable") from None
+            except (XClIdParseError, AbortReqError, HttpError):
+                raise SocialError("source_unavailable") from None
             reason = response_reason(rep)
             if reason:
-                if reason == "rate_limited":
-                    reset = int(rep.headers.get("x-rate-limit-reset", "0"))
-                    await self._close_ctx(max(reset, int(__import__("time").time()) + 60))
                 raise SocialError(reason)
             return rep
 
-    class BoundedAPI(API):
-        # Version-specific hooks verified against the 0.20.1 wheel. One GQL page,
-        # no empty-page retries; parsers remain those of the pinned library.
-        async def _gql_item(self, op, kv, ft=None):
-            async with SingleRequest(self.pool, op.split("/")[-1]) as client:
-                return await client.get(f"{GQL_URL}/{op}", params=encode_params(
-                    {"variables": kv, "features": {**GQL_FEATURES, **(ft or {})}}))
-
-        async def _gql_items(self, op, kv, ft=None, limit=-1, cursor_type="Bottom"):
-            rep = await self._gql_item(op, kv, ft)
-            if rep is not None:
-                yield rep
-
-    api = BoundedAPI(pool=payload["path"], raise_when_no_account=True, wait_timeout=0)
-    accounts = await api.pool.get_all()
-    if len(accounts) != 1 or accounts[0].proxy:
-        raise SocialError("single_account_required")
-    if not accounts[0].has_session or not accounts[0].active:
-        raise SocialError("login_required")
-    items = []
+    original, twscrape_api.QueueClient = twscrape_api.QueueClient, SingleRequest
     try:
-        if payload["operation"] == "search":
-            from contextlib import aclosing
-            async with aclosing(api.search(payload["source"], limit=payload["limit"])) as gen:
-                async for post in gen:
-                    items.append(_post_payload(post))
-                    if len(items) >= payload["limit"]:
-                        break
-        elif payload["operation"] == "post":
-            post = await api.tweet_details(int(payload["source"]))
-            if post is not None:
+        api = API(pool=payload["path"], raise_when_no_account=True, wait_timeout=0)
+        accounts = await api.pool.get_all()
+        if len(accounts) != 1 or accounts[0].proxy:
+            raise SocialError("single_account_required")
+        if not accounts[0].has_session or not accounts[0].active:
+            raise SocialError("login_required")
+        # The broker's fenced Mongo lease is the only mutual exclusion that matters and
+        # its cooldown the only rate-limit memory. The library locks the account for 15
+        # minutes per request and a killed helper never releases that, so start clean.
+        await api.pool.reset_locks()
+        try:
+            async with asyncio.timeout(HELPER_DEADLINE):
+                return await _read(api, payload)
+        except TimeoutError:
+            raise SocialError("source_timeout") from None
+        except NoAccountError:
+            raise SocialError("account_busy") from None
+    finally:
+        twscrape_api.QueueClient = original
+
+
+async def _read(api, payload):
+    operation, source, limit = payload["operation"], payload["source"], payload["limit"]
+    items = []
+    if operation == "search":
+        async with contextlib.aclosing(api.search(source, limit=limit)) as gen:
+            async for post in gen:
                 items.append(_post_payload(post))
-        elif payload["operation"] == "account":
-            user = await api.user_by_login(payload["source"])
-            if user is not None:
-                # Public bio only; follower graphs, emails, owner feeds and DMs excluded.
-                items.append({"post_id": str(user.id), "url": f"https://x.com/{user.username}",
-                              "text": user.rawDescription[:4000], "published_at": ""})
-        else:
-            raise SocialError("operation_denied")
-    except NoAccountError:
-        raise SocialError("account_busy") from None
+                if len(items) >= limit:
+                    break
+    elif operation == "post":
+        if not source.isdigit():
+            raise SocialError("invalid_source")
+        post = await api.tweet_details(int(source))
+        if post is not None:
+            items.append(_post_payload(post))
+    elif operation == "account":
+        user = await api.user_by_login(source)
+        if user is not None:
+            # Public bio only; follower graphs, emails, owner feeds and DMs excluded.
+            items.append({"post_id": str(user.id), "url": f"https://x.com/{user.username}",
+                          "text": user.rawDescription[:4000], "published_at": ""})
+    else:
+        raise SocialError("operation_denied")
     return items
 
 

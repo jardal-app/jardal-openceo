@@ -29,6 +29,7 @@ __all__ = [
     "ProjectEvidence",
     "ResearchRuntimeResources",
     "build_research_service",
+    "build_social_broker",
     "close_research_service",
 ]
 
@@ -388,6 +389,43 @@ def build_research_service(
         deps.events = ResearchEvents(event_db, evidence, retention_days=int(_setting(settings, "RESEARCH_REPORT_RETENTION_DAYS", 180)))
     service = ResearchService(settings=settings, deps=deps, clock=clock)
     return service, resources
+
+
+async def build_social_broker(settings: Any, db: Any) -> tuple[Any | None, str]:
+    """Broker de lectura de X, opcional: un directorio de sesiones invalido lo apaga.
+
+    Devuelve `(broker, motivo)`; sin broker, la ruta social responde 503. El arranque
+    del servicio entero no depende de el: antes un directorio con permisos 0755, un
+    enlace simbolico en la ruta o una ruta dentro del repo/vault lanzaba la excepcion
+    dentro del lifespan y el core completo (voz, tickets, Horizon) no arrancaba por
+    una funcion opcional y apagada por defecto. Solo se registra el codigo del motivo.
+    """
+    root = _setting(settings, "RESEARCH_SOCIAL_SESSION_DIR", "")
+    if not root:
+        return None, "not_configured"
+    try:
+        from research.social import SocialBroker, SocialError, SocialSessions
+        from research.social_x import XReader
+
+        session_root = Path(root).expanduser().resolve()
+        forbidden = [Path(__file__).resolve().parents[2]]
+        for name in ("RESEARCH_WORKSPACE_DIR", "RESEARCH_EVIDENCE_DIR"):
+            configured = _setting(settings, name, "")
+            if configured:
+                forbidden.append(Path(configured).expanduser().resolve())
+        if any(session_root.is_relative_to(path) for path in forbidden) or "vault" in session_root.parts:
+            reason = "session_dir_not_isolated"
+        else:
+            broker = SocialBroker(db, SocialSessions(root), adapter=XReader())
+            await broker.initialize()
+            return broker, "ready"
+    except SocialError as exc:
+        reason = exc.reason
+    except Exception as exc:  # noqa: BLE001 - optional capability must not stop the service
+        reason = "social_init_failed"
+        logger.warning("Research social: fallo de inicializacion (%s)", type(exc).__name__)
+    logger.warning("Research social deshabilitado: %s", reason)
+    return None, reason
 
 
 async def close_research_service(resources: ResearchRuntimeResources) -> None:

@@ -520,11 +520,14 @@ class GreenhouseSourceAdapter(_JsonBoardSource):
             return None
         location = row.get("location") if isinstance(row.get("location"), dict) else {}
         title = row.get("title")
+        # `first_published` is the publication date. `updated_at` moves on every edit of the
+        # post, so it is never presented as one: without `first_published` it stays unknown.
+        first_published = row.get("first_published")
         return WatchItem(
             item_key=digest("id", f"greenhouse:{source['board']}:{identity}"),
             content_fp=content_fingerprint(title, location.get("name"), url),
             url=url, title=title if isinstance(title, str) else None,
-            published_at=parse_datetime(row.get("updated_at")) if isinstance(row.get("updated_at"), str) else None,
+            published_at=parse_datetime(first_published) if isinstance(first_published, str) else None,
             summary=location.get("name") if isinstance(location.get("name"), str) else None,
         )
 

@@ -140,6 +140,61 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
         doc = await self.b.accounts.find_one({"account_id": self.account})
         self.assertEqual(doc["status"], "login_required")
 
+    async def test_rate_limit_is_a_cooldown_that_spares_the_provider(self):
+        calls = []
+
+        class Adapter:
+            async def read(self_, **kw):
+                calls.append(1)
+                if len(calls) == 1:
+                    raise SocialError("rate_limited")
+                return [{"post_id": "1", "url": "u", "text": "t", "published_at": ""}]
+        self.b.adapter = Adapter()
+        for _ in range(2):
+            with self.assertRaisesRegex(SocialError, "rate_limited"):
+                await self.b.read(scope=self.scope)
+        self.assertEqual(len(calls), 1, "the second read must not reach X during the cooldown")
+        self.now += timedelta(minutes=16)
+        result = await self.b.read(scope=self.scope)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["items"][0]["post_id"], "1")
+
+    async def test_paused_account_explains_itself_only_to_a_grant_holder(self):
+        class Adapter:
+            calls = 0
+            reason = ""
+
+            async def read(self_, **kw):
+                Adapter.calls += 1
+                raise SocialError(Adapter.reason)
+        self.b.adapter = Adapter()
+        for reason in ("challenge_required", "login_required"):
+            with self.subTest(reason=reason):
+                await self.b.accounts.update_one({"account_id": self.account}, {
+                    "$set": {"status": "active"}, "$unset": {"status_reason": ""}})
+                Adapter.reason, Adapter.calls = reason, 0
+                with self.assertRaisesRegex(SocialError, reason):
+                    await self.b.read(scope=self.scope)
+                self.assertEqual(Adapter.calls, 1)
+                # Paused: the holder is told why, and X is not contacted again.
+                for _ in range(2):
+                    with self.assertRaisesRegex(SocialError, reason):
+                        await self.b.read(scope=self.scope)
+                self.assertEqual(Adapter.calls, 1)
+                # Anyone without a matching grant still sees the same access_denied.
+                for key, value in (("consumer", "other"), ("owner", "bob"), ("source", "from:other")):
+                    with self.assertRaisesRegex(SocialError, "access_denied"):
+                        await self.b.authorize(**{**self.scope, key: value})
+        # A new local login re-activates the account and reads work again.
+        await self.b.accounts.update_one({"account_id": self.account}, {
+            "$set": {"status": "active"}, "$unset": {"status_reason": ""}})
+
+        class Healthy:
+            async def read(self_, **kw):
+                return [{"post_id": "9", "url": "u", "text": "t", "published_at": ""}]
+        self.b.adapter = Healthy()
+        self.assertEqual((await self.b.read(scope=self.scope))["items"][0]["post_id"], "9")
+
 
 class LocalBoundaryTests(unittest.TestCase):
     def test_symlink_and_public_permissions_rejected(self):

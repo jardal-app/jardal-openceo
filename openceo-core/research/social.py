@@ -113,6 +113,14 @@ class SocialBroker:
             "active": True, "expires_at": {"$gt": now}, "operations": operation,
             "sources": source,
         })
+        if account is None and grant is not None:
+            # Only a caller that already holds a valid grant learns why the account is
+            # paused; everyone else keeps seeing the same access_denied.
+            paused = await self.accounts.find_one({"account_id": account_id, "status": "login_required",
+                                                    "expires_at": {"$gt": now}})
+            if paused:
+                reason = paused.get("status_reason")
+                raise SocialError(reason if reason in {"login_required", "challenge_required"} else "login_required")
         if account is None or grant is None:
             raise SocialError("access_denied")
         return grant

@@ -80,6 +80,53 @@ class AcceptanceD(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.service.recover_event_delivery(), 0)
         self.assertEqual(len(self.model.calls), count)
         self.assertEqual(len(await self.events.list(project="jardal-openceo", owner="alice")), 1)
+    async def _completed_job_with_pending_delivery(self, question):
+        """A terminal job with its result stored and its event not yet delivered."""
+        principal = Principal(user_id="alice", permissions=frozenset({"run_research", "read_research"}),
+                              allowed_projects=frozenset({"jardal-openceo"}))
+        await self.service.submit(ResearchJobRequest(project_key="jardal-openceo", purpose="test",
+            question=question, mode="deep", seed_urls=["https://example.org/public"],
+            limits={"search_requests": 0, "pages": 2, "steps": 30, "seconds": 30}), principal=principal, project_cfg=self.cfg)
+        events, self.service._deps.events = self.service._deps.events, None
+        try:
+            job = await self.service.run_once()
+        finally:
+            self.service._deps.events = events
+        await self.repo.patch_research_job(job["research_id"], {"event_delivery_pending": True})
+        return job
+
+    async def test_a_row_whose_event_can_never_publish_neither_blocks_startup_nor_repeats(self):
+        from copy import deepcopy
+        good = await self._completed_job_with_pending_delivery("Revenue?")
+        for label, damage in (("scope", lambda r: r.update(project_key="synthetic_other")),
+                              ("schema", lambda r: r.clear())):
+            with self.subTest(label):
+                bad = await self._completed_job_with_pending_delivery("Revenue " + label + "?")
+                result = deepcopy(bad["result"])
+                damage(result)
+                await self.repo.patch_research_job(bad["research_id"], {"result": result})
+                # The boot-time reconciliation must survive the poisoned row and still serve the rest.
+                await self.service.recover_event_delivery()
+                row = await self.repo.get_research_job(bad["research_id"])
+                self.assertFalse(row["event_delivery_pending"])
+                self.assertTrue(row["event_delivery_failed"])
+                self.assertEqual(await self.service.recover_event_delivery(), 0, "must not retry at every boot")
+        self.assertFalse((await self.repo.get_research_job(good["research_id"]))["event_delivery_pending"])
+        self.assertEqual(len(await self.events.list(project="jardal-openceo", owner="alice")), 1)
+
+    async def test_a_publish_failure_never_loses_the_terminal_job(self):
+        class Refusing:
+            async def publish(self_, job, **kw):
+                raise RuntimeError("storage down")
+        self.service._deps.events = Refusing()
+        job = await self.service.run_once()
+        self.assertEqual(job["status"], "completed")
+        self.assertTrue(job["result"]["claims"])
+        # A transient failure keeps the mark so the next startup retries it.
+        self.assertTrue((await self.repo.get_research_job(job["research_id"]))["event_delivery_pending"])
+        self.service._deps.events = self.events
+        self.assertEqual(await self.service.recover_event_delivery(), 1)
+
     async def test_real_mcp_transport_requires_explicit_event_grant_and_revocation(self):
         await self.service.run_once()
         registry = ConsumerRegistry()

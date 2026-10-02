@@ -37,13 +37,56 @@ acceso; la eliminación local explícita usa `retire` con los mismos owner/accou
 El proyecto debe conceder `allowed_account_refs` y estar habilitado para Research.
 La identidad HTTP necesita `run_research`; el grant corresponde a `http:USER_ID`,
 proyecto, fuente exacta y operación. `POST /api/research/social/read` obtiene como
-máximo cinco items, una página y un request; no expone DM, bookmarks ni el feed del
-owner. Los artifacts caducan en siete días o antes si vence el grant. Leerlos
-revalida autoridad; quedan `restricted` y `declaration`, sin llamadas al modelo.
+máximo cinco items y **una petición GraphQL**; no expone DM, bookmarks ni el feed del
+owner. Antes de esa petición la librería genera su identificador de transacción:
+baja una página pública de x.com con las cookies y, con sesión válida, los scripts de
+la web de X. Cada lectura es un proceso nuevo, sin caché entre lecturas, así que la
+red tocada es mayor que una petición. Los artifacts caducan en siete días o antes si
+vence el grant. Leerlos revalida autoridad; quedan `restricted` y `declaration`, sin
+llamadas al modelo.
 
 La lease compartida en Mongo serializa lectores y setup incluso entre procesos.
-Login/challenge detienen la cuenta; rate limit impone cooldown; cancelación mata
-el helper y libera la lease. No hay rotación ni espera indefinida.
+Cancelación mata el helper y libera la lease; el helper tiene además un deadline
+propio de 20 s para terminar por sí mismo y limpia al empezar los bloqueos de 15
+minutos que la librería deja si lo matan. No hay rotación ni espera indefinida.
+
+Causas que devuelve la lectura (HTTP 409 salvo `access_denied`, que es 403):
+
+| Causa | Qué significa y qué hace el servicio |
+| --- | --- |
+| `login_required` | X ya no acepta la sesión (caducó, cookies mal copiadas o cuenta cerrada). Pausa la cuenta; quien tiene grant ve esta causa y no hay más intentos hasta repetir `cookies`. |
+| `challenge_required` | X pide desbloquear la cuenta en un navegador. Misma pausa; lo resuelve la persona. |
+| `rate_limited` | X limitó la cuenta. Cooldown de 15 minutos sin contactar a X. |
+| `access_restricted` | 403 sin código de error; no se interpreta como sesión caducada. |
+| `source_unavailable` / `source_timeout` | X cambió su web, falló la red o se agotó el deadline. No pausa la cuenta. |
+| `account_busy` | Otra lectura o setup tiene la lease. Reintentar después. |
+
+Sin grant válido todas las causas se ven como `access_denied`. Si
+`RESEARCH_SOCIAL_SESSION_DIR` no es válido (permisos, symlink, dentro de repo,
+workspace, evidencias o vault) el servicio arranca igual y solo la ruta social
+responde 503; el log indica `unsafe_session_directory`, `session_dir_not_isolated` o
+`social_init_failed`.
+
+## Fuentes recurrentes (RSS/Atom)
+
+Antes de suscribirse a una fuente, comprobarla con la sonda de solo lectura. Usa el
+lector con guard de egress y el adaptador de vigilancia, lee dos veces para ver si la
+fuente responde a la petición condicional y no necesita Mongo, modelo ni flags:
+
+```bash
+./.venv/bin/python scripts/research_watch_probe.py --url https://example.org/feed.xml
+./.venv/bin/python scripts/research_watch_probe.py --type greenhouse --board TOKEN
+./.venv/bin/python scripts/research_watch_probe.py --type lever --board TOKEN
+```
+
+Medido el 2026-10-02 contra fuentes públicas reales: el Atom de releases de GitHub, el
+RSS 2.0 de `peps.python.org` y el tablero Greenhouse `gitlab` devolvieron items con
+título, URL y fecha, y la segunda lectura fue `not_modified` (ETag, y Last-Modified en
+el RSS); el tablero Lever `leverdemo` devolvió sus 11 postings y se relee entero, porque
+Lever no usa validadores por diseño. Una fuente que pasa aquí la puede leer una
+suscripción; encender `RESEARCH_ENABLED` y el scheduler sigue siendo decisión del dueño
+y se hace al final del proyecto. El guard de egress bloquea localhost y redes privadas:
+la fuente de la prueba recurrente debe ser una URL pública.
 
 ## Deep
 
@@ -117,3 +160,38 @@ claims. `Last-Modified` sirve para HTTP condicional, nunca como fecha de publica
 requiere mapping exacto del proyecto, owner y conclusiones públicas revisadas como
 durables. El runtime no monta el vault. Seguir `obsidian-vault-links`, enlazar el
 hub y comprobar únicamente las notas creadas con `--project` y rutas explícitas.
+
+Un job que no puede publicar su evento (scope o esquema inválidos) queda anotado con
+`event_delivery_failed` y no se reintenta; un fallo transitorio conserva
+`event_delivery_pending` y se reintenta en el siguiente arranque. La publicación nunca
+impide devolver el job terminado ni arrancar el servicio.
+
+## Cierre humano único
+
+Se decide al terminar todo el proyecto y nada de esto se activa antes. Hoy
+`projects/jardal-openceo/project.yaml` no tiene bloque `research` y
+`RESEARCH_ENABLED=false`; el scheduler no se activa salvo
+`RESEARCH_SCHEDULER_ENABLED=true`. Con `RESEARCH_PAID_SPEND_USD=0.00` y sin
+`paid_budget_usd` en el proyecto no hay gasto de pago. Encender `RESEARCH_ENABLED` abre
+`/api/research/*` a quien tenga `run_research`; no inicia nada recurrente por sí solo.
+
+**Demostración B (recurrencia desplegada).** La persona elige una URL pública de feed
+que controle (comprobable con la sonda de arriba) y autoriza poner
+`RESEARCH_ENABLED=true` y `RESEARCH_SCHEDULER_ENABLED=true` en `openceo-core/.env` y este
+bloque en el proyecto:
+
+```yaml
+research:
+  enabled: true
+  allowed_modes: [quick]
+  classification_ceiling: public
+```
+
+El agente reinicia la unidad, crea una suscripción acotada, la reinicia de nuevo para
+comprobar que identidad, vencimiento y cursor sobreviven, observa un tick, la cancela y
+comprueba que deja de adquirir. La persona decide si las flags quedan encendidas.
+
+**Piloto X (hasta cinco posts).** La persona ejecuta `create` y `cookies` con su propia
+sesión (login/2FA incluido), acuerda una cuenta o consulta pública y añade
+`allowed_account_refs: [ACCOUNT_ID]` al mismo bloque. El agente hace `grant`, una lectura
+real, comprueba causas, aislamiento y procedencia, y termina con `retire` y limpieza.
