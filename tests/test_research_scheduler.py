@@ -128,7 +128,7 @@ class _FakeRepo:
         row["run_state"] = "running"
         row["lease_owner"] = lease_owner
         row["lease_expires_at"] = now + timedelta(seconds=lease_seconds)
-        row["scheduled_for"] = row["next_run_at"]
+        row["scheduled_for"] = row.get("scheduled_for") or row["next_run_at"]
         row["fencing_token"] = int(row.get("fencing_token") or 0) + 1
         return dict(row)
 
