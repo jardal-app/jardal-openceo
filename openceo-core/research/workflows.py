@@ -96,7 +96,7 @@ class ResearchScheduleRuntime:
                  project_cfg_for: Callable, on_admitted: Callable | None = None,
                  resolve_principal: Callable | None = None,
                  adapters: dict[str, Any] | None = None, discover: Callable | None = None,
-                 now_fn: Callable | None = None) -> None:
+                 now_fn: Callable | None = None, waiter: Callable | None = None) -> None:
         self.settings = settings
         self.service = service
         self.repo = repo
@@ -110,11 +110,13 @@ class ResearchScheduleRuntime:
         self.handler = ResearchScheduleHandler(
             repo=repo, workflows=workflows,
             resolve_principal=resolve_principal or principal_resolver_for(repo),
-            project_cfg_for=project_cfg_for, on_admitted=on_admitted,
+            project_cfg_for=project_cfg_for, on_admitted=on_admitted, now_fn=now_fn,
         )
-        # No capped wait: absence of a due time means indefinite event wait.
+        # No capped wait: absence of a due time means indefinite event wait. ``now_fn`` y
+        # ``waiter`` son costuras de test (reloj virtual); en produccion quedan en su defecto.
         self.scheduler = ResearchScheduler(
             repo=repo, handler=self._guarded, store=self.store, settings=settings,
+            now_fn=now_fn, waiter=waiter,
             lease_seconds=getattr(settings, "RESEARCH_SCHEDULER_LEASE_SECONDS", 120),
             batch_limit=getattr(settings, "RESEARCH_SCHEDULER_BATCH_LIMIT", 20),
             backoff_base=getattr(settings, "RESEARCH_SCHEDULER_BACKOFF_SECONDS", 60),

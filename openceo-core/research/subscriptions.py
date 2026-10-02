@@ -235,11 +235,17 @@ class ResearchSubscriptions:
         repo: Any,
         settings: Any,
         resolve_principal: Callable[[str], Any] | None = None,
+        now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self._store = store
         self._repo = repo
         self._settings = settings
         self._resolve_principal = resolve_principal
+        # Reloj inyectable (tests con tiempo virtual); ``None`` deja el reloj de pared.
+        self._now_fn = now_fn
+
+    def _now(self) -> datetime | None:
+        return self._now_fn() if self._now_fn is not None else None
 
     # ------------------------------------------------------------ autoridad
 
@@ -401,7 +407,7 @@ class ResearchSubscriptions:
         try:
             document, created = await self._store.create(
                 project_key=request.project_key, owner_id=principal.user_id, purpose=request.purpose,
-                spec=spec, dedupe_key=dedupe_key, extra=extra,
+                spec=spec, dedupe_key=dedupe_key, extra=extra, now=self._now(),
             )
         except ResearchScheduleConflict as exc:
             raise SubscriptionConflict(
@@ -489,7 +495,7 @@ class ResearchSubscriptions:
                         params.get("question") or "pregunta",
                         await _resolve(project_cfg_for, document["project_key"]))
         try:
-            stored = await self._store.update(subscription_id, changes)
+            stored = await self._store.update(subscription_id, changes, now=self._now())
         except ScheduleValidationError as exc:
             raise SubscriptionValidationError(str(exc)) from exc
         if stored is None:
