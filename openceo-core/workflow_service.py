@@ -143,6 +143,17 @@ class WorkflowToolRegistry:
     def set_horizon_service(self, horizon_service: Any) -> None:
         self._horizon = horizon_service
 
+    def set_research_service(self, research_service: Any) -> None:
+        self._research = research_service
+        self.register("research.investigate", self._research_investigate)
+
+    async def _research_investigate(
+        self, request: dict[str, Any], context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Admite un job quick por ocurrencia con scope autenticado; no crea Tasks."""
+        from research.workflows import admit_investigation
+        return await admit_investigation(self._research, request, context)
+
     @staticmethod
     def _coerce_int(value: Any) -> int | None:
         """Interpreta un entero tolerando el templating del motor YAML.
@@ -812,6 +823,34 @@ class WorkflowService:
 
     def set_horizon_service(self, horizon_service: Any) -> None:
         self._tools.set_horizon_service(horizon_service)
+
+    def set_research_service(self, research_service: Any) -> None:
+        self._tools.set_research_service(research_service)
+
+    async def execute_research_workflow(
+        self, workflow_id: str, params: dict[str, Any], *, context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Runner de schedules, separado de execute_task_workflow y core.complete.
+
+        Solo el YAML de admision conocido. No escribe workflow_runs de negocio ni
+        realiza discovery LLM. Los demas workflows de 00069 se añaden con sus contratos.
+        """
+        from research.workflows import require_research_context
+        require_research_context(context)
+        if workflow_id != "research.investigate":
+            raise ValueError("Workflow research no soportado")
+        path = self.workflows_dir / "research" / "investigate.yaml"
+        workflow = self._parse_workflow_yaml(path.read_text(encoding="utf-8"), source=str(path))
+        steps = workflow["steps"]
+        if (workflow["workflow"] != workflow_id or workflow.get("auto_match")
+                or workflow.get("triggers") or len(steps) != 1
+                or steps[0].get("tool") != "research.investigate"
+                or steps[0].get("type", "tool") != "tool"):
+            raise ValueError("El YAML research debe contener solo su tool de admision")
+        resolved = _resolve_value(steps[0].get("params") or {}, {**context, "research_request": params})
+        if resolved != {"request": params}:
+            raise ValueError("El YAML research no puede reemplazar los parametros de la ocurrencia")
+        return await self._tools.call("research.investigate", resolved, context)
 
     async def resume_blocked_run_for_task(
         self,

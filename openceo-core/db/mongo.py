@@ -1742,7 +1742,8 @@ class MongoRepository:
                         "run_state": "running",
                         "lease_owner": lease_owner,
                         "lease_expires_at": moment + timedelta(seconds=lease_seconds),
-                        "scheduled_for": "$next_run_at",
+                        # Retry/recovery keeps the original occurrence identity.
+                        "scheduled_for": {"$ifNull": ["$scheduled_for", "$next_run_at"]},
                         "fencing_token": {"$add": [{"$ifNull": ["$fencing_token", 0]}, 1]},
                         "updated_at": moment,
                     }

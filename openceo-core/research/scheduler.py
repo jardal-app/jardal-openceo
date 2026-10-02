@@ -641,6 +641,7 @@ class ResearchScheduler:
             "last_result": result,
             "last_error": None,
             "execution_key": execution_key,
+            "scheduled_for": None,
             "attempts": 0,
             "pending_reconcile": False,
             "next_run_at": next_run_at,
@@ -676,6 +677,8 @@ class ResearchScheduler:
             # la cadencia normal. La ocurrencia perdida queda en el historial, no en un
             # bucle de gasto.
             updates["attempts"] = 0
+            updates["scheduled_for"] = None
+            updates["pending_reconcile"] = False
             updates["next_run_at"] = compute_next_run_at(claimed, moment)
         else:
             updates["next_run_at"] = moment + timedelta(

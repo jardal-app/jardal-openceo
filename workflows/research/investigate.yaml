@@ -1,0 +1,13 @@
+workflow: research.investigate
+name: Admitir investigacion de una ocurrencia
+agent: research
+description: >-
+  Admite un job quick con identidad y clave de ocurrencia del contexto research.
+  El routing es determinista; el modelo se ejecuta despues por el dispatcher.
+auto_match: false
+triggers: []
+steps:
+  - id: admit
+    tool: research.investigate
+    params:
+      request: "{{research_request}}"

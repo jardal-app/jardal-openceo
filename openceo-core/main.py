@@ -35,6 +35,7 @@ from research.consumers import ConsumerRegistry
 from research.mcp_facade import build_research_mcp_facade
 from research.router import build_research_router
 from research.wiring import build_research_service, close_research_service
+from research.workflows import ResearchScheduleRuntime
 from integrations.openwebui_compat import (
     chat_response,
     extract_latest_user_message,
@@ -324,6 +325,18 @@ async def lifespan(_: FastAPI):
         from auth.service import create_default_user_if_needed
         create_default_user_if_needed(_auth_db)
 
+        research_coordinator = ResearchScheduleRuntime(
+            repo=repo, workflows=workflow_service, service=research_service,
+            settings=settings,
+            project_cfg_for=lambda project: config_loader.load_project(project),
+            on_admitted=_wake_research_dispatcher,
+        )
+        app.state.research_schedule_store = research_coordinator.store
+        app.state.research_scheduler = research_coordinator.scheduler
+        stack.push_async_callback(research_coordinator.stop)
+        research_schedules_started = await research_coordinator.start()
+        logger.info("Research scheduler %s", "habilitado" if research_schedules_started else "deshabilitado")
+
         for label, mcp in [("Internal", internal_mcp), ("Global", global_mcp)]:
             if mcp is not None:
                 logger.info(
@@ -337,6 +350,7 @@ async def lifespan(_: FastAPI):
 
         yield
 
+        await research_coordinator.stop()
         # Horizon se para antes que el resto para que ninguna escritura suya
         # caiga despues de cerrar el repositorio.
         await horizon_scheduler.stop()
