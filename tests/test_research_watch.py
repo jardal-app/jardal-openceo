@@ -207,8 +207,20 @@ class SourceAdapterTests(unittest.IsolatedAsyncioTestCase):
             {"type": "greenhouse", "board": "acme"}, page_token=None, conditional=None, scope=SCOPE, deadline=None)
         self.assertEqual(reader.calls[0]["url"], "https://boards-api.greenhouse.io/v1/boards/acme/jobs")
         self.assertEqual([(i.title, i.summary) for i in page.items], [("Backend", "Remoto")])
-        self.assertIsNotNone(page.items[0].published_at)
         self.assertEqual(reader.calls[0]["access_method"], AccessMethod.API)
+
+    async def test_greenhouse_publication_date_is_first_published_never_updated_at(self):
+        # Real payloads carry both; `updated_at` moves on every edit of the post.
+        body = json.dumps({"jobs": [
+            {"id": 11, "title": "Backend", "absolute_url": "https://boards.greenhouse.io/acme/jobs/11",
+             "first_published": "2026-09-01T09:00:00-04:00", "updated_at": "2026-09-30T10:00:00-04:00"},
+            {"id": 12, "title": "Solo editado", "absolute_url": "https://boards.greenhouse.io/acme/jobs/12",
+             "updated_at": "2026-09-30T10:00:00-04:00"}]}).encode()
+        page = await GreenhouseSourceAdapter(FakeReader(body)).fetch_page(
+            {"type": "greenhouse", "board": "acme"}, page_token=None, conditional=None, scope=SCOPE, deadline=None)
+        published = {i.title: i.published_at for i in page.items}
+        self.assertEqual(published["Backend"].isoformat(), "2026-09-01T09:00:00-04:00")
+        self.assertIsNone(published["Solo editado"])
 
     async def test_greenhouse_content_change_changes_the_fingerprint_not_the_identity(self):
         def parse(title):
