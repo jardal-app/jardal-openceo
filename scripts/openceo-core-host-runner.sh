@@ -12,18 +12,24 @@ if [[ ! -x "$VENV_PY" ]]; then
   exit 1
 fi
 
-if [[ -f "$ENV_FILE" ]]; then
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ -z "$line" ]] && continue
-    [[ "$line" =~ ^[[:space:]]*# ]] && continue
-    if [[ "$line" == *"="* ]]; then
-      key="${line%%=*}"
-      val="${line#*=}"
-      key="$(printf '%s' "$key" | tr -d '[:space:]')"
+load_env() {
+  if [[ -f "$ENV_FILE" ]]; then
+    # Use the same dotenv expansion as Settings and the manual host launcher.
+    while IFS= read -r -d '' key && IFS= read -r -d '' val; do
       export "$key=$val"
-    fi
-  done < "$ENV_FILE"
-fi
+    done < <("$VENV_PY" - "$ENV_FILE" <<'PYENV'
+import re
+import sys
+from dotenv import dotenv_values
+for key, value in dotenv_values(sys.argv[1]).items():
+    if value is not None and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        sys.stdout.buffer.write(key.encode() + b"\0" + value.encode() + b"\0")
+PYENV
+    )
+  fi
+}
+
+load_env
 
 export OPENCEO_HOST="0.0.0.0"
 export OPENCEO_PORT="${OPENCEO_HOST_PORT:-18765}"
