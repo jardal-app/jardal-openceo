@@ -135,6 +135,7 @@ class DevProvider(str, Enum):
     GEMINI = "gemini"
     OPENCODE = "opencode"
     GLM = "glm"
+    MUSE = "muse"
 
 
 class DevSessionMode(str, Enum):

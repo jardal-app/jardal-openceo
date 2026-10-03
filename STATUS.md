@@ -991,3 +991,12 @@ Trabajo de infraestructura hecho **fuera de OpenCEO** (en `/home/develop/deploym
 - Access control en MongoDB con empleados, roles reutilizables y filtros por proyecto
 - Vistas de dashboard: overview de agentes, task board, project selector y analítica
 - Contratos de comandos Telegram para owner/employee + notificaciones outbound
+
+## 2026-10-03 — Tier S: builder muse + plan-reviewer codexj (TASK-2026-00084)
+
+- Builder Tier S pasa de `claudep` a `muse` (`--model muse-spark-1.3-contributor --reasoning-effort max --yolo`, tmux interactivo, sin cambios de protocolo: BUILD_DONE/FIX_DONE por archivo).
+- `claudep` pasa a reviewer de solo lectura (adaptador claude existente); quorum sigue siendo codex obligatorio + otro modelo.
+- Plan-reviewer `codexf` -> `codexj` (cuenta propia del dueño); defaults, metadata, tests y yamls (`jardal-trading`, `jardal-openceo`) actualizados.
+- Nuevo provider `muse` en `DevProvider` + patrón tmux + `MUSE_CLI_PATH`/`MUSE_DEFAULT_ARGS`; `sync-mcp-config.py` escribe `openceo-internal` también en `~/.config/muse/settings.json`.
+- Verificación: `tests/test_tier_s_contract.py` 15 passed; smoke tmux del builder OK (`muse-spark-1.3-contributor · max · YOLO`); un `muse exec` mínimo confirmó modelo y MCP `openceo_internal` visibles.
+- Pendiente: `scripts/openceo-core-host.sh restart` para que el código nuevo aplique en el servicio. TASK-2026-00078 (adaptador OpenCode) y TASK-2026-00030 siguen su propio curso; no se ejecutaron pilotos Tier S (gasto).

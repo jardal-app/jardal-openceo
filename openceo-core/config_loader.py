@@ -136,12 +136,13 @@ class ConfigLoader:
                     "timeout_minutes": 15,
                     "roles": {
                         "planner": {"provider": "claude", "label": "claudej", "model": "claude-opus-5-5", "active": True, "command": ["claudej"]},
-                        "plan-reviewer": {"provider": "codex", "label": "codexf", "model": "gpt-6-sol", "active": True, "command": ["codexf"]},
-                        "builder": {"provider": "claude", "label": "claudep", "model": "deepseek-v4.1-flash", "active": True, "command": ["claudep"]},
+                        "plan-reviewer": {"provider": "codex", "label": "codexj", "model": "gpt-6-sol", "active": True, "command": ["codexj"]},
+                        "builder": {"provider": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "active": True, "command": ["muse", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"]},
                     },
                     "reviewers": [
                         {"label": "qwen", "provider": "qwen", "model": "qwen3.8-max", "active": True, "command": ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"]},
                         {"label": "claudeg", "provider": "claude", "model": "glm-5.3", "active": True, "command": ["claudeg", "--model", "opus", "--tools", "Read,Glob,Grep"]},
+                        {"label": "claudep", "provider": "claude", "model": "deepseek-v4.1-flash", "active": True, "command": ["claudep", "--model", "opus", "--tools", "Read,Glob,Grep"]},
                         {"label": "agyd", "provider": "gemini", "model": "gemini", "active": False, "command": ["agyd"]},
                         {"label": "mimo", "provider": "opencode", "model": "opencode-go/mimo-v2.6-pro", "active": False, "command": ["opencode"]},
                     ],
@@ -173,6 +174,11 @@ class ConfigLoader:
                         "env": {},
                     },
                     "kimi": {
+                        "command": [],
+                        "cwd": None,
+                        "env": {},
+                    },
+                    "muse": {
                         "command": [],
                         "cwd": None,
                         "env": {},

@@ -219,6 +219,8 @@ class CriticalConsensusOrchestrator:
                 return await wait(f"Tier S espera: no se encontró el comando de {account['label']}.")
         active_reviewers = [item for item in cfg["reviewers"] if item["active"]]
         mandatory_label = required[_ROLE_PLAN_REVIEWER]["label"]
+        planner_label = required[_ROLE_PLANNER]["label"]
+        builder_label = required[_ROLE_BUILDER]["label"]
         models = {mandatory_label: required[_ROLE_PLAN_REVIEWER]["model"]}
         models.update({item["label"]: item["model"] for item in active_reviewers})
         if len(models) != len(active_reviewers) + 1:
@@ -265,7 +267,7 @@ class CriticalConsensusOrchestrator:
                                                         task_id=task_id, is_spillover=is_spillover)
             if n_plans is None or not 1 <= n_plans <= cfg["max_plans"] or not paths.plan_path.exists():
                 if turn.rate_limited:
-                    return await wait("Tier S espera por cuota temporal de claudej.")
+                    return await wait(f"Tier S espera por cuota temporal de {planner_label}.")
                 return await turn_wait(turn, "Planner sin PLAN_READY_N válido; se conserva el intento para reintentar.")
             await self._checkpoint(run_id, task_id, session_id, phase="plan_review", total_plans=n_plans,
                                    question=None, human_answer=None, requires_human_attention=False)
@@ -343,7 +345,7 @@ class CriticalConsensusOrchestrator:
                     else:
                         build_turn = await self._run_builder(sessions, p, paths, cfg, progress)
                     if build_turn.rate_limited:
-                        return await wait("Tier S espera por cuota temporal de claudep.")
+                        return await wait(f"Tier S espera por cuota temporal de {builder_label}.")
                 if self._read_signal(paths.status_path) != f"BUILD_DONE_{p}" or not paths.build_summary(p).exists():
                     return await turn_wait(build_turn, f"Builder no confirmó BUILD_DONE_{p}.")
                 after = git_snapshot(repo_path)
@@ -369,7 +371,7 @@ class CriticalConsensusOrchestrator:
                     else:
                         fix = await self._run_builder_fix(sessions, p, r, paths, cfg, progress, labels=labels)
                     if fix.rate_limited:
-                        return await wait("Tier S espera por cuota temporal de claudep.")
+                        return await wait(f"Tier S espera por cuota temporal de {builder_label}.")
                     if self._read_signal(paths.status_path) != f"FIX_DONE_{p}_{r}":
                         return await turn_wait(fix, f"Builder no confirmó FIX_DONE_{p}_{r}.")
                 delta = git_snapshot(repo_path).changed_since(before_fix)
@@ -411,7 +413,7 @@ class CriticalConsensusOrchestrator:
                 fix = await self._run_builder_fix(sessions, p, r, paths, cfg, progress,
                                                   labels=list(reports))
                 if fix.rate_limited:
-                    return await wait("Tier S espera por cuota temporal de claudep.")
+                    return await wait(f"Tier S espera por cuota temporal de {builder_label}.")
                 if self._read_signal(paths.status_path) != f"FIX_DONE_{p}_{r}" or not fix.ok:
                     return await turn_wait(fix, f"Builder no confirmó FIX_DONE_{p}_{r}.")
                 after_fix = git_snapshot(repo_path)
@@ -476,7 +478,7 @@ class CriticalConsensusOrchestrator:
                         interrupt_check=lambda pane: detect_claude_question(pane) is not None,
                     )
                 if fix_turn.rate_limited:
-                    return await wait("Tier S espera por cuota temporal de claudep.")
+                    return await wait(f"Tier S espera por cuota temporal de {builder_label}.")
                 if not fix_turn.ok or self._read_signal(paths.status_path) != "FIX_DONE_INTEGRATED":
                     return await turn_wait(fix_turn, "Builder no confirmó el fix integrado.")
             after_fix = git_snapshot(repo_path)
@@ -1002,8 +1004,8 @@ class CriticalConsensusOrchestrator:
                 role_cfg = {}
             roles[role_name] = {
                 "provider": str(role_cfg.get("provider", "")).strip().lower() or self._default_provider_for_role(role_name),
-                "label": str(role_cfg.get("label") or {"planner": "claudej", "plan-reviewer": "codexf", "builder": "claudep"}[role_name]),
-                "model": str(role_cfg.get("model") or {"planner": "claude-opus-5-5", "plan-reviewer": "gpt-6-sol", "builder": "deepseek-v4.1-flash"}[role_name]),
+                "label": str(role_cfg.get("label") or {"planner": "claudej", "plan-reviewer": "codexj", "builder": "muse"}[role_name]),
+                "model": str(role_cfg.get("model") or {"planner": "claude-opus-5-5", "plan-reviewer": "gpt-6-sol", "builder": "muse-spark-1.3-contributor"}[role_name]),
                 "active": role_cfg.get("active", True) is True,
                 "command": role_cfg.get("command") or [],
                 "env": role_cfg.get("env", {}) or {},
@@ -1054,8 +1056,8 @@ class CriticalConsensusOrchestrator:
 
     @staticmethod
     def _default_provider_for_role(role: str) -> str:
-        if role in (_ROLE_PLANNER, _ROLE_BUILDER):
-            return "claude"
+        if role == _ROLE_BUILDER:
+            return "muse"
         if role == _ROLE_PLAN_REVIEWER:
             return "codex"
         return "claude"
@@ -1117,6 +1119,8 @@ class CriticalConsensusOrchestrator:
             return [self._settings.OPENCODE_CLI_PATH, *shlex.split(self._settings.OPENCODE_DEFAULT_ARGS)]
         if provider == DevProvider.GLM:
             return [self._settings.GLM_CLI_PATH, *shlex.split(self._settings.GLM_DEFAULT_ARGS)]
+        if provider == DevProvider.MUSE:
+            return [self._settings.MUSE_CLI_PATH, *shlex.split(self._settings.MUSE_DEFAULT_ARGS)]
         return [self._settings.CLAUDE_CODE_PATH, *shlex.split(self._settings.CLAUDE_DEFAULT_ARGS)]
 
     # ------------------------------------------------------------------
