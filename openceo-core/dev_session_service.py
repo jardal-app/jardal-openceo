@@ -140,7 +140,7 @@ class DevSessionService:
                         session_doc.metadata["execution_mode"] = "tier_s"
                         session_doc.metadata["consensus"] = {
                             "lead": "planner",
-                            "reviewers": ["codexf", "qwen", "claudeg"],
+                            "reviewers": ["codexj", "qwen", "claudeg", "claudep"],
                         }
                     except Exception as exc:
                         logger.error("Failed to start Tier S for '%s': %s", project, exc)
@@ -1312,6 +1312,8 @@ class DevSessionService:
             return [self._settings.OPENCODE_CLI_PATH, *shlex.split(self._settings.OPENCODE_DEFAULT_ARGS)]
         if provider == DevProvider.GLM:
             return [self._settings.GLM_CLI_PATH, *shlex.split(self._settings.GLM_DEFAULT_ARGS)]
+        if provider == DevProvider.MUSE:
+            return [self._settings.MUSE_CLI_PATH, *shlex.split(self._settings.MUSE_DEFAULT_ARGS)]
         return [self._settings.CLAUDE_CODE_PATH, *shlex.split(self._settings.CLAUDE_DEFAULT_ARGS)]
 
     def _pane_has_response_token(self, project: str, token: str) -> bool:

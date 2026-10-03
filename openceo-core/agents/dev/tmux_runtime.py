@@ -32,6 +32,7 @@ _DEFAULT_PROMPT_PATTERNS: dict[str, re.Pattern[str]] = {
         re.MULTILINE | re.IGNORECASE,
     ),
     "glm": re.compile(r"(>\s*$|›\s*$|❯\s*$|\$\s*$)", re.MULTILINE),
+    "muse": re.compile(r"(>\s*$|›\s*$|❯\s*$|\$\s*$|muse.*>\s*$)", re.MULTILINE),
 }
 
 _SHELL_PROMPT_PATTERN = re.compile(r"(^[^\n]*@[^\n:]+:.*[$#%]\s*$|^\s*\$\s*$)", re.MULTILINE)
@@ -648,6 +649,7 @@ class TmuxRuntime:
             DevProvider.CLAUDE,
             DevProvider.GEMINI,
             DevProvider.OPENCODE,
+            DevProvider.MUSE,
         }
         codex_update_submitted = False
         codex_restart_submitted = False
@@ -686,6 +688,7 @@ class TmuxRuntime:
                     return True
                 provider_banner_ready = (
                     ("openai codex" in lowered)
+                    or ("muse" in lowered)
                     or ("claude" in lowered)
                     or ("antigravity" in lowered)
                     or ("gemini" in lowered and ("type your message or @path/to/file" in lowered or "? for shortcuts" in lowered))

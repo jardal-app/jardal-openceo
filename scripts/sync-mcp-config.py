@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Sync MCP provider config into Claude Code CLI config files.
+"""Sync MCP provider config into coding CLI config files.
 
 Writes the openceo-internal MCP server block into:
-- ~/.claude/.claude.json       (clauded — planner)
-- ~/.claude-deepseek/.claude.json (claudep — builder)
+- ~/.claude.json                    (clauded — planner)
+- ~/.claude-deepseek/.claude.json   (claudep — reviewer)
+- ~/.config/muse/settings.json      (muse — builder; other keys preserved)
 
 Run at bootstrap time (before OpenCEO tmux sessions start) so that
 planner/builder agents can call openceo_* MCP tools.
@@ -28,6 +29,7 @@ from mcp_server import build_mcp_provider_config
 TARGETS = [
     Path.home() / ".claude.json",
     Path.home() / ".claude-deepseek" / ".claude.json",
+    Path.home() / ".config" / "muse" / "settings.json",
 ]
 
 

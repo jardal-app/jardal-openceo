@@ -30,7 +30,9 @@ class Settings(BaseSettings):
     GEMINI_CLI_PATH: str = "/home/develop/.local/bin/agyd"
     OPENCODE_CLI_PATH: str = "/home/develop/.opencode/bin/opencode"
     GLM_CLI_PATH: str = "clauded"
+    MUSE_CLI_PATH: str = "/home/develop/.local/bin/muse"
 
+    MUSE_DEFAULT_ARGS: str = "--model muse-spark-1.3-contributor --reasoning-effort max --yolo"
     CODEX_DEFAULT_ARGS: str = "--dangerously-bypass-approvals-and-sandbox -m gpt-5.4 -c model_reasoning_effort=xhigh"
     CLAUDE_DEFAULT_ARGS: str = "--dangerously-skip-permissions --model opus --effort high"
     GEMINI_DEFAULT_ARGS: str = ""

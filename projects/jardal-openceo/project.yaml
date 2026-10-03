@@ -24,13 +24,15 @@ dev:
         command: ["claudej"]
       plan-reviewer:
         active: true
-        command: ["codexf"]
+        command: ["codexj"]
       builder:
         active: true
-        command: ["claudep"]
+        provider: muse
+        command: ["muse", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"]
     reviewers:
       - {label: qwen, provider: qwen, model: qwen3.8-max, active: true, command: ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"]}
       - {label: claudeg, provider: claude, model: glm-5.3, active: true, command: ["claudeg", "--model", "opus", "--tools", "Read,Glob,Grep"]}
+      - {label: claudep, provider: claude, model: deepseek-v4.1-flash, active: true, command: ["claudep", "--model", "opus", "--tools", "Read,Glob,Grep"]}
       - {label: agyd, provider: gemini, model: gemini, active: false, command: ["agyd"]}
       - {label: mimo, provider: opencode, model: opencode-go/mimo-v2.6-pro, active: false, command: ["opencode"]}
 

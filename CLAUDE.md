@@ -110,7 +110,7 @@ cd openceo-voice-android
 ### Dev Tier S (Consenso Crítico Multi-IA)
 - Se activa enviando `"coding_tool": "tier_s"` en la raíz del ticket o dentro de `params`.
 - En proyectos con `dev.coding_tool: tier_s` en `project.yaml` (como `jardal-trading`), todos los tickets dev entran a Tier S de forma predeterminada.
-- Orquesta: Planner (`clauded`), Plan Reviewer (`codexf` / reasoning xhigh), Builder (`claudep`), y 3 revisores cruzados (Codex, Antigravity CLI `agyd`, OpenCode Kimi/Qwen) en 2 rondas de auditoría.
+- Orquesta: Planner (`clauded`), Plan Reviewer (`codexj` / reasoning xhigh), Builder (`muse` con `--model muse-spark-1.3-contributor --reasoning-effort max --yolo` en tmux), y revisores cruzados (`codexj` obligatorio + `qwen`, `claudeg`, `claudep`) en 2 rondas de auditoría.
 
 ---
 

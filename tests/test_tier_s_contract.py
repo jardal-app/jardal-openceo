@@ -15,8 +15,10 @@ if str(CORE) not in sys.path:
 
 from agents.dev.consensus import CriticalConsensusOrchestrator, ConsensusParticipant
 from agents.dev.tier_s_contract import detect_claude_question, git_snapshot, review_quorum
-from agents.dev.tmux_runtime import TmuxRuntime, TmuxTurnResult
+from agents.dev.tmux_runtime import TmuxRuntime, TmuxTurnResult, _DEFAULT_PROMPT_PATTERNS
 from state import DevProvider
+
+import yaml
 
 
 class TierSContractTests(unittest.IsolatedAsyncioTestCase):
@@ -86,10 +88,10 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.repo / "tracked.txt").read_text(), "working tree\n")
 
     async def test_quorum_requires_codex_and_distinct_valid_model(self) -> None:
-        models = {"codexf": "gpt-6-sol", "qwen": "qwen3.8-max", "other": "gpt-6-sol"}
-        self.assertFalse(review_quorum({"codexf": "No findings.", "other": "No findings."}, models))
-        self.assertFalse(review_quorum({"codexf": "", "qwen": "No findings."}, models))
-        self.assertTrue(review_quorum({"codexf": "No findings.", "qwen": "[WARN] a.py:1 — issue → fix"}, models))
+        models = {"codexj": "gpt-6-sol", "qwen": "qwen3.8-max", "other": "gpt-6-sol"}
+        self.assertFalse(review_quorum({"codexj": "No findings.", "other": "No findings."}, models))
+        self.assertFalse(review_quorum({"codexj": "", "qwen": "No findings."}, models))
+        self.assertTrue(review_quorum({"codexj": "No findings.", "qwen": "[WARN] a.py:1 — issue → fix"}, models))
         self.assertTrue(review_quorum({"codexr": "No findings.", "qwen": "No findings."},
                                       {"codexr": "gpt", "qwen": "qwen"}, "codexr"))
 
@@ -136,7 +138,7 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
 
         async def review(*args):
             scopes.append((args[2], list(args[4])))
-            return ({"codexf": "No findings.", "qwen": "No findings.",
+            return ({"codexj": "No findings.", "qwen": "No findings.",
                      "claudeg": "No findings."}, {})
 
         async def plan(*args, **kwargs):
@@ -182,7 +184,7 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         self.orch._run_builder_fix = AsyncMock()
         self.orch._readonly_review = AsyncMock(return_value="No findings.")
         self.orch._review_snapshot = AsyncMock(return_value=(
-            {"codexf": "No findings.", "qwen": "No findings.", "claudeg": "No findings."}, {}))
+            {"codexj": "No findings.", "qwen": "No findings.", "claudeg": "No findings."}, {}))
         self.config["dev"]["tier_s"]["review_rounds"] = 2
         result = await self.orch.execute("test", "ticket", self.config, AsyncMock())
         self.assertTrue(result.ok, result.summary)
@@ -264,9 +266,57 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.reviews_received, 3)
         archived = self.repo / ".tier-s" / "runs" / result.run_id
         self.assertEqual((archived / "status").read_text(), "TICKET_COMPLETE")
-        self.assertTrue((archived / "REVIEW-codexf-1-1.md").exists())
+        self.assertTrue((archived / "REVIEW-codexj-1-1.md").exists())
         self.assertTrue((archived / "REVIEW-qwen-1-1.md").exists())
         self.assertTrue((archived / "REVIEW-claudeg-1-1.md").exists())
+
+    async def test_roster_defaults_muse_builder_and_codexj_reviewer(self) -> None:
+        cfg = self.orch._normalized_config({"dev": {"tier_s": {"roles": {
+            "planner": {"command": ["x"]},
+            "plan-reviewer": {"command": ["x"]},
+            "builder": {"command": ["x"]},
+        }}}})
+        builder = cfg["roles"]["builder"]
+        self.assertEqual(builder["provider"], "muse")
+        self.assertEqual(builder["label"], "muse")
+        self.assertEqual(builder["model"], "muse-spark-1.3-contributor")
+        self.assertEqual(cfg["roles"]["plan-reviewer"]["provider"], "codex")
+        self.assertEqual(cfg["roles"]["plan-reviewer"]["label"], "codexj")
+        self.assertEqual(DevProvider("muse"), DevProvider.MUSE)
+        self.assertIn("muse", _DEFAULT_PROMPT_PATTERNS)
+        # The legacy codexf label no longer satisfies the default quorum.
+        self.assertTrue(review_quorum(
+            {"codexj": "No findings.", "qwen": "No findings."},
+            {"codexj": "gpt", "qwen": "qwen"}))
+        self.assertFalse(review_quorum(
+            {"codexf": "No findings.", "qwen": "No findings."},
+            {"codexf": "gpt", "qwen": "qwen"}))
+
+    async def test_project_yamls_pin_muse_builder_and_claudep_reviewer(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        for name in ("jardal-openceo", "jardal-trading"):
+            with (repo / "projects" / name / "project.yaml").open(encoding="utf-8") as handle:
+                data = yaml.safe_load(handle) or {}
+            roles = (data.get("dev") or {}).get("tier_s", {}).get("roles", {}) or {}
+            builder = roles.get("builder", {}) or {}
+            self.assertEqual(builder.get("provider"), "muse", name)
+            command = " ".join(str(part) for part in (builder.get("command") or []))
+            self.assertIn("--model muse-spark-1.3-contributor", command, name)
+            self.assertIn("--reasoning-effort max", command, name)
+            self.assertIn("--yolo", command, name)
+            reviewer = roles.get("plan-reviewer", roles.get("plan_reviewer", {})) or {}
+            self.assertTrue(
+                any("codexj" in str(part) for part in (reviewer.get("command") or [])),
+                f"{name}: plan-reviewer must run codexj",
+            )
+        with (repo / "projects" / "jardal-openceo" / "project.yaml").open(encoding="utf-8") as handle:
+            openceo = yaml.safe_load(handle) or {}
+        reviewers = (openceo.get("dev") or {}).get("tier_s", {}).get("reviewers", []) or []
+        claudep = next((item for item in reviewers if item.get("label") == "claudep"), None)
+        self.assertIsNotNone(claudep)
+        assert claudep is not None
+        self.assertEqual(claudep.get("provider"), "claude")
+        self.assertTrue(claudep.get("active"))
 
 
 if __name__ == "__main__":

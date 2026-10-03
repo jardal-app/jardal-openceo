@@ -67,7 +67,7 @@ def blocking_findings(text: str) -> bool:
     return bool(re.search(r"^\[(CRITICAL|WARN)\] ", text, re.MULTILINE))
 
 
-def review_quorum(reports: dict[str, str], models: dict[str, str], mandatory_label: str = "codexf") -> bool:
+def review_quorum(reports: dict[str, str], models: dict[str, str], mandatory_label: str = "codexj") -> bool:
     """Codex plus one genuinely distinct model, each with a valid report."""
     if not valid_review(reports.get(mandatory_label, "")):
         return False
