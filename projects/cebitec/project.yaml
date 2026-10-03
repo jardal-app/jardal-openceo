@@ -7,7 +7,7 @@ project:
 
 dev:
   coding_tier: auto
-  default_provider: codex
+  default_provider: muse
   branch_pattern: "{session_id}-{slug}"
   auto_push: false
   create_pr: true
@@ -15,15 +15,19 @@ dev:
 
   providers:
     codex:
-      command: ["/home/develop/.local/bin/codex", "--dangerously-bypass-approvals-and-sandbox"]
+      command: ["/home/develop/.local/bin/codexf"]
       cwd: /home/develop/development/DigitalInnovations/CEBITEC
       env: {}
 
     claude:
-      command: ["/home/develop/.local/bin/claude", "--dangerously-skip-permissions", "--model", "opus", "--effort", "high"]
+      command: ["/home/develop/.local/bin/claudej"]
       cwd: /home/develop/development/DigitalInnovations/CEBITEC
-      env:
-        ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-4-6
+      env: {}
+
+    muse:
+      command: ["/home/develop/.local/bin/muse"]
+      cwd: /home/develop/development/DigitalInnovations/CEBITEC
+      env: {}
 
     opencode:
       command: ["/home/develop/.opencode/bin/opencode", "-m", "deepseek/deepseek-reasoner"]

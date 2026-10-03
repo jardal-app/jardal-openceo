@@ -130,7 +130,8 @@ class PMStateRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(main, "repo", FakeRepo()):
             with patch.object(main, "_handle_openceo_pm_direct", AsyncMock(return_value=expected)) as pm_handler:
-                result = await main.chat_completions(payload)
+                with patch.object(main.first_layer_gateway, "process_turn", AsyncMock(return_value=(False, ""))):
+                    result = await main.chat_completions(payload)
 
         self.assertEqual(main._assistant_text_from_chat_result(result), "flujo pm")
         pm_handler.assert_awaited_once_with(payload, "pm-state-test", "1")
@@ -164,8 +165,9 @@ class PMStateRoutingTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, "repo", FakeRepo()):
             with patch.object(main, "_handle_openceo_pm_direct", AsyncMock(return_value=pm_expected)) as pm_handler:
                 with patch.object(main, "_handle_openceo_ceo_model", AsyncMock(return_value=ceo_expected)) as ceo_handler:
-                    status_result = await main.chat_completions(status_payload)
-                    unrelated_result = await main.chat_completions(unrelated_payload)
+                    with patch.object(main.first_layer_gateway, "process_turn", AsyncMock(return_value=(False, ""))):
+                        status_result = await main.chat_completions(status_payload)
+                        unrelated_result = await main.chat_completions(unrelated_payload)
 
         self.assertEqual(main._assistant_text_from_chat_result(status_result), "estado pm")
         self.assertEqual(main._assistant_text_from_chat_result(unrelated_result), "routing normal")
@@ -357,6 +359,7 @@ class PMGuidedFlowTests(unittest.IsolatedAsyncioTestCase):
             project="melanyryr",
             tool="codex",
             interview="El cliente quiere login con Google.",
+            autorun=False,
         )
 
     async def test_pm_background_running_reports_progress(self) -> None:

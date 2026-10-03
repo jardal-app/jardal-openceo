@@ -6,48 +6,32 @@ project:
       local_path: /home/develop/development/Jardal/jardal-trading
 
 dev:
-  coding_tool: tier_s
+  # Tier S design §3/§15: no dev.coding_tool (routing is per-task; the old
+  # tier_s default silently routed every untagged ticket to the costliest
+  # pipeline) and no dev.tier_s (roles and pool are global in
+  # config_loader.py; planner is claudej there).
   coding_tier: auto
-  default_provider: claude
+  default_provider: muse
   branch_pattern: "{session_id}-{slug}"
   auto_push: false
   create_pr: true
   pr_body: auto
-  tier_s:
-    enabled: true
-    review_rounds: 2  # Set to 1 for pilot/testing tickets to save reviewer tokens
-    max_plans: 7  # Cap sub-plan fragmentation; planner should consolidate where safe
-    timeout_minutes: 15
-    opencode_reviewers:
-      - label: kimi27c
-        model: opencode-go/kimi-k2.7-code
-      - label: qwen37
-        model: opencode-go/qwen3.7-max
-    roles:
-      planner:
-        provider: claude
-        command: ["/home/develop/.local/bin/clauded"]
-      plan_reviewer:
-        provider: codex
-        command: ["/home/develop/.local/bin/codexj"]
-      builder:
-        provider: muse
-        command: ["/home/develop/.local/bin/muse", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"]
-      gemini_reviewer:
-        provider: gemini
-        command: ["/home/develop/.local/bin/agyd"]
 
   providers:
     codex:
-      command: ["/home/develop/.local/bin/codex", "--dangerously-bypass-approvals-and-sandbox", "-m", "gpt-5.5", "-c", "model_reasoning_effort=xhigh"]
+      command: ["/home/develop/.local/bin/codexf"]
       cwd: /home/develop/development/Jardal/jardal-trading
       env: {}
 
     claude:
-      command: ["/home/develop/.local/bin/claude", "--dangerously-skip-permissions", "--model", "opus", "--effort", "high"]
+      command: ["/home/develop/.local/bin/claudej"]
       cwd: /home/develop/development/Jardal/jardal-trading
-      env:
-        ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-4-6
+      env: {}
+
+    muse:
+      command: ["/home/develop/.local/bin/muse"]
+      cwd: /home/develop/development/Jardal/jardal-trading
+      env: {}
 
     gemini:
       command: ["/home/develop/.local/bin/agyd"]

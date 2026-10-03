@@ -36,16 +36,15 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         self.config = {
             "project": {"repos": [{"local_path": str(self.repo)}]},
             "dev": {"tier_s": {
-                "review_rounds": 1, "max_plans": 2,
                 "roles": {
                     "planner": {"active": True, "command": command},
                     "plan-reviewer": {"active": True, "command": command},
                     "builder": {"active": True, "command": command},
                 },
                 "reviewers": [
-                    {"label": "qwen", "provider": "qwen", "model": "qwen3.8-max", "active": True, "command": command},
-                    {"label": "claudeg", "provider": "claude", "model": "glm-5.3", "active": True, "command": command},
-                    {"label": "agyd", "provider": "gemini", "model": "gemini", "active": False, "command": command},
+                    {"label": "qwen", "provider": "qwen", "model": "qwen3.8-max", "family": "qwen", "active": True, "command": command},
+                    {"label": "claudeg", "provider": "claude", "model": "glm-5.3", "family": "glm", "active": True, "command": command},
+                    {"label": "agyd", "provider": "gemini", "model": "gemini", "family": "gemini", "active": False, "command": command},
                 ],
             }},
         }
@@ -59,15 +58,6 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         result = await self.orch.execute("test", "ticket", self.config, AsyncMock())
         self.assertTrue(result.waiting)
         self.assertIn("claudej", result.summary)
-        self.orch.ensure_project_sessions.assert_not_called()
-
-    async def test_legacy_opencode_reviewers_cannot_silently_enter_roster(self) -> None:
-        self.config["dev"]["tier_s"]["opencode_reviewers"] = [
-            {"label": "mimo", "model": "mimo-v2.6-pro"}]
-        self.orch.ensure_project_sessions = AsyncMock()
-        result = await self.orch.execute("test", "ticket", self.config, AsyncMock())
-        self.assertTrue(result.waiting)
-        self.assertIn("opencode_reviewers", result.summary)
         self.orch.ensure_project_sessions.assert_not_called()
 
     async def test_git_snapshot_includes_new_files_and_deletions(self) -> None:
@@ -87,13 +77,16 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
             (isolated / "tracked.txt").write_text("reviewer edit\n", encoding="utf-8")
         self.assertEqual((self.repo / "tracked.txt").read_text(), "working tree\n")
 
-    async def test_quorum_requires_codex_and_distinct_valid_model(self) -> None:
-        models = {"codexj": "gpt-6-sol", "qwen": "qwen3.8-max", "other": "gpt-6-sol"}
-        self.assertFalse(review_quorum({"codexj": "No findings.", "other": "No findings."}, models))
-        self.assertFalse(review_quorum({"codexj": "", "qwen": "No findings."}, models))
-        self.assertTrue(review_quorum({"codexj": "No findings.", "qwen": "[WARN] a.py:1 — issue → fix"}, models))
-        self.assertTrue(review_quorum({"codexr": "No findings.", "qwen": "No findings."},
-                                      {"codexr": "gpt", "qwen": "qwen"}, "codexr"))
+    async def test_quorum_requires_two_valid_reports_from_distinct_families(self) -> None:
+        families = {"qwen": "qwen", "claudeg": "glm", "other": "qwen"}
+        # Same family twice is not a quorum, even with two valid reports.
+        self.assertFalse(review_quorum({"qwen": "No findings.", "other": "No findings."}, families))
+        # An invalid report never counts.
+        self.assertFalse(review_quorum({"qwen": "", "claudeg": "No findings."}, families))
+        # Two valid reports from two families form a quorum.
+        self.assertTrue(review_quorum({"qwen": "No findings.", "claudeg": "[WARN] a.py:1 — issue → fix"}, families))
+        # Unknown labels never count (fail-closed).
+        self.assertFalse(review_quorum({"qwen": "No findings.", "ghost": "No findings."}, families))
 
     async def test_native_question_only_while_selection_is_visible(self) -> None:
         pane = ("Which color do you choose: red or blue?\n"
@@ -136,10 +129,9 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         self.orch._readonly_review = AsyncMock(return_value="No findings.")
         scopes = []
 
-        async def review(*args):
-            scopes.append((args[2], list(args[4])))
-            return ({"codexj": "No findings.", "qwen": "No findings.",
-                     "claudeg": "No findings."}, {})
+        async def review(*args, **kwargs):
+            scopes.append((args[1], list(args[3])))
+            return ({"qwen": "No findings.", "claudeg": "No findings."}, {})
 
         async def plan(*args, **kwargs):
             paths = args[2]
@@ -160,7 +152,8 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         self.orch._review_snapshot = review
         result = await self.orch.execute("test", "ticket", self.config, AsyncMock())
         self.assertTrue(result.ok, result.summary)
-        self.assertEqual(scopes, [(1, ["tracked.txt"]), (2, ["second.txt"])])
+        self.assertEqual(scopes, [(1, ["tracked.txt"]), (2, ["second.txt"]),
+                                   (0, ["second.txt", "tracked.txt"])])
 
     async def test_completed_fix_signal_resumes_without_rerunning_builder(self) -> None:
         (self.repo / "tracked.txt").write_text("draft\n", encoding="utf-8")
@@ -184,8 +177,7 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         self.orch._run_builder_fix = AsyncMock()
         self.orch._readonly_review = AsyncMock(return_value="No findings.")
         self.orch._review_snapshot = AsyncMock(return_value=(
-            {"codexj": "No findings.", "qwen": "No findings.", "claudeg": "No findings."}, {}))
-        self.config["dev"]["tier_s"]["review_rounds"] = 2
+            {"qwen": "No findings.", "claudeg": "No findings."}, {}))
         result = await self.orch.execute("test", "ticket", self.config, AsyncMock())
         self.assertTrue(result.ok, result.summary)
         self.orch._run_builder_fix.assert_not_called()
@@ -263,12 +255,14 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         self.orch._run_builder = build
         result = await self.orch.execute("test", "ticket", self.config, AsyncMock())
         self.assertTrue(result.ok, result.summary)
-        self.assertEqual(result.reviews_received, 3)
+        self.assertEqual(result.reviews_received, 4)
         archived = self.repo / ".tier-s" / "runs" / result.run_id
         self.assertEqual((archived / "status").read_text(), "TICKET_COMPLETE")
-        self.assertTrue((archived / "REVIEW-codexj-1-1.md").exists())
+        self.assertFalse((archived / "REVIEW-codexj-1-1.md").exists())
         self.assertTrue((archived / "REVIEW-qwen-1-1.md").exists())
         self.assertTrue((archived / "REVIEW-claudeg-1-1.md").exists())
+        self.assertTrue((archived / "REVIEW-qwen-0-1.md").exists())
+        self.assertTrue((archived / "REVIEW-claudeg-0-1.md").exists())
 
     async def test_roster_defaults_muse_builder_and_codexj_reviewer(self) -> None:
         cfg = self.orch._normalized_config({"dev": {"tier_s": {"roles": {
@@ -282,41 +276,53 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(builder["model"], "muse-spark-1.3-contributor")
         self.assertEqual(cfg["roles"]["plan-reviewer"]["provider"], "codex")
         self.assertEqual(cfg["roles"]["plan-reviewer"]["label"], "codexj")
+        self.assertEqual(cfg["roles"]["plan-reviewer"]["model"], "gpt-6.1-sol")
         self.assertEqual(DevProvider("muse"), DevProvider.MUSE)
         self.assertIn("muse", _DEFAULT_PROMPT_PATTERNS)
-        # The legacy codexf label no longer satisfies the default quorum.
+        # Quorum is two pool families; unknown labels never count.
         self.assertTrue(review_quorum(
-            {"codexj": "No findings.", "qwen": "No findings."},
-            {"codexj": "gpt", "qwen": "qwen"}))
+            {"qwen": "No findings.", "claudeg": "No findings."},
+            {"qwen": "qwen", "claudeg": "glm"}))
         self.assertFalse(review_quorum(
-            {"codexf": "No findings.", "qwen": "No findings."},
-            {"codexf": "gpt", "qwen": "qwen"}))
+            {"qwen": "No findings.", "ghost": "No findings."},
+            {"qwen": "qwen"}))
 
-    async def test_project_yamls_pin_muse_builder_and_claudep_reviewer(self) -> None:
+    async def test_global_tier_s_config_pins_roster_and_projects_stay_clean(self) -> None:
+        from config_loader import ConfigLoader
+        from settings import Settings
         repo = Path(__file__).resolve().parents[1]
+        loader = ConfigLoader(Settings(_env_file=None, PROJECTS_DIR=str(repo / "projects")))
+        # Tier S roles and pool are global: identical for every project.
         for name in ("jardal-openceo", "jardal-trading"):
-            with (repo / "projects" / name / "project.yaml").open(encoding="utf-8") as handle:
-                data = yaml.safe_load(handle) or {}
-            roles = (data.get("dev") or {}).get("tier_s", {}).get("roles", {}) or {}
-            builder = roles.get("builder", {}) or {}
-            self.assertEqual(builder.get("provider"), "muse", name)
-            command = " ".join(str(part) for part in (builder.get("command") or []))
+            roles = loader.load_project(name)["dev"]["tier_s"]["roles"]
+            builder = roles["builder"]
+            self.assertEqual(builder["provider"], "muse", name)
+            command = " ".join(str(part) for part in builder["command"])
             self.assertIn("--model muse-spark-1.3-contributor", command, name)
             self.assertIn("--reasoning-effort max", command, name)
             self.assertIn("--yolo", command, name)
-            reviewer = roles.get("plan-reviewer", roles.get("plan_reviewer", {})) or {}
+            reviewer = roles["plan-reviewer"]
             self.assertTrue(
-                any("codexj" in str(part) for part in (reviewer.get("command") or [])),
+                any("codexj" in str(part) for part in reviewer["command"]),
                 f"{name}: plan-reviewer must run codexj",
             )
-        with (repo / "projects" / "jardal-openceo" / "project.yaml").open(encoding="utf-8") as handle:
-            openceo = yaml.safe_load(handle) or {}
-        reviewers = (openceo.get("dev") or {}).get("tier_s", {}).get("reviewers", []) or []
-        claudep = next((item for item in reviewers if item.get("label") == "claudep"), None)
+        reviewers = loader.load_project("jardal-openceo")["dev"]["tier_s"]["reviewers"]
+        claudep = next((item for item in reviewers if item["label"] == "claudep"), None)
         self.assertIsNotNone(claudep)
         assert claudep is not None
-        self.assertEqual(claudep.get("provider"), "claude")
-        self.assertTrue(claudep.get("active"))
+        self.assertEqual(claudep["provider"], "claude")
+        self.assertEqual(claudep["family"], "deepseek")
+        self.assertTrue(claudep["active"])
+        active_families = {item["family"] for item in reviewers if item["active"]}
+        self.assertGreaterEqual(len(active_families), 2)
+        # No checked-in project may carry routing or Tier S overrides.
+        for name in loader.available_projects():
+            with (repo / "projects" / name / "project.yaml").open(encoding="utf-8") as handle:
+                data = yaml.safe_load(handle) or {}
+            dev = (data.get("dev") or {}) if isinstance(data, dict) else {}
+            self.assertNotIn("coding_tool", dev, name)
+            self.assertTrue(not dev.get("tier_s"), name)
+            self.assertEqual(loader.validate_project(name), [], name)
 
 
 if __name__ == "__main__":

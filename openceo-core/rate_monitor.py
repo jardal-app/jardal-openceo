@@ -17,6 +17,7 @@ from typing import Any
 
 import libtmux
 
+from agents.dev.routing import resolved_tool_name
 from settings import Settings
 from state import CodingTool, TaskStatus
 
@@ -419,13 +420,13 @@ class RateMonitor:
         if active_tickets is not None:
             used_slots = 0
             for t in active_tickets:
-                tool = t.get("coding_tool", "")
+                tool = resolved_tool_name(t)
                 if tool == "tier_s":
                     used_slots += self._settings.RATE_TIER_S_WEIGHT
                 else:
                     used_slots += self._settings.RATE_NORMAL_WEIGHT
 
-            ticket_tool = ticket.get("coding_tool", "")
+            ticket_tool = resolved_tool_name(ticket)
             needed = (
                 self._settings.RATE_TIER_S_WEIGHT
                 if ticket_tool == "tier_s"
@@ -436,7 +437,7 @@ class RateMonitor:
                 return False, datetime.now(timezone.utc) + timedelta(minutes=2)
 
         # 2. Provider limits
-        ticket_tool = ticket.get("coding_tool", "")
+        ticket_tool = resolved_tool_name(ticket)
         providers_to_check: list[str] = []
         if ticket_tool == "tier_s":
             providers_to_check = ["claude", "codex"]
@@ -463,7 +464,7 @@ class RateMonitor:
 
     async def on_ticket_completed(self, ticket: dict[str, Any]) -> None:
         """Refresh limits after a ticket finishes. Called by task_service."""
-        tool = ticket.get("coding_tool", "")
+        tool = resolved_tool_name(ticket)
         if tool == "tier_s":
             await self.refresh_status("claude")
             await self.refresh_status("codex")

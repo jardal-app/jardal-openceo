@@ -19,6 +19,19 @@ from state import TaskStatus
 from tools.notion import NotionTicketManager
 
 
+class FakeTaskService:
+    """Task service falso: captura los TaskCreateRequest y devuelve dicts."""
+
+    def __init__(self) -> None:
+        self.requests: list = []
+        self.seq = 0
+
+    async def create_task(self, req):  # type: ignore[no-untyped-def]
+        self.requests.append(req)
+        self.seq += 1
+        return {"task_id": f"task-{self.seq}", "status": "queued"}
+
+
 class PMJsonParsingTests(unittest.TestCase):
     def test_extract_json_payload_accepts_markdown_fences(self) -> None:
         payload = pm_session._extract_json_payload(
@@ -136,15 +149,18 @@ class NotionDynamicSchemaTests(unittest.TestCase):
 
 class PMSubprocessReliabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_claude_subprocess_injects_explicit_mcp_config(self) -> None:
-        settings = Settings(PROJECTS_DIR="projects", DEFAULT_PROJECT="jardal-openceo")
+        settings = Settings(PROJECTS_DIR="projects", DEFAULT_PROJECT="jardal-openceo", MCP_SERVER_ENABLED=True)
         manager = PMSessionManager(settings, config_loader=ConfigLoader(settings))
+        service = FakeTaskService()
+        manager.set_task_service(service)
         captured: dict[str, object] = {}
 
         class FakeProc:
             returncode = 0
 
             async def communicate(self, input=None):  # type: ignore[no-untyped-def]
-                return (b"OK: 2 tickets creados en Notion", b"")
+                return (b"OK: 2 tickets creados en Notion\n"
+                        b'{"tickets": [{"title": "Ticket A"}, {"title": "Ticket B"}]}', b"")
 
         async def fake_exec(*args, **kwargs):  # type: ignore[no-untyped-def]
             captured["args"] = args
@@ -160,15 +176,17 @@ class PMSubprocessReliabilityTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.status, TaskStatus.COMPLETED)
         self.assertEqual(result.tickets_created, 2)
+        self.assertEqual(len(service.requests), 2)
         args = list(captured["args"])
         self.assertIn("--mcp-config", args)
         self.assertIn("--strict-mcp-config", args)
         env = captured["kwargs"]["env"]
         self.assertIn("OPENCEO_INTERNAL_MCP_URL", env)
 
-    async def test_timeout_recovers_created_tickets_from_notion(self) -> None:
+    async def test_timeout_returns_failed(self) -> None:
         settings = Settings(PROJECTS_DIR="projects", DEFAULT_PROJECT="jardal-openceo")
         manager = PMSessionManager(settings, config_loader=ConfigLoader(settings))
+        manager.set_task_service(FakeTaskService())
 
         class FakeProc:
             returncode = 0
@@ -183,43 +201,23 @@ class PMSubprocessReliabilityTests(unittest.IsolatedAsyncioTestCase):
             async def wait(self) -> None:
                 return None
 
-        class FakeNotion:
-            def __init__(self) -> None:
-                self.source_ids: list[str] = []
-
-            def list_tickets_by_source_id(self, source_id: str) -> dict:
-                self.source_ids.append(source_id)
-                return {
-                    "ok": True,
-                    "count": 3,
-                    "tickets": [
-                        {"title": "Ticket 1", "ok": True},
-                        {"title": "Ticket 2", "ok": True},
-                        {"title": "Ticket 3", "ok": True},
-                    ],
-                }
-
         async def fake_exec(*args, **kwargs):  # type: ignore[no-untyped-def]
             return FakeProc()
 
-        notion = FakeNotion()
         with patch("agents.pm.session.asyncio.create_subprocess_exec", side_effect=fake_exec):
             with patch.object(pm_session, "_SUBPROCESS_TIMEOUT", 0.01):
                 result = await manager.extract_tickets_subprocess(
                     interview_text="El cliente quiere login con Google.",
                     project="melanyryr",
                     tool="codex",
-                    notion_manager=notion,
                 )
 
-        self.assertEqual(result.status, TaskStatus.COMPLETED)
-        self.assertEqual(result.tickets_created, 3)
-        self.assertEqual([ticket["title"] for ticket in result.ticket_summaries], ["Ticket 1", "Ticket 2", "Ticket 3"])
-        self.assertEqual(len(notion.source_ids), 1)
+        self.assertEqual(result.status, TaskStatus.FAILED)
+        self.assertIn("CLI timeout", result.error or "")
 
 
 class PMDeepSeekTicketTests(unittest.IsolatedAsyncioTestCase):
-    async def test_langraph_writes_source_id_into_notion_batch(self) -> None:
+    async def test_langraph_writes_source_id_into_task_batch(self) -> None:
         settings = Settings(PROJECTS_DIR="projects", DEFAULT_PROJECT="jardal-openceo")
         manager = PMSessionManager(settings, config_loader=ConfigLoader(settings))
 
@@ -227,27 +225,19 @@ class PMDeepSeekTicketTests(unittest.IsolatedAsyncioTestCase):
             async def ainvoke(self, messages):  # type: ignore[no-untyped-def]
                 return type("Response", (), {"content": '{"tickets":[{"title":"Crear login","priority":"high"}]}'})()
 
-        class FakeNotion:
-            def __init__(self) -> None:
-                self.tickets = None
-
-            def create_tickets_batch(self, *, tickets):  # type: ignore[no-untyped-def]
-                self.tickets = tickets
-                return {"created": len(tickets), "failed": 0, "results": []}
-
-        notion = FakeNotion()
+        service = FakeTaskService()
         manager._llm = FakeLLM()
+        manager.set_task_service(service)
 
         result = await manager.extract_tickets(
             interview_text="El sistema necesita login con Google.",
             project="melanyryr",
-            notion_manager=notion,
         )
 
         self.assertEqual(result.status, TaskStatus.COMPLETED)
         self.assertEqual(result.tickets_created, 1)
-        self.assertIsNotNone(notion.tickets)
-        self.assertTrue(notion.tickets[0]["source_id"].startswith("pm-langraph-"))
+        self.assertEqual(len(service.requests), 1)
+        self.assertTrue(service.requests[0].source_id.startswith("pm-langraph-"))
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from agents.dev.routing import normalize_document_routing
 from db.mongo import MongoRepository
 from events import RealtimeHub
 from graph import OpenCEOGraph
@@ -488,6 +489,10 @@ class TaskService:
                 return existing
 
         doc = make_task_document(payload)
+        # Transition (Tier S design §3.3): legacy routing paths are promoted to
+        # the top-level field at ingest, with a deprecation warning per task.
+        for routing_warning in normalize_document_routing(doc):
+            logger.warning("deprecated routing task_id=%s (%s)", doc.task_id, routing_warning)
         await self._apply_default_phase_workflow_to_document(doc)
         if doc.ticket_number is None:
             doc.ticket_number = await self._repo.get_next_ticket_number()
@@ -1273,7 +1278,44 @@ class TaskService:
                     # que repetirse aqui o los tickets ejecutados de verdad
                     # serian justo los que nunca replanifican.
                     asyncio.create_task(self._notify_horizon_terminal(updated))
+                if final_status == TaskStatus.WAITING.value:
+                    reason = str(updated.get("waiting_reason") or "")
+                    if reason.startswith(("routing_missing", "config")):
+                        asyncio.create_task(self._comment_wait_on_erp(updated, reason))
             return updated
+
+    async def _comment_wait_on_erp(self, task: dict[str, Any], reason: str) -> None:
+        """Post a one-shot ERP comment for waits that need the owner.
+
+        Only routing and config waits qualify: both mean a human (or the
+        tier authority) must fix something before the ticket can run.
+        Transient waits (quota, repo_busy, rate limits) heal alone and stay
+        silent. Never breaks execution.
+        """
+        try:
+            adapter = getattr(self, "_erpnext", None)
+            if adapter is None or not getattr(adapter, "is_enabled", False):
+                return
+            key = reason.split(":", 1)[0].strip()
+            if task.get("wait_commented_for") == key:
+                return
+            mirrors = (task.get("params") or {}).get("_mirrors") or {}
+            mirror = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
+            name = str(mirror.get("name") or "") if isinstance(mirror, dict) else ""
+            if not name:
+                return
+            if key == "routing_missing":
+                text = (
+                    "OpenCEO no puede ejecutar este ticket: falta el campo coding_tool, "
+                    "que se fija al crear la tarea (codex, claude, glm, gemini, opencode, "
+                    "kimi o tier_s). Asigna el ejecutor para continuar."
+                )
+            else:
+                text = f"OpenCEO no puede ejecutar este ticket: configuración inválida ({reason})."
+            await adapter.add_comment(name, text)
+            await self._repo.patch_task(task["task_id"], {"wait_commented_for": key})
+        except Exception:
+            logger.warning("Could not comment wait on ERP for %s", task.get("task_id"), exc_info=True)
 
     async def _fire_notion_sync_back(self, task: dict[str, Any], status_label: str) -> None:
         if self._notion is None:

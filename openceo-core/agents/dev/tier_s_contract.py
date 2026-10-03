@@ -67,16 +67,25 @@ def blocking_findings(text: str) -> bool:
     return bool(re.search(r"^\[(CRITICAL|WARN)\] ", text, re.MULTILINE))
 
 
-def review_quorum(reports: dict[str, str], models: dict[str, str], mandatory_label: str = "codexj") -> bool:
-    """Codex plus one genuinely distinct model, each with a valid report."""
-    if not valid_review(reports.get(mandatory_label, "")):
-        return False
-    mandatory_model = models.get(mandatory_label, "")
-    return any(
-        label != mandatory_label and model and model != mandatory_model
-        and valid_review(reports.get(label, ""))
-        for label, model in models.items()
-    )
+def review_quorum(reports: dict[str, str], families: dict[str, str]) -> bool:
+    """Two valid reports from two distinct model families.
+
+    Tier S design §7 (F0): codexj is out of code review, so any two pool
+    slots from distinct families form a quorum. ``families`` maps reviewer
+    label to its declared family from the global pool. Fail-closed: a
+    report whose label has no known family never counts toward quorum.
+    """
+    seen: set[str] = set()
+    for label, text in reports.items():
+        if not valid_review(text):
+            continue
+        family = (families.get(label) or "").strip()
+        if not family:
+            continue
+        seen.add(family)
+        if len(seen) >= 2:
+            return True
+    return False
 
 
 _QUESTION_OPTION = re.compile(r"(?m)^\s*(?P<selected>[❯›])?\s*(?P<number>[1-9])[.)]\s+(?P<text>.{2,180})$")

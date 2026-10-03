@@ -86,6 +86,11 @@ class DevSessionService:
         async with lock:
             await self._repo.set_selected_project(payload.user_id, project)
             config = self._config_loader.load_project(project)
+            config_errors = self._config_loader.validate_project(project)
+            if config_errors:
+                raise ValueError(
+                    f"Invalid project config for '{project}': {'; '.join(config_errors)}"
+                )
             consensus_mode = payload.provider == DevProvider.AUTO and self._is_consensus_enabled(config)
 
             # One session per project maximum — reuse if tmux is actually running
@@ -1249,10 +1254,8 @@ class DevSessionService:
                 return DevProvider(lead)
             return DevProvider.CLAUDE
 
-        configured_tool = str(config.get("dev", {}).get("coding_tool", "auto")).strip().lower()
-        if configured_tool in DevProvider._value2member_map_ and configured_tool != DevProvider.AUTO.value:
-            return DevProvider(configured_tool)
-
+        # No dev.coding_tool fallback: the key was removed (§15.3) and no
+        # consumer may read it. AUTO resolves via default_provider only.
         default_provider = str(config.get("dev", {}).get("default_provider", "auto")).strip().lower()
         if default_provider in DevProvider._value2member_map_ and default_provider != DevProvider.AUTO.value:
             return DevProvider(default_provider)

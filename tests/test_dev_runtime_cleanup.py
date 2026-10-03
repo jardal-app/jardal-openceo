@@ -74,9 +74,9 @@ class DevPromptTests(unittest.TestCase):
         prompt = self.manager._build_coding_prompt(task, {})
 
         self.assertIn("Ticket: #24", prompt)
-        self.assertIn("Module: Ventas / Inventario", prompt)
-        self.assertIn("Type: Feature", prompt)
-        self.assertIn("Acceptance Criteria:", prompt)
+        self.assertIn("Módulo: Ventas / Inventario", prompt)
+        self.assertIn("Tipo: Feature", prompt)
+        self.assertIn("Criterios de aceptación:", prompt)
         self.assertIn("1. El saldo se recalcula automáticamente al editar una venta", prompt)
         self.assertIn("2. No quedan desfases de inventario después de guardar", prompt)
         self.assertNotIn("WORKFLOW", prompt)

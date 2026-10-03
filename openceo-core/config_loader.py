@@ -72,6 +72,55 @@ class ConfigLoader:
             return self._merge_with_defaults(project, data)
         return self._merge_with_defaults(project, {})
 
+    def validate_project(self, project: str | None) -> list[str]:
+        """Check raw project.yaml for obsolete or misplaced keys.
+
+        Returns human-readable errors; an empty list means the project may
+        run. Tier S design §15: Tier S config is global (the defaults above),
+        so any ``dev.tier_s`` content in a project.yaml is invalid, and
+        ``dev.coding_tool`` is obsolete (§3: routing is per-task). Callers
+        park the project's tickets in ``waiting(config)`` when this is
+        non-empty; other projects are unaffected.
+        """
+        if not project:
+            return []
+        cfg_path = self._resolve_projects_root() / project / "project.yaml"
+        if not cfg_path.exists():
+            return []
+        try:
+            with cfg_path.open("r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+        except Exception as exc:
+            return [f"{project}/project.yaml: unreadable ({exc})"]
+        if not isinstance(data, dict):
+            return [f"{project}/project.yaml: top level must be a mapping"]
+        dev = data.get("dev")
+        if dev is None:
+            return []
+        if not isinstance(dev, dict):
+            return [f"{project}/project.yaml: 'dev' must be a mapping"]
+        errors: list[str] = []
+        if "coding_tool" in dev:
+            errors.append(
+                "dev.coding_tool is obsolete: routing is per-task "
+                "(TaskDocument.coding_tool, set at creation). Remove it from "
+                f"{project}/project.yaml."
+            )
+        tier_s = dev.get("tier_s")
+        if tier_s is not None and tier_s != {}:
+            if isinstance(tier_s, dict):
+                found = ", ".join(sorted(str(key) for key in tier_s))
+                errors.append(
+                    "dev.tier_s must not be set in project.yaml: Tier S roles "
+                    f"and pool are global. Remove it from {project}/project.yaml "
+                    f"(found: {found})."
+                )
+            else:
+                errors.append(
+                    f"dev.tier_s in {project}/project.yaml must be a mapping or absent."
+                )
+        return errors
+
     def context_path(self, project: str | None) -> Path:
         base = self._resolve_project_context_root() / (project or "_global")
         base.mkdir(parents=True, exist_ok=True)
@@ -123,28 +172,30 @@ class ConfigLoader:
                 "repos": [],
             },
             "dev": {
-                "coding_tool": "claude",
+                # No dev.coding_tool default: routing is per-task
+                # (TaskDocument.coding_tool). A project default would silently
+                # route untagged tickets (Tier S design §3).
                 "coding_tier": "auto",
                 "default_provider": "auto",
                 "branch_pattern": "{session_id}-{slug}",
                 "auto_push": False,
                 "create_pr": True,
                 "pr_body": "empty",
+                # Global Tier S config: the single source of roles and pool.
+                # Projects must not set dev.tier_s (see validate_project).
                 "tier_s": {
-                    "review_rounds": 2,
-                    "max_plans": 8,
                     "timeout_minutes": 15,
                     "roles": {
-                        "planner": {"provider": "claude", "label": "claudej", "model": "claude-opus-5-5", "active": True, "command": ["claudej"]},
-                        "plan-reviewer": {"provider": "codex", "label": "codexj", "model": "gpt-6-sol", "active": True, "command": ["codexj"]},
+                        "planner": {"provider": "claude", "label": "claudej", "model": "opus", "active": True, "command": ["claudej"]},
+                        "plan-reviewer": {"provider": "codex", "label": "codexj", "model": "gpt-6.1-sol", "active": True, "command": ["codexj"]},
                         "builder": {"provider": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "active": True, "command": ["muse", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"]},
                     },
                     "reviewers": [
-                        {"label": "qwen", "provider": "qwen", "model": "qwen3.8-max", "active": True, "command": ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"]},
-                        {"label": "claudeg", "provider": "claude", "model": "glm-5.3", "active": True, "command": ["claudeg", "--model", "opus", "--tools", "Read,Glob,Grep"]},
-                        {"label": "claudep", "provider": "claude", "model": "deepseek-v4.1-flash", "active": True, "command": ["claudep", "--model", "opus", "--tools", "Read,Glob,Grep"]},
-                        {"label": "agyd", "provider": "gemini", "model": "gemini", "active": False, "command": ["agyd"]},
-                        {"label": "mimo", "provider": "opencode", "model": "opencode-go/mimo-v2.6-pro", "active": False, "command": ["opencode"]},
+                        {"label": "qwen", "provider": "qwen", "model": "qwen3.8-max", "family": "qwen", "active": True, "command": ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"]},
+                        {"label": "claudeg", "provider": "claude", "model": "glm-5.3", "family": "glm", "active": True, "command": ["claudeg", "--model", "opus", "--tools", "Read,Glob,Grep"]},
+                        {"label": "claudep", "provider": "claude", "model": "deepseek-flash", "family": "deepseek", "active": True, "command": ["claudep", "--model", "opus", "--tools", "Read,Glob,Grep"]},
+                        {"label": "agyd", "provider": "gemini", "model": "gemini", "family": "gemini", "active": False, "command": ["agyd"]},
+                        {"label": "mimo", "provider": "opencode", "model": "opencode-go/mimo-v2.6-pro", "family": "mimo", "active": False, "command": ["opencode"]},
                     ],
                 },
                 "providers": {

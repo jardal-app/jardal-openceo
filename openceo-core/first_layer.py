@@ -422,7 +422,7 @@ PERSONALIDAD Y TONO DE VOZ (CRÍTICO):
    - '¿por qué falló?', '¿qué falta?', '¿qué cambios pide?' con ticket en foco -> intent="ticket_query".
    - 'reintenta el ticket', 'ejecuta el ticket' -> intent="ticket_retry".
 9. SESIONES DEV (CÓDIGO/PROGRAMACIÓN) Y TERMINALES TMUX:
-   - 'crea una sesión en jardal-trading', 'cree una sesión en jardal-trading', 'abre una sesión en trading', 'crea una sesión dev', 'abre sesión con codex|claude' -> SIEMPRE intent="dev_session_start" con project y opcional provider. Toda petición de crear/abrir sesión para un proyecto de código es una sesión dev.
+   - 'crea una sesión en jardal-trading', 'cree una sesión en jardal-trading', 'abre una sesión en trading', 'crea una sesión dev', 'abre sesión con codex|claude|muse|opencode' -> SIEMPRE intent="dev_session_start" con project y opcional provider. Toda petición de crear/abrir sesión para un proyecto de código es una sesión dev.
    - 'crea una sesión en el proyecto nro 1', 'crea sesión en el 1', 'crea una sesión en el proyecto 1', 'abre sesión en el 2', 'crea sesión en el nro 1' -> intent="dev_session_start" con el project correspondiente al número según la lista 'PROYECTOS DISPONIBLES' (ej: 1 -> jardal-openceo, 2 -> jardal-trading, etc.).
    - 'cierra la sesión dev', 'elimina la sesión dev', 'termina la sesión' -> intent="dev_session_stop".
    - instrucción directa de código con sesión dev -> intent="dev_instruction" con instruction.

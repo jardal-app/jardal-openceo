@@ -24,6 +24,7 @@ CORE_DIR = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
+from agents.finance import contribution as contribution_module  # noqa: E402
 from agents.finance import scope_summary as scope_module  # noqa: E402
 from agents.finance.session import FinanceSessionManager  # noqa: E402
 from state import TaskStatus  # noqa: E402
@@ -127,7 +128,8 @@ class FinanceSessionManagerTests(unittest.TestCase):
 
     def test_contribution_phrase_reads_and_speaks(self) -> None:
         client = FakeERPNextClient()
-        client.gl_rows = [_gl_row("2026-09-20", "Servicios - J", "0", "6200")]
+        in_scope = contribution_module.current_month_period()[1]
+        client.gl_rows = [_gl_row(in_scope, "Servicios - J", "0", "6200")]
         output = self._run("cómo vamos con el diezmo", client)
         self.assertEqual(output.status, TaskStatus.COMPLETED)
         self.assertIn("6200.00", output.last_response_summary or "")

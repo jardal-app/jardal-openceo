@@ -77,6 +77,10 @@ class MongoRepository:
         return self.db["tier_s_runs"]
 
     @property
+    def repo_locks(self):
+        return self.db["repo_locks"]
+
+    @property
     def discovery_runs(self):
         return self.db["discovery_runs"]
 
@@ -228,6 +232,11 @@ class MongoRepository:
             partialFilterExpression={"active_repo": {"$type": "string"}},
         )
         await self.tier_s_runs.create_index([("cleanup_at", ASCENDING)])
+
+        # Common execution lock: one document per repo. The TTL index is a
+        # backstop for crashed holders; live code takes over expired locks
+        # directly in acquire_repo_lock.
+        await self.repo_locks.create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
 
         await self.discovery_runs.create_index([("discovery_id", ASCENDING)], unique=True)
         await self.discovery_runs.create_index([("task_id", ASCENDING), ("created_at", DESCENDING)])
@@ -613,6 +622,49 @@ class MongoRepository:
 
     async def active_tier_s_run_for_repo(self, repo_path: str) -> dict[str, Any] | None:
         return self._clean(await self.tier_s_runs.find_one({"active_repo": repo_path}))
+
+    # ------------------------- Repo execution lock -------------------------
+
+    async def acquire_repo_lock(self, repo: str, holder: str, ttl_seconds: int = 86400) -> dict[str, Any] | None:
+        """Atomically take the per-repo execution lock shared by every tier.
+
+        Tier S design §11.1. Re-acquiring as the same ``holder`` refreshes
+        the lease. Returns the lock document, or None when another live
+        holder owns it.
+        """
+        now = datetime.now(timezone.utc)
+        try:
+            row = await self.repo_locks.find_one_and_update(
+                {"_id": repo, "$or": [{"holder": holder}, {"expires_at": {"$lte": now}}]},
+                {"$set": {"holder": holder, "acquired_at": now,
+                          "expires_at": now + timedelta(seconds=ttl_seconds)}},
+                upsert=True,
+                return_document=ReturnDocument.AFTER,
+            )
+        except DuplicateKeyError:
+            # No match but the _id exists (or a concurrent upsert won): the
+            # lock is held by another live holder.
+            return None
+        if row is not None and row.get("holder") == holder:
+            return self._clean(row)
+        return None
+
+    async def release_repo_lock(self, repo: str, holder: str) -> bool:
+        """Release the repo lock, but only if ``holder`` owns it."""
+        result = await self.repo_locks.delete_one({"_id": repo, "holder": holder})
+        return result.deleted_count == 1
+
+    async def touch_repo_lock(self, repo: str, holder: str, ttl_seconds: int = 86400) -> bool:
+        """Extend a lock owned by ``holder`` (waiting retains the lock)."""
+        now = datetime.now(timezone.utc)
+        result = await self.repo_locks.update_one(
+            {"_id": repo, "holder": holder},
+            {"$set": {"expires_at": now + timedelta(seconds=ttl_seconds)}},
+        )
+        return result.modified_count == 1
+
+    async def repo_lock_holder(self, repo: str) -> dict[str, Any] | None:
+        return self._clean(await self.repo_locks.find_one({"_id": repo}))
 
     async def interrupted_tier_s_runs(self, limit: int = 200) -> list[dict[str, Any]]:
         rows = self.tier_s_runs.find({"active_repo": {"$type": "string"},

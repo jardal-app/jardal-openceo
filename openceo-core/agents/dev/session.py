@@ -22,6 +22,7 @@ from .opencode_run import (
     parse_run_output,
 )
 from .review_links import ReviewLinksExtraction, apply_review_links_to_params, extract_review_links
+from .routing import ROUTING_MISSING_REASON, resolve_coding_tool
 from .tmux_runtime import TmuxRuntime
 from config_loader import ConfigLoader
 from rate_monitor import RateMonitor
@@ -31,6 +32,29 @@ from state import CodingTier, CodingTool, TaskStatus
 from .tier_selector import TierSelector
 
 logger = logging.getLogger(__name__)
+
+#: Typed wait reason when the project's config is invalid (Tier S design §15).
+CONFIG_INVALID_REASON = "config"
+
+#: Typed wait reason when another execution holds the repo lock (§11.1).
+REPO_BUSY_REASON = "repo_busy"
+
+
+def _resolve_execution_repo(project_config: dict[str, Any]) -> str | None:
+    """Repo path this execution would work on, for the common lock."""
+    repos = (project_config.get("project") or {}).get("repos") or []
+    if not repos:
+        return None
+    local_path = repos[0].get("local_path") or repos[0].get("path")
+    if not local_path:
+        return None
+    path = Path(str(local_path))
+    try:
+        if path.exists():
+            return str(path.resolve())
+    except OSError:
+        pass
+    return str(local_path)
 
 
 @dataclass
@@ -87,13 +111,49 @@ class DevSessionManager:
         dev_cfg = project_config.get("dev", {})
         qa_cfg = dev_cfg.get("qa", {})
 
-        # Respect ticket-level tier/tool overrides (e.g. manual classification)
+        # Single routing reader (Tier S design §3): the top-level coding_tool,
+        # with legacy fallbacks during the deprecation transition.
+        decision = resolve_coding_tool(task, project_config)
+        if decision.deprecated:
+            logger.warning(
+                "deprecated routing source=%s task_id=%s (%s)",
+                decision.source, task.get("task_id"), decision.detail,
+            )
+        if decision.tool is None:
+            # Not dispatched: no tier selection (it may call an LLM) and no
+            # fallback. The ERP comment for the wait is posted by task_service.
+            return DevExecutionOutput(
+                status=TaskStatus.WAITING,
+                waiting_reason=f"{ROUTING_MISSING_REASON}: {decision.detail}",
+                params=task.get("params") if isinstance(task.get("params"), dict) else None,
+            )
+
+        # Invalid project config parks every ticket, whatever the tier.
+        config_errors = self._config_loader.validate_project(task.get("project"))
+        if config_errors:
+            return DevExecutionOutput(
+                status=TaskStatus.WAITING,
+                waiting_reason=f"{CONFIG_INVALID_REASON}: {'; '.join(config_errors)}",
+                params=task.get("params") if isinstance(task.get("params"), dict) else None,
+            )
+
+        # Respect ticket-level tier overrides (e.g. manual classification)
         task_params = task.get("params") if isinstance(task.get("params"), dict) else {}
         task_tier = task.get("coding_tier") or task_params.get("coding_tier")
-        task_tool = task.get("coding_tool") or task_params.get("coding_tool")
 
         if task_tier:
-            tier = CodingTier(task_tier)
+            try:
+                tier = CodingTier(task_tier)
+            except ValueError:
+                logger.warning(
+                    "invalid coding_tier=%r task_id=%s; falling back to selector",
+                    task_tier, task.get("task_id"),
+                )
+                tier = await self._tier_selector.select(
+                    str(dev_cfg.get("coding_tier", "auto")),
+                    task.get("title", ""),
+                    task.get("description", ""),
+                )
         else:
             tier = await self._tier_selector.select(
                 str(dev_cfg.get("coding_tier", "auto")),
@@ -101,23 +161,41 @@ class DevSessionManager:
                 task.get("description", ""),
             )
 
-        configured_tool = self._configured_tool(dev_cfg)
+        # Common execution lock (§11.1): one repo, one execution, every tier.
+        repo = _resolve_execution_repo(project_config) if self._repo is not None else None
+        holder = str(task.get("task_id") or "")
+        if repo is not None and holder:
+            if await self._repo.acquire_repo_lock(repo, holder) is None:
+                return DevExecutionOutput(
+                    status=TaskStatus.WAITING,
+                    waiting_reason=f"{REPO_BUSY_REASON}: {repo}",
+                    resume_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+                    params=task.get("params") if isinstance(task.get("params"), dict) else None,
+                )
+        try:
+            if decision.tool == CodingTool.TIER_S:
+                output = await self._run_critical_consensus(task, project_config, tier, qa_cfg)
+            else:
+                output = await self._run_simple_tool(task, project_config, decision.tool, tier, qa_cfg)
+        except Exception:
+            if repo is not None and holder:
+                await self._repo.release_repo_lock(repo, holder)
+            raise
+        if repo is not None and holder:
+            if output.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.ESCALATED):
+                await self._repo.release_repo_lock(repo, holder)
+            elif output.status == TaskStatus.WAITING:
+                await self._repo.touch_repo_lock(repo, holder)
+        return output
 
-        # Ticket-level coding_tool overrides project config.
-        effective_tool: CodingTool | None = None
-        if task_tool:
-            try:
-                effective_tool = CodingTool(task_tool)
-            except ValueError:
-                effective_tool = None
-        if effective_tool is None:
-            effective_tool = configured_tool
-
-        if effective_tool == CodingTool.TIER_S:
-            return await self._run_critical_consensus(task, project_config, tier, qa_cfg)
-
-        tool = effective_tool or self._tool_for_tier(tier)
-
+    async def _run_simple_tool(
+        self,
+        task: dict[str, Any],
+        project_config: dict[str, Any],
+        tool: CodingTool,
+        tier: CodingTier,
+        qa_cfg: dict[str, Any],
+    ) -> DevExecutionOutput:
         output = DevExecutionOutput(
             status=TaskStatus.IN_PROGRESS,
             coding_tier=tier,
@@ -563,15 +641,6 @@ class DevSessionManager:
         except Exception as exc:
             return self._step("update_files", "skipped", f"CONTEXT.md unavailable: {exc}")
 
-    def _tool_for_tier(self, tier: CodingTier) -> CodingTool:
-        if tier == CodingTier.TIER1:
-            return CodingTool.CODEX
-        if tier == CodingTier.TIER3:
-            return CodingTool.OPENCODE
-        if tier == CodingTier.TIER4:
-            return CodingTool.KIMI
-        return CodingTool.CLAUDE
-
     def _resolve_cli_command(self, tool: CodingTool, config: dict[str, Any]) -> list[str]:
         command: list[str]
         cmd = config.get("dev", {}).get("cli_command")
@@ -621,16 +690,6 @@ class DevSessionManager:
         if cwd is not None:
             cwd = str(cwd)
         return command, cwd, env_vars
-
-    def _configured_tool(self, dev_cfg: dict[str, Any]) -> CodingTool | None:
-        value = str(dev_cfg.get("coding_tool", "")).strip().lower()
-        if not value:
-            return None
-        if value == "claude-code":
-            value = "claude"
-        if value in CodingTool._value2member_map_:
-            return CodingTool(value)
-        return None
 
     def _build_coding_prompt(self, task: dict[str, Any], config: dict[str, Any]) -> str:
         pm = (task.get("params") or {}).get("pm_ticket") or {}

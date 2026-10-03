@@ -45,6 +45,12 @@ _ROLE_PLANNER = "planner"
 _ROLE_PLAN_REVIEWER = "plan-reviewer"
 _ROLE_BUILDER = "builder"
 
+# Transitional execution constants. review_rounds/max_plans were removed from
+# the config surface (Tier S design §15.3, F0); F6 replaces them with
+# max_fix_rounds and package budgets.
+_REVIEW_ROUNDS = 2
+_MAX_PLANS = 8
+
 
 @dataclass
 class _TierSPaths:
@@ -104,8 +110,16 @@ class CriticalConsensusOrchestrator:
 
     @staticmethod
     def is_enabled(config: dict[str, Any]) -> bool:
-        dev_cfg = config.get("dev", {}) or {}
-        return str(dev_cfg.get("coding_tool", "")).strip().lower() == "tier_s"
+        """Interactive Tier S trigger: none (product decision, F0 cleanup).
+
+        The old AUTO + ``dev.coding_tool: tier_s`` project flag is gone
+        (§15.3 removed the key), and an explicit ``tier_s`` session was
+        discarded: loose sessions are always single-provider. The
+        orchestrator machinery stays dormant for the autonomous queue,
+        which routes per-task through ``resolve_coding_tool`` instead.
+        """
+        _ = config
+        return False
 
     async def execute(
         self,
@@ -208,8 +222,6 @@ class CriticalConsensusOrchestrator:
             return await wait(fallback)
 
         required = cfg["roles"]
-        if cfg["unsupported_legacy_opencode"]:
-            return await wait("Tier S espera: opencode_reviewers es una configuración obsoleta; usa reviewers cuando exista su adaptador de lectura.")
         for role in (_ROLE_PLANNER, _ROLE_PLAN_REVIEWER, _ROLE_BUILDER):
             account = required[role]
             if not account["active"]:
@@ -218,17 +230,20 @@ class CriticalConsensusOrchestrator:
             if not command or not (Path(command[0]).exists() or shutil.which(command[0])):
                 return await wait(f"Tier S espera: no se encontró el comando de {account['label']}.")
         active_reviewers = [item for item in cfg["reviewers"] if item["active"]]
-        mandatory_label = required[_ROLE_PLAN_REVIEWER]["label"]
+        plan_reviewer_label = required[_ROLE_PLAN_REVIEWER]["label"]
         planner_label = required[_ROLE_PLANNER]["label"]
         builder_label = required[_ROLE_BUILDER]["label"]
-        models = {mandatory_label: required[_ROLE_PLAN_REVIEWER]["model"]}
-        models.update({item["label"]: item["model"] for item in active_reviewers})
-        if len(models) != len(active_reviewers) + 1:
+        families = {item["label"]: item["family"] for item in active_reviewers}
+        if len(families) != len(active_reviewers):
             return await wait("Tier S espera: las etiquetas de revisores deben ser únicas.")
         if required[_ROLE_PLAN_REVIEWER]["provider"] != "codex":
-            return await wait("Tier S espera: el revisor obligatorio requiere el adaptador Codex.")
-        if not any(item["model"] != models[mandatory_label] for item in active_reviewers):
-            return await wait("Tier S espera: falta un segundo modelo revisor independiente.")
+            return await wait("Tier S espera: la revisión del plan requiere el adaptador Codex.")
+        distinct_families = set(families.values())
+        if len(distinct_families) < 2:
+            return await wait("Tier S espera: el pool necesita al menos 2 familias de revisores activas para el quorum.")
+        if len(distinct_families) < 3:
+            logger.warning("Tier S pool degraded: only %d distinct families, no spare reviewer slot",
+                           len(distinct_families))
         for account in active_reviewers:
             if account["provider"] not in {"qwen", "claude", "codex"}:
                 return await wait(f"Tier S espera: {account['label']} necesita un adaptador de lectura; desactívalo hasta que esté disponible.")
@@ -291,8 +306,8 @@ class CriticalConsensusOrchestrator:
                     repo_path, cfg["timeout_seconds"])
                 if not valid_review(report):
                     await self._checkpoint(run_id, task_id, session_id,
-                        reviewer_availability={mandatory_label: self._review_failures.get(
-                            (str(repo_path), mandatory_label), "invalid_report")})
+                        reviewer_availability={plan_reviewer_label: self._review_failures.get(
+                            (str(repo_path), plan_reviewer_label), "invalid_report")})
                     return await wait("Codex no entregó una revisión válida del plan.")
                 (paths.dir / "PLAN_REVIEW.md").write_text(report, encoding="utf-8")
                 if not blocking_findings(report):
@@ -360,7 +375,7 @@ class CriticalConsensusOrchestrator:
                 before_fix = GitSnapshot(run["fix_baseline"], "") if run.get("fix_baseline") else git_snapshot(repo_path)
                 if not run.get("fix_baseline"):
                     await self._checkpoint(run_id, task_id, session_id, fix_baseline=before_fix.files)
-                labels = [mandatory_label, *[item["label"] for item in active_reviewers]]
+                labels = [item["label"] for item in active_reviewers]
                 if self._read_signal(paths.status_path) != f"FIX_DONE_{p}_{r}":
                     if run.get("question"):
                         if not str(run.get("human_answer") or "").strip():
@@ -389,7 +404,7 @@ class CriticalConsensusOrchestrator:
                 if not changed:
                     return await wait("El diff del subplan desapareció antes de la revisión.")
                 await progress(f"Revisión {r} del subplan {p}.")
-                reports, availability = await self._review_snapshot(required[_ROLE_PLAN_REVIEWER], active_reviewers,
+                reports, availability = await self._review_snapshot(active_reviewers,
                                                        p, r, changed, paths, cfg, repo_path)
                 total_reviews += sum(valid_review(value) for value in reports.values())
                 await self._checkpoint(run_id, task_id, session_id, reviews_received=total_reviews,
@@ -401,8 +416,8 @@ class CriticalConsensusOrchestrator:
                                        snapshot_hash=snapshot.digest)
                 if git_snapshot(repo_path).digest != snapshot.digest:
                     return await wait("Un revisor modificó el árbol de trabajo; revisar antes de continuar.")
-                if not review_quorum(reports, models, mandatory_label):
-                    return await wait(f"Revisión {r} sin quorum: Codex y otro modelo son obligatorios.")
+                if not review_quorum(reports, families):
+                    return await wait(f"Revisión {r} sin quorum: se necesitan 2 revisores válidos de familias distintas.")
                 if not any(blocking_findings(value) for value in reports.values()):
                     phase = "next"
                     break
@@ -440,14 +455,22 @@ class CriticalConsensusOrchestrator:
                 files = cumulative.changed_since(GitSnapshot(run.get("initial_snapshot") or {}, ""))
                 if not files:
                     return await wait("No quedó diff acumulado para la revisión integrada.")
-                integrated = await self._readonly_review(required[_ROLE_PLAN_REVIEWER],
-                    self._integrated_prompt(files), repo_path, cfg["timeout_seconds"])
-                if not valid_review(integrated):
-                    return await wait("Codex no entregó revisión integrada válida.")
-                (paths.dir / "REVIEW-INTEGRATED.md").write_text(integrated, encoding="utf-8")
+                await progress("Revisión integrada del ticket.")
+                integrated_reports, integrated_availability = await self._review_snapshot(
+                    active_reviewers, 0, attempt + 1, files, paths, cfg, repo_path,
+                    prompt_builder=lambda label: (
+                        f"Read-only integrated review, {label}. " + self._integrated_prompt(files)),
+                )
+                total_reviews += sum(valid_review(value) for value in integrated_reports.values())
+                await self._checkpoint(run_id, task_id, session_id, reviews_received=total_reviews,
+                                       reviewer_results={key: bool(valid_review(value)) for key, value in integrated_reports.items()},
+                                       reviewer_availability=integrated_availability,
+                                       snapshot_hash=cumulative.digest)
                 if git_snapshot(repo_path).digest != cumulative.digest:
-                    return await wait("El diff cambió durante la revisión integrada.")
-                if not blocking_findings(integrated):
+                    return await wait("Un revisor modificó el árbol de trabajo; revisar antes de continuar.")
+                if not review_quorum(integrated_reports, families):
+                    return await wait("Revisión integrada sin quorum: se necesitan 2 revisores válidos de familias distintas.")
+                if not any(blocking_findings(value) for value in integrated_reports.values()):
                     break
                 if attempt >= 2:
                     return await wait("Quedan hallazgos en la revisión integrada.")
@@ -467,10 +490,15 @@ class CriticalConsensusOrchestrator:
                     )
                 else:
                     self._reset_signal_file(paths.status_path)
+                    integrated_files = "\n".join(
+                        f"- {paths.review(item['label'], 0, attempt + 1)}"
+                        for item in active_reviewers
+                        if paths.review(item["label"], 0, attempt + 1).exists())
                     fix_turn = await self._send_participant_instruction(
                         sessions[_ROLE_BUILDER], None, None,
-                        "Fix valid blocking findings in .tier-s/REVIEW-INTEGRATED.md. "
-                        "Update the relevant BUILD_SUMMARY_N.md. Write FIX_DONE_INTEGRATED to .tier-s/status when done. "
+                        "Fix valid blocking findings in these integrated review files:\n"
+                        f"{integrated_files}\n"
+                        "Update the relevant BUILD_SUMMARY_N.md files. Write FIX_DONE_INTEGRATED to .tier-s/status when done. "
                         f"Work inside {repo_path}.",
                         cfg["timeout_seconds"],
                         completion_check=lambda: self._read_signal(paths.status_path) == "FIX_DONE_INTEGRATED",
@@ -485,7 +513,7 @@ class CriticalConsensusOrchestrator:
             delta = after_fix.changed_since(before_fix)
             if not delta:
                 return await wait("El fix integrado no cambió código verificable.")
-            reports, availability = await self._review_snapshot(required[_ROLE_PLAN_REVIEWER], active_reviewers,
+            reports, availability = await self._review_snapshot(active_reviewers,
                 n_plans, cfg["review_rounds"] + 1 + attempt, delta, paths, cfg, repo_path)
             total_reviews += sum(valid_review(value) for value in reports.values())
             await self._checkpoint(run_id, task_id, session_id, reviews_received=total_reviews,
@@ -494,7 +522,7 @@ class CriticalConsensusOrchestrator:
                                        for value in reports.values()),
                                    reviewer_results={key: bool(valid_review(value)) for key, value in reports.items()},
                                    reviewer_availability=availability)
-            if git_snapshot(repo_path).digest != after_fix.digest or not review_quorum(reports, models, mandatory_label):
+            if git_snapshot(repo_path).digest != after_fix.digest or not review_quorum(reports, families):
                 return await wait("La confirmación del último delta no alcanzó quorum o cambió el diff.")
             if any(blocking_findings(value) for value in reports.values()):
                 return await wait("El último delta conserva hallazgos bloqueantes.")
@@ -566,10 +594,14 @@ class CriticalConsensusOrchestrator:
             existing = await self._repo.active_tier_s_run(owner)
             if existing:
                 self._run_cache[existing["run_id"]] = existing
+                if await self._repo.acquire_repo_lock(str(repo_path), owner) is None:
+                    raise _RepoBusy("Tier S espera: el repo está bloqueado por otra ejecución.")
                 return existing
             occupant = await self._repo.active_tier_s_run_for_repo(str(repo_path))
             if occupant:
                 raise _RepoBusy(f"Tier S espera: el repo ya tiene un intento activo ({occupant['run_id']}).")
+            if await self._repo.acquire_repo_lock(str(repo_path), owner) is None:
+                raise _RepoBusy("Tier S espera: el repo está bloqueado por otra ejecución.")
         now = datetime.now(timezone.utc)
         doc = {"run_id": str(uuid4()), "owner_id": owner, "task_id": task_id,
                "session_id": session_id, "project": project, "repo_path": str(repo_path),
@@ -582,6 +614,9 @@ class CriticalConsensusOrchestrator:
             try:
                 await self._repo.create_tier_s_run(doc)
             except DuplicateKeyError as exc:
+                if await self._repo.active_tier_s_run(owner) is None:
+                    # Another owner won the repo: don't orphan our lock on it.
+                    await self._repo.release_repo_lock(str(repo_path), owner)
                 raise _RepoBusy("Tier S espera: otro intento tomó el repo antes de iniciar.") from exc
             if task_id:
                 await self._repo.patch_task(task_id, {"tier_s_run_id": doc["run_id"]})
@@ -726,6 +761,14 @@ class CriticalConsensusOrchestrator:
                     "waiting_reason": run.get("waiting_reason"), "question": run.get("question"),
                 }})
         if run.get("status") in {"completed", "failed", "cancelled"} and run.get("active_repo") is None:
+            if self._repo is not None and task_id is None and session_id is not None:
+                # Interactive-owned run: autonomous runs are released by
+                # DevSessionManager.run, which owns the whole dev turn.
+                try:
+                    await self._repo.release_repo_lock(
+                        str(run.get("repo_path") or ""), str(run.get("owner_id") or session_id))
+                except Exception:
+                    logger.warning("Could not release Tier S repo lock", exc_info=True)
             self._run_cache.pop(run_id, None)
             repo_path = str(run.get("repo_path") or "")
             for key in [key for key in self._review_failures if key[0] == repo_path]:
@@ -853,13 +896,18 @@ class CriticalConsensusOrchestrator:
             logger.warning("Tier S reviewer %s failed", account["label"], exc_info=True)
             return ""
 
-    async def _review_snapshot(self, mandatory: dict[str, Any], reviewers: list[dict[str, Any]],
+    async def _review_snapshot(self, reviewers: list[dict[str, Any]],
                                p: int, round_: int, changed: list[str], paths: _TierSPaths,
-                               cfg: dict[str, Any], repo_path: Path) -> tuple[dict[str, str], dict[str, str]]:
-        accounts = [mandatory, *reviewers]
+                               cfg: dict[str, Any], repo_path: Path,
+                               prompt_builder: Callable[[str], str] | None = None,
+                               ) -> tuple[dict[str, str], dict[str, str]]:
+        accounts = list(reviewers)
         labels = [account["label"] for account in accounts]
-        prompts = [self._code_reviewer_prompt(label, p, round_, paths, changed)
-                   for label in labels]
+        if prompt_builder is None:
+            prompts = [self._code_reviewer_prompt(label, p, round_, paths, changed)
+                       for label in labels]
+        else:
+            prompts = [prompt_builder(label) for label in labels]
         outputs = await asyncio.gather(*(
             self._readonly_review(account, prompt, repo_path, cfg["timeout_seconds"])
             for account, prompt in zip(accounts, prompts)
@@ -991,8 +1039,8 @@ class CriticalConsensusOrchestrator:
         if not isinstance(tier_s_cfg, dict):
             tier_s_cfg = {}
 
-        review_rounds = max(1, int(tier_s_cfg.get("review_rounds", 2)))
-        max_plans = max(1, int(tier_s_cfg.get("max_plans", 8)))
+        review_rounds = _REVIEW_ROUNDS
+        max_plans = _MAX_PLANS
         timeout_seconds = max(120, int(tier_s_cfg.get("timeout_minutes", 15)) * 60)
 
         raw_roles = tier_s_cfg.get("roles", {}) or {}
@@ -1005,7 +1053,7 @@ class CriticalConsensusOrchestrator:
             roles[role_name] = {
                 "provider": str(role_cfg.get("provider", "")).strip().lower() or self._default_provider_for_role(role_name),
                 "label": str(role_cfg.get("label") or {"planner": "claudej", "plan-reviewer": "codexj", "builder": "muse"}[role_name]),
-                "model": str(role_cfg.get("model") or {"planner": "claude-opus-5-5", "plan-reviewer": "gpt-6-sol", "builder": "muse-spark-1.3-contributor"}[role_name]),
+                "model": str(role_cfg.get("model") or {"planner": "opus", "plan-reviewer": "gpt-6.1-sol", "builder": "muse-spark-1.3-contributor"}[role_name]),
                 "active": role_cfg.get("active", True) is True,
                 "command": role_cfg.get("command") or [],
                 "env": role_cfg.get("env", {}) or {},
@@ -1018,12 +1066,12 @@ class CriticalConsensusOrchestrator:
                     pass
 
         default_reviewers = [
-            {"label": "qwen", "provider": "qwen", "model": "qwen3.8-max", "active": True,
+            {"label": "qwen", "provider": "qwen", "model": "qwen3.8-max", "family": "qwen", "active": True,
              "command": ["qwen", "--approval-mode", "plan"]},
-            {"label": "claudeg", "provider": "claude", "model": "glm-5.3", "active": True,
+            {"label": "claudeg", "provider": "claude", "model": "glm-5.3", "family": "glm", "active": True,
              "command": ["claudeg", "--tools", "Read,Glob,Grep"]},
-            {"label": "agyd", "provider": "gemini", "model": "gemini", "active": False, "command": ["agyd"]},
-            {"label": "mimo", "provider": "opencode", "model": "opencode-go/mimo-v2.6-pro", "active": False,
+            {"label": "agyd", "provider": "gemini", "model": "gemini", "family": "gemini", "active": False, "command": ["agyd"]},
+            {"label": "mimo", "provider": "opencode", "model": "opencode-go/mimo-v2.6-pro", "family": "mimo", "active": False,
              "command": ["opencode"]},
         ]
         raw_reviewers = tier_s_cfg.get("reviewers", default_reviewers)
@@ -1036,14 +1084,12 @@ class CriticalConsensusOrchestrator:
                 model = str(item.get("model") or "").strip()
                 provider = str(item.get("provider") or "").strip().lower()
                 if label and model and provider:
+                    # Family falls back to provider (fail-closed for quorum:
+                    # two slots sharing a provider never form a quorum).
                     reviewers.append({"label": label, "model": model, "provider": provider,
+                                      "family": str(item.get("family") or provider).strip(),
                                       "active": item.get("active", True) is True,
                                       "command": item.get("command") or []})
-
-        legacy_gemini = raw_roles.get("gemini_reviewer") if isinstance(raw_roles, dict) else None
-        if isinstance(legacy_gemini, dict) and legacy_gemini.get("active", True):
-            reviewers.append({"label": "agyd", "model": "gemini", "provider": "gemini",
-                              "active": True, "command": legacy_gemini.get("command") or ["agyd"]})
 
         return {
             "roles": roles,
@@ -1051,7 +1097,6 @@ class CriticalConsensusOrchestrator:
             "max_plans": max_plans,
             "timeout_seconds": timeout_seconds,
             "reviewers": reviewers,
-            "unsupported_legacy_opencode": bool(tier_s_cfg.get("opencode_reviewers")),
         }
 
     @staticmethod
