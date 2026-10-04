@@ -1462,6 +1462,8 @@ class CriticalConsensusOrchestrator:
             f"   - Tests run or needed\n"
             f"4. Overwrite {_TIER_S_DIR}/status with exactly BUILD_DONE_{p} and print it.\n\n"
             f"Do NOT touch other sub-plans.\n"
+            f"Do NOT commit, push, rebase, stash, or change branches: leave your work "
+            f"uncommitted in the working tree; the orchestrator integrates it.\n"
             f"Work inside {paths.dir.parent}."
         )
 
@@ -1516,6 +1518,8 @@ class CriticalConsensusOrchestrator:
             f"Apply the valid findings to the code. Ignore findings you disagree with (note why).\n"
             f"Update {_TIER_S_DIR}/BUILD_SUMMARY_{p}.md with what was changed.\n"
             f"Overwrite {_TIER_S_DIR}/status with exactly FIX_DONE_{p}_{round_} and print it.\n"
+            f"Do NOT commit, push, rebase, stash, or change branches: leave your work "
+            f"uncommitted in the working tree; the orchestrator integrates it.\n"
             f"Work inside {paths.dir.parent}."
         )
 
