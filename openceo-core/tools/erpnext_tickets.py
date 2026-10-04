@@ -48,11 +48,10 @@ SUBJECT_MAX_LENGTH = 140
 #: Valores que acepta el Select `openceo_coding_tool` en ERPNext. Se derivan del enum
 #: para que no puedan desincronizarse: si se agrega un provider, se agrega aca solo.
 # Explicit (NOT derived from CodingTool): openceo_coding_tool is an ERP Select,
-# so a value missing there fails the whole POST. Add "muse" here only together
-# with the desk Select option; until then muse tickets mirror without the field.
-_CODING_TOOLS: frozenset[str] = frozenset(
-    {"codex", "claude", "glm", "gemini", "opencode", "kimi", "tier_s"}
-)
+# so a value missing there fails the whole POST. The desk moved to the v2
+# letters on 2026-10-04 (tier_s/a/b/c); provider names are omitted until the
+# code migrates to v2. Omitting loses a display datum, never the ticket.
+_CODING_TOOLS: frozenset[str] = frozenset({"tier_s", "tier_a", "tier_b", "tier_c"})
 
 #: OpenCEO -> ERPNext. `completed` se resuelve por ticket (ver `resolve_erpnext_status`):
 #: con revision humana pendiente -> `Pending Review` (cola QA); sin ella -> `Completed`

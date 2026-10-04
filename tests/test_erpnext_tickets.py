@@ -160,7 +160,11 @@ class MappingTests(unittest.TestCase):
     def test_provider_se_normaliza_desde_el_enum(self):
         self.assertEqual(map_coding_tool(CodingTool.TIER_S), "tier_s")
         self.assertEqual(map_coding_tool("TIER_S"), "tier_s")
-        self.assertEqual(map_coding_tool("codex"), "codex")
+        self.assertEqual(map_coding_tool("tier_a"), "tier_a")
+        self.assertEqual(map_coding_tool("TIER_C"), "tier_c")
+        # Desk moved to the v2 letters on 2026-10-04: provider names would
+        # fail the POST, so they are omitted until the code migrates to v2.
+        self.assertIsNone(map_coding_tool("codex"))
 
     def test_provider_desconocido_devuelve_none(self):
         """`openceo_coding_tool` es un Select: un valor invalido haria fallar el POST.
