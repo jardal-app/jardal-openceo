@@ -19,6 +19,7 @@ from rate_monitor import RateMonitor
 from settings import Settings
 from state import CodingTier, CodingTool, TaskStatus
 
+from .tier_s_contract import child_env
 from .tier_selector import TierSelector
 
 logger = logging.getLogger(__name__)
@@ -786,7 +787,7 @@ class DevSessionManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
-                env={**os.environ, **env} if env else None,
+                env=child_env(os.environ, env),
             )
             input_bytes = None if stdin_payload is None else stdin_payload.encode("utf-8")
             stdout, stderr = await asyncio.wait_for(

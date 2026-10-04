@@ -25,7 +25,7 @@ from state import DevProvider
 
 from .tmux_runtime import TmuxRuntime, TmuxTurnResult
 from .tier_s_contract import (
-    GitSnapshot, blocking_findings, detect_claude_question, git_snapshot,
+    GitSnapshot, blocking_findings, child_env, detect_claude_question, git_snapshot,
     parse_plan_observations, parse_plan_responses, plan_response_gaps,
     review_quorum, valid_plan_review, valid_review, verify_plan_anchor,
 )
@@ -964,9 +964,7 @@ class CriticalConsensusOrchestrator:
         before = git_snapshot(cwd) if check_writes else None
         failure_key = (str(origin_repo), str(account["label"]))
         try:
-            merged_env = None
-            if env:
-                merged_env = {**os.environ, **{str(k): str(v) for k, v in env.items()}}
+            merged_env = child_env(os.environ, env)
             process = await asyncio.create_subprocess_exec(
                 *argv, cwd=str(cwd), stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,

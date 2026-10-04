@@ -11,7 +11,30 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Collection
+from typing import Collection, Mapping
+
+
+# Orchestration credentials that must never leak into child CLI environments.
+# dsh resolves its DeepSeek key per request and ranks the inherited process
+# environment ABOVE $DSH_HOME/.credentials.yaml, so inheriting the service key
+# silently re-bills Tier S reviews to the orchestration account instead of the
+# operator's own dsh key (TASK-2026-00105).
+CHILD_ENV_CREDENTIAL_BLOCKLIST = frozenset({"DEEPSEEK_API_KEY"})
+
+
+def child_env(base: Mapping[str, str], overlay: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Merge a child process env over ``base`` without leaking credentials.
+
+    Blocklisted keys are dropped unless the overlay sets them explicitly:
+    explicit config is operator intent and wins.
+    """
+    overlay = {str(k): str(v) for k, v in dict(overlay or {}).items()}
+    merged = {
+        str(k): str(v) for k, v in dict(base).items()
+        if k not in CHILD_ENV_CREDENTIAL_BLOCKLIST or k in overlay
+    }
+    merged.update(overlay)
+    return merged
 
 
 @dataclass(frozen=True)
