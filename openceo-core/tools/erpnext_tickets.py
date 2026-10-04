@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from settings import Settings
-from state import CodingTool, QAReviewState
+from state import QAReviewState
 from tools.erpnext_client import (
     ERPNextClient,
     ERPNextDuplicateError,
@@ -47,7 +47,12 @@ SUBJECT_MAX_LENGTH = 140
 
 #: Valores que acepta el Select `openceo_coding_tool` en ERPNext. Se derivan del enum
 #: para que no puedan desincronizarse: si se agrega un provider, se agrega aca solo.
-_CODING_TOOLS: frozenset[str] = frozenset(tool.value for tool in CodingTool)
+# Explicit (NOT derived from CodingTool): openceo_coding_tool is an ERP Select,
+# so a value missing there fails the whole POST. Add "muse" here only together
+# with the desk Select option; until then muse tickets mirror without the field.
+_CODING_TOOLS: frozenset[str] = frozenset(
+    {"codex", "claude", "glm", "gemini", "opencode", "kimi", "tier_s"}
+)
 
 #: OpenCEO -> ERPNext. `completed` se resuelve por ticket (ver `resolve_erpnext_status`):
 #: con revision humana pendiente -> `Pending Review` (cola QA); sin ella -> `Completed`

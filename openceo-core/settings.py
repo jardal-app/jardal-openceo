@@ -26,6 +26,7 @@ class Settings(BaseSettings):
 
     # Dev coding providers
     CODEX_CLI_PATH: str = "/home/develop/.npm-global/bin/codex"
+    CODEXJ_CLI_PATH: str = "/home/develop/.local/bin/codexj"
     CLAUDE_CODE_PATH: str = "clauded"
     GEMINI_CLI_PATH: str = "/home/develop/.local/bin/agyd"
     OPENCODE_CLI_PATH: str = "/home/develop/.opencode/bin/opencode"
@@ -176,6 +177,8 @@ class Settings(BaseSettings):
     RATE_CODEX_RESERVE_WEEKLY: float = 0.0
     RATE_CLAUDE_RESERVE_5H: float = 0.0
     RATE_CLAUDE_RESERVE_WEEKLY: float = 0.0
+    RATE_MUSE_RESERVE_5H: float = 0.0
+    RATE_MUSE_RESERVE_WEEKLY: float = 0.0
     RATE_TIER_S_WEIGHT: int = 3
     RATE_NORMAL_WEIGHT: int = 1
     RATE_STATUS_STALE_SECONDS: int = 300  # 5 min

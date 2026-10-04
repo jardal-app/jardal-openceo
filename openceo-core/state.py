@@ -126,6 +126,7 @@ class CodingTool(str, Enum):
     OPENCODE = "opencode"
     KIMI = "kimi"
     TIER_S = "tier_s"
+    MUSE = "muse"
 
 
 class DevProvider(str, Enum):

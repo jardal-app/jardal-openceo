@@ -145,7 +145,7 @@ class DevSessionService:
                         session_doc.metadata["execution_mode"] = "tier_s"
                         session_doc.metadata["consensus"] = {
                             "lead": "planner",
-                            "reviewers": ["codexj", "qwen", "claudeg", "claudep"],
+                            "reviewers": ["codexj", "qwen", "qwen-glm", "claudep"],
                         }
                     except Exception as exc:
                         logger.error("Failed to start Tier S for '%s': %s", project, exc)

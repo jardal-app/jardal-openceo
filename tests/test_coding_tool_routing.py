@@ -35,7 +35,7 @@ def _task(**overrides):
 
 class ResolveCodingToolTests(unittest.TestCase):
     def test_root_value_wins_and_is_not_deprecated(self) -> None:
-        for value in ("codex", "claude", "glm", "gemini", "opencode", "kimi", "tier_s"):
+        for value in ("codex", "claude", "glm", "gemini", "opencode", "kimi", "tier_s", "muse"):
             decision = resolve_coding_tool(_task(coding_tool=value))
             self.assertEqual(decision.tool, CodingTool(value))
             self.assertEqual(decision.source, "root")

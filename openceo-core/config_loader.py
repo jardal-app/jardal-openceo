@@ -192,7 +192,7 @@ class ConfigLoader:
                     },
                     "reviewers": [
                         {"label": "qwen", "provider": "qwen", "model": "qwen3.8-max", "family": "qwen", "active": True, "command": ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"]},
-                        {"label": "claudeg", "provider": "claude", "model": "glm-5.3", "family": "glm", "active": True, "command": ["claudeg", "--model", "opus", "--tools", "Read,Glob,Grep"]},
+                        {"label": "qwen-glm", "provider": "qwen", "model": "glm-5.3", "family": "glm", "active": True, "command": ["qwen", "-m", "glm-5.3", "--approval-mode", "plan"]},  # owner 2026-10-03: GLM via Qwen plan (claudeg retired)
                         {"label": "claudep", "provider": "claude", "model": "deepseek-flash", "family": "deepseek", "active": True, "command": ["claudep", "--model", "opus", "--tools", "Read,Glob,Grep"]},
                         {"label": "agyd", "provider": "gemini", "model": "gemini", "family": "gemini", "active": False, "command": ["agyd"]},
                         {"label": "mimo", "provider": "opencode", "model": "opencode-go/mimo-v2.6-pro", "family": "mimo", "active": False, "command": ["opencode"]},

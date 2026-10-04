@@ -95,6 +95,7 @@ class OpenCEOGraph:
                 description=state["description"],
                 agent_hint=state.get("agent_hint"),
                 project_config=project_cfg,
+                coding_tool=state.get("coding_tool"),
             )
 
         step = {
@@ -152,6 +153,9 @@ class OpenCEOGraph:
                 if str(phase.get("type") or "").strip().lower() == "agent":
                     return f"Task routed to {selected_agent.value} by phase {phase_key}"
                 break
+        tool = str(state.get("coding_tool") or "").strip()
+        if tool and selected_agent == AgentName.DEV:
+            return f"Task routed to dev by coding_tool={tool}"
         return f"Task routed to {selected_agent.value}"
 
     def _after_ceo_route(self, state: GraphState) -> str:

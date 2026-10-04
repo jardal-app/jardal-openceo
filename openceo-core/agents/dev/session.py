@@ -665,6 +665,8 @@ class DevSessionManager:
                 command = [self._settings.GLM_CLI_PATH, *shlex.split(self._settings.GLM_DEFAULT_ARGS)]
             elif tool == CodingTool.KIMI:
                 command = [self._settings.KIMI_CLI_PATH, *shlex.split(self._settings.KIMI_DEFAULT_ARGS)]
+            elif tool == CodingTool.MUSE:
+                command = [self._settings.MUSE_CLI_PATH, *shlex.split(self._settings.MUSE_DEFAULT_ARGS)]
             else:
                 command = [self._settings.CLAUDE_CODE_PATH, *shlex.split(self._settings.CLAUDE_DEFAULT_ARGS)]
 

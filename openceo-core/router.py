@@ -79,7 +79,15 @@ class CEORouter:
         description: str,
         agent_hint: str | None = None,
         project_config: dict[str, Any] | None = None,
+        coding_tool: str | None = None,
     ) -> AgentName:
+        # A ticket-level coding_tool is a persisted routing decision: every
+        # CodingTool value is a dev executor, so it forces DEV before any
+        # text classification. Without this, Tier S tickets can misroute to
+        # pm/finance and "complete" without ever reaching dev (F0 pilot 00097).
+        if coding_tool and str(coding_tool).strip():
+            return AgentName.DEV
+
         if agent_hint:
             hinted = self.AGENT_ALIASES.get(agent_hint.lower())
             if hinted:

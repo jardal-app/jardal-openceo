@@ -101,6 +101,37 @@ class RouterConfigTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(selected, AgentName.PM)
 
+    async def test_coding_tool_forces_dev_over_pm_text_and_hint(self) -> None:
+        # F0 pilot 00097 misrouted to pm: a persisted coding_tool is a dev
+        # executor by definition and wins over text classification and hints.
+        message = "El cliente quiere login con Google, roles admin y dashboard de auditoría."
+        project_config = {"routing": {"llm_fallback": False}}
+
+        for tool in ("tier_s", "codex", "claude", "muse", "opencode", "kimi", "gemini", "glm"):
+            with self.subTest(tool=tool):
+                selected = await self.router.select_agent(
+                    title=message,
+                    description=message,
+                    agent_hint="pm",
+                    project_config=project_config,
+                    coding_tool=tool,
+                )
+                self.assertEqual(selected, AgentName.DEV)
+
+    async def test_no_coding_tool_keeps_previous_behavior(self) -> None:
+        message = "El cliente quiere login con Google, roles admin y dashboard de auditoría."
+        project_config = {"routing": {"llm_fallback": False}}
+
+        for tool in (None, "", "   "):
+            with self.subTest(tool=tool):
+                selected = await self.router.select_agent(
+                    title=message,
+                    description=message,
+                    project_config=project_config,
+                    coding_tool=tool,
+                )
+                self.assertEqual(selected, AgentName.PM)
+
 
 class RoutingConfigLoaderTests(unittest.TestCase):
     def test_project_defaults_include_routing_schema(self) -> None:

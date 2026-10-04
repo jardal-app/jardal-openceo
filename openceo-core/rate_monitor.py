@@ -1,8 +1,8 @@
 """Rate-limit monitor for AI coding-tool subscriptions.
 
 Manages dedicated tmux monitor sessions to poll `/status` (Codex) and `/usage`
-(Claude), parses remaining quota, and gates ticket launches based on reserve
-thresholds and concurrency slots.
+(Claude, muse), parses remaining quota, and gates ticket launches based on
+reserve thresholds and concurrency slots.
 """
 
 from __future__ import annotations
@@ -51,6 +51,17 @@ _CLAUDE_RESETS_RE = re.compile(
 
 # Codex session-id from /status output:  "Session: <uuid>"
 _CODEX_SESSION_ID_RE = re.compile(r"Session:\s*([0-9a-f-]{36})", re.IGNORECASE)
+
+# muse /usage subscription box – e.g. "Current  0% used · Resets at 4:54 PM"
+# and "Weekly  4% used · Resets Oct 5 at 12:00 AM" (verified 2026-10-04).
+_MUSE_CURRENT_RE = re.compile(
+    r"Current\s+(\d+)%\s+used\W+Resets?\s+at\s+(\d{1,2}:\d{2}\s*(?:AM|PM))",
+    re.IGNORECASE,
+)
+_MUSE_WEEKLY_RE = re.compile(
+    r"Weekly\s+(\d+)%\s+used\W+Resets?\s+(\w+\s+\d{1,2})\s+at\s+(\d{1,2}:\d{2}\s*(?:AM|PM))",
+    re.IGNORECASE,
+)
 
 # ---------------------------------------------------------------------------
 # Rate-limit trigger patterns (used by the polling loops in tmux_runtime)
@@ -139,16 +150,18 @@ class RateMonitor:
         # Monitor sessions need interactive REPLs so slash commands
         # (/usage, /status) work. DEFAULT_ARGS may contain -p for
         # batch dev sessions — strip it and use interactive-only flags.
-        # Codex: disable MCP servers (-c overrides config.toml) — the
-        # monitor only needs the built-in /status command, and the
-        # openceo-global MCP adds ~40s to boot time.
+        # Codex: measure the codexj account (owner 2026-10-04), the one
+        # Tier S actually spends — never the default codex login. No extra
+        # flags: the wrapper already carries bypass + model + effort, and a
+        # -c override wedges the TUI behind a blocking warning (00086).
         if provider == "codex":
-            path = self._settings.CODEX_CLI_PATH
-            cmd = f"{path} --dangerously-bypass-approvals-and-sandbox"
-            cmd += " -c 'mcp_servers={}'"
+            cmd = self._settings.CODEXJ_CLI_PATH
         elif provider == "claude":
             path = self._settings.CLAUDE_CODE_PATH
             cmd = f"{path} --dangerously-skip-permissions"
+        elif provider == "muse":
+            # Bare: the monitor only runs /usage, no tools, no approvals needed.
+            cmd = self._settings.MUSE_CLI_PATH
         else:
             raise ValueError(f"No monitor support for provider: {provider}")
 
@@ -157,15 +170,30 @@ class RateMonitor:
         pane.send_keys(cmd, enter=True)
         logger.info("Created rate-monitor tmux session '%s'", name)
         # Let the CLI finish booting before we send slash commands.
-        # Codex model loading takes ~25-30s even without MCP servers.
-        boot_wait = 30 if provider == "codex" else 8
+        # Codex model loading takes ~25-30s even without MCP servers;
+        # muse TUI takes ~45s (measured 2026-10-04).
+        if provider == "muse":
+            boot_wait = 50
+        else:
+            boot_wait = 30 if provider == "codex" else 8
         time.sleep(boot_wait)
+        if provider == "codex":
+            # Dismiss any blocking startup notice so Enter submits.
+            pane.send_keys("Escape")
+            time.sleep(2)
         return session
 
     def _send_to_monitor(self, provider: str, text: str) -> None:
         session = self._get_or_create_monitor_session(provider)
         pane = session.active_window.active_pane
-        pane.send_keys(text, enter=True)
+        if provider == "muse":
+            # muse TUI ignores send_keys(..., enter=True): literal + explicit
+            # enter, same mechanism tmux_runtime uses for builders.
+            pane.send_keys(text, enter=False, literal=True)
+            time.sleep(1)
+            pane.enter()
+        else:
+            pane.send_keys(text, enter=True)
         # Give the CLI a moment to process the slash command
         time.sleep(3)
 
@@ -185,7 +213,7 @@ class RateMonitor:
             return ""
 
     def close_monitor_sessions(self) -> None:
-        for provider in ("codex", "claude"):
+        for provider in ("codex", "claude", "muse"):
             name = self._monitor_session_name(provider)
             try:
                 session = self.server.sessions.get(session_name=name)
@@ -205,25 +233,27 @@ class RateMonitor:
         status = ProviderStatus(provider="codex")
         now = datetime.now(timezone.utc)
 
+        # Scrollback may hold several /status outputs: the last one is freshest.
         pct_matches = _CODEX_PCT_RE.findall(content)
-        if len(pct_matches) >= 1:
-            status.remaining_5h = int(pct_matches[0]) / 100.0
         if len(pct_matches) >= 2:
-            status.remaining_weekly = int(pct_matches[1]) / 100.0
+            status.remaining_5h = int(pct_matches[-2]) / 100.0
+            status.remaining_weekly = int(pct_matches[-1]) / 100.0
+        elif len(pct_matches) == 1:
+            status.remaining_5h = int(pct_matches[-1]) / 100.0
 
-        m5h = _CODEX_RESETS_5H_RE.search(content)
-        if m5h:
-            status.resets_5h_at = RateMonitor._codex_time_to_utc(m5h.group(1), now)
+        m5h_list = _CODEX_RESETS_5H_RE.findall(content)
+        if m5h_list:
+            status.resets_5h_at = RateMonitor._codex_time_to_utc(m5h_list[-1], now)
 
-        mw = _CODEX_RESETS_WEEKLY_RE.search(content)
-        if mw:
+        mw_list = _CODEX_RESETS_WEEKLY_RE.findall(content)
+        if mw_list:
             status.resets_weekly_at = RateMonitor._codex_weekly_to_utc(
-                mw.group(1), mw.group(2), now
+                mw_list[-1][0], mw_list[-1][1], now
             )
 
-        sid = _CODEX_SESSION_ID_RE.search(content)
-        if sid:
-            status.codex_session_id = sid.group(1)
+        sid_list = _CODEX_SESSION_ID_RE.findall(content)
+        if sid_list:
+            status.codex_session_id = sid_list[-1]
 
         status.updated_at = now
         return status
@@ -234,17 +264,48 @@ class RateMonitor:
         status = ProviderStatus(provider="claude")
         now = datetime.now(timezone.utc)
 
+        # Scrollback may hold several /usage outputs: the last one is freshest.
+        # Each output yields 3 matches (session, week, fable); map session→5h.
         used_matches = _CLAUDE_USED_RE.findall(content)
-        if len(used_matches) >= 1:
-            status.remaining_5h = max(0.0, 1.0 - int(used_matches[0]) / 100.0)
-        if len(used_matches) >= 2:
-            status.remaining_weekly = max(0.0, 1.0 - int(used_matches[1]) / 100.0)
+        if len(used_matches) >= 3:
+            status.remaining_5h = max(0.0, 1.0 - int(used_matches[-3]) / 100.0)
+            status.remaining_weekly = max(0.0, 1.0 - int(used_matches[-2]) / 100.0)
+        elif len(used_matches) == 2:
+            status.remaining_5h = max(0.0, 1.0 - int(used_matches[-2]) / 100.0)
+            status.remaining_weekly = max(0.0, 1.0 - int(used_matches[-1]) / 100.0)
+        elif len(used_matches) == 1:
+            status.remaining_5h = max(0.0, 1.0 - int(used_matches[-1]) / 100.0)
 
         reset_matches = _CLAUDE_RESETS_RE.findall(content)
-        if len(reset_matches) >= 1:
-            status.resets_5h_at = RateMonitor._claude_time_to_utc(reset_matches[0], now)
         if len(reset_matches) >= 2:
-            status.resets_weekly_at = RateMonitor._claude_time_to_utc(reset_matches[1], now)
+            status.resets_5h_at = RateMonitor._claude_time_to_utc(reset_matches[-2], now)
+            status.resets_weekly_at = RateMonitor._claude_time_to_utc(reset_matches[-1], now)
+        elif len(reset_matches) == 1:
+            status.resets_5h_at = RateMonitor._claude_time_to_utc(reset_matches[-1], now)
+
+        status.updated_at = now
+        return status
+
+    @staticmethod
+    def _parse_muse_usage(content: str) -> ProviderStatus:
+        """Parse muse `/usage` subscription box (Current + Weekly % used)."""
+        status = ProviderStatus(provider="muse")
+        now = datetime.now(timezone.utc)
+
+        # Scrollback may hold several outputs: the last one is freshest.
+        cur_list = _MUSE_CURRENT_RE.findall(content)
+        if cur_list:
+            used, reset = cur_list[-1]
+            status.remaining_5h = max(0.0, 1.0 - int(used) / 100.0)
+            status.resets_5h_at = RateMonitor._muse_current_to_utc(reset, now)
+
+        wk_list = _MUSE_WEEKLY_RE.findall(content)
+        if wk_list:
+            used, date_part, time_part = wk_list[-1]
+            status.remaining_weekly = max(0.0, 1.0 - int(used) / 100.0)
+            status.resets_weekly_at = RateMonitor._muse_weekly_to_utc(
+                date_part, time_part, now
+            )
 
         status.updated_at = now
         return status
@@ -252,6 +313,53 @@ class RateMonitor:
     # ------------------------------------------------------------------
     # Time normalisation helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _muse_current_to_utc(time_str: str, now: datetime) -> datetime:
+        """muse shows server-local time (UTC here), e.g. '4:54 PM'."""
+        try:
+            m = re.match(r"(\d{1,2}):(\d{2})\s*(am|pm)", time_str.strip(), re.IGNORECASE)
+            if not m:
+                return now + timedelta(hours=5)
+            hour = int(m.group(1))
+            minute = int(m.group(2))
+            if m.group(3).lower() == "pm" and hour != 12:
+                hour += 12
+            elif m.group(3).lower() == "am" and hour == 12:
+                hour = 0
+            candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if candidate <= now:
+                candidate += timedelta(days=1)
+            return candidate
+        except Exception:
+            return now + timedelta(hours=5)
+
+    @staticmethod
+    def _muse_weekly_to_utc(date_str: str, time_str: str, now: datetime) -> datetime:
+        """muse weekly: 'Oct 5' + '12:00 AM', server-local (UTC here)."""
+        try:
+            parts = date_str.strip().split()
+            month_map = {
+                "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+                "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+            }
+            month = month_map.get(parts[0].lower()[:3], now.month)
+            day = int(parts[1])
+            m = re.match(r"(\d{1,2}):(\d{2})\s*(am|pm)", time_str.strip(), re.IGNORECASE)
+            if not m:
+                return now + timedelta(days=7)
+            hour = int(m.group(1))
+            minute = int(m.group(2))
+            if m.group(3).lower() == "pm" and hour != 12:
+                hour += 12
+            elif m.group(3).lower() == "am" and hour == 12:
+                hour = 0
+            candidate = datetime(now.year, month, day, hour, minute, tzinfo=timezone.utc)
+            if candidate < now - timedelta(days=1):
+                candidate = candidate.replace(year=now.year + 1)
+            return candidate
+        except Exception:
+            return now + timedelta(days=7)
 
     @staticmethod
     def _codex_time_to_utc(time_str: str, now: datetime) -> datetime:
@@ -329,7 +437,12 @@ class RateMonitor:
         async with lock:
             if provider == "codex":
                 self._send_to_monitor(provider, "/status")
+                # The TUI sometimes eats the first Enter (autocomplete popup):
+                # a second Enter submits, while a stray empty submit is harmless.
+                self._send_to_monitor(provider, "")
             elif provider == "claude":
+                self._send_to_monitor(provider, "/usage")
+            elif provider == "muse":
                 self._send_to_monitor(provider, "/usage")
             else:
                 # unsupported – return full availability
@@ -338,9 +451,20 @@ class RateMonitor:
             # Wait for the CLI to respond
             await asyncio.sleep(3)
             content = self._capture_monitor(provider, lines=40)
+            missing_output = (
+                (provider == "codex" and "left" not in content.lower())
+                or (provider == "muse" and "resets" not in content.lower())
+            )
+            if missing_output:
+                # Command did not execute — one more Enter before giving up.
+                self._send_to_monitor(provider, "")
+                await asyncio.sleep(3)
+                content = self._capture_monitor(provider, lines=60)
 
             if provider == "codex":
                 status = self._parse_codex_status(content)
+            elif provider == "muse":
+                status = self._parse_muse_usage(content)
             else:
                 status = self._parse_claude_usage(content)
 
@@ -389,21 +513,20 @@ class RateMonitor:
 
     async def can_launch(self, provider: str) -> bool:
         """Check if we have enough quota to launch a new ticket on this provider."""
-        # Gemini, OpenCode – always available (no tracking)
-        if provider not in ("codex", "claude"):
+        # Gemini, OpenCode, GLM, Kimi – always available (no tracking)
+        if provider not in ("codex", "claude", "muse"):
             return True
 
         status = await self.get_status(provider)
-        reserve_5h = (
-            self._settings.RATE_CODEX_RESERVE_5H
-            if provider == "codex"
-            else self._settings.RATE_CLAUDE_RESERVE_5H
-        )
-        reserve_weekly = (
-            self._settings.RATE_CODEX_RESERVE_WEEKLY
-            if provider == "codex"
-            else self._settings.RATE_CLAUDE_RESERVE_WEEKLY
-        )
+        if provider == "codex":
+            reserve_5h = self._settings.RATE_CODEX_RESERVE_5H
+            reserve_weekly = self._settings.RATE_CODEX_RESERVE_WEEKLY
+        elif provider == "muse":
+            reserve_5h = self._settings.RATE_MUSE_RESERVE_5H
+            reserve_weekly = self._settings.RATE_MUSE_RESERVE_WEEKLY
+        else:
+            reserve_5h = self._settings.RATE_CLAUDE_RESERVE_5H
+            reserve_weekly = self._settings.RATE_CLAUDE_RESERVE_WEEKLY
         return status.remaining_5h > reserve_5h and status.remaining_weekly > reserve_weekly
 
     async def can_launch_ticket(
@@ -440,11 +563,11 @@ class RateMonitor:
         ticket_tool = resolved_tool_name(ticket)
         providers_to_check: list[str] = []
         if ticket_tool == "tier_s":
-            providers_to_check = ["claude", "codex"]
-        elif ticket_tool in ("codex", "claude"):
+            providers_to_check = ["claude", "codex", "muse"]
+        elif ticket_tool in ("codex", "claude", "muse"):
             providers_to_check = [ticket_tool]
         else:
-            # gemini / opencode / unknown – always OK
+            # gemini / opencode / glm / kimi / unknown – always OK
             return True, None
 
         earliest_reset: datetime | None = None
@@ -468,7 +591,8 @@ class RateMonitor:
         if tool == "tier_s":
             await self.refresh_status("claude")
             await self.refresh_status("codex")
-        elif tool in ("codex", "claude"):
+            await self.refresh_status("muse")
+        elif tool in ("codex", "claude", "muse"):
             await self.refresh_status(tool)
 
     # ------------------------------------------------------------------

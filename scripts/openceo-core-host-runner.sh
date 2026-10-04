@@ -36,6 +36,10 @@ export OPENCEO_PORT="${OPENCEO_HOST_PORT:-18765}"
 if [[ -n "${MONGODB_URL:-}" ]] && [[ "${MONGODB_URL}" == *"jardal-mongo"* ]]; then
   export MONGODB_URL="${MONGODB_URL//jardal-mongo/127.0.0.1}"
 fi
+# Same CLI search path as the manual launcher: Tier S resolves bare role
+# commands (claudej, codexj, muse, qwen, claudep) via PATH. Without this,
+# the systemd-managed service fails preflight with "no se encontró el comando".
+export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.opencode/bin:$PATH"
 export PROJECTS_DIR="${PROJECTS_DIR:-$ROOT_DIR/projects}"
 export PYTHONUNBUFFERED=1
 

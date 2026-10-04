@@ -51,6 +51,13 @@ _ROLE_BUILDER = "builder"
 _REVIEW_ROUNDS = 2
 _MAX_PLANS = 8
 
+# Builder sessions (muse) ignore repo CLAUDE.md when AGENTS.md exists, but the
+# owner keeps standing rules in CLAUDE.md — order it explicitly, first line.
+_BUILDER_RULES_PREAMBLE = (
+    "Read CLAUDE.md and AGENTS.md in the repo root and follow all applicable "
+    "rules before doing anything else.\n\n"
+)
+
 
 @dataclass
 class _TierSPaths:
@@ -1068,8 +1075,8 @@ class CriticalConsensusOrchestrator:
         default_reviewers = [
             {"label": "qwen", "provider": "qwen", "model": "qwen3.8-max", "family": "qwen", "active": True,
              "command": ["qwen", "--approval-mode", "plan"]},
-            {"label": "claudeg", "provider": "claude", "model": "glm-5.3", "family": "glm", "active": True,
-             "command": ["claudeg", "--tools", "Read,Glob,Grep"]},
+            {"label": "qwen-glm", "provider": "qwen", "model": "glm-5.3", "family": "glm", "active": True,
+             "command": ["qwen", "-m", "glm-5.3", "--approval-mode", "plan"]},  # owner 2026-10-03: GLM via Qwen plan (claudeg retired)
             {"label": "agyd", "provider": "gemini", "model": "gemini", "family": "gemini", "active": False, "command": ["agyd"]},
             {"label": "mimo", "provider": "opencode", "model": "opencode-go/mimo-v2.6-pro", "family": "mimo", "active": False,
              "command": ["opencode"]},
@@ -1309,7 +1316,8 @@ class CriticalConsensusOrchestrator:
 
     def _builder_prompt(self, p: int, paths: _TierSPaths) -> str:
         return (
-            f"Implement ONLY sub-plan {p} from {_TIER_S_DIR}/{_PLAN_FILENAME.split('/')[-1]}.\n\n"
+            _BUILDER_RULES_PREAMBLE
+            + f"Implement ONLY sub-plan {p} from {_TIER_S_DIR}/{_PLAN_FILENAME.split('/')[-1]}.\n\n"
             f"1. Read {_TIER_S_DIR}/{_PLAN_FILENAME.split('/')[-1]} and understand sub-plan {p}.\n"
             f"2. Implement the changes exactly as specified in the sub-plan.\n"
             f"3. Write {_TIER_S_DIR}/BUILD_SUMMARY_{p}.md with:\n"
@@ -1367,7 +1375,8 @@ class CriticalConsensusOrchestrator:
         review_files = [f"{_TIER_S_DIR}/REVIEW-{label}-{p}-{round_}.md" for label in labels]
         file_list = "\n".join(f"- {f} (if exists)" for f in review_files)
         return (
-            f"Reviewers finished round {round_} for sub-plan {p}.\n\n"
+            _BUILDER_RULES_PREAMBLE
+            + f"Reviewers finished round {round_} for sub-plan {p}.\n\n"
             f"Read the review files:\n{file_list}\n\n"
             f"Apply the valid findings to the code. Ignore findings you disagree with (note why).\n"
             f"Update {_TIER_S_DIR}/BUILD_SUMMARY_{p}.md with what was changed.\n"

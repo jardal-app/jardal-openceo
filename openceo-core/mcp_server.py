@@ -372,7 +372,7 @@ def _register_openceo_tools(
         tags: list[str] | None = None,
         due_date: str | None = None,
         external_url: str | None = None,
-        coding_tool: Literal["codex", "claude", "glm", "gemini", "opencode", "kimi", "tier_s"] | None = None,
+        coding_tool: Literal["codex", "claude", "glm", "gemini", "opencode", "kimi", "tier_s", "muse"] | None = None,
         coding_tier: Literal["tier1", "tier2", "tier3", "tier4"] | None = None,
         autorun: bool = False,
     ) -> dict[str, Any]:
