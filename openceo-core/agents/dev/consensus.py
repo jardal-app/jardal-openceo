@@ -438,7 +438,8 @@ class CriticalConsensusOrchestrator:
             await self._ensure_participant_session(sessions[_ROLE_BUILDER], config, wait_ready=True)
         while p <= n_plans:
             if phase == "build":
-                before = (GitSnapshot(run["baseline"], "") if run.get("baseline")
+                stored_baseline = self._stored_snapshot(run, "baseline")
+                before = (GitSnapshot(stored_baseline, "") if stored_baseline is not None
                           and run.get("subplan") == p else git_snapshot(repo_path))
                 await self._checkpoint(run_id, task_id, session_id, phase="build", subplan=p,
                                        baseline=before.files)
@@ -468,8 +469,9 @@ class CriticalConsensusOrchestrator:
                 phase = "review"
             if phase == "fix":
                 r = int(run.get("round") or 1)
-                before_fix = GitSnapshot(run["fix_baseline"], "") if run.get("fix_baseline") else git_snapshot(repo_path)
-                if not run.get("fix_baseline"):
+                stored_fix = self._stored_snapshot(run, "fix_baseline")
+                before_fix = GitSnapshot(stored_fix, "") if stored_fix is not None else git_snapshot(repo_path)
+                if stored_fix is None:
                     await self._checkpoint(run_id, task_id, session_id, fix_baseline=before_fix.files)
                 labels = [item["label"] for item in active_reviewers]
                 if self._read_signal(paths.status_path) != f"FIX_DONE_{p}_{r}":
@@ -1418,6 +1420,14 @@ class CriticalConsensusOrchestrator:
             return int(match.group(1))
         except ValueError:
             return None
+
+    @staticmethod
+    def _stored_snapshot(run: dict[str, Any], key: str) -> dict[str, str | None] | None:
+        """Stored snapshot dict, distinguishing 'never stored' (None) from a
+        clean tree ({}). An empty dict is falsy: treating it as missing
+        re-baselines after the work is done and hides it."""
+        value = run.get(key)
+        return dict(value) if isinstance(value, dict) else None
 
     # ------------------------------------------------------------------
     # Phase C — Builder
