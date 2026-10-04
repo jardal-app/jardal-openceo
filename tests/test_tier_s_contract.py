@@ -1,24 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 CORE = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE) not in sys.path:
     sys.path.insert(0, str(CORE))
 
 from agents.dev.consensus import CriticalConsensusOrchestrator, ConsensusParticipant
+from agents.dev.session import DevSessionManager
 from agents.dev.tier_s_contract import (
-    detect_claude_question, git_snapshot, parse_plan_observations,
+    child_env, detect_claude_question, git_snapshot, parse_plan_observations,
     parse_plan_responses, plan_response_gaps, review_quorum,
     valid_plan_review, verify_plan_anchor,
 )
+from settings import Settings
 from agents.dev.tmux_runtime import TmuxRuntime, TmuxTurnResult, _DEFAULT_PROMPT_PATTERNS
 from state import DevProvider
 
@@ -548,6 +551,65 @@ class NonBlockingPlanReviewTests(unittest.IsolatedAsyncioTestCase):
         # Asked once, then retried once with the gap note.
         self.assertEqual(len(prompts), 2)
         self.assertIn("O2", prompts[1])
+
+
+_ENV_PROBE = (
+    "import os; print('LEAK:' + os.environ['DEEPSEEK_API_KEY']) "
+    "if os.environ.get('DEEPSEEK_API_KEY') else print('CLEAN')"
+)
+
+
+class ChildEnvTests(unittest.TestCase):
+    def test_drops_blocked_credential(self) -> None:
+        merged = child_env({"DEEPSEEK_API_KEY": "sk-service", "PATH": "/bin"}, {"FOO": "1"})
+        self.assertNotIn("DEEPSEEK_API_KEY", merged)
+        self.assertEqual(merged["PATH"], "/bin")
+        self.assertEqual(merged["FOO"], "1")
+
+    def test_drops_blocked_credential_without_overlay(self) -> None:
+        merged = child_env({"DEEPSEEK_API_KEY": "sk-service", "PATH": "/bin"}, None)
+        self.assertNotIn("DEEPSEEK_API_KEY", merged)
+        self.assertEqual(merged["PATH"], "/bin")
+
+    def test_explicit_overlay_wins(self) -> None:
+        merged = child_env({"DEEPSEEK_API_KEY": "sk-service"}, {"DEEPSEEK_API_KEY": "sk-explicit"})
+        self.assertEqual(merged["DEEPSEEK_API_KEY"], "sk-explicit")
+
+
+class ChildEnvLeakTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.cwd = Path(self.temp.name)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    async def test_review_process_does_not_leak_service_key(self) -> None:
+        orch = CriticalConsensusOrchestrator(MagicMock(), MagicMock())
+        account = {"label": "dsh", "provider": "dsh"}
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-service-fake"}):
+            report = await orch._run_review_process(
+                account, [sys.executable, "-c", _ENV_PROBE], "", self.cwd, 60,
+                env={"DSH_HOME": "/home/develop/.dsh"}, origin_repo=self.cwd)
+        self.assertEqual(report, "CLEAN")
+
+    async def test_review_process_honors_explicit_overlay_key(self) -> None:
+        orch = CriticalConsensusOrchestrator(MagicMock(), MagicMock())
+        account = {"label": "dsh", "provider": "dsh"}
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-service-fake"}):
+            report = await orch._run_review_process(
+                account, [sys.executable, "-c", _ENV_PROBE], "", self.cwd, 60,
+                env={"DEEPSEEK_API_KEY": "sk-explicit-fake"}, origin_repo=self.cwd)
+        self.assertEqual(report, "LEAK:sk-explicit-fake")
+
+    async def test_tier_executor_does_not_leak_service_key(self) -> None:
+        mgr = DevSessionManager(Settings(), MagicMock())
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-service-fake"}):
+            result = await mgr._run_process_detailed(
+                [sys.executable, "-c", _ENV_PROBE], cwd=str(self.cwd),
+                env={"DSH_HOME": "/home/develop/.dsh"})
+        self.assertTrue(result.ok, result.stderr)
+        self.assertEqual(result.stdout, "CLEAN")
 
 
 if __name__ == "__main__":
