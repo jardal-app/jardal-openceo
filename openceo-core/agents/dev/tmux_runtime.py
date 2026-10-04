@@ -1095,8 +1095,11 @@ class TmuxRuntime:
         text = submitted_text.strip()
         if not text:
             return False
-        escaped = re.escape(text)
-        if not re.search(rf"^\s*[›❯>]\s*{escaped}\s*$", content, flags=re.MULTILINE):
+        # Prefix of the first line only: long prompts wrap mid-line in the
+        # pane, so even the full first line never matches verbatim and
+        # retries would never fire.
+        first = re.escape(text.splitlines()[0].strip()[:40])
+        if not re.search(rf"^\s*[›❯>]\s*{first}", content, flags=re.MULTILINE):
             return False
         if re.search(r"\bworking\b|\besc to interrupt\b|\besc to cancel\b|\bgenerating\b", content, flags=re.IGNORECASE):
             return False
@@ -1128,7 +1131,9 @@ class TmuxRuntime:
     @staticmethod
     async def _submit_text(pane: Any, text: str) -> None:
         pane.send_keys(text, enter=False, literal=True)
-        await asyncio.sleep(0.12)
+        # Let the TUI render a long paste before Enter, or the keystroke is
+        # swallowed and the prompt sits unsent until the turn times out.
+        await asyncio.sleep(max(0.12, min(2.0, len(text) / 800.0)))
         pane.enter()
 
         # Some TUI states occasionally swallow Enter during startup.
