@@ -60,3 +60,23 @@ class BuilderPromptGuardsTests(unittest.TestCase):
         prompt = self._prompt("fix")
         self.assertIn("Do NOT commit, push, rebase, stash, or change branches", prompt)
         self.assertIn("FIX_DONE_1_1", prompt)
+
+
+class StoredSnapshotTests(unittest.TestCase):
+    def test_empty_dict_is_a_stored_clean_tree(self) -> None:
+        self.assertEqual(
+            CriticalConsensusOrchestrator._stored_snapshot({"baseline": {}}, "baseline"),
+            {},
+        )
+
+    def test_missing_or_null_is_not_stored(self) -> None:
+        self.assertIsNone(CriticalConsensusOrchestrator._stored_snapshot({}, "baseline"))
+        self.assertIsNone(
+            CriticalConsensusOrchestrator._stored_snapshot({"baseline": None}, "baseline")
+        )
+
+    def test_returns_a_copy(self) -> None:
+        stored = {"a.py": "abc"}
+        out = CriticalConsensusOrchestrator._stored_snapshot({"baseline": stored}, "baseline")
+        self.assertEqual(out, stored)
+        self.assertIsNot(out, stored)
