@@ -1307,8 +1307,8 @@ class TaskService:
             if key == "routing_missing":
                 text = (
                     "OpenCEO no puede ejecutar este ticket: falta el campo coding_tool, "
-                    "que se fija al crear la tarea (codex, claude, glm, gemini, opencode, "
-                    "kimi o tier_s). Asigna el ejecutor para continuar."
+                    "que se fija al crear la tarea (tier_s, tier_a, tier_b o tier_c; "
+                    "tier_c es la opción por defecto). Asigna el tier para continuar."
                 )
             else:
                 text = f"OpenCEO no puede ejecutar este ticket: configuración inválida ({reason})."

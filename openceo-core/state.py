@@ -118,15 +118,18 @@ class CodingTier(str, Enum):
 
 
 class CodingTool(str, Enum):
-    CODEX = "codex"
-    CLAUDE = "claude"
-    CLAUDE_CODE = "claude"
-    GLM = "glm"
-    GEMINI = "gemini"
-    OPENCODE = "opencode"
-    KIMI = "kimi"
+    """Execution tier of a task (Tier S design v2 §3, F0.1).
+
+    The letters order by scarce-quota cost, not quality; tier_c is the
+    default for most tickets. No account names here: accounts live only in
+    configuration (``account:``). Explicit provider choice for loose chat
+    sessions still uses :class:`DevProvider` and is unaffected.
+    """
+
     TIER_S = "tier_s"
-    MUSE = "muse"
+    TIER_A = "tier_a"
+    TIER_B = "tier_b"
+    TIER_C = "tier_c"
 
 
 class DevProvider(str, Enum):

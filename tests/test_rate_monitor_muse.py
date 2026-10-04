@@ -10,8 +10,8 @@ CORE = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE) not in sys.path:
     sys.path.insert(0, str(CORE))
 
+from agents.dev.routing import resolved_tool_name  # noqa: E402
 from rate_monitor import RateMonitor  # noqa: E402
-from state import CodingTool  # noqa: E402
 
 
 MUSE_USAGE = """\
@@ -65,8 +65,8 @@ class ParseMuseUsageTests(unittest.TestCase):
         reset = RateMonitor._muse_current_to_utc("4:54 PM", now)
         self.assertEqual((reset.day, reset.hour, reset.minute), (5, 16, 54))
 
-    def test_coding_tool_muse_resolves(self) -> None:
-        self.assertEqual(CodingTool("muse"), CodingTool.MUSE)
+    def test_legacy_muse_value_resolves_to_tier_c(self) -> None:
+        self.assertEqual(resolved_tool_name({"coding_tool": "muse"}), "tier_c")
 
 
 if __name__ == "__main__":

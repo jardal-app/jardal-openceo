@@ -11,6 +11,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Collection
 
 
 @dataclass(frozen=True)
@@ -67,16 +68,26 @@ def blocking_findings(text: str) -> bool:
     return bool(re.search(r"^\[(CRITICAL|WARN)\] ", text, re.MULTILINE))
 
 
-def review_quorum(reports: dict[str, str], families: dict[str, str]) -> bool:
+def review_quorum(
+    reports: dict[str, str],
+    families: dict[str, str],
+    extra: Collection[str] = (),
+) -> bool:
     """Two valid reports from two distinct model families.
 
     Tier S design §7 (F0): codexj is out of code review, so any two pool
     slots from distinct families form a quorum. ``families`` maps reviewer
     label to its declared family from the global pool. Fail-closed: a
     report whose label has no known family never counts toward quorum.
+    ``extra`` holds self-review slots (design v2 §7.3, e.g. ``muse-review``
+    on a muse-built ticket): their reports arrive as information but never
+    count toward quorum.
     """
+    excluded = set(extra)
     seen: set[str] = set()
     for label, text in reports.items():
+        if label in excluded:
+            continue
         if not valid_review(text):
             continue
         family = (families.get(label) or "").strip()
@@ -86,6 +97,143 @@ def review_quorum(reports: dict[str, str], families: dict[str, str]) -> bool:
         if len(seen) >= 2:
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Non-blocking plan review (design v2 §6.4, §16.2, §16.3 — F0.1)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PlanObservation:
+    """One numbered codexj observation from PLAN_REVIEW.md."""
+
+    id: int
+    severity: str  # CRITICAL | WARN
+    anchor: str  # e.g. "CURRENT_PLAN.md:12" or "src/a.py:42"
+    path: str  # anchor path without the line suffix
+    line: int | None
+    problem: str
+    suggestion: str
+
+
+_PLAN_OBSERVATION_RE = re.compile(
+    r"^O(\d+)\s+\[(CRITICAL|WARN)\]\s+(\S+)\s+[—–-]\s*(.+?)\s*(?:→|->)\s*(.+?)\s*$"
+)
+_PLAN_RESPONSE_RE = re.compile(
+    r"^O(\d+)\s*:\s*(ACEPTADA|RECHAZADA|DIFERIDA)\b\s*(?:[—–-]\s*(.*))?$",
+    re.IGNORECASE,
+)
+_PLAN_DONE_RE = re.compile(r"^REVIEW_DONE_plan_0\s*$", re.MULTILINE)
+
+
+def parse_plan_observations(report: str) -> list[PlanObservation]:
+    """Parse the ``O<n>`` observations of a plan review (design §16.2).
+
+    Malformed lines are skipped (callers treat zero observations from a
+    non-empty report as an invalid report). The optional trailing
+    ``REVIEW_DONE_plan_0`` signal and ``>`` quote lines are ignored.
+    """
+    observations: list[PlanObservation] = []
+    for raw_line in report.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(">") or _PLAN_DONE_RE.match(line):
+            continue
+        match = _PLAN_OBSERVATION_RE.match(line)
+        if not match:
+            continue
+        anchor = match.group(3)
+        path, _, line_part = anchor.rpartition(":")
+        line_no: int | None = None
+        if path and line_part.isdigit():
+            line_no = int(line_part)
+        else:
+            path = anchor
+        observations.append(PlanObservation(
+            id=int(match.group(1)),
+            severity=match.group(2),
+            anchor=anchor,
+            path=path,
+            line=line_no,
+            problem=match.group(4).strip(),
+            suggestion=match.group(5).strip(),
+        ))
+    return observations
+
+
+def valid_plan_review(report: str) -> bool:
+    """A plan review is valid with zero findings or ≥1 observation."""
+    body = report.strip()
+    if not body:
+        return False
+    if re.search(r"^No findings\.$", body, re.MULTILINE):
+        return True
+    return bool(parse_plan_observations(body))
+
+
+def parse_plan_responses(text: str) -> dict[int, list[str]]:
+    """Parse PLAN_RESPONSE.md (design §16.3): observation id → verdicts.
+
+    Verdicts are normalized to ``ACEPTADA``/``RECHAZADA``/``DIFERIDA``.
+    Repeated ids keep every verdict so the completeness check can flag
+    duplicates (§6.4: each ``O<n>`` has exactly one response).
+    """
+    responses: dict[int, list[str]] = {}
+    for raw_line in text.splitlines():
+        match = _PLAN_RESPONSE_RE.match(raw_line.strip())
+        if not match:
+            continue
+        responses.setdefault(int(match.group(1)), []).append(match.group(2).upper())
+    return responses
+
+
+def plan_response_gaps(
+    observations: list[PlanObservation],
+    responses: dict[int, list[str]],
+) -> tuple[list[int], list[int]]:
+    """Missing and duplicated observation ids in a plan response.
+
+    Returns ``(missing, duplicated)``, both sorted. Responses to unknown
+    ids are ignored (they answer nothing).
+    """
+    wanted = {obs.id for obs in observations}
+    missing = sorted(wanted - set(responses))
+    duplicated = sorted(obs_id for obs_id in wanted
+                        if len(responses.get(obs_id, ())) > 1)
+    return missing, duplicated
+
+
+def verify_plan_anchor(
+    observation: PlanObservation,
+    plan_path: Path,
+    repo_path: Path,
+) -> bool:
+    """Mechanical anchor check: the file exists and the line is in range.
+
+    F0.1 covers existence + range; quote matching joins the shared
+    verification module in F3 (§7.11). The plan file may be cited bare
+    (``CURRENT_PLAN.md``) or with the ``.tier-s/`` prefix.
+    """
+    name = observation.path.strip().lstrip("./")
+    if name in {"CURRENT_PLAN.md", ".tier-s/CURRENT_PLAN.md", plan_path.name}:
+        target = plan_path
+    else:
+        target = repo_path / name
+    try:
+        resolved = target.resolve()
+        repo_root = repo_path.resolve()
+    except OSError:
+        return False
+    if resolved != repo_root and repo_root not in resolved.parents:
+        return False
+    if not resolved.is_file():
+        return False
+    if observation.line is None:
+        return True
+    try:
+        total = sum(1 for _ in resolved.open("r", encoding="utf-8", errors="replace"))
+    except OSError:
+        return False
+    return 1 <= observation.line <= total
 
 
 _QUESTION_OPTION = re.compile(r"(?m)^\s*(?P<selected>[❯›])?\s*(?P<number>[1-9])[.)]\s+(?P<text>.{2,180})$")

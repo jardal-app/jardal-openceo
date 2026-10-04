@@ -26,7 +26,8 @@ from state import DevProvider
 from .tmux_runtime import TmuxRuntime, TmuxTurnResult
 from .tier_s_contract import (
     GitSnapshot, blocking_findings, detect_claude_question, git_snapshot,
-    review_quorum, valid_review,
+    parse_plan_observations, parse_plan_responses, plan_response_gaps,
+    review_quorum, valid_plan_review, valid_review, verify_plan_anchor,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ _PLAN_FILENAME = f"{_TIER_S_DIR}/CURRENT_PLAN.md"
 
 _TOTAL_PLANS_HEADER_RE = re.compile(r"^TOTAL_PLANS:\s*(\d+)\s*$", re.M)
 _PLAN_READY_RE = re.compile(r"^PLAN_READY_(\d+)$")
+_PLAN_RESPONDED = "PLAN_RESPONDED"
 
 # P1 TUI fallback signal patterns — detect signals printed to TUI but not persisted to file.
 # Anchored with ^...$ + re.MULTILINE so the signal must appear on its own line,
@@ -46,10 +48,13 @@ _ROLE_PLAN_REVIEWER = "plan-reviewer"
 _ROLE_BUILDER = "builder"
 
 # Transitional execution constants. review_rounds/max_plans were removed from
-# the config surface (Tier S design §15.3, F0); F6 replaces them with
-# max_fix_rounds and package budgets.
+# the config surface (Tier S design §15.3, F0); F2 replaces them with the
+# single-ticket cycle (one PLAN.md, no sub-plans).
 _REVIEW_ROUNDS = 2
 _MAX_PLANS = 8
+
+#: Providers with a one-shot read-only adapter in _readonly_review.
+_READONLY_PROVIDERS = frozenset({"codex", "qwen", "claude", "dsh", "muse"})
 
 # Builder sessions (muse) ignore repo CLAUDE.md when AGENTS.md exists, but the
 # owner keeps standing rules in CLAUDE.md — order it explicitly, first line.
@@ -240,19 +245,23 @@ class CriticalConsensusOrchestrator:
         plan_reviewer_label = required[_ROLE_PLAN_REVIEWER]["label"]
         planner_label = required[_ROLE_PLANNER]["label"]
         builder_label = required[_ROLE_BUILDER]["label"]
+        # Extra slots (design v2 §7.3) report as information only: they never
+        # count toward quorum or toward the preflight family minimum.
+        extra_labels = {item["label"] for item in active_reviewers if item.get("extra")}
         families = {item["label"]: item["family"] for item in active_reviewers}
         if len(families) != len(active_reviewers):
             return await wait("Tier S espera: las etiquetas de revisores deben ser únicas.")
         if required[_ROLE_PLAN_REVIEWER]["provider"] != "codex":
             return await wait("Tier S espera: la revisión del plan requiere el adaptador Codex.")
-        distinct_families = set(families.values())
+        distinct_families = {family for label, family in families.items()
+                             if label not in extra_labels}
+        min_families = max(2, int(cfg.get("min_available_families", 3)))
         if len(distinct_families) < 2:
             return await wait("Tier S espera: el pool necesita al menos 2 familias de revisores activas para el quorum.")
-        if len(distinct_families) < 3:
-            logger.warning("Tier S pool degraded: only %d distinct families, no spare reviewer slot",
-                           len(distinct_families))
+        if len(distinct_families) < min_families:
+            return await wait(f"Tier S espera: el pool necesita al menos {min_families} familias elegibles (hay {len(distinct_families)}).")
         for account in active_reviewers:
-            if account["provider"] not in {"qwen", "claude", "codex"}:
+            if account["provider"] not in _READONLY_PROVIDERS:
                 return await wait(f"Tier S espera: {account['label']} necesita un adaptador de lectura; desactívalo hasta que esté disponible.")
 
         roster = self._frozen_roster(cfg)
@@ -296,42 +305,122 @@ class CriticalConsensusOrchestrator:
             phase = "plan_review"
 
         if phase == "plan_review":
+            review_path = paths.dir / "PLAN_REVIEW.md"
+            response_path = paths.dir / "PLAN_RESPONSE.md"
+            had_question = bool(run.get("question"))
             if run.get("question"):
                 if not str(run.get("human_answer") or "").strip():
                     return await wait("Tier S espera respuesta a la pregunta del planner.", question=run["question"])
+                # A question asked while answering the review resumes the
+                # response; without a review yet it resumes the plan fix.
+                expect_response = review_path.exists()
                 turn = await resume_question(
                     sessions[_ROLE_PLANNER],
-                    lambda: bool(_PLAN_READY_RE.match(self._read_signal(paths.status_path))),
+                    (lambda: self._read_signal(paths.status_path) == _PLAN_RESPONDED
+                     if expect_response
+                     else bool(_PLAN_READY_RE.match(self._read_signal(paths.status_path)))),
                     [],
                 )
-                if not _PLAN_READY_RE.match(self._read_signal(paths.status_path)):
+                if expect_response:
+                    if self._read_signal(paths.status_path) != _PLAN_RESPONDED:
+                        return await turn_wait(turn, "Planner no respondió a la revisión del plan.")
+                elif not _PLAN_READY_RE.match(self._read_signal(paths.status_path)):
                     return await turn_wait(turn, "Planner no corrigió el plan.")
-            await progress("Codex revisando el plan.")
-            for attempt in range(2):
-                report = await self._readonly_review(required[_ROLE_PLAN_REVIEWER],
-                    self._plan_reviewer_prompt(paths) + "\nTicket:\n" + instruction,
-                    repo_path, cfg["timeout_seconds"])
-                if not valid_review(report):
+            # Non-blocking plan review (design v2 §6.4): codexj suggests once,
+            # claudej answers EVERY observation, and the corrected plan moves
+            # to the builder whatever the verdicts. No veto: without a human,
+            # a veto always ends in waiting(needs_owner).
+            report = ""
+            if had_question and review_path.exists():
+                # Resume: reuse the review instead of burning another scarce
+                # codexj call on the same plan.
+                candidate = review_path.read_text(encoding="utf-8", errors="replace")
+                if valid_plan_review(candidate):
+                    report = candidate
+            if not report:
+                await progress("Codex revisando el plan.")
+                for _ in range(2):
+                    candidate = await self._readonly_review(required[_ROLE_PLAN_REVIEWER],
+                        self._plan_reviewer_prompt(paths) + "\nTicket:\n" + instruction,
+                        repo_path, cfg["timeout_seconds"])
+                    if valid_plan_review(candidate):
+                        report = candidate
+                        break
+                if not report:
                     await self._checkpoint(run_id, task_id, session_id,
                         reviewer_availability={plan_reviewer_label: self._review_failures.get(
                             (str(repo_path), plan_reviewer_label), "invalid_report")})
                     return await wait("Codex no entregó una revisión válida del plan.")
-                (paths.dir / "PLAN_REVIEW.md").write_text(report, encoding="utf-8")
-                if not blocking_findings(report):
-                    break
-                if attempt:
-                    return await wait("El plan conserva hallazgos tras la corrección.")
-                self._reset_signal_file(paths.status_path)
-                turn = await self._send_participant_instruction(
-                    sessions[_ROLE_PLANNER], None, None,
-                    f"Corrige hallazgos de .tier-s/PLAN_REVIEW.md en CURRENT_PLAN.md. Conserva TOTAL_PLANS y anuncia PLAN_READY_N. Directorio: {repo_path}",
-                    cfg["timeout_seconds"],
-                    completion_check=lambda: bool(_PLAN_READY_RE.match(self._read_signal(paths.status_path))),
-                    tui_signal_patterns=[],
-                    interrupt_check=lambda pane: detect_claude_question(pane) is not None,
-                )
-                if not turn.ok:
-                    return await turn_wait(turn, "Planner no corrigió el plan.")
+                review_path.write_text(report, encoding="utf-8")
+                # A fresh review invalidates any stale response: old O<n> ids
+                # must never satisfy the new observations.
+                if response_path.exists():
+                    response_path.unlink()
+            # Observations with an unverifiable anchor are discarded
+            # mechanically before the planner ever sees them (§6.4, §7.7).
+            observations = [obs for obs in parse_plan_observations(report)
+                            if verify_plan_anchor(obs, paths.plan_path, repo_path)]
+            stats: dict[str, Any] = {
+                "observations": len(observations),
+                "accepted": 0, "rejected": 0, "deferred": 0, "no_response": [],
+            }
+            if observations:
+                # On resume the planner just answered: seed from its file so a
+                # complete response costs no extra turn; a fresh pass always
+                # starts empty (the stale file was deleted above).
+                responses: dict[int, list[str]] = (
+                    parse_plan_responses(response_path.read_text(encoding="utf-8"))
+                    if had_question and response_path.exists() else {})
+                missing, duplicated = plan_response_gaps(observations, responses)
+                attempts = 0
+                while (missing or duplicated) and attempts < 2:
+                    if responses:
+                        pending = sorted(set(missing) | set(duplicated))
+                        gaps_note = (" Responde también (una sola línea cada una) "
+                                     + ", ".join(f"O{n}" for n in pending) + ".")
+                    else:
+                        gaps_note = ""
+                    self._reset_signal_file(paths.status_path)
+                    turn = await self._send_participant_instruction(
+                        sessions[_ROLE_PLANNER], None, None,
+                        self._plan_response_prompt(paths, observations) + gaps_note,
+                        cfg["timeout_seconds"],
+                        completion_check=lambda: self._read_signal(paths.status_path) == _PLAN_RESPONDED,
+                        tui_signal_patterns=[],
+                        interrupt_check=lambda pane: detect_claude_question(pane) is not None,
+                    )
+                    if ((not turn.ok or self._read_signal(paths.status_path) != _PLAN_RESPONDED)
+                            and not detect_claude_question(turn.output)):
+                        # The planner session may be gone (§6.4): answer in a
+                        # fresh session with the plan and the review as input.
+                        await self._ensure_participant_session(
+                            sessions[_ROLE_PLANNER], config, wait_ready=True)
+                        self._reset_signal_file(paths.status_path)
+                        turn = await self._send_participant_instruction(
+                            sessions[_ROLE_PLANNER], None, None,
+                            self._plan_response_prompt(paths, observations) + gaps_note,
+                            cfg["timeout_seconds"],
+                            completion_check=lambda: self._read_signal(paths.status_path) == _PLAN_RESPONDED,
+                            tui_signal_patterns=[],
+                            interrupt_check=lambda pane: detect_claude_question(pane) is not None,
+                        )
+                    if self._read_signal(paths.status_path) != _PLAN_RESPONDED:
+                        return await turn_wait(turn, "Planner no respondió a la revisión del plan.")
+                    responses = (parse_plan_responses(response_path.read_text(encoding="utf-8"))
+                                 if response_path.exists() else {})
+                    missing, duplicated = plan_response_gaps(observations, responses)
+                    attempts += 1
+                if missing or duplicated:
+                    # Still incomplete after the retry: continue and record
+                    # SIN_RESPUESTA in telemetry (§6.4). The orchestrator never
+                    # judges the content, only the completeness.
+                    stats["no_response"] = sorted(set(missing) | set(duplicated))
+                wanted = {obs.id for obs in observations}
+                for obs_id, verdicts in responses.items():
+                    if obs_id in wanted and verdicts:
+                        stats[{"ACEPTADA": "accepted", "RECHAZADA": "rejected",
+                               "DIFERIDA": "deferred"}[verdicts[0]]] += 1
+            await self._checkpoint(run_id, task_id, session_id, plan_review=stats)
             n_plans = self._reread_total_plans(paths.plan_path)
             if n_plans is None or not 1 <= n_plans <= cfg["max_plans"]:
                 return await wait("TOTAL_PLANS inválido tras la revisión.")
@@ -423,7 +512,7 @@ class CriticalConsensusOrchestrator:
                                        snapshot_hash=snapshot.digest)
                 if git_snapshot(repo_path).digest != snapshot.digest:
                     return await wait("Un revisor modificó el árbol de trabajo; revisar antes de continuar.")
-                if not review_quorum(reports, families):
+                if not review_quorum(reports, families, extra_labels):
                     return await wait(f"Revisión {r} sin quorum: se necesitan 2 revisores válidos de familias distintas.")
                 if not any(blocking_findings(value) for value in reports.values()):
                     phase = "next"
@@ -475,7 +564,7 @@ class CriticalConsensusOrchestrator:
                                        snapshot_hash=cumulative.digest)
                 if git_snapshot(repo_path).digest != cumulative.digest:
                     return await wait("Un revisor modificó el árbol de trabajo; revisar antes de continuar.")
-                if not review_quorum(integrated_reports, families):
+                if not review_quorum(integrated_reports, families, extra_labels):
                     return await wait("Revisión integrada sin quorum: se necesitan 2 revisores válidos de familias distintas.")
                 if not any(blocking_findings(value) for value in integrated_reports.values()):
                     break
@@ -529,7 +618,7 @@ class CriticalConsensusOrchestrator:
                                        for value in reports.values()),
                                    reviewer_results={key: bool(valid_review(value)) for key, value in reports.items()},
                                    reviewer_availability=availability)
-            if git_snapshot(repo_path).digest != after_fix.digest or not review_quorum(reports, families):
+            if git_snapshot(repo_path).digest != after_fix.digest or not review_quorum(reports, families, extra_labels):
                 return await wait("La confirmación del último delta no alcanzó quorum o cambió el diff.")
             if any(blocking_findings(value) for value in reports.values()):
                 return await wait("El último delta conserva hallazgos bloqueantes.")
@@ -589,6 +678,7 @@ class CriticalConsensusOrchestrator:
         return [{
             "role": item["role"], "label": item["label"], "model": item["model"],
             "provider": item["provider"], "active": item["active"],
+            "account": str(item.get("account") or ""),
             "command_hash": hashlib.sha256(
                 repr(self._account_command(item)).encode()).hexdigest(),
         } for item in accounts]
@@ -794,19 +884,29 @@ class CriticalConsensusOrchestrator:
                                repo_path: Path, timeout: int) -> str:
         command = self._account_command(account)
         provider = account["provider"]
+        stdin_prompt = False
         if provider == "codex":
             argv = [*command, "exec", "--ephemeral", "-"]
+            stdin_prompt = True
         elif provider == "qwen":
             argv = [*command, "--output-format", "text", prompt]
         elif provider == "claude":
             argv = [*command, "--print", "--permission-mode", "plan",
                     "--no-session-persistence", prompt]
+        elif provider == "dsh":
+            # Headless one-shot; the trailing "-" reads the task from stdin.
+            argv = [*command]
+            stdin_prompt = True
+        elif provider == "muse":
+            argv = [*command, prompt]
         else:
             return ""
         try:
             with self._isolated_review_worktree(repo_path) as review_path:
                 return await self._run_review_process(account, argv, prompt, review_path,
                                                       timeout, check_writes=True,
+                                                      stdin_prompt=stdin_prompt,
+                                                      env=dict(account.get("env") or {}),
                                                       origin_repo=repo_path)
         except Exception:
             self._review_failures[(str(repo_path), str(account["label"]))] = "worktree_error"
@@ -856,16 +956,22 @@ class CriticalConsensusOrchestrator:
 
     async def _run_review_process(self, account: dict[str, Any], argv: list[str], prompt: str,
                                   cwd: Path, timeout: int, *, check_writes: bool = False,
+                                  stdin_prompt: bool = False,
+                                  env: dict[str, str] | None = None,
                                   origin_repo: Path) -> str:
         before = git_snapshot(cwd) if check_writes else None
         failure_key = (str(origin_repo), str(account["label"]))
         try:
+            merged_env = None
+            if env:
+                merged_env = {**os.environ, **{str(k): str(v) for k, v in env.items()}}
             process = await asyncio.create_subprocess_exec(
                 *argv, cwd=str(cwd), stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=merged_env,
             )
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(prompt.encode() if account["provider"] == "codex" else None),
+                process.communicate(prompt.encode() if stdin_prompt else None),
                 timeout=timeout,
             )
             if process.returncode != 0:
@@ -1049,7 +1155,13 @@ class CriticalConsensusOrchestrator:
         review_rounds = _REVIEW_ROUNDS
         max_plans = _MAX_PLANS
         timeout_seconds = max(120, int(tier_s_cfg.get("timeout_minutes", 15)) * 60)
+        min_available_families = int(tier_s_cfg.get("min_available_families", 3))
 
+        # Fallback accounts/models for bare configs (tests, synthetic runs).
+        # Production always carries the global config, which is authoritative.
+        default_accounts = {"planner": "claudej", "plan-reviewer": "codexj", "builder": "muse"}
+        default_models = {"planner": "opus", "plan-reviewer": "gpt-6.1-sol",
+                          "builder": "muse-spark-1.3-contributor"}
         raw_roles = tier_s_cfg.get("roles", {}) or {}
         roles: dict[str, dict[str, Any]] = {}
         for role_name in [_ROLE_PLANNER, _ROLE_PLAN_REVIEWER, _ROLE_BUILDER]:
@@ -1057,10 +1169,12 @@ class CriticalConsensusOrchestrator:
                         if isinstance(raw_roles, dict) else {})
             if not isinstance(role_cfg, dict):
                 role_cfg = {}
+            account = str(role_cfg.get("account") or default_accounts[role_name])
             roles[role_name] = {
                 "provider": str(role_cfg.get("provider", "")).strip().lower() or self._default_provider_for_role(role_name),
-                "label": str(role_cfg.get("label") or {"planner": "claudej", "plan-reviewer": "codexj", "builder": "muse"}[role_name]),
-                "model": str(role_cfg.get("model") or {"planner": "opus", "plan-reviewer": "gpt-6.1-sol", "builder": "muse-spark-1.3-contributor"}[role_name]),
+                "account": account,
+                "label": str(role_cfg.get("label") or account),
+                "model": str(role_cfg.get("model") or default_models[role_name]),
                 "active": role_cfg.get("active", True) is True,
                 "command": role_cfg.get("command") or [],
                 "env": role_cfg.get("env", {}) or {},
@@ -1073,10 +1187,10 @@ class CriticalConsensusOrchestrator:
                     pass
 
         default_reviewers = [
-            {"label": "qwen", "provider": "qwen", "model": "qwen3.8-max", "family": "qwen", "active": True,
+            {"label": "qwen-max", "provider": "qwen", "model": "qwen3.8-max", "family": "qwen", "active": True,
              "command": ["qwen", "--approval-mode", "plan"]},
             {"label": "qwen-glm", "provider": "qwen", "model": "glm-5.3", "family": "glm", "active": True,
-             "command": ["qwen", "-m", "glm-5.3", "--approval-mode", "plan"]},  # owner 2026-10-03: GLM via Qwen plan (claudeg retired)
+             "command": ["qwen", "-m", "glm-5.3", "--approval-mode", "plan"]},
             {"label": "agyd", "provider": "gemini", "model": "gemini", "family": "gemini", "active": False, "command": ["agyd"]},
             {"label": "mimo", "provider": "opencode", "model": "opencode-go/mimo-v2.6-pro", "family": "mimo", "active": False,
              "command": ["opencode"]},
@@ -1096,12 +1210,15 @@ class CriticalConsensusOrchestrator:
                     reviewers.append({"label": label, "model": model, "provider": provider,
                                       "family": str(item.get("family") or provider).strip(),
                                       "active": item.get("active", True) is True,
-                                      "command": item.get("command") or []})
+                                      "extra": item.get("extra", False) is True,
+                                      "command": item.get("command") or [],
+                                      "env": item.get("env", {}) or {}})
 
         return {
             "roles": roles,
             "review_rounds": review_rounds,
             "max_plans": max_plans,
+            "min_available_families": min_available_families,
             "timeout_seconds": timeout_seconds,
             "reviewers": reviewers,
         }
@@ -1268,8 +1385,26 @@ class CriticalConsensusOrchestrator:
         return (
             f"Review {_TIER_S_DIR}/CURRENT_PLAN.md against the ticket. Read only direct contracts needed. "
             f"Check completeness, ordering, invariants and whether the subplan count is minimal. "
-            f"Do not edit files or run tests. Report each real issue as [WARN] path:line — issue → fix; "
-            "otherwise output exactly 'No findings.'. Work in the current directory."
+            f"Do not edit files or run tests. Your review is advisory: the planner answers each "
+            f"observation but nothing you write blocks the plan. Report each real issue on its own line as:\n"
+            f"O<n> [CRITICAL|WARN] <CURRENT_PLAN.md|repo-path>:<line> — <problem> → <suggestion>\n"
+            f"followed by a literal quote line starting with '> '. Number observations O1, O2, … "
+            f"with no gaps. If there is nothing worth reporting, output exactly 'No findings.'. "
+            f"Work in the current directory."
+        )
+
+    def _plan_response_prompt(self, paths: _TierSPaths, observations: list[Any]) -> str:
+        ids = ", ".join(f"O{obs.id}" for obs in observations)
+        return (
+            f"Answer the plan review in {_TIER_S_DIR}/PLAN_REVIEW.md ({ids}). "
+            f"For accepted observations, adjust {_TIER_S_DIR}/CURRENT_PLAN.md accordingly. "
+            f"Write {_TIER_S_DIR}/PLAN_RESPONSE.md with exactly one line per observation:\n"
+            f"O<n>: ACEPTADA — <what changed in the plan>\n"
+            f"O<n>: RECHAZADA — <technical reason>\n"
+            f"O<n>: DIFERIDA — <reason; why it is out of scope>\n"
+            f"Answer every observation ({ids}), each exactly once. "
+            f"Then overwrite {_TIER_S_DIR}/status with exactly {_PLAN_RESPONDED} and print it. "
+            f"Work inside {paths.dir.parent}."
         )
 
     def _reread_total_plans(self, plan_path: Path) -> int | None:
