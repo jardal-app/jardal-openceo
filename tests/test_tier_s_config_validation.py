@@ -78,13 +78,25 @@ class ValidateProjectTests(unittest.TestCase):
         self.assertNotIn("review_rounds", dev["tier_s"])
         self.assertNotIn("max_plans", dev["tier_s"])
         roles = dev["tier_s"]["roles"]
-        self.assertEqual(roles["planner"]["label"], "claudej")
+        self.assertEqual(roles["planner"]["account"], "claudej")
         self.assertTrue(roles["planner"]["active"])
         self.assertEqual(roles["plan-reviewer"]["model"], "gpt-6.1-sol")
         reviewers = dev["tier_s"]["reviewers"]
         self.assertTrue(all(item.get("family") for item in reviewers))
-        active_families = {item["family"] for item in reviewers if item["active"]}
-        self.assertGreaterEqual(len(active_families), 2)
+        active_families = {item["family"] for item in reviewers
+                           if item["active"] and not item.get("extra")}
+        self.assertGreaterEqual(len(active_families), 3)
+        tiers = dev["tiers"]
+        self.assertEqual(tiers["tier_a"]["account"], "claudej")
+        self.assertEqual(tiers["tier_b"]["account"], "codexj")
+        self.assertEqual(tiers["tier_c"]["chain"], ["muse", "dsh", "claudep"])
+
+    def test_tiers_section_is_rejected(self) -> None:
+        self._write("proj", "dev:\n  tiers:\n    tier_a:\n      account: clauded\n")
+        errors = _loader_for(self.root).validate_project("proj")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("dev.tiers", errors[0])
+        self.assertIn("global", errors[0])
 
 
 class CreateSessionGateTests(unittest.IsolatedAsyncioTestCase):
@@ -126,7 +138,8 @@ class InteractiveTriggerCleanupTests(unittest.TestCase):
 class PlanRoutingMigrationTests(unittest.TestCase):
     def test_buckets(self) -> None:
         tasks = [
-            {"task_id": "ok", "coding_tool": "codex"},
+            {"task_id": "ok", "coding_tool": "tier_s"},
+            {"task_id": "legacy", "coding_tool": "codex"},
             {"task_id": "params", "params": {"coding_tool": "claude"}},
             {"task_id": "tier", "coding_tier": "tier3"},
             {"task_id": "bad-root", "coding_tool": "nope", "params": {"coding_tool": "kimi"}},
@@ -136,9 +149,10 @@ class PlanRoutingMigrationTests(unittest.TestCase):
         self.assertEqual(plan.already_ok, 1)
         self.assertEqual(
             {entry["task_id"]: entry["patch"] for entry in plan.promoted},
-            {"params": {"coding_tool": "claude"},
-             "tier": {"coding_tool": "opencode"},
-             "bad-root": {"coding_tool": "kimi"}},
+            {"legacy": {"coding_tool": "tier_b"},
+             "params": {"coding_tool": "tier_a"},
+             "tier": {"coding_tool": "tier_c"},
+             "bad-root": {"coding_tool": "tier_c"}},
         )
         self.assertTrue(all(entry["warnings"] for entry in plan.promoted))
         self.assertEqual(plan.needs_assignment, ["none"])

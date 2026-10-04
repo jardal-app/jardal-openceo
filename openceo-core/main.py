@@ -3998,7 +3998,7 @@ def _build_dev_capabilities_text(
         f"Sesiones abiertas: {len(sessions)}.",
         "Flujos disponibles:",
         "- crear o reutilizar sesion por proyecto y provider (codex, claude, agyd/gemini, opencode, glm)",
-        "- ejecutar tickets críticos en modo tier_s cuando el proyecto lo tenga configurado",
+        "- ejecutar tickets críticos en modo tier_s cuando el ticket lo pida (coding_tool=tier_s)",
         "- enviar instrucciones en segundo plano sin bloquear chat",
         "- consultar estado, salida, y panorama de todas las sesiones",
         "- cambiar foco entre sesiones por proyecto o por indice",

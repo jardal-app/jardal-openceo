@@ -998,6 +998,14 @@ Scope and ownership must be explicit. `project: null` can mean company-level wor
 
 ## Tier S (Multi-AI Peer Review)
 
+> **SUPERSEDED 2026-10-04 (TASK-2026-00102, F0.1).** This section describes the
+> retired flow (persistent tmux reviewers, OpenCode compiler, per-project
+> `coding_tool`, `critical_consensus`). The vigente design is
+> `docs/work/TIER_S_DESIGN_FINAL.md` v2 (ticket = cycle = one builder
+> session; tiers `tier_s/a/b/c`; pool quorum; non-blocking plan review).
+> Do not implement from this section; it is kept for history until F2
+> replaces the engine and this section is rewritten.
+
 For high-stakes tickets (systems handling real money, critical infrastructure, complex algorithms, anything where a single bug has severe consequences), the Dev Agent activates a multi-AI peer review workflow. Claude Code acts as lead programmer. Codex and Gemini act as persistent tmux-based reviewers. OpenCode remains a single reviewer slot from Claude's perspective, but internally it runs a headless multi-model review pipeline and compiles its own consensus into `FEEDBACK-opencode.md`. The Dev Agent (`dev_session_service.py` for chat sessions, `session.py` for legacy task runs) orchestrates everything deterministically — it follows workflow steps, it does not think or generate content.
 
 ### Principles

@@ -95,7 +95,7 @@ class GraphDevPayloadTests(unittest.IsolatedAsyncioTestCase):
                     status=TaskStatus.COMPLETED,
                     steps=[],
                     coding_tier=CodingTier.TIER3,
-                    coding_tool=CodingTool.OPENCODE,
+                    coding_tool=CodingTool.TIER_C,
                 )
 
         graph = OpenCEOGraph.__new__(OpenCEOGraph)
@@ -111,7 +111,7 @@ class GraphDevPayloadTests(unittest.IsolatedAsyncioTestCase):
             "params": {"pm_ticket": {"module": "Ventas"}},
             "priority": "medium",
             "coding_tier": "tier4",
-            "coding_tool": "kimi",
+            "coding_tool": "tier_c",
             "project_config": {},
             "steps": [],
         }

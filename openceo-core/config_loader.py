@@ -76,9 +76,10 @@ class ConfigLoader:
         """Check raw project.yaml for obsolete or misplaced keys.
 
         Returns human-readable errors; an empty list means the project may
-        run. Tier S design §15: Tier S config is global (the defaults above),
-        so any ``dev.tier_s`` content in a project.yaml is invalid, and
-        ``dev.coding_tool`` is obsolete (§3: routing is per-task). Callers
+        run. Tier S design v2 §3/§17: Tier S config and the simple-tier
+        executors are global (the defaults above), so any ``dev.tier_s`` or
+        ``dev.tiers`` content in a project.yaml is invalid, and
+        ``dev.coding_tool`` is obsolete (routing is per-task). Callers
         park the project's tickets in ``waiting(config)`` when this is
         non-empty; other projects are unaffected.
         """
@@ -118,6 +119,19 @@ class ConfigLoader:
             else:
                 errors.append(
                     f"dev.tier_s in {project}/project.yaml must be a mapping or absent."
+                )
+        tiers = dev.get("tiers")
+        if tiers is not None and tiers != {}:
+            if isinstance(tiers, dict):
+                found = ", ".join(sorted(str(key) for key in tiers))
+                errors.append(
+                    "dev.tiers must not be set in project.yaml: simple-tier "
+                    f"executors are global. Remove it from {project}/project.yaml "
+                    f"(found: {found})."
+                )
+            else:
+                errors.append(
+                    f"dev.tiers in {project}/project.yaml must be a mapping or absent."
                 )
         return errors
 
@@ -183,20 +197,42 @@ class ConfigLoader:
                 "pr_body": "empty",
                 # Global Tier S config: the single source of roles and pool.
                 # Projects must not set dev.tier_s (see validate_project).
+                # Accounts are interchangeable: swapping e.g. claudej -> clauded
+                # only changes `account:` (+ its command) here, never tickets,
+                # code or data (design v2 §3.1, §4.4).
                 "tier_s": {
                     "timeout_minutes": 15,
+                    "min_available_families": 3,
                     "roles": {
-                        "planner": {"provider": "claude", "label": "claudej", "model": "opus", "active": True, "command": ["claudej"]},
-                        "plan-reviewer": {"provider": "codex", "label": "codexj", "model": "gpt-6.1-sol", "active": True, "command": ["codexj"]},
-                        "builder": {"provider": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "active": True, "command": ["muse", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"]},
+                        "planner": {"provider": "claude", "account": "claudej", "label": "claudej", "model": "opus", "active": True, "command": ["claudej"]},
+                        "plan-reviewer": {"provider": "codex", "account": "codexj", "label": "codexj", "model": "gpt-6.1-sol", "active": True, "command": ["codexj"]},
+                        "builder": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "active": True, "command": ["muse", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"]},
                     },
                     "reviewers": [
-                        {"label": "qwen", "provider": "qwen", "model": "qwen3.8-max", "family": "qwen", "active": True, "command": ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"]},
-                        {"label": "qwen-glm", "provider": "qwen", "model": "glm-5.3", "family": "glm", "active": True, "command": ["qwen", "-m", "glm-5.3", "--approval-mode", "plan"]},  # owner 2026-10-03: GLM via Qwen plan (claudeg retired)
-                        {"label": "claudep", "provider": "claude", "model": "deepseek-flash", "family": "deepseek", "active": True, "command": ["claudep", "--model", "opus", "--tools", "Read,Glob,Grep"]},
+                        {"label": "qwen-max", "provider": "qwen", "model": "qwen3.8-max", "family": "qwen", "active": True, "quota": "reactive", "expires_on": "2026-10-19", "command": ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"]},
+                        # owner 2026-10-03: GLM via Qwen plan (claudeg retired). Qwen Code
+                        # exposes no effort flag (verified --help 2026-10-04): model via -m only.
+                        {"label": "qwen-glm", "provider": "qwen", "model": "glm-5.3", "family": "glm", "active": True, "quota": "reactive", "command": ["qwen", "-m", "glm-5.3", "--approval-mode", "plan"]},
+                        {"label": "dsh", "provider": "dsh", "model": "deepseek-v4.1-flash", "family": "deepseek", "active": True, "quota": "reactive", "command": ["node", "/home/develop/development/Jardal/jardal-deepseek-harness/apps/cli/lib/bin.js", "--profile", "headless", "-"], "env": {"DSH_HOME": "/home/develop/.dsh"}},
+                        {"label": "claudep", "provider": "claude", "model": "deepseek-flash", "family": "deepseek", "active": False, "quota": "reactive", "command": ["claudep", "--model", "opus", "--tools", "Read,Glob,Grep"]},  # deepseek reserve while dsh serves
+                        {"label": "muse-review", "provider": "muse", "model": "muse-spark-1.3-contributor", "family": "muse", "active": True, "extra": True, "quota": "reactive", "command": ["muse", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max"]},  # extra: never counts for quorum (§7.3)
                         {"label": "agyd", "provider": "gemini", "model": "gemini", "family": "gemini", "active": False, "command": ["agyd"]},
                         {"label": "mimo", "provider": "opencode", "model": "opencode-go/mimo-v2.6-pro", "family": "mimo", "active": False, "command": ["opencode"]},
                     ],
+                },
+                # Global simple-tier executors (design v2 §3.1, §17.1, F0.1).
+                # Projects must not set dev.tiers (see validate_project).
+                # model/effort are data here; explicit enforcement is F5.
+                "tiers": {
+                    "tier_a": {"account": "claudej", "model": "opusplan", "effort": "xhigh"},
+                    "tier_b": {"account": "codexj", "model": "gpt-6.1-sol", "effort": "xhigh"},
+                    "tier_c": {"chain": ["muse", "dsh", "claudep"],
+                               "muse": {"model": "muse-spark-1.3-contributor", "effort": "max",
+                                        "command": ["muse", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max"]},
+                               "dsh": {"model": "deepseek-v4.1-flash", "effort": "max",
+                                       "command": ["node", "/home/develop/development/Jardal/jardal-deepseek-harness/apps/cli/lib/bin.js", "--profile", "headless", "-"],
+                                       "env": {"DSH_HOME": "/home/develop/.dsh"}},
+                               "claudep": {"model": "deepseek-flash[1m]", "command": ["claudep"]}},
                 },
                 "providers": {
                     "codex": {

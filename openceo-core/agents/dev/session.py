@@ -4,25 +4,15 @@ import asyncio
 import json
 import logging
 import os
-import shlex
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from .consensus import CriticalConsensusOrchestrator
-from .kimi_session_manager import KimiSessionManager
-from .kimi_run import detect_kimi_retryable_failure, parse_kimi_output
-from .opencode_models import apply_opencode_model_override
-from .opencode_paths import normalize_opencode_command
-from .opencode_run import (
-    build_run_command,
-    build_run_shell_command,
-    extract_response_sentinel_exit_code,
-    parse_run_output,
-)
 from .review_links import ReviewLinksExtraction, apply_review_links_to_params, extract_review_links
-from .routing import ROUTING_MISSING_REASON, resolve_coding_tool
+from .routing import ROUTING_MISSING_REASON, TIER_C_CHAIN, resolve_coding_tool, select_tier_c_link
 from .tmux_runtime import TmuxRuntime
 from config_loader import ConfigLoader
 from rate_monitor import RateMonitor
@@ -91,6 +81,23 @@ class DevExecutionOutput:
         }
 
 
+@dataclass
+class TierExecutor:
+    """One-shot command resolved from a tier (design v2 §3.1, F0.1).
+
+    ``argv`` is the base command without the prompt; ``prompt_via`` tells
+    the caller whether the prompt travels as the last argv element or on
+    stdin. ``label`` (``tier_a``, ``tier_c:muse``…) identifies the executor
+    in steps and logs.
+    """
+
+    argv: list[str]
+    prompt_via: str  # "argv" | "stdin"
+    cwd: str | None
+    env: dict[str, str]
+    label: str
+
+
 class DevSessionManager:
     """Runs deterministic step-based Dev Agent sessions."""
 
@@ -101,7 +108,6 @@ class DevSessionManager:
         self._tier_selector = TierSelector(settings)
         self._rate_monitor = rate_monitor
         self._repo = repo
-        self._kimi_sessions = KimiSessionManager(settings)
         self._consensus = CriticalConsensusOrchestrator(
             settings, TmuxRuntime(settings, rate_monitor=rate_monitor), rate_monitor=rate_monitor,
             repo=repo,
@@ -346,27 +352,33 @@ class DevSessionManager:
                 summary=summary,
             )
 
-        if tool == CodingTool.OPENCODE:
-            return await self._step_opencode(task, config, prompt)
-
-        if tool == CodingTool.KIMI:
-            return await self._step_kimi(task, config, prompt)
-
-        command = self._resolve_cli_command(tool, config)
-        ok, output = await self._run_command(command, stdin_payload=prompt, timeout=1800)
+        executor = await self._resolve_tier_executor(tool, config)
+        if executor.prompt_via == "argv":
+            command = [*executor.argv, prompt]
+            stdin_payload: str | None = None
+        else:
+            command = list(executor.argv)
+            stdin_payload = prompt
+        ok, output, err = await self._run_process(
+            command, stdin_payload=stdin_payload, timeout=1800,
+            cwd=executor.cwd, env=executor.env or None,
+        )
 
         if not ok:
+            detail = self._summarize_failure_output(
+                output, err, fallback=f"{executor.label} execution failed")
             return CodingStepResult(
-                step=self._step("code", "failed", output),
+                step=self._step("code", "failed", detail),
                 prompt=prompt,
                 summary="",
-                error=output,
+                error=detail,
             )
 
-        review_links = extract_review_links(output, self._review_base_url(config))
-        summary = self._truncate(output, 500)
+        text = output or "ok"
+        review_links = extract_review_links(text, self._review_base_url(config))
+        summary = self._truncate(text, 500)
         return CodingStepResult(
-            step=self._step("code", "ok", "Coding CLI finished"),
+            step=self._step("code", "ok", f"Coding CLI finished ({executor.label})"),
             prompt=prompt,
             summary=summary,
             review_links=review_links,
@@ -432,169 +444,6 @@ class DevSessionManager:
             review_links=review_links,
         )
 
-    async def _step_opencode(
-        self,
-        task: dict[str, Any],
-        config: dict[str, Any],
-        prompt: str,
-    ) -> "CodingStepResult":
-        command, cwd, env_vars = self._resolve_provider_runtime(CodingTool.OPENCODE, config)
-        session_title = self._build_session_title(task)
-        shell_command, sentinel = build_run_shell_command(
-            base_command=command,
-            prompt=prompt,
-            cwd=cwd,
-            title=session_title,
-            agent_name="build",
-        )
-        ok, stdout, stderr = await self._run_process(
-            ["/bin/sh", "-lc", shell_command],
-            timeout=1800,
-            cwd=cwd,
-            env=env_vars,
-        )
-        combined_output = "\n".join(part for part in (stdout, stderr) if part).strip()
-        parsed = parse_run_output(combined_output)
-        review_links = extract_review_links(
-            parsed.raw_text or parsed.final_text or combined_output,
-            self._review_base_url(config),
-        )
-
-        if not ok:
-            error = self._summarize_failure_output(
-                stdout,
-                stderr,
-                fallback=parsed.error_text or "OpenCode build failed",
-            )
-            return CodingStepResult(
-                step=self._step("code", "failed", error),
-                prompt=prompt,
-                summary="",
-                error=error,
-                review_links=review_links,
-            )
-
-        sentinel_exit = extract_response_sentinel_exit_code(combined_output, sentinel)
-        if sentinel_exit is None:
-            error = "OpenCode run did not emit completion sentinel"
-            return CodingStepResult(
-                step=self._step("code", "failed", error),
-                prompt=prompt,
-                summary="",
-                error=error,
-                review_links=review_links,
-            )
-
-        if sentinel_exit != 0:
-            error = self._summarize_failure_output(
-                stdout,
-                stderr,
-                fallback=parsed.error_text or f"OpenCode build failed with exit code {sentinel_exit}",
-            )
-            return CodingStepResult(
-                step=self._step("code", "failed", error),
-                prompt=prompt,
-                summary="",
-                error=error,
-                review_links=review_links,
-            )
-
-        if parsed.error_text:
-            error = self._truncate(parsed.error_text, 600)
-            return CodingStepResult(
-                step=self._step("code", "failed", error),
-                prompt=prompt,
-                summary="",
-                error=error,
-                review_links=review_links,
-            )
-
-        summary = self._truncate(
-            parsed.final_text or parsed.raw_text or combined_output or "OpenCode build finished",
-            500,
-        )
-        return CodingStepResult(
-            step=self._step("code", "ok", "OpenCode build finished"),
-            prompt=prompt,
-            summary=summary,
-            session_id=parsed.session_id,
-            session_title=session_title,
-            review_links=review_links,
-        )
-
-    async def _step_kimi(
-        self,
-        task: dict[str, Any],
-        config: dict[str, Any],
-        prompt: str,
-    ) -> "CodingStepResult":
-        command, cwd, env_vars = self._resolve_provider_runtime(CodingTool.KIMI, config)
-        run_command = self._build_kimi_command(command, prompt, cwd)
-        process_result = await self._run_process_detailed(
-            run_command,
-            timeout=1800,
-            cwd=cwd,
-            env=env_vars,
-        )
-        combined_output = "\n".join(
-            part for part in (process_result.stdout, process_result.stderr) if part
-        ).strip()
-        parsed = parse_kimi_output(combined_output)
-        review_links = extract_review_links(
-            parsed.raw_text or parsed.final_text or combined_output,
-            self._review_base_url(config),
-        )
-
-        if not process_result.ok:
-            retryable = detect_kimi_retryable_failure(process_result.returncode, combined_output)
-            if retryable is not None:
-                wait_seconds = retryable.wait_seconds or 7200
-                detail = self._truncate(retryable.detail, 600)
-                return CodingStepResult(
-                    step=self._step("code", "waiting", detail),
-                    prompt=prompt,
-                    summary=detail,
-                    session_id=parsed.session_id,
-                    waiting_reason=retryable.waiting_reason,
-                    resume_at=datetime.now(timezone.utc) + timedelta(seconds=wait_seconds),
-                    review_links=review_links,
-                )
-
-            error = self._summarize_failure_output(
-                process_result.stdout,
-                process_result.stderr,
-                fallback="Kimi CLI failed",
-            )
-            return CodingStepResult(
-                step=self._step("code", "failed", error),
-                prompt=prompt,
-                summary="",
-                error=error,
-                session_id=parsed.session_id,
-                review_links=review_links,
-            )
-
-        session_title: str | None = None
-        desired_title = self._build_session_title(task)
-        if parsed.session_id and cwd:
-            try:
-                if self._kimi_sessions.set_session_title(cwd, parsed.session_id, desired_title):
-                    session_title = desired_title
-            except Exception:
-                session_title = None
-        summary = self._truncate(
-            parsed.final_text or parsed.raw_text or combined_output or "Kimi finished",
-            500,
-        )
-        return CodingStepResult(
-            step=self._step("code", "ok", "Kimi finished"),
-            prompt=prompt,
-            summary=summary,
-            session_id=parsed.session_id,
-            session_title=session_title,
-            review_links=review_links,
-        )
-
     async def _step_qa(
         self,
         config: dict[str, Any],
@@ -641,57 +490,132 @@ class DevSessionManager:
         except Exception as exc:
             return self._step("update_files", "skipped", f"CONTEXT.md unavailable: {exc}")
 
-    def _resolve_cli_command(self, tool: CodingTool, config: dict[str, Any]) -> list[str]:
-        command: list[str]
-        cmd = config.get("dev", {}).get("cli_command")
-        if isinstance(cmd, list) and cmd:
-            command = [str(token) for token in cmd]
-        elif isinstance(cmd, str) and cmd.strip():
-            command = shlex.split(cmd)
-        else:
-            provider_cfg = (config.get("dev", {}).get("providers", {}) or {}).get(tool.value, {})
-            provider_command = provider_cfg.get("command")
-            if isinstance(provider_command, list) and provider_command:
-                command = [str(token) for token in provider_command]
-            elif isinstance(provider_command, str) and provider_command.strip():
-                command = shlex.split(provider_command)
-            elif tool == CodingTool.CODEX:
-                command = [self._settings.CODEX_CLI_PATH, *shlex.split(self._settings.CODEX_DEFAULT_ARGS)]
-            elif tool == CodingTool.GEMINI:
-                command = [self._settings.GEMINI_CLI_PATH, *shlex.split(self._settings.GEMINI_DEFAULT_ARGS)]
-            elif tool == CodingTool.OPENCODE:
-                command = [self._settings.OPENCODE_CLI_PATH, *shlex.split(self._settings.OPENCODE_DEFAULT_ARGS)]
-            elif tool == CodingTool.GLM:
-                command = [self._settings.GLM_CLI_PATH, *shlex.split(self._settings.GLM_DEFAULT_ARGS)]
-            elif tool == CodingTool.KIMI:
-                command = [self._settings.KIMI_CLI_PATH, *shlex.split(self._settings.KIMI_DEFAULT_ARGS)]
-            elif tool == CodingTool.MUSE:
-                command = [self._settings.MUSE_CLI_PATH, *shlex.split(self._settings.MUSE_DEFAULT_ARGS)]
-            else:
-                command = [self._settings.CLAUDE_CODE_PATH, *shlex.split(self._settings.CLAUDE_DEFAULT_ARGS)]
-
-        if tool == CodingTool.OPENCODE:
-            command = apply_opencode_model_override(command, self._settings.OPENCODE_MODEL_OVERRIDE)
-            command = normalize_opencode_command(command)
-        return command
-
-    def _resolve_provider_runtime(
+    async def _resolve_tier_executor(
         self,
         tool: CodingTool,
         config: dict[str, Any],
-    ) -> tuple[list[str], str | None, dict[str, str]]:
-        provider_cfg = (config.get("dev", {}).get("providers", {}) or {}).get(tool.value, {})
-        command = self._resolve_cli_command(tool, config)
-        env_vars = {
-            str(key): str(value)
-            for key, value in dict(provider_cfg.get("env") or {}).items()
-        }
+    ) -> TierExecutor:
+        """Resolve a tier to its one-shot executor (design v2 §3.1, F0.1).
+
+        Tier A runs the configured Claude account, Tier B the configured
+        Codex account, Tier C the first available link of its chain
+        (muse → dsh → claudep). Model/effort stay wrapper-owned until F5
+        enforces them explicitly (§4.4); the account always comes from the
+        global ``tiers`` config, never from the ticket.
+        """
+        dev_cfg = config.get("dev", {}) or {}
+        tiers_cfg = dev_cfg.get("tiers", {}) or {}
+        providers = dev_cfg.get("providers", {}) or {}
+        repo_cwd = self._resolve_repo_path(config)
+
+        if tool == CodingTool.TIER_A:
+            account = str((tiers_cfg.get("tier_a") or {}).get("account") or "claudej")
+            provider_cfg = providers.get("claude", {}) or {}
+            argv = self._as_argv(provider_cfg.get("command")) or [account]
+            return TierExecutor(
+                argv=self._ensure_print_flag(argv),
+                prompt_via="argv",
+                cwd=self._provider_cwd(provider_cfg, repo_cwd),
+                env=self._provider_env(provider_cfg),
+                label="tier_a",
+            )
+        if tool == CodingTool.TIER_B:
+            account = str((tiers_cfg.get("tier_b") or {}).get("account") or "codexj")
+            provider_cfg = providers.get("codex", {}) or {}
+            return TierExecutor(
+                argv=[account, "exec", "--ephemeral", "-"],
+                prompt_via="stdin",
+                cwd=self._provider_cwd(provider_cfg, repo_cwd),
+                env=self._provider_env(provider_cfg),
+                label="tier_b",
+            )
+        if tool == CodingTool.TIER_C:
+            tier_c = tiers_cfg.get("tier_c", {}) or {}
+            chain = [str(link) for link in tier_c.get("chain", TIER_C_CHAIN) if str(link)]
+            availability = await self._tier_c_availability(chain, tier_c)
+            link = select_tier_c_link(availability, chain)
+            link_cfg = tier_c.get(link, {}) or {}
+            if link == "muse":
+                provider_cfg = providers.get("muse", {}) or {}
+                argv = self._as_argv(link_cfg.get("command")) or self._as_argv(
+                    provider_cfg.get("command")) or ["muse", "exec"]
+                return TierExecutor(
+                    argv=argv, prompt_via="argv",
+                    cwd=self._provider_cwd(provider_cfg, repo_cwd),
+                    env=self._provider_env(provider_cfg),
+                    label="tier_c:muse",
+                )
+            argv = self._as_argv(link_cfg.get("command")) or [link]
+            if link == "claudep":
+                argv = self._ensure_print_flag(argv)
+            return TierExecutor(
+                argv=argv,
+                prompt_via="stdin" if link == "dsh" else "argv",
+                cwd=repo_cwd,
+                env={str(k): str(v) for k, v in dict(link_cfg.get("env") or {}).items()},
+                label=f"tier_c:{link}",
+            )
+        raise ValueError(f"no simple executor for tier {tool!r}")
+
+    async def _tier_c_availability(
+        self,
+        chain: list[str],
+        tier_c: dict[str, Any],
+    ) -> dict[str, bool]:
+        """Probe each Tier C link: muse via its quota monitor, the reactive
+        links by command existence (tried until they fail, §7.2)."""
+        availability: dict[str, bool] = {}
+        for link in chain:
+            if link == "muse":
+                availability[link] = await self._muse_available()
+                continue
+            link_cfg = tier_c.get(link, {}) or {}
+            argv = self._as_argv(link_cfg.get("command"))
+            availability[link] = self._command_available(argv or [link])
+        return availability
+
+    async def _muse_available(self) -> bool:
+        if self._rate_monitor is None:
+            return True
+        try:
+            return await self._rate_monitor.can_launch("muse")
+        except Exception:
+            logger.warning("muse availability probe failed; assuming available", exc_info=True)
+            return True
+
+    @staticmethod
+    def _command_available(argv: list[str]) -> bool:
+        if not argv:
+            return False
+        if shutil.which(argv[0]) is None:
+            return False
+        return all(Path(token).exists() for token in argv[1:]
+                   if token.startswith("/") and "." in Path(token).name)
+
+    @staticmethod
+    def _as_argv(raw: Any) -> list[str]:
+        if isinstance(raw, list) and raw:
+            return [str(token) for token in raw]
+        if isinstance(raw, str) and raw.strip():
+            return [raw.strip()]
+        return []
+
+    @staticmethod
+    def _ensure_print_flag(argv: list[str]) -> list[str]:
+        if any(token in ("-p", "--print") for token in argv):
+            return list(argv)
+        return [*argv, "--print"]
+
+    @staticmethod
+    def _provider_cwd(provider_cfg: dict[str, Any], repo_cwd: str | None) -> str | None:
         cwd = provider_cfg.get("cwd")
-        if cwd is None:
-            cwd = self._resolve_repo_path(config)
         if cwd is not None:
-            cwd = str(cwd)
-        return command, cwd, env_vars
+            return str(cwd)
+        return repo_cwd
+
+    @staticmethod
+    def _provider_env(provider_cfg: dict[str, Any]) -> dict[str, str]:
+        return {str(k): str(v) for k, v in dict(provider_cfg.get("env") or {}).items()}
 
     def _build_coding_prompt(self, task: dict[str, Any], config: dict[str, Any]) -> str:
         pm = (task.get("params") or {}).get("pm_ticket") or {}
@@ -763,36 +687,6 @@ class DevSessionManager:
         )
 
         return "\n".join(lines)
-
-    def _build_opencode_command(
-        self,
-        base_command: list[str],
-        prompt: str,
-        cwd: str | None,
-        session_title: str,
-    ) -> list[str]:
-        return build_run_command(
-            base_command=base_command,
-            prompt=prompt,
-            cwd=cwd,
-            title=session_title,
-            agent_name="build",
-        )
-
-    def _build_kimi_command(
-        self,
-        base_command: list[str],
-        prompt: str,
-        cwd: str | None,
-    ) -> list[str]:
-        if not base_command:
-            raise ValueError("Kimi base command is empty")
-
-        command = [base_command[0], "--print", *base_command[1:]]
-        if cwd:
-            command.extend(["--work-dir", cwd])
-        command.extend(["--prompt", prompt])
-        return command
 
     def _resolve_repo_path(self, config: dict[str, Any]) -> str | None:
         repos = config.get("project", {}).get("repos", [])

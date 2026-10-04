@@ -19,7 +19,7 @@ import libtmux
 
 from agents.dev.routing import resolved_tool_name
 from settings import Settings
-from state import CodingTool, TaskStatus
+from state import TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -559,15 +559,20 @@ class RateMonitor:
                 # No slots → retry in 2 min (a ticket should finish soon)
                 return False, datetime.now(timezone.utc) + timedelta(minutes=2)
 
-        # 2. Provider limits
+        # 2. Quota limits per tier (design v2 §4.3, F0.1): Tier S needs the
+        # scarce Claude + Codex accounts before the cycle starts; Tier A/B
+        # need theirs. Tier C always launches: muse is checked at chain
+        # selection and the dsh/claudep links are reactive.
         ticket_tool = resolved_tool_name(ticket)
         providers_to_check: list[str] = []
         if ticket_tool == "tier_s":
             providers_to_check = ["claude", "codex", "muse"]
-        elif ticket_tool in ("codex", "claude", "muse"):
-            providers_to_check = [ticket_tool]
+        elif ticket_tool == "tier_a":
+            providers_to_check = ["claude"]
+        elif ticket_tool == "tier_b":
+            providers_to_check = ["codex"]
         else:
-            # gemini / opencode / glm / kimi / unknown – always OK
+            # tier_c / unknown – always OK
             return True, None
 
         earliest_reset: datetime | None = None
@@ -592,8 +597,12 @@ class RateMonitor:
             await self.refresh_status("claude")
             await self.refresh_status("codex")
             await self.refresh_status("muse")
-        elif tool in ("codex", "claude", "muse"):
-            await self.refresh_status(tool)
+        elif tool == "tier_a":
+            await self.refresh_status("claude")
+        elif tool == "tier_b":
+            await self.refresh_status("codex")
+        elif tool == "tier_c":
+            await self.refresh_status("muse")
 
     # ------------------------------------------------------------------
     # Rate-limit detection helpers (used by tmux_runtime polling)
