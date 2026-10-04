@@ -4,6 +4,7 @@ import asyncio
 import sys
 import types
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -127,4 +128,44 @@ class ResumeQueuedTicketsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(resumed, 1)
         self.assertEqual(patched, ["t2"])
+        self.assertEqual(len(scheduled), 1)
+
+    async def test_naive_resume_at_from_mongo_does_not_crash(self) -> None:
+        """Motor sin tz_aware devuelve resume_at naive (UTC): no debe romper
+        el scheduler con TypeError ni bloquear el resume vencido."""
+        now = datetime.now(timezone.utc)
+        queued = [
+            {"task_id": "t-past", "project": "p1", "status": "queued",
+             "resume_at": (now - timedelta(minutes=5)).replace(tzinfo=None)},
+            {"task_id": "t-future", "project": "p2", "status": "queued",
+             "resume_at": (now + timedelta(minutes=5)).replace(tzinfo=None)},
+        ]
+        service = object.__new__(TaskService)
+        service._rate_monitor = _FakeRateMonitor()
+        service._repo = _FakeRepo(queued=queued, active=[])
+        patched: list[str] = []
+
+        async def fake_patch_task(task_id: str, updates: dict[str, object]) -> dict[str, object]:
+            patched.append(task_id)
+            return {"task_id": task_id, **updates}
+
+        async def fake_run_task(task_id: str) -> None:
+            pass
+
+        service.patch_task = fake_patch_task
+        service.run_task = fake_run_task
+        service._task_allows_autorun = lambda ticket: True
+
+        scheduled: list[asyncio.coroutines] = []
+
+        def fake_create_task(coro):
+            scheduled.append(coro)
+            coro.close()
+            return None
+
+        with patch("task_service.asyncio.create_task", side_effect=fake_create_task):
+            resumed = await TaskService.resume_queued_tickets(service)
+
+        self.assertEqual(resumed, 1)
+        self.assertEqual(patched, ["t-past"])
         self.assertEqual(len(scheduled), 1)

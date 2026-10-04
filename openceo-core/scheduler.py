@@ -50,6 +50,11 @@ class WaitingTaskScheduler:
 
     async def _loop(self) -> None:
         while not self._stop.is_set():
-            await self._task_service.resume_waiting_tasks()
-            await self._task_service.resume_queued_tickets()
+            try:
+                await self._task_service.resume_waiting_tasks()
+                await self._task_service.resume_queued_tickets()
+            except Exception:
+                # One bad ticket must not kill auto-resume forever; the next
+                # tick retries. The traceback is the alert.
+                logger.exception("WaitingTaskScheduler tick failed; will retry")
             await asyncio.sleep(max(5, self._settings.WAITING_POLL_SECONDS))

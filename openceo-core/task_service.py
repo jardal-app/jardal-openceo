@@ -1747,8 +1747,13 @@ class TaskService:
             if project in active_projects:
                 continue
             resume_at = ticket.get("resume_at")
-            if resume_at is not None and resume_at > now_utc:
-                continue
+            if resume_at is not None:
+                # Motor devuelve naive (UTC) sin tz_aware: normalizar antes de
+                # comparar, o el TypeError mata el scheduler entero.
+                if isinstance(resume_at, datetime) and resume_at.tzinfo is None:
+                    resume_at = resume_at.replace(tzinfo=timezone.utc)
+                if resume_at > now_utc:
+                    continue
 
             can, new_resume = await self._rate_monitor.can_launch_ticket(
                 ticket, active_tickets=active,
