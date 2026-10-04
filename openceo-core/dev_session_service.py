@@ -445,6 +445,15 @@ class DevSessionService:
             project, role = parsed
             if project in consensus_projects:
                 continue
+            # Tier S ticket runs (tier_s_runs) are not dev_sessions: a live run
+            # owns its planner/builder TUI and resume reuses it. Killing it
+            # here breaks every Tier S cycle on each service (re)start.
+            if await self._repo.live_tier_s_run_for_project(project) is not None:
+                logger.info(
+                    "Runtime cleanup: sparing Tier S tmux session '%s' (live run)",
+                    session_name,
+                )
+                continue
             self._tmux.close_session(
                 project=f"tier_s::{project}::{role}",
                 tmux_session_name=session_name,

@@ -623,6 +623,17 @@ class MongoRepository:
     async def active_tier_s_run_for_repo(self, repo_path: str) -> dict[str, Any] | None:
         return self._clean(await self.tier_s_runs.find_one({"active_repo": repo_path}))
 
+    async def live_tier_s_run_for_project(self, project: str) -> dict[str, Any] | None:
+        """Latest Tier S run still holding its repo (active/running/waiting).
+
+        Terminal runs clear ``active_repo``; only a string value means the run
+        owns live tmux sessions that cleanup must spare.
+        """
+        return self._clean(await self.tier_s_runs.find_one(
+            {"project": project, "active_repo": {"$type": "string"}},
+            sort=[("updated_at", DESCENDING)],
+        ))
+
     # ------------------------- Repo execution lock -------------------------
 
     async def acquire_repo_lock(self, repo: str, holder: str, ttl_seconds: int = 86400) -> dict[str, Any] | None:
