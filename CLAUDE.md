@@ -6,7 +6,7 @@ Guía y contrato de arquitectura para agentes y desarrolladores que interactúan
 `/home/develop/development/Jardal/jardal-knowledge/vault/` (usar el skill `obsidian-vault-links`).
 Trabajo temporal de tickets: `docs/work/TASK-2026-000NN-tema.md`.
 
-Instrucciones operativas del repo (F7a, los CLI del roster la cargan directamente): @AGENTS.md.
+Instrucciones operativas del repo (F7a, los CLI del roster las cargan directamente): §10 de este archivo (también visible como `AGENTS.md`, symlink a este archivo).
 
 ---
 
@@ -228,3 +228,64 @@ del mismo trabajo. Al cerrar, en orden:
 3. **Ticket en ERPNext en su estado final** según AGENTS.md: `Completed` si el agente terminó y verificó; `Pending Review` solo si queda una credencial o aprobación humana concreta; `Working` si sigue abierto el trabajo o una dependencia. Pasar el contexto de QA al adaptador y releer el estado de negocio. Borrar la rama local (`-d`) y remota si existe una vez mergeada.
 4. **Docs temporales eliminados**: `docs/work/TASK-2026-000NN-tema.md` se borra con aprobación del dueño una vez verificado que lo durable quedó en el vault y el resultado en el ticket.
 5. **Registro durable**: `STATUS.md` (traspaso), ticket ERPNext (resultado) y vault (solo hechos, decisiones, flujos y conclusiones reutilizables, con el número de ticket como evidencia).
+
+---
+
+## 10. Contrato operativo raíz (Tier S F7a)
+
+Repo-root instructions. Every CLI in the Tier S roster reads this file
+directly; prompts never paste it. This section is also served as
+`AGENTS.md` (symlink to this file) so every agent loads the same rules.
+
+### Layout
+
+- `openceo-core/` — orchestrator (Python, FastAPI, LangGraph), tests in `tests/`
+- `openceo-core/agents/dev/tier_s/` — Tier S engine (F1–F7): cycle, review
+  rounds, findings inbox, objectives, knowledge
+- `openceo-react/` — dashboard (React 19 + Vite + Tailwind v4)
+- `openceo-voice/`, `openceo-voice-android/` — realtime voice + Android app
+- `workflows/` — deterministic Tier-0 YAML workflows
+- `projects/<project>/project.yaml` — per-project config (validated)
+- `docs/work/TASK-2026-000NN-tema.md` — temporary ticket research (delete after)
+
+### Python
+
+- Always use the root venv: `./.venv/bin/python -m pytest …`
+- Never create venvs in `/tmp`; never force-install into system python
+- Compile-check touched files: `python3 -m py_compile <files>`
+
+### Validate before finishing
+
+```bash
+./.venv/bin/python -m pytest tests/test_tier_s_final.py tests/test_tier_s_contract.py \
+  tests/test_coding_tool_routing.py tests/test_tier_s_config_validation.py -q
+```
+
+Full suite (~8 min): `./.venv/bin/python -m pytest tests/ -q`
+
+### Service (host mode)
+
+```bash
+scripts/openceo-core-host.sh restart|status
+```
+
+### Tier S executor contract
+
+**Scope: this contract applies ONLY when your prompt names you a Tier S executor (builder/reviewer). Owner sessions follow §9 instead; executors never follow §9.**
+
+- Work on the checked-out branch; NEVER commit, push, rebase, stash, or
+  change branches. Only the orchestrator commits (squash) and merges.
+- Orchestrator files live in `.tier-s/` (PLAN, FINDINGS, FIX, HANDOFF,
+  status). Read them; write only the artifact your prompt names.
+- Gates are run by the orchestrator; report failures with file + line.
+- Reviewers: read-only worktrees, reports on stdout in §16.4 format.
+- One ticket = one session; no transcripts or diffs in prompts.
+
+### Standing rules
+
+- No polling or Mongo/API sweeps: react to CRUD events only.
+- ERPNext owns business state (`Task`/`Project`); Mongo owns execution.
+  Never create Mongo-only tickets: internal creation goes through the
+  ticket API (ERPNext first).
+- No secrets, credentials, or personal data in notes or temp docs.
+- Conventions over configuration: mirror sibling code, reuse its helpers.
