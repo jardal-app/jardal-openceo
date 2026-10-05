@@ -77,6 +77,14 @@ class MongoRepository:
         return self.db["tier_s_runs"]
 
     @property
+    def findings_inbox(self):
+        return self.db["findings_inbox"]
+
+    @property
+    def dev_objectives(self):
+        return self.db["objectives"]
+
+    @property
     def repo_locks(self):
         return self.db["repo_locks"]
 
@@ -226,7 +234,20 @@ class MongoRepository:
         await self.workflow_runs.create_index([("status", ASCENDING), ("updated_at", DESCENDING)])
 
         await self.tier_s_runs.create_index([("run_id", ASCENDING)], unique=True)
+        await self.tier_s_runs.create_index([("task_id", ASCENDING), ("updated_at", DESCENDING)])
         await self.tier_s_runs.create_index([("owner_id", ASCENDING), ("updated_at", DESCENDING)])
+        await self.findings_inbox.create_index([("project", ASCENDING), ("status", ASCENDING)])
+        await self.findings_inbox.create_index([("project", ASCENDING), ("file", ASCENDING)])
+        await self.dev_objectives.create_index([("objective_id", ASCENDING)], unique=True)
+        await self.dev_objectives.create_index([("project", ASCENDING), ("status", ASCENDING)])
+        await self.agent_status.create_index(
+            [("slot", ASCENDING)], unique=True,
+            partialFilterExpression={"slot": {"$type": "string"}},
+        )
+        await self.tasks.create_index(
+            [("objective_id", ASCENDING), ("status", ASCENDING)],
+            name="idx_tasks_objective",
+        )
         await self.tier_s_runs.create_index(
             [("active_repo", ASCENDING)], unique=True,
             partialFilterExpression={"active_repo": {"$type": "string"}},
@@ -623,6 +644,14 @@ class MongoRepository:
     async def active_tier_s_run_for_repo(self, repo_path: str) -> dict[str, Any] | None:
         return self._clean(await self.tier_s_runs.find_one({"active_repo": repo_path}))
 
+    async def active_tier_s_run_for_task(self, task_id: str) -> dict[str, Any] | None:
+        """Latest non-terminal Tier S run for a task (cancel endpoint)."""
+        row = await self.tier_s_runs.find_one(
+            {"task_id": task_id, "status": {"$in": ["running", "waiting"]}},
+            sort=[("updated_at", DESCENDING)],
+        )
+        return self._clean(row)
+
     async def live_tier_s_run_for_project(self, project: str) -> dict[str, Any] | None:
         """Latest Tier S run still holding its repo (active/running/waiting).
 
@@ -704,6 +733,82 @@ class MongoRepository:
         patch = {**updates, "updated_at": datetime.now(timezone.utc)}
         await self.tier_s_runs.update_one({"run_id": run_id}, {"$set": patch})
         return await self.get_tier_s_run(run_id)
+
+    # ------------------------- Review slots (F3) -------------------------
+
+    async def get_agent_status(self, key: str) -> dict[str, Any] | None:
+        """Slot availability doc (``review:<label>``), or None when fresh."""
+        return self._clean(await self.agent_status.find_one({"slot": key}))
+
+    async def set_agent_status(self, key: str, state: dict[str, Any]) -> None:
+        await self.agent_status.update_one(
+            {"slot": key},
+            {"$set": {**state, "slot": key,
+                      "updated_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+
+    # ------------------------- Findings inbox (F4) -------------------------
+
+    async def get_findings_entry(self, fp: str) -> dict[str, Any] | None:
+        return self._clean(await self.findings_inbox.find_one({"_id": fp}))
+
+    async def upsert_findings_entry(self, fp: str, entry: dict[str, Any]) -> None:
+        await self.findings_inbox.update_one(
+            {"_id": fp},
+            {"$set": {**entry, "_id": fp,
+                      "updated_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+
+    async def list_open_findings_for_files(
+        self, files: list[str], limit: int = 15,
+    ) -> list[dict[str, Any]]:
+        rows = self.findings_inbox.find(
+            {"status": "open", "file": {"$in": files}},
+            sort=[("severity_max", ASCENDING)],
+        ).limit(max(1, limit))
+        return [self._clean(row) async for row in rows]
+
+    # ------------------------- Dev objectives (F6) -------------------------
+
+    async def create_objective(self, doc: dict[str, Any]) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        stored = {**doc, "created_at": now, "updated_at": now}
+        await self.dev_objectives.insert_one(stored)
+        return self._clean(stored)
+
+    async def get_objective(self, objective_id: str) -> dict[str, Any] | None:
+        return self._clean(
+            await self.dev_objectives.find_one({"objective_id": objective_id}))
+
+    async def patch_objective(
+        self, objective_id: str, updates: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        patch = {**updates, "updated_at": datetime.now(timezone.utc)}
+        await self.dev_objectives.update_one(
+            {"objective_id": objective_id}, {"$set": patch})
+        return await self.get_objective(objective_id)
+
+    async def list_tasks_by_objective(
+        self, objective_id: str, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        rows = self.tasks.find(
+            {"objective_id": objective_id},
+            sort=[("created_at", ASCENDING)],
+        ).limit(limit)
+        return [self._clean(row) async for row in rows]
+
+    async def list_tasks_blocked_by(
+        self, task_id: str, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Waiting/queued tickets listing ``task_id`` in ``blocked_by``."""
+        rows = self.tasks.find(
+            {"blocked_by": task_id,
+             "status": {"$in": ["waiting", "queued"]}},
+            sort=[("created_at", ASCENDING)],
+        ).limit(limit)
+        return [self._clean(row) async for row in rows]
 
     async def expired_tier_s_runs(self, now: datetime, repo_path: str,
                                   limit: int = 50) -> list[dict[str, Any]]:

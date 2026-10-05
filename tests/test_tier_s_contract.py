@@ -1,6 +1,15 @@
+"""Kept Tier S contract tests (the old subplan engine is gone).
+
+Covers what the Tier S engine in :mod:`agents.dev.tier_s` still uses:
+snapshots, quorum (with self-review extras), TUI question handling, the
+non-blocking plan-review format, the global roster/pool config and the child
+environment credential blocklist. Old-orchestrator tests were removed with
+``consensus.py`` (owner order); the engine's behavior is proven by
+``tests/test_tier_s_final.py``.
+"""
+
 from __future__ import annotations
 
-import asyncio
 import os
 import subprocess
 import sys
@@ -8,13 +17,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 CORE = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE) not in sys.path:
     sys.path.insert(0, str(CORE))
 
-from agents.dev.consensus import CriticalConsensusOrchestrator, ConsensusParticipant
 from agents.dev.session import DevSessionManager
 from agents.dev.tier_s_contract import (
     child_env, detect_claude_question, git_snapshot, parse_plan_observations,
@@ -22,7 +30,7 @@ from agents.dev.tier_s_contract import (
     valid_plan_review, verify_plan_anchor,
 )
 from settings import Settings
-from agents.dev.tmux_runtime import TmuxRuntime, TmuxTurnResult, _DEFAULT_PROMPT_PATTERNS
+from agents.dev.tmux_runtime import TmuxRuntime
 from state import DevProvider
 
 import yaml
@@ -38,35 +46,9 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         (self.repo / "tracked.txt").write_text("before\n", encoding="utf-8")
         subprocess.run(["git", "add", "tracked.txt"], cwd=self.repo, check=True)
         subprocess.run(["git", "commit", "-qm", "base"], cwd=self.repo, check=True)
-        self.orch = CriticalConsensusOrchestrator(MagicMock(), MagicMock())
-        command = [sys.executable]
-        self.config = {
-            "project": {"repos": [{"local_path": str(self.repo)}]},
-            "dev": {"tier_s": {
-                "roles": {
-                    "planner": {"active": True, "command": command},
-                    "plan-reviewer": {"active": True, "command": command},
-                    "builder": {"active": True, "command": command},
-                },
-                "reviewers": [
-                    {"label": "qwen", "provider": "qwen", "model": "qwen3.8-max", "family": "qwen", "active": True, "command": command},
-                    {"label": "claudeg", "provider": "claude", "model": "glm-5.3", "family": "glm", "active": True, "command": command},
-                    {"label": "dsh", "provider": "dsh", "model": "deepseek-v4.1-flash", "family": "deepseek", "active": True, "command": command},
-                    {"label": "agyd", "provider": "gemini", "model": "gemini", "family": "gemini", "active": False, "command": command},
-                ],
-            }},
-        }
 
     def tearDown(self) -> None:
         self.temp.cleanup()
-
-    async def test_inactive_planner_waits_without_starting_sessions(self) -> None:
-        self.config["dev"]["tier_s"]["roles"]["planner"]["active"] = False
-        self.orch.ensure_project_sessions = AsyncMock()
-        result = await self.orch.execute("test", "ticket", self.config, AsyncMock())
-        self.assertTrue(result.waiting)
-        self.assertIn("claudej", result.summary)
-        self.orch.ensure_project_sessions.assert_not_called()
 
     async def test_git_snapshot_includes_new_files_and_deletions(self) -> None:
         before = git_snapshot(self.repo)
@@ -75,15 +57,6 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         after = git_snapshot(self.repo)
         self.assertEqual(after.changed_since(before), ["new.txt", "tracked.txt"])
         self.assertIsNone(after.files["tracked.txt"])
-
-    async def test_isolated_codex_review_sees_snapshot_without_writing_source(self) -> None:
-        (self.repo / "tracked.txt").write_text("working tree\n", encoding="utf-8")
-        (self.repo / "new.txt").write_text("new\n", encoding="utf-8")
-        with self.orch._isolated_review_worktree(self.repo) as isolated:
-            self.assertEqual((isolated / "tracked.txt").read_text(), "working tree\n")
-            self.assertEqual((isolated / "new.txt").read_text(), "new\n")
-            (isolated / "tracked.txt").write_text("reviewer edit\n", encoding="utf-8")
-        self.assertEqual((self.repo / "tracked.txt").read_text(), "working tree\n")
 
     async def test_quorum_requires_two_valid_reports_from_distinct_families(self) -> None:
         families = {"qwen": "qwen", "claudeg": "glm", "other": "qwen"}
@@ -95,6 +68,16 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(review_quorum({"qwen": "No findings.", "claudeg": "[WARN] a.py:1 — issue → fix"}, families))
         # Unknown labels never count (fail-closed).
         self.assertFalse(review_quorum({"qwen": "No findings.", "ghost": "No findings."}, families))
+        # Extra self-review slots never count, even when valid.
+        self.assertFalse(review_quorum(
+            {"muse-review": "No findings.", "qwen": "No findings."},
+            {"muse-review": "muse", "qwen": "qwen"},
+            {"muse-review"}))
+        self.assertTrue(review_quorum(
+            {"muse-review": "No findings.", "qwen": "No findings.",
+             "claudeg": "No findings."},
+            {"muse-review": "muse", "qwen": "qwen", "claudeg": "glm"},
+            {"muse-review"}))
 
     async def test_native_question_only_while_selection_is_visible(self) -> None:
         pane = ("Which color do you choose: red or blue?\n"
@@ -128,188 +111,6 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
                                                completion_check=lambda: True)
         self.assertTrue(result.ok)
         pane.send_keys.assert_called_once_with("Down", enter=False)
-
-    async def test_second_subplan_reviews_only_its_delta(self) -> None:
-        planner = ConsensusParticipant("planner", DevProvider.CLAUDE, "planner", "planner")
-        builder = ConsensusParticipant("builder", DevProvider.CLAUDE, "builder", "builder")
-        self.orch.ensure_project_sessions = AsyncMock(return_value=(planner, [builder]))
-        self.orch._ensure_participant_session = AsyncMock()
-        self.orch._readonly_review = AsyncMock(return_value="No findings.")
-        scopes = []
-
-        async def review(*args, **kwargs):
-            scopes.append((args[1], list(args[3])))
-            return ({"qwen": "No findings.", "claudeg": "No findings."}, {})
-
-        async def plan(*args, **kwargs):
-            paths = args[2]
-            paths.plan_path.write_text("TOTAL_PLANS: 2\n", encoding="utf-8")
-            paths.status_path.write_text("PLAN_READY_2", encoding="utf-8")
-            return 2, TmuxTurnResult(True, "PLAN_READY_2", True)
-
-        async def build(*args, **kwargs):
-            p, paths = args[1:3]
-            (self.repo / ("tracked.txt" if p == 1 else "second.txt")).write_text(
-                f"subplan {p}\n", encoding="utf-8")
-            paths.build_summary(p).write_text("summary", encoding="utf-8")
-            paths.status_path.write_text(f"BUILD_DONE_{p}", encoding="utf-8")
-            return TmuxTurnResult(True, f"BUILD_DONE_{p}", True)
-
-        self.orch._run_planner = plan
-        self.orch._run_builder = build
-        self.orch._review_snapshot = review
-        result = await self.orch.execute("test", "ticket", self.config, AsyncMock())
-        self.assertTrue(result.ok, result.summary)
-        self.assertEqual(scopes, [(1, ["tracked.txt"]), (2, ["second.txt"]),
-                                   (0, ["second.txt", "tracked.txt"])])
-
-    async def test_completed_fix_signal_resumes_without_rerunning_builder(self) -> None:
-        (self.repo / "tracked.txt").write_text("draft\n", encoding="utf-8")
-        before = git_snapshot(self.repo)
-        (self.repo / "tracked.txt").write_text("fixed\n", encoding="utf-8")
-        paths = self.orch._tier_s_paths(self.repo)
-        paths.dir.mkdir()
-        paths.plan_path.write_text("TOTAL_PLANS: 1\n", encoding="utf-8")
-        paths.status_path.write_text("FIX_DONE_1_1", encoding="utf-8")
-        roster = self.orch._frozen_roster(self.orch._normalized_config(self.config))
-        run = {"run_id": "resume-fix", "repo_path": str(self.repo), "status": "waiting",
-               "phase": "fix", "subplan": 1, "round": 1, "total_plans": 1,
-               "fix_baseline": before.files, "initial_snapshot": before.files,
-               "roster": roster, "reviews_received": 3}
-        self.orch._run_cache[run["run_id"]] = run
-        self.orch._open_run = AsyncMock(return_value=run)
-        planner = ConsensusParticipant("planner", DevProvider.CLAUDE, "planner", "planner")
-        builder = ConsensusParticipant("builder", DevProvider.CLAUDE, "builder", "builder")
-        self.orch.ensure_project_sessions = AsyncMock(return_value=(planner, [builder]))
-        self.orch._ensure_participant_session = AsyncMock()
-        self.orch._run_builder_fix = AsyncMock()
-        self.orch._readonly_review = AsyncMock(return_value="No findings.")
-        self.orch._review_snapshot = AsyncMock(return_value=(
-            {"qwen": "No findings.", "claudeg": "No findings."}, {}))
-        result = await self.orch.execute("test", "ticket", self.config, AsyncMock())
-        self.assertTrue(result.ok, result.summary)
-        self.orch._run_builder_fix.assert_not_called()
-
-    async def test_consumed_question_is_cleared_even_when_planner_stops(self) -> None:
-        question = {"text": "Which?", "options": ["Red", "Blue"],
-                    "option_indices": [0, 1], "selected_index": 0, "input_index": None}
-        run = {"run_id": "resume-question", "repo_path": str(self.repo),
-               "phase": "planner", "status": "waiting", "question": question,
-               "human_answer": "Blue", "roster": self.orch._frozen_roster(
-                   self.orch._normalized_config(self.config))}
-        self.orch._run_cache[run["run_id"]] = run
-        self.orch._open_run = AsyncMock(return_value=run)
-        planner = ConsensusParticipant("planner", DevProvider.CLAUDE, "planner", "planner")
-        builder = ConsensusParticipant("builder", DevProvider.CLAUDE, "builder", "builder")
-        self.orch.ensure_project_sessions = AsyncMock(return_value=(planner, [builder]))
-        self.orch._tmux.answer_question = AsyncMock(return_value=TmuxTurnResult(False, "", False))
-        result = await self.orch.execute("test", "ticket", self.config, AsyncMock())
-        self.assertTrue(result.waiting)
-        self.assertIsNone(run["question"])
-        self.assertIsNone(run["human_answer"])
-        self.orch._run_planner = AsyncMock(return_value=(None, TmuxTurnResult(False, "", False)))
-        await self.orch.execute("test", "ticket", self.config, AsyncMock())
-        self.orch._tmux.answer_question.assert_awaited_once()
-
-    async def test_erpnext_projection_keeps_latest_phase_without_blocking_checkpoint(self) -> None:
-        repo = MagicMock()
-        repo.patch_tier_s_run = AsyncMock()
-        repo.patch_task = AsyncMock(return_value={
-            "params": {"_mirrors": {"erpnext": {"name": "TASK-1"}}}})
-        adapter = MagicMock()
-        release = asyncio.Event()
-        phases = []
-
-        async def project(_name, summary):
-            phases.append(summary["phase"])
-            if len(phases) == 1:
-                await release.wait()
-
-        adapter.update_tier_s_progress = AsyncMock(side_effect=project)
-        orch = CriticalConsensusOrchestrator(MagicMock(), MagicMock(), repo=repo)
-        orch._erpnext = adapter
-        orch._run_cache["run-1"] = {"run_id": "run-1", "phase": "planner",
-                                    "status": "active", "repo_path": str(self.repo)}
-        await orch._checkpoint("run-1", "task-1", None, status="waiting")
-        await asyncio.sleep(0)
-        await orch._checkpoint("run-1", "task-1", None, phase="build")
-        await orch._checkpoint("run-1", "task-1", None, phase="review")
-        self.assertEqual(phases, ["planner"])
-        release.set()
-        await orch._projection_tasks["task-1"]
-        self.assertEqual(phases, ["planner", "review"])
-
-    async def test_small_ticket_completes_only_after_all_reviews(self) -> None:
-        planner = ConsensusParticipant("planner", DevProvider.CLAUDE, "planner", "planner")
-        builder = ConsensusParticipant("builder", DevProvider.CLAUDE, "builder", "builder")
-        self.orch.ensure_project_sessions = AsyncMock(return_value=(planner, [builder]))
-        self.orch._ensure_participant_session = AsyncMock()
-        self.orch._readonly_review = AsyncMock(return_value="No findings.")
-
-        async def plan(*args, **kwargs):
-            paths = args[2]
-            paths.plan_path.write_text("TOTAL_PLANS: 1\n\n## Sub-Plan 1\nImplement.\n", encoding="utf-8")
-            paths.status_path.write_text("PLAN_READY_1", encoding="utf-8")
-            return 1, TmuxTurnResult(True, "PLAN_READY_1", True)
-
-        async def build(*args, **kwargs):
-            paths = args[2]
-            (self.repo / "tracked.txt").write_text("after\n", encoding="utf-8")
-            paths.build_summary(1).write_text("Changed tracked.txt", encoding="utf-8")
-            paths.status_path.write_text("BUILD_DONE_1", encoding="utf-8")
-            return TmuxTurnResult(True, "BUILD_DONE_1", True)
-
-        self.orch._run_planner = plan
-        self.orch._run_builder = build
-        result = await self.orch.execute("test", "ticket", self.config, AsyncMock())
-        self.assertTrue(result.ok, result.summary)
-        self.assertEqual(result.reviews_received, 6)
-        archived = self.repo / ".tier-s" / "runs" / result.run_id
-        self.assertEqual((archived / "status").read_text(), "TICKET_COMPLETE")
-        self.assertFalse((archived / "REVIEW-codexj-1-1.md").exists())
-        self.assertTrue((archived / "REVIEW-qwen-1-1.md").exists())
-        self.assertTrue((archived / "REVIEW-claudeg-1-1.md").exists())
-        self.assertTrue((archived / "REVIEW-dsh-1-1.md").exists())
-        self.assertTrue((archived / "REVIEW-qwen-0-1.md").exists())
-        self.assertTrue((archived / "REVIEW-claudeg-0-1.md").exists())
-        self.assertTrue((archived / "REVIEW-dsh-0-1.md").exists())
-
-    async def test_roster_defaults_muse_builder_and_codexj_reviewer(self) -> None:
-        cfg = self.orch._normalized_config({"dev": {"tier_s": {"roles": {
-            "planner": {"command": ["x"]},
-            "plan-reviewer": {"command": ["x"]},
-            "builder": {"command": ["x"]},
-        }}}})
-        builder = cfg["roles"]["builder"]
-        self.assertEqual(builder["provider"], "muse")
-        self.assertEqual(builder["account"], "muse")
-        self.assertEqual(builder["label"], "muse")
-        self.assertEqual(builder["model"], "muse-spark-1.3-contributor")
-        self.assertEqual(cfg["roles"]["plan-reviewer"]["provider"], "codex")
-        self.assertEqual(cfg["roles"]["plan-reviewer"]["account"], "codexj")
-        self.assertEqual(cfg["roles"]["plan-reviewer"]["label"], "codexj")
-        self.assertEqual(cfg["roles"]["plan-reviewer"]["model"], "gpt-6.1-sol")
-        self.assertEqual(cfg["roles"]["planner"]["account"], "claudej")
-        self.assertEqual(cfg["min_available_families"], 3)
-        self.assertEqual(DevProvider("muse"), DevProvider.MUSE)
-        self.assertIn("muse", _DEFAULT_PROMPT_PATTERNS)
-        # Quorum is two pool families; unknown labels never count.
-        self.assertTrue(review_quorum(
-            {"qwen": "No findings.", "claudeg": "No findings."},
-            {"qwen": "qwen", "claudeg": "glm"}))
-        self.assertFalse(review_quorum(
-            {"qwen": "No findings.", "ghost": "No findings."},
-            {"qwen": "qwen"}))
-        # Extra self-review slots never count, even when valid.
-        self.assertFalse(review_quorum(
-            {"muse-review": "No findings.", "qwen": "No findings."},
-            {"muse-review": "muse", "qwen": "qwen"},
-            {"muse-review"}))
-        self.assertTrue(review_quorum(
-            {"muse-review": "No findings.", "qwen": "No findings.",
-             "claudeg": "No findings."},
-            {"muse-review": "muse", "qwen": "qwen", "claudeg": "glm"},
-            {"muse-review"}))
 
     async def test_global_tier_s_config_pins_roster_and_projects_stay_clean(self) -> None:
         from config_loader import ConfigLoader
@@ -432,127 +233,6 @@ class PlanReviewContractTests(unittest.TestCase):
             self.assertFalse(verify_plan_anchor(obs_at("../escape.py", 1), plan, repo))
 
 
-class NonBlockingPlanReviewTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
-        self.repo = Path(self.temp.name)
-        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=self.repo, check=True)
-        subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=self.repo, check=True)
-        (self.repo / "tracked.txt").write_text("before\n", encoding="utf-8")
-        subprocess.run(["git", "add", "tracked.txt"], cwd=self.repo, check=True)
-        subprocess.run(["git", "commit", "-qm", "base"], cwd=self.repo, check=True)
-        self.orch = CriticalConsensusOrchestrator(MagicMock(), MagicMock())
-        command = [sys.executable]
-        self.config = {
-            "project": {"repos": [{"local_path": str(self.repo)}]},
-            "dev": {"tier_s": {
-                "roles": {
-                    "planner": {"active": True, "command": command},
-                    "plan-reviewer": {"active": True, "command": command},
-                    "builder": {"active": True, "command": command},
-                },
-                "reviewers": [
-                    {"label": "qwen", "provider": "qwen", "model": "m", "family": "qwen", "active": True, "command": command},
-                    {"label": "glm", "provider": "qwen", "model": "m", "family": "glm", "active": True, "command": command},
-                    {"label": "dsh", "provider": "dsh", "model": "m", "family": "deepseek", "active": True, "command": command},
-                ],
-            }},
-        }
-        planner = ConsensusParticipant("planner", DevProvider.CLAUDE, "planner", "planner")
-        builder = ConsensusParticipant("builder", DevProvider.CLAUDE, "builder", "builder")
-        self.orch.ensure_project_sessions = AsyncMock(return_value=(planner, [builder]))
-        self.orch._ensure_participant_session = AsyncMock()
-        self.checkpoints: list[dict] = []
-        orig_checkpoint = self.orch._checkpoint
-
-        async def spy(run_id, task_id, session_id, **updates):
-            self.checkpoints.append(updates)
-            return await orig_checkpoint(run_id, task_id, session_id, **updates)
-
-        self.orch._checkpoint = spy  # type: ignore[method-assign]
-
-        async def plan(*args, **kwargs):
-            paths = args[2]
-            paths.plan_path.write_text(
-                "TOTAL_PLANS: 1\n\n## Sub-Plan 1\nImplement.\n", encoding="utf-8")
-            paths.status_path.write_text("PLAN_READY_1", encoding="utf-8")
-            return 1, TmuxTurnResult(True, "PLAN_READY_1", True)
-
-        async def build(*args, **kwargs):
-            paths = args[2]
-            (self.repo / "tracked.txt").write_text("after\n", encoding="utf-8")
-            paths.build_summary(1).write_text("Changed tracked.txt", encoding="utf-8")
-            paths.status_path.write_text("BUILD_DONE_1", encoding="utf-8")
-            return TmuxTurnResult(True, "BUILD_DONE_1", True)
-
-        async def review(*args, **kwargs):
-            return ({"qwen": "No findings.", "glm": "No findings.",
-                     "dsh": "No findings."}, {})
-
-        self.orch._run_planner = plan
-        self.orch._run_builder = build
-        self.orch._review_snapshot = review
-
-    def tearDown(self) -> None:
-        self.temp.cleanup()
-
-    def _plan_stats(self) -> dict:
-        for updates in self.checkpoints:
-            if "plan_review" in updates:
-                return updates["plan_review"]
-        raise AssertionError("no plan_review checkpoint")
-
-    async def test_critical_observation_does_not_veto(self) -> None:
-        self.orch._readonly_review = AsyncMock(return_value=(
-            "O1 [CRITICAL] CURRENT_PLAN.md:3 — missing test step → add it\n"
-            "> ## Sub-Plan 1\n"
-            "O2 [WARN] src/nowhere.py:1 — ghost → ignore\n"
-            "REVIEW_DONE_plan_0\n"
-        ))
-
-        async def respond(*args, **kwargs):
-            paths = self.orch._tier_s_paths(self.repo)
-            paths.dir.joinpath("PLAN_RESPONSE.md").write_text(
-                "O1: RECHAZADA — tests run in the build step\n", encoding="utf-8")
-            paths.status_path.write_text("PLAN_RESPONDED", encoding="utf-8")
-            return TmuxTurnResult(True, "PLAN_RESPONDED", True)
-
-        self.orch._send_participant_instruction = respond  # type: ignore[method-assign]
-        result = await self.orch.execute("test", "ticket", self.config, AsyncMock())
-        self.assertTrue(result.ok, result.summary)
-        # The ghost-anchored O2 was discarded mechanically; O1 rejected.
-        self.assertEqual(self._plan_stats(),
-                         {"observations": 1, "accepted": 0, "rejected": 1,
-                          "deferred": 0, "no_response": []})
-
-    async def test_incomplete_response_continues_with_sin_respuesta(self) -> None:
-        self.orch._readonly_review = AsyncMock(return_value=(
-            "O1 [WARN] CURRENT_PLAN.md:1 — vague → specify\n"
-            "O2 [WARN] CURRENT_PLAN.md:3 — risky → split\n"
-        ))
-        prompts: list[str] = []
-
-        async def respond(*args, **kwargs):
-            prompts.append(args[3])
-            paths = self.orch._tier_s_paths(self.repo)
-            paths.dir.joinpath("PLAN_RESPONSE.md").write_text(
-                "O1: ACEPTADA — specified\n", encoding="utf-8")
-            paths.status_path.write_text("PLAN_RESPONDED", encoding="utf-8")
-            return TmuxTurnResult(True, "PLAN_RESPONDED", True)
-
-        self.orch._send_participant_instruction = respond  # type: ignore[method-assign]
-        result = await self.orch.execute("test", "ticket", self.config, AsyncMock())
-        self.assertTrue(result.ok, result.summary)
-        stats = self._plan_stats()
-        self.assertEqual(stats["observations"], 2)
-        self.assertEqual(stats["accepted"], 1)
-        self.assertEqual(stats["no_response"], [2])
-        # Asked once, then retried once with the gap note.
-        self.assertEqual(len(prompts), 2)
-        self.assertIn("O2", prompts[1])
-
-
 _ENV_PROBE = (
     "import os; print('LEAK:' + os.environ['DEEPSEEK_API_KEY']) "
     "if os.environ.get('DEEPSEEK_API_KEY') else print('CLEAN')"
@@ -572,8 +252,8 @@ class ChildEnvTests(unittest.TestCase):
         self.assertEqual(merged["PATH"], "/bin")
 
     def test_explicit_overlay_wins(self) -> None:
-        merged = child_env({"DEEPSEEK_API_KEY": "sk-service"}, {"DEEPSEEK_API_KEY": "sk-explicit"})
-        self.assertEqual(merged["DEEPSEEK_API_KEY"], "sk-explicit")
+        merged = child_env({"DEEPSEEK_API_KEY": "sk-service"}, {"DEEPSEEK_API_KEY": "[REDACTED]"})
+        self.assertEqual(merged["DEEPSEEK_API_KEY"], "[REDACTED]")
 
 
 class ChildEnvLeakTests(unittest.IsolatedAsyncioTestCase):
@@ -584,27 +264,9 @@ class ChildEnvLeakTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    async def test_review_process_does_not_leak_service_key(self) -> None:
-        orch = CriticalConsensusOrchestrator(MagicMock(), MagicMock())
-        account = {"label": "dsh", "provider": "dsh"}
-        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-service-fake"}):
-            report = await orch._run_review_process(
-                account, [sys.executable, "-c", _ENV_PROBE], "", self.cwd, 60,
-                env={"DSH_HOME": "/home/develop/.dsh"}, origin_repo=self.cwd)
-        self.assertEqual(report, "CLEAN")
-
-    async def test_review_process_honors_explicit_overlay_key(self) -> None:
-        orch = CriticalConsensusOrchestrator(MagicMock(), MagicMock())
-        account = {"label": "dsh", "provider": "dsh"}
-        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-service-fake"}):
-            report = await orch._run_review_process(
-                account, [sys.executable, "-c", _ENV_PROBE], "", self.cwd, 60,
-                env={"DEEPSEEK_API_KEY": "sk-explicit-fake"}, origin_repo=self.cwd)
-        self.assertEqual(report, "LEAK:sk-explicit-fake")
-
     async def test_tier_executor_does_not_leak_service_key(self) -> None:
         mgr = DevSessionManager(Settings(), MagicMock())
-        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-service-fake"}):
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "[REDACTED]"}):
             result = await mgr._run_process_detailed(
                 [sys.executable, "-c", _ENV_PROBE], cwd=str(self.cwd),
                 env={"DSH_HOME": "/home/develop/.dsh"})

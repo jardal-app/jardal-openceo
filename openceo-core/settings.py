@@ -193,6 +193,11 @@ class Settings(BaseSettings):
 
     # Internal runtime behavior
     TASK_AUTORUN: bool = True
+    # Objective children dispatch (design §9.3, default true = children
+    # enqueue themselves). Set false to hold a pilot's planned tickets
+    # queued (autorun=false) so conversion can be verified first; release
+    # them later via POST /api/tasks/{task_id}/run.
+    TIER_S_OBJECTIVE_CHILD_AUTORUN: bool = True
     WAITING_POLL_SECONDS: int = 60
     PROJECTS_DIR: str = "projects"
     PROJECT_CONTEXTS_DIR: str = str(CORE_DIR.parent / ".runtime" / "project-context")

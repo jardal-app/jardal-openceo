@@ -20,7 +20,6 @@ if str(CORE) not in sys.path:
 
 import tempfile  # noqa: E402
 
-from agents.dev.consensus import CriticalConsensusOrchestrator  # noqa: E402
 from agents.dev.routing import plan_routing_migration  # noqa: E402
 from config_loader import ConfigLoader  # noqa: E402
 from dev_session_service import DevSessionService  # noqa: E402
@@ -118,15 +117,9 @@ class InteractiveTriggerCleanupTests(unittest.TestCase):
 
     ``dev.coding_tool`` was removed from project.yaml (§15.3), so the old
     AUTO + project-flag trigger can never fire and no consumer may read the
-    key. The consensus machinery stays dormant for the autonomous queue;
-    loose sessions resolve AUTO via default_provider only.
+    key. The old engine was removed entirely; Tier S runs on the ticket
+    queue and loose sessions resolve AUTO via default_provider only.
     """
-
-    def test_consensus_is_never_enabled_from_config(self) -> None:
-        self.assertFalse(CriticalConsensusOrchestrator.is_enabled({}))
-        self.assertFalse(
-            CriticalConsensusOrchestrator.is_enabled({"dev": {"coding_tool": "tier_s"}})
-        )
 
     def test_auto_ignores_removed_coding_tool_key(self) -> None:
         service = DevSessionService(MagicMock(), AsyncMock(), MagicMock(), MagicMock(), MagicMock())

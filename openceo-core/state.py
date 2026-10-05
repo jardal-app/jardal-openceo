@@ -210,6 +210,14 @@ class TaskCreateRequest(BaseModel):
     autorun: bool = True
     coding_tier: CodingTier | None = None
     coding_tool: CodingTool | None = None
+    # Tier S design v2 §15.1 (F4/F6): internal creation (inbox promotion,
+    # objective planner, closure fixes) sets these at creation, like any
+    # other origin. They flow into TaskDocument via make_task_document.
+    acceptance: list[str] | None = None
+    objective_id: str | None = None
+    blocked_by: list[str] | None = None
+    origin: str | None = None
+    finding_fingerprint: str | None = None
 
 
 class TaskDocument(BaseModel):
@@ -242,6 +250,16 @@ class TaskDocument(BaseModel):
     autorun: bool | None = None
     coding_tier: CodingTier | None = None
     coding_tool: CodingTool | None = None
+    # Tier S design v2 §15.1 (F2/F6): objective membership, OpenCEO-side
+    # dependencies (the enqueuer never dispatches with open blockers),
+    # ticket origin and findings-inbox fingerprint for promoted tickets.
+    objective_id: str | None = None
+    blocked_by: list[str] = Field(default_factory=list)
+    origin: str | None = None
+    finding_fingerprint: str | None = None
+    # Verifiable acceptance criteria. The planner derives them in PLAN.md
+    # when the ticket does not carry them (design §20-8).
+    acceptance: list[str] | None = None
     coding_session_id: str | None = None
     coding_session_title: str | None = None
     steps: list[TaskStep] = Field(default_factory=list)
@@ -570,6 +588,9 @@ def make_task_document(payload: TaskCreateRequest) -> TaskDocument:
     qa_review_required = bool(data.get("qa_review_required"))
     if data.get("qa_review_state") is None:
         data["qa_review_state"] = QAReviewState.PENDING if qa_review_required else QAReviewState.NOT_REQUIRED
+    # Optional list fields: None means "absent", not an empty override.
+    if data.get("blocked_by") is None:
+        data.pop("blocked_by", None)
     # If agent_hint is provided, use it as the initial agent value
     if data.get("agent_hint"):
         data.setdefault("agent", data["agent_hint"])
