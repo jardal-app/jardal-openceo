@@ -11,10 +11,20 @@ LOG_FILE="$RUNTIME_DIR/openceo-core-host.log"
 
 mkdir -p "$RUNTIME_DIR"
 
-resolve_runtime_pid() {
+runtime_pids() {
   ps -C python -o pid=,args= \
-    | awk -v py="$VENV_PY" '$2 == py && $3 == "main.py" {print $1}' \
-    | tail -n 1
+    | awk -v py="$VENV_PY" '$2 == py && $3 == "main.py" {print $1}'
+}
+
+resolve_runtime_pid() {
+  runtime_pids | tail -n 1
+}
+
+port_owner() {
+  local port="${OPENCEO_PORT:-18765}"
+  command -v ss >/dev/null 2>&1 || return 0
+  ss -tlnp 2>/dev/null | grep -E ":${port}[[:space:]]" | grep -oE 'pid=[0-9]+' \
+    | head -n 1 | cut -d= -f2
 }
 
 load_env() {
@@ -70,6 +80,12 @@ start() {
     echo "openceo-core host already running (pid $(cat "$PID_FILE"))."
     return 0
   fi
+  local owner
+  owner="$(port_owner || true)"
+  if [[ -n "$owner" ]]; then
+    echo "Port ${OPENCEO_PORT} already held by pid $owner (not openceo-core); refusing to start."
+    return 1
+  fi
   if [[ ! -x "$VENV_PY" ]]; then
     echo "Missing virtualenv python at $VENV_PY"
     echo "Run: scripts/setup.sh"
@@ -98,43 +114,69 @@ start() {
 }
 
 stop() {
-  local pid runtime_pid
-  pid=""
+  local pid pids all target
+  all=""
   if [[ -f "$PID_FILE" ]]; then
     pid="$(cat "$PID_FILE")"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      all="$pid"
+    fi
   fi
-  if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
-    runtime_pid="$(resolve_runtime_pid || true)"
-    pid="${runtime_pid:-$pid}"
-  fi
-  if [[ -z "$pid" ]]; then
-    echo "openceo-core host not running."
+  pids="$(runtime_pids || true)"
+  for target in $pids; do
+    if [[ " $all " != *" $target "* ]]; then
+      all="$all $target"
+    fi
+  done
+  all="$(echo "$all" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -un | tr '\n' ' ')"
+  if [[ -z "${all// }" ]]; then
+    if [[ -f "$PID_FILE" ]]; then
+      echo "Stale pid file found."
+    else
+      echo "openceo-core host not running."
+    fi
     rm -f "$PID_FILE"
     return 0
   fi
-  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-    kill "$pid"
-    sleep 1
-    if kill -0 "$pid" 2>/dev/null; then
-      kill -9 "$pid" || true
+  for target in $all; do
+    kill "$target" 2>/dev/null || true
+  done
+  sleep 1
+  for target in $all; do
+    if kill -0 "$target" 2>/dev/null; then
+      kill -9 "$target" 2>/dev/null || true
     fi
-    echo "openceo-core host stopped."
-  else
-    echo "Stale pid file found."
-  fi
+  done
+  echo "openceo-core host stopped."
   rm -f "$PID_FILE"
 }
 
 status() {
   load_env
-  if is_running; then
-    local pid
-    pid="$(cat "$PID_FILE")"
-    echo "openceo-core host is running (pid $pid) on port ${OPENCEO_PORT}."
-  else
-    echo "openceo-core host is stopped."
+  local pids count owner
+  pids="$(runtime_pids || true)"
+  count="$(echo "$pids" | grep -cE '^[0-9]+$' || true)"
+  owner="$(port_owner || true)"
+  if [[ -z "${pids// }" ]]; then
+    if [[ -n "$owner" ]]; then
+      echo "openceo-core host is stopped, but port ${OPENCEO_PORT} is held by pid $owner."
+    else
+      echo "openceo-core host is stopped."
+    fi
     return 1
   fi
+  if [[ "$count" -gt 1 ]]; then
+    echo "WARNING: $count openceo-core instances running (pids: $(echo $pids | tr '\n' ' ')). Only one may run; stop all and start once."
+    return 2
+  fi
+  local pid
+  pid="$(echo "$pids" | head -n 1)"
+  if [[ -n "$owner" && "$owner" != "$pid" ]]; then
+    echo "WARNING: openceo-core (pid $pid) is not the port ${OPENCEO_PORT} owner (pid $owner)."
+    return 2
+  fi
+  echo "$pid" >"$PID_FILE"
+  echo "openceo-core host is running (pid $pid) on port ${OPENCEO_PORT}."
 }
 
 logs() {

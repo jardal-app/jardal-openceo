@@ -82,6 +82,15 @@ scripts/openceo-core-host.sh restart
 scripts/openceo-core-host.sh status
 ```
 
+### Instancia única (obligatorio)
+
+Solo puede correr UNA instancia de openceo-core por host. El lifespan de arranque tiene efectos globales (tareas interrumpidas, reconciliación tmux, schedulers) y uvicorn lo ejecuta ANTES de bindear el puerto: una segunda instancia corrompe el estado compartido y solo después muere con `Errno 98`. Una unit en churn o un arranque manual repiten el incidente F0 cada pocos segundos.
+
+- Arranque canónico: `scripts/openceo-core-host.sh restart|start` — nunca `python main.py` directo (sin env bindea el puerto 8000 por defecto y convive como segundo cerebro en otro puerto).
+- El script verifica en cada `start`/`status`: pids coincidentes + dueño del puerto (`status` avisa con exit 2 si hay más de una); `stop` mata TODAS las coincidencias.
+- `main.py` toma un flock en `.runtime/openceo-core-host.lock` antes del lifespan; si está tomado, muere con FATAL + exit 3 sin tocar Mongo ni schedulers. El kernel lo libera ante cualquier muerte: no hay estado stale.
+- Pendiente del dueño (2026-10-05): launcher canónico — script vs unit systemd `openceo-core-host.service` (parada el 2026-10-05 tras 167 reinicios en churn; NO habilitar ambas a la vez).
+
 ### Compilar APK Android
 ```bash
 cd openceo-voice-android
