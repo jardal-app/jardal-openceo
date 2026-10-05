@@ -780,11 +780,13 @@ class DevSessionManager:
             dict(task), Path(repo_path), cycle_cfg, gate_specs=gate_specs)
         summary = "; ".join(notices[-3:]) if notices else ""
         if outcome.status == "completed":
+            converted = outcome.reason == "converted"
             detail = (f"converted to objective {outcome.detail}"
-                      if outcome.reason == "converted"
+                      if converted
                       else f"closed {outcome.commit_sha[:12] if outcome.commit_sha else ''}")
             return DevExecutionOutput(
-                status=TaskStatus.COMPLETED,
+                status=(TaskStatus.CONVERTED if converted
+                        else TaskStatus.COMPLETED),
                 coding_tier=None,
                 coding_tool=CodingTool.TIER_S,
                 last_response_summary=(

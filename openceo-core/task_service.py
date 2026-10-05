@@ -56,6 +56,7 @@ ERPNEXT_PENDING_REASON = "erpnext_pending"
 _TERMINAL_TASK_STATUSES = frozenset(
     {
         TaskStatus.COMPLETED.value,
+        TaskStatus.CONVERTED.value,
         TaskStatus.FAILED.value,
         TaskStatus.ESCALATED.value,
         TaskStatus.CANCELLED.value,
@@ -390,7 +391,8 @@ class TaskService:
         if status == str(mirror.get("status_pushed") or ""):
             return
         if map_status(status) is None:
-            # Estado que no se empuja (failed, escalated, interrupted).
+            # Estado que no se empuja (failed, escalated, interrupted,
+            # converted: el padre se completa al cerrar el objetivo, §9.7).
             return
 
         queue = getattr(self, "_erpnext_queue", None)
@@ -1138,7 +1140,9 @@ class TaskService:
             if task is None:
                 return None
 
-            if task.get("status") == TaskStatus.COMPLETED.value and not force:
+            if task.get("status") in (
+                TaskStatus.COMPLETED.value, TaskStatus.CONVERTED.value,
+            ) and not force:
                 return task
 
             # Serialize execution per project so dev agents never race on the same repo
@@ -1258,6 +1262,7 @@ class TaskService:
 
             if final_status in {
                 TaskStatus.COMPLETED.value,
+                TaskStatus.CONVERTED.value,
                 TaskStatus.FAILED.value,
                 TaskStatus.ESCALATED.value,
             }:

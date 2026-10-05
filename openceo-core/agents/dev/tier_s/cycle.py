@@ -67,7 +67,7 @@ from state import CodingTool, TaskStatus
 
 #: Dependency statuses that unblock a ticket (design §9.5: the enqueuer never
 #: dispatches while a blocker is open; failed counts as open — no work done).
-TERMINAL_BLOCKER_STATUS = frozenset({"completed", "cancelled"})
+TERMINAL_BLOCKER_STATUS = frozenset({"completed", "converted", "cancelled"})
 
 #: The Tier S engine reads roles from the same global block F0/F0.1 built.
 _ROLE_KEYS = ("planner", "plan_reviewer", "plan-reviewer", "builder")

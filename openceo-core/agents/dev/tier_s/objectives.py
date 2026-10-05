@@ -172,11 +172,12 @@ async def convert_ticket(
 ) -> dict[str, Any]:
     """Turn an oversized Tier S ticket into an objective (§9.2).
 
-    The ticket text becomes the immutable anchor; the ticket itself closes as
-    converted (its children carry the work); the ERP parent mirror stays
-    empty — the adapter has no parent/group task support (§20-17) — and the
-    objective planner launches immediately with ``SIZING.md`` as a hint.
-    Returns the objective document.
+    The ticket text becomes the immutable anchor; the ticket itself moves to
+    ``converted`` (its children carry the work) — never ``completed``: the
+    parent goes Completed in ERP only at objective close (§9.7). The ERP
+    parent mirror stays empty — the adapter has no parent/group task
+    support (§20-17) — and the objective planner launches immediately with
+    ``SIZING.md`` as a hint. Returns the objective document.
     """
     objective_id = new_objective_id()
     task_id = str(ticket.get("task_id", ""))
@@ -213,11 +214,10 @@ async def convert_ticket(
         "sizing_hint": sizing_text[:4000],
     })
     await env.patch_task(task_id, {
-        "status": "completed",
+        "status": "converted",
         "objective_id": objective_id,
         "waiting_reason": None,
         "resume_at": None,
-        "completed_at": _utcnow_iso(),
         "last_response_summary": (
             f"Converted to objective {objective_id} ({cause}). "
             "The objective planner owns the follow-up tickets."),
@@ -1051,6 +1051,18 @@ async def _finish_objective(
     objective_id = str(objective.get("objective_id"))
     await env.objectives.patch_objective(
         objective_id, {"status": "closed", "closed_at": _utcnow_iso()})
+    parent_id = str(objective.get("conversion_source_task_id") or "")
+    if parent_id:
+        parent = await env.tasks.get_task(parent_id)
+        if parent is not None and str(parent.get("status") or "") == "converted":
+            await env.patch_task(parent_id, {
+                "status": "completed",
+                "waiting_reason": None,
+                "resume_at": None,
+                "completed_at": _utcnow_iso(),
+                "last_response_summary": (
+                    f"Objective {objective_id} closed: final review clean."),
+            })
     ref = _notify_ref(objective)
     if env.notify is not None:
         tickets = await env.tasks.list_by_objective(objective_id)
