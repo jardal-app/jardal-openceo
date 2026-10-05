@@ -5284,6 +5284,28 @@ async def delete_group(
 
 
 if __name__ == "__main__":
+    # Single instance per host (CLAUDE.md §4): lifespan runs BEFORE uvicorn
+    # binds, so without this a duplicate would corrupt shared state and
+    # only then die on Errno 98. Kept in a global: closing it releases.
+    import os
+    import sys
+    from pathlib import Path as _Path
+
+    from instance_lock import acquire as _acquire
+    from instance_lock import lock_path_for as _lock_path_for
+    from instance_lock import stamp as _stamp
+
+    _instance_lock = _acquire(
+        _lock_path_for(_Path(__file__).resolve().parent))
+    if _instance_lock is None:
+        print(
+            "FATAL: another openceo-core instance holds the host lock; "
+            "refusing to start (see CLAUDE.md §4). Stop the other first: "
+            "scripts/openceo-core-host.sh stop",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+    _stamp(_instance_lock, os.getpid())
     uvicorn.run(
         app,
         host=settings.OPENCEO_HOST,
