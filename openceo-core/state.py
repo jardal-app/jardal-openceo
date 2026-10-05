@@ -46,6 +46,11 @@ class TaskStatus(str, Enum):
     QUEUED = "queued"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
+    # A Tier S ticket converted into an objective (§9.2): its own execution
+    # ended, the children carry the work. Terminal, never pushed to ERPNext
+    # (map_status has no entry); the parent goes Completed only at
+    # objective close (§9.7).
+    CONVERTED = "converted"
     FAILED = "failed"
     ESCALATED = "escalated"
     INTERRUPTED = "interrupted"
