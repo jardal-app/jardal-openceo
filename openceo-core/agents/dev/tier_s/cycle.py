@@ -389,13 +389,14 @@ class TierSCycle:
             return await self._run_guarded(ctx)
         except Exception as exc:  # fail explicit, resumable, lock always freed
             detail = f"{type(exc).__name__}: {exc}"[:500]
-            await self._park(
+            parked = await self._park(
                 ctx, "transient", detail,
                 resume_in_min=self._backoff(ctx, 0), patch_run=True,
                 notify=False, run_status="failed")
             return CycleOutcome(
                 status="failed", run_id=ctx.run_id,
-                reason="transient", detail=detail)
+                reason="transient", detail=detail,
+                resume_at=parked.resume_at)
         finally:
             await self._cleanup(ctx)
 
@@ -1721,6 +1722,15 @@ class TierSCycle:
             except Exception:
                 pass
             ctx.lock_held = False
+        # Release the repo guard on every exit: only a string active_repo
+        # means live work (db/mongo.py contract). Parks and terminals keep
+        # no process behind, so holding it would wedge the repo for the
+        # next run (unique partial index) — including this task's own
+        # resume, which always opens a new run.
+        try:
+            await self._runs.patch_run(ctx.run_id, {"active_repo": None})
+        except Exception:
+            pass
 
     async def _say(self, ctx: _Ctx, text: str) -> None:
         if self._notify is not None:
