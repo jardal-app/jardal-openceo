@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 from agents.dev.routing import normalize_document_routing
 from db.mongo import MongoRepository
@@ -1317,6 +1317,45 @@ class TaskService:
         except Exception:
             logger.warning("Could not comment wait on ERP for %s", task.get("task_id"), exc_info=True)
 
+    async def comment_on_ticket(self, task_id: str, text: str) -> bool:
+        """Post an ERP comment on a ticket's business mirror (Tier S, F3–F6).
+
+        Used for close summaries, escalations and objective conversions.
+        Returns False (never raises) when the adapter or the mirror is
+        missing; the adapter itself dedupes identical content.
+        """
+        try:
+            adapter = getattr(self, "_erpnext", None)
+            if adapter is None or not getattr(adapter, "is_enabled", False):
+                return False
+            task = await self._repo.get_task(task_id)
+            if task is None:
+                return False
+            mirrors = (task.get("params") or {}).get("_mirrors") or {}
+            mirror = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
+            name = str(mirror.get("name") or "") if isinstance(mirror, dict) else ""
+            if not name or not str(text or "").strip():
+                return False
+            await adapter.add_comment(name, str(text).strip())
+            return True
+        except Exception:
+            logger.warning("Could not comment on ERP for %s", task_id, exc_info=True)
+            return False
+
+    async def blockers_open(self, task: Mapping[str, Any]) -> bool:
+        """True when any ``blocked_by`` dependency is not terminal (§9.5).
+
+        The enqueuer never dispatches a ticket with open blockers; ``failed``
+        counts as open (no work was done).
+        """
+        blockers = task.get("blocked_by") or []
+        for blocker in blockers:
+            row = await self._repo.get_task(str(blocker))
+            status = str((row or {}).get("status") or "")
+            if status not in {"completed", "cancelled"}:
+                return True
+        return False
+
     async def _fire_notion_sync_back(self, task: dict[str, Any], status_label: str) -> None:
         if self._notion is None:
             return
@@ -1715,6 +1754,8 @@ class TaskService:
         for task in due:
             if not self._task_allows_autorun(task):
                 continue
+            if task.get("blocked_by") and await self.blockers_open(task):
+                continue
             task_id = task["task_id"]
             await self.patch_task(
                 task_id,
@@ -1742,6 +1783,8 @@ class TaskService:
         resumed = 0
         for ticket in queued:
             if not self._task_allows_autorun(ticket):
+                continue
+            if ticket.get("blocked_by") and await self.blockers_open(ticket):
                 continue
             project = str(ticket.get("project") or "default")
             if project in active_projects:
@@ -1799,6 +1842,14 @@ class TaskService:
 
     async def _on_ticket_done(self, ticket: dict[str, Any]) -> None:
         """Post-completion: QA gate, then refresh rate limits and launch queued tickets."""
+        # Dependency wakeup (§9.5): tickets blocked by this one requeue when
+        # it lands terminal-good. Event-driven, no sweeps.
+        if str(ticket.get("status") or "") in {"completed", "cancelled"}:
+            try:
+                await self._requeue_dependents(str(ticket.get("task_id") or ""))
+            except Exception:
+                logger.warning("Dependent requeue error for %s",
+                               ticket.get("task_id"), exc_info=True)
         # QA review gate: if enabled, intercept before marking truly done
         if self._qa_service is not None and ticket.get("qa_review_required"):
             try:
@@ -1815,6 +1866,27 @@ class TaskService:
                 logger.info("Post-completion: launched %d queued ticket(s)", launched)
         except Exception:
             logger.warning("_on_ticket_done error", exc_info=True)
+
+    async def _requeue_dependents(self, task_id: str) -> int:
+        """Requeue tickets directly blocked by ``task_id`` (§9.5).
+
+        Only direct dependents: each requeued ticket re-checks its own
+        remaining blockers at admission, so chains wake level by level.
+        """
+        if not task_id:
+            return 0
+        dependents = await self._repo.list_tasks_blocked_by(task_id)
+        requeued = 0
+        for ticket in dependents:
+            if not self._task_allows_autorun(ticket):
+                continue
+            await self._repo.patch_task(str(ticket.get("task_id") or ""), {
+                "status": TaskStatus.QUEUED.value,
+                "waiting_reason": None,
+                "resume_at": None,
+            })
+            requeued += 1
+        return requeued
 
     async def _fire_notion_approval_sync_back(self, task: dict[str, Any]) -> None:
         if self._notion is None:

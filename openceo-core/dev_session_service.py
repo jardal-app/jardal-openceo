@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from agents.dev.consensus import CriticalConsensusOrchestrator
 from agents.dev.opencode_models import apply_opencode_model_override
 from agents.dev.opencode_paths import normalize_opencode_command
 from agents.dev.opencode_run import (
@@ -52,7 +51,10 @@ _ANY_FINAL_MARKED_BLOCK_RE = re.compile(
     r"^[^\S\r\n]*[^\w\r\n]*OPENCEO_FINAL_END::(?P=marker)[^\w\r\n]*$"
 )
 
-_CONSENSUS_TMUX_SESSION_RE = re.compile(
+# Tier S ticket runs own role TUIs named dev-<project>-<role>. The orphan sweep
+# below kills the ones no live run backs; a live run in tier_s_runs spares
+# its sessions (incident 2026-10-04-tier-s-orphan-killer).
+_TIER_S_TMUX_SESSION_RE = re.compile(
     r"^dev-(?P<project>.+)-(?P<role>planner|plan-reviewer|builder|gemini-reviewer)$",
     flags=re.IGNORECASE,
 )
@@ -76,7 +78,6 @@ class DevSessionService:
         self._project_service = project_service
         self._hub = realtime_hub
         self._tmux = TmuxRuntime(settings, rate_monitor=rate_monitor)
-        self._consensus = CriticalConsensusOrchestrator(settings, self._tmux, rate_monitor=rate_monitor, repo=repo)
         self._project_locks: dict[str, asyncio.Lock] = {}
         self._peer_turn_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -91,28 +92,15 @@ class DevSessionService:
                 raise ValueError(
                     f"Invalid project config for '{project}': {'; '.join(config_errors)}"
                 )
-            consensus_mode = payload.provider == DevProvider.AUTO and self._is_consensus_enabled(config)
-
-            # One session per project maximum — reuse if tmux is actually running
+            # One session per project maximum — reuse if tmux is actually running.
+            # Loose sessions are always single-provider; Tier S runs on the
+            # ticket queue, never as an interactive session.
             active = await self._repo.find_active_project_session(project, user_id=payload.user_id)
             if active is not None:
-                runtime_matches = self._is_consensus_session(active) == consensus_mode
-                if runtime_matches:
-                    if self._settings.DEV_EXECUTION_MODE == "mock":
-                        return active
-                    if consensus_mode:
-                        try:
-                            await self._consensus.ensure_project_sessions(
-                                project=project,
-                                config=config,
-                                wait_ready=False,
-                                prime_reviewers=False,
-                            )
-                            return active
-                        except Exception as exc:
-                            logger.warning("Consensus runtime for '%s' looked stale: %s", project, exc)
-                    elif self._tmux.has_session(project):
-                        return active
+                if self._settings.DEV_EXECUTION_MODE == "mock":
+                    return active
+                if self._tmux.has_session(project):
+                    return active
 
                 logger.warning(
                     "DB session %s says active but no tmux session for project '%s' — canceling stale",
@@ -129,57 +117,38 @@ class DevSessionService:
 
             cwd = self._resolve_repo_path(config)
             if self._settings.DEV_EXECUTION_MODE == "mock":
-                tmux_name = f"dev-{project}-claude" if consensus_mode else f"openceo-dev-{project}"
+                tmux_name = f"openceo-dev-{project}"
                 session_doc.status = DevSessionStatus.WAITING_USER
             else:
-                if consensus_mode:
-                    try:
-                        lead, reviewers = await self._consensus.ensure_project_sessions(
-                            project=project,
-                            config=config,
-                            wait_ready=False,
-                            prime_reviewers=False,
-                        )
-                        tmux_name = lead.tmux_session_name
-                        provider = lead.provider
-                        session_doc.metadata["execution_mode"] = "tier_s"
-                        session_doc.metadata["consensus"] = {
-                            "lead": "planner",
-                            "reviewers": ["qwen-max", "qwen-glm", "dsh"],
-                        }
-                    except Exception as exc:
-                        logger.error("Failed to start Tier S for '%s': %s", project, exc)
-                        raise ValueError(f"Failed to start Tier S: {exc}") from exc
-                else:
-                    command, env_vars, cwd = self._resolve_command(provider, config)
-                    try:
-                        shell_mode = provider == DevProvider.OPENCODE
-                        if shell_mode:
-                            session_doc.metadata["opencode_run_mode"] = True
-                        start_command = [] if shell_mode else command
-                        tmux_name = self._tmux.start_session(
-                            project=project,
-                            provider=provider,
-                            command=start_command,
-                            cwd=cwd,
-                            env=env_vars,
-                            shell_mode=shell_mode,
-                        )
-                    except ValueError as exc:
-                        if "already exists" in str(exc):
-                            # tmux session already exists (e.g., orphan from crash) — reconnect
-                            tmux_name = self._tmux._session_name(project)
-                            logger.warning("tmux session '%s' already existed, reusing", tmux_name)
-                        else:
-                            raise
-                    except Exception as exc:
-                        logger.error("Failed to start tmux session for '%s': %s", project, exc)
-                        raise ValueError(f"Failed to start tmux session: {exc}") from exc
+                command, env_vars, cwd = self._resolve_command(provider, config)
+                try:
+                    shell_mode = provider == DevProvider.OPENCODE
+                    if shell_mode:
+                        session_doc.metadata["opencode_run_mode"] = True
+                    start_command = [] if shell_mode else command
+                    tmux_name = self._tmux.start_session(
+                        project=project,
+                        provider=provider,
+                        command=start_command,
+                        cwd=cwd,
+                        env=env_vars,
+                        shell_mode=shell_mode,
+                    )
+                except ValueError as exc:
+                    if "already exists" in str(exc):
+                        # tmux session already exists (e.g., orphan from crash) — reconnect
+                        tmux_name = self._tmux._session_name(project)
+                        logger.warning("tmux session '%s' already existed, reusing", tmux_name)
+                    else:
+                        raise
+                except Exception as exc:
+                    logger.error("Failed to start tmux session for '%s': %s", project, exc)
+                    raise ValueError(f"Failed to start tmux session: {exc}") from exc
 
-                    try:
-                        await self._tmux.wait_until_ready(project=project, timeout=45)
-                    except Exception:
-                        logger.warning("tmux session '%s' started but initial readiness check failed", tmux_name)
+                try:
+                    await self._tmux.wait_until_ready(project=project, timeout=45)
+                except Exception:
+                    logger.warning("tmux session '%s' started but initial readiness check failed", tmux_name)
                 session_doc.status = DevSessionStatus.WAITING_USER
 
             session_doc.tmux_session_name = tmux_name
@@ -195,11 +164,7 @@ class DevSessionService:
                     content=(
                         f"Sesión tmux '{tmux_name}' creada. "
                         f"Provider: {provider.value}. "
-                        + (
-                            "Modo: tier_s. Equipo configurado por suscripciones activas; el planner y el builder son obligatorios."
-                            if consensus_mode
-                            else "Esperando instrucciones."
-                        )
+                        "Esperando instrucciones."
                     ),
                 )
             )
@@ -235,10 +200,7 @@ class DevSessionService:
             latest = await self._repo.get_dev_session(session_id)
             if latest is None:
                 raise ValueError("Session not found")
-            if self._is_consensus_session(latest):
-                updated = await self._run_consensus_turn(latest, payload.message)
-            else:
-                updated = await self._run_tmux_turn(latest, payload.message)
+            updated = await self._run_tmux_turn(latest, payload.message)
 
         return updated
 
@@ -260,12 +222,7 @@ class DevSessionService:
         if action == "cancel":
             project = session["project"]
             self._cancel_async_peer_turn(session_id)
-            config = self._config_loader.load_project(project)
-            if self._is_consensus_session(session):
-                if not await self._consensus.cancel_run(session_id, config):
-                    self._consensus.close_project(project=project, config=config)
-            else:
-                self._tmux.close_session(project)
+            self._tmux.close_session(project)
 
             updated = await self._repo.patch_dev_session(
                 session_id,
@@ -293,12 +250,7 @@ class DevSessionService:
         if action == "complete":
             project = session["project"]
             self._cancel_async_peer_turn(session_id)
-            config = self._config_loader.load_project(project)
-            if self._is_consensus_session(session):
-                if not await self._consensus.cancel_run(session_id, config):
-                    self._consensus.close_project(project=project, config=config)
-            else:
-                self._tmux.close_session(project)
+            self._tmux.close_session(project)
 
             updated = await self._repo.patch_dev_session(
                 session_id,
@@ -355,7 +307,7 @@ class DevSessionService:
 
         if self._settings.DEV_EXECUTION_MODE == "mock":
             return session
-        if self._is_consensus_session(session) or self._is_opencode_run_session(session):
+        if self._is_opencode_run_session(session):
             return session
 
         self._ensure_tmux_session_registered(session)
@@ -406,12 +358,7 @@ class DevSessionService:
 
     def get_live_output(self, project: str) -> str:
         """Capture the current tmux pane output for a project."""
-        config = self._config_loader.load_project(project)
-        if self._is_consensus_enabled(config):
-            raw = self._consensus.get_live_output(project=project, config=config)
-        else:
-            raw = self._tmux.get_current_output(project)
-        return self._sanitize_output(raw)
+        return self._sanitize_output(self._tmux.get_current_output(project))
 
     def is_turn_running(self, session_id: str) -> bool:
         task = self._peer_turn_tasks.get(session_id)
@@ -433,18 +380,11 @@ class DevSessionService:
         for project, action in actions.items():
             logger.info("Runtime cleanup: project '%s' → %s", project, action)
 
-        consensus_projects = {
-            str(session.get("project") or "")
-            for session in all_active
-            if self._is_consensus_session(session)
-        }
         for session_name in self._tmux.all_session_names():
-            parsed = self._parse_consensus_tmux_session_name(session_name)
+            parsed = self._parse_tier_s_tmux_session_name(session_name)
             if parsed is None:
                 continue
             project, role = parsed
-            if project in consensus_projects:
-                continue
             # Tier S ticket runs (tier_s_runs) are not dev_sessions: a live run
             # owns its planner/builder TUI and resume reuses it. Killing it
             # here breaks every Tier S cycle on each service (re)start.
@@ -473,28 +413,6 @@ class DevSessionService:
         # Cancel DB sessions that have no live tmux session
         for sess in all_active:
             project = sess.get("project", "")
-            if self._is_consensus_session(sess):
-                config = self._config_loader.load_project(project)
-                try:
-                    await self._consensus.ensure_project_sessions(
-                        project=project,
-                        config=config,
-                        wait_ready=False,
-                        prime_reviewers=False,
-                    )
-                    if sess.get("status") == DevSessionStatus.RUNNING.value:
-                        updated = await self._repo.patch_dev_session(
-                            sess["session_id"],
-                            {
-                                "status": DevSessionStatus.WAITING_USER.value,
-                                "waiting_reason": "Service restart: consensus paused, waiting for user resume",
-                            },
-                        )
-                        if updated is not None:
-                            await self._hub.broadcast("dev_session_updated", updated)
-                    continue
-                except Exception as exc:
-                    logger.warning("Consensus startup reconcile failed for '%s': %s", project, exc)
             if not self._tmux.has_session(project):
                 sid = sess["session_id"]
                 logger.info(
@@ -550,8 +468,8 @@ class DevSessionService:
         )
         return active_sessions + waiting_sessions
 
-    def _parse_consensus_tmux_session_name(self, session_name: str) -> tuple[str, str] | None:
-        match = _CONSENSUS_TMUX_SESSION_RE.match(str(session_name or "").strip())
+    def _parse_tier_s_tmux_session_name(self, session_name: str) -> tuple[str, str] | None:
+        match = _TIER_S_TMUX_SESSION_RE.match(str(session_name or "").strip())
         if not match:
             return None
         project = str(match.group("project") or "").strip()
@@ -644,10 +562,7 @@ class DevSessionService:
                     return
                 if session.get("status") != DevSessionStatus.RUNNING.value:
                     return
-                if self._is_consensus_session(session):
-                    await self._run_consensus_turn(session, instruction)
-                else:
-                    await self._run_tmux_turn(session, instruction)
+                await self._run_tmux_turn(session, instruction)
         except Exception as exc:
             updated = await self._repo.patch_dev_session(
                 session_id,
@@ -665,63 +580,6 @@ class DevSessionService:
             tracked = self._peer_turn_tasks.get(session_id)
             if tracked is current:
                 self._peer_turn_tasks.pop(session_id, None)
-
-    async def _run_consensus_turn(self, session: dict[str, Any], instruction: str) -> dict[str, Any]:
-        session_id = session["session_id"]
-        project = session["project"]
-        config = self._config_loader.load_project(project)
-        active_run = await self._repo.active_tier_s_run(session_id)
-        if active_run and active_run.get("question"):
-            await self._repo.patch_tier_s_run(active_run["run_id"], {"human_answer": instruction})
-
-        async def progress(detail: str) -> None:
-            updated = await self._repo.patch_dev_session(
-                session_id,
-                {
-                    "status": DevSessionStatus.RUNNING.value,
-                    "waiting_reason": detail,
-                },
-            )
-            if updated is not None:
-                await self._hub.broadcast("dev_session_updated", updated)
-
-        result = await self._consensus.execute(
-            project=project,
-            instruction=instruction,
-            config=config,
-            progress=progress,
-            session_id=session_id,
-        )
-
-        assistant_text = result.summary or "Tier S terminó sin resumen."
-        assistant_msg = SessionMessage(
-            role=SessionMessageRole.ASSISTANT,
-            channel=SessionMessageChannel.TEXT,
-            content=assistant_text,
-        )
-        await self._repo.append_dev_message(session_id, assistant_msg.model_dump(mode="python"))
-
-        updates: dict[str, Any] = {
-            "last_output": (result.last_output or assistant_text)[-4000:],
-            "last_error": result.error,
-        }
-        if result.waiting:
-            updates["status"] = DevSessionStatus.WAITING_USER.value
-            updates["waiting_reason"] = result.summary
-        elif result.ok:
-            updates["status"] = DevSessionStatus.WAITING_USER.value
-            updates["waiting_reason"] = "Tier S listo para la siguiente instrucción"
-        else:
-            updates["status"] = DevSessionStatus.FAILED.value
-            updates["waiting_reason"] = result.summary
-            updates["completed_at"] = datetime.now(timezone.utc)
-
-        updated = await self._repo.patch_dev_session(session_id, updates)
-        if updated is None:
-            raise ValueError("Session not found after consensus update")
-
-        await self._hub.broadcast("dev_session_updated", updated)
-        return updated
 
     async def _run_tmux_turn(self, session: dict[str, Any], instruction: str) -> dict[str, Any]:
         """Send instruction to tmux and capture the result."""
@@ -1104,19 +962,6 @@ class DevSessionService:
         if not project:
             return "Session has no project configured"
 
-        if self._is_consensus_session(session):
-            config = self._config_loader.load_project(project)
-            try:
-                await self._consensus.ensure_project_sessions(
-                    project=project,
-                    config=config,
-                    wait_ready=False,
-                    prime_reviewers=False,
-                )
-                return None
-            except Exception as exc:
-                return f"Tier S runtime no longer exists: {exc}"
-
         if self._tmux.has_session(project):
             return None
 
@@ -1145,10 +990,6 @@ class DevSessionService:
         if updated is None:
             return None
 
-        if self._is_consensus_session(session):
-            config = self._config_loader.load_project(str(session.get("project") or ""))
-            await self._consensus.cancel_run(session_id, config)
-
         user_id = str(session.get("user_id") or "").strip()
         project = str(session.get("project") or "").strip()
         if user_id and project:
@@ -1173,7 +1014,7 @@ class DevSessionService:
     ) -> dict[str, Any] | None:
         if session.get("status") != DevSessionStatus.RUNNING.value:
             return None
-        if self._is_consensus_session(session) or self._is_opencode_run_session(session):
+        if self._is_opencode_run_session(session):
             return None
 
         project = str(session.get("project") or "").strip()
@@ -1233,35 +1074,16 @@ class DevSessionService:
                 return str(msg.get("content") or "").strip() or None
         return None
 
-    def _is_consensus_enabled(self, config: dict[str, Any]) -> bool:
-        return self._consensus.is_enabled(config)
-
     def _is_opencode_run_session(self, session: dict[str, Any]) -> bool:
         if session.get("provider") != DevProvider.OPENCODE.value:
             return False
         metadata = session.get("metadata") or {}
         return isinstance(metadata, dict) and bool(metadata.get("opencode_run_mode"))
 
-    def _is_consensus_session(self, session: dict[str, Any]) -> bool:
-        metadata = session.get("metadata") or {}
-        if not isinstance(metadata, dict):
-            return False
-        mode = str(metadata.get("execution_mode") or "").strip().lower()
-        return mode == "tier_s"
-
     def _resolve_provider(self, session: dict[str, Any], config: dict[str, Any]) -> DevProvider:
         requested = DevProvider(session.get("provider", DevProvider.AUTO.value))
         if requested != DevProvider.AUTO:
             return requested
-
-        if self._is_consensus_enabled(config):
-            tier_cfg = (config.get("dev", {}).get("tier_s", {}) or {})
-            roles = tier_cfg.get("roles", {}) or {}
-            planner_cfg = roles.get("planner", {}) or {}
-            lead = str(planner_cfg.get("provider", "claude")).strip().lower()
-            if lead in DevProvider._value2member_map_:
-                return DevProvider(lead)
-            return DevProvider.CLAUDE
 
         # No dev.coding_tool fallback: the key was removed (§15.3) and no
         # consumer may read it. AUTO resolves via default_provider only.
@@ -1355,7 +1177,7 @@ class DevSessionService:
             return
         if not self._tmux.has_session(project):
             return
-        if self._is_consensus_session(session) or self._is_opencode_run_session(session):
+        if self._is_opencode_run_session(session):
             return
 
         provider_value = str(session.get("provider") or "").strip() or DevProvider.AUTO.value

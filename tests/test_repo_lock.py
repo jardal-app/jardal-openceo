@@ -6,21 +6,16 @@ fake lock would prove nothing about atomicity. Skipped when Mongo is down.
 
 from __future__ import annotations
 
-import subprocess
 import sys
-import tempfile
 import unittest
 import uuid
 from pathlib import Path
-from unittest.mock import MagicMock
 
 CORE = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE) not in sys.path:
     sys.path.insert(0, str(CORE))
 
-from agents.dev.consensus import _RepoBusy, CriticalConsensusOrchestrator  # noqa: E402
 from db.mongo import MongoRepository  # noqa: E402
-from pymongo.errors import DuplicateKeyError  # noqa: E402
 from settings import Settings  # noqa: E402
 
 MONGO_URL = "mongodb://localhost:27017"
@@ -101,54 +96,6 @@ class RepoLockTests(unittest.IsolatedAsyncioTestCase):
                if spec.get("key") == [("expires_at", 1)]
                and spec.get("expireAfterSeconds") == 0]
         self.assertEqual(len(ttl), 1)
-
-
-@unittest.skipUnless(_mongo_available(), "MongoDB not available")
-class OpenRunLockTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
-        settings = Settings(_env_file=None, MONGODB_URL=MONGO_URL, MONGODB_DATABASE=TEST_DB)
-        self.repo = MongoRepository(settings)
-        await self.repo.connect()
-        await self.repo.repo_locks.delete_many({})
-        await self.repo.tier_s_runs.delete_many({})
-        self.temp = tempfile.TemporaryDirectory()
-        self.repo_path = Path(self.temp.name)
-        subprocess.run(["git", "init", "-q"], cwd=self.repo_path, check=True)
-        self.orch = CriticalConsensusOrchestrator(MagicMock(), MagicMock(), repo=self.repo)
-
-    async def asyncTearDown(self) -> None:
-        await self.repo.repo_locks.delete_many({})
-        await self.repo.tier_s_runs.delete_many({})
-        await self.repo.close()
-        self.temp.cleanup()
-
-    async def test_reopen_same_owner_refreshes_lock(self) -> None:
-        first = await self.orch._open_run("proj", self.repo_path, {}, task_id="task-a",
-                                          session_id=None)
-        second = await self.orch._open_run("proj", self.repo_path, {}, task_id="task-a",
-                                           session_id=None)
-        self.assertEqual(first["run_id"], second["run_id"])
-        holder = await self.repo.repo_lock_holder(str(self.repo_path))
-        assert holder is not None
-        self.assertEqual(holder["holder"], "task-a")
-
-    async def test_other_owner_blocked_by_lock_without_tier_s_run(self) -> None:
-        # A simple tier holds the repo (lock only, no Tier S run).
-        await self.repo.acquire_repo_lock(str(self.repo_path), "task-simple")
-        with self.assertRaises(_RepoBusy):
-            await self.orch._open_run("proj", self.repo_path, {}, task_id="task-b",
-                                      session_id=None)
-
-    async def test_lost_create_race_releases_orphan_lock(self) -> None:
-        async def flaky_create(doc):
-            raise DuplicateKeyError("simulated race")
-
-        self.repo.create_tier_s_run = flaky_create  # type: ignore[method-assign]
-        with self.assertRaises(_RepoBusy):
-            await self.orch._open_run("proj", self.repo_path, {}, task_id="task-b",
-                                      session_id=None)
-        self.assertIsNone(await self.repo.repo_lock_holder(str(self.repo_path)))
-
 
 if __name__ == "__main__":
     unittest.main()

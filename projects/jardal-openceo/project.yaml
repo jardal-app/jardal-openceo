@@ -16,6 +16,16 @@ dev:
   auto_push: false
   create_pr: true
   pr_body: auto
+  # Tier S v2 (F1/F2): merge policy + orchestrator gates (design §11/§12).
+  auto_merge: true
+  budget_exclude: []
+  gates:
+    - { name: compile, cmd: "python3 -m py_compile openceo-core/main.py openceo-core/first_layer.py openceo-core/project_service.py openceo-core/db/mongo.py", timeout_minutes: 5, required: true }
+    - { name: tier_s_focused, cmd: "./.venv/bin/python -m pytest tests/test_tier_s_contract.py tests/test_tier_s_final.py -q", timeout_minutes: 15, required: true }
+  # Vault location for Tier S knowledge notes (design §9.8, F7b).
+  vault_project:
+    dir: /home/develop/development/Jardal/jardal-knowledge/vault
+    project: projects/jardal/jardal-openceo
 
   providers:
     codex:

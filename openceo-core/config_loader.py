@@ -133,6 +133,28 @@ class ConfigLoader:
                 errors.append(
                     f"dev.tiers in {project}/project.yaml must be a mapping or absent."
                 )
+        # Optional vault mapping for Tier S knowledge notes (design §9.8, F7b).
+        vault = dev.get("vault_project")
+        if vault is not None:
+            if not isinstance(vault, dict):
+                errors.append(
+                    f"{project}/project.yaml: 'dev.vault_project' must be a "
+                    "mapping {dir, project}."
+                )
+            elif not vault.get("dir") or not vault.get("project"):
+                errors.append(
+                    f"{project}/project.yaml: 'dev.vault_project' needs "
+                    "'dir' and 'project'."
+                )
+        # dev.gates shape (design §11, §17.2 — F1). dev.qa stays tolerated:
+        # the old engine still reads it, and §17.3 key removal lands when the
+        # old engine retires, not while both dispatch paths exist.
+        if "gates" in dev:
+            from agents.dev.tier_s.gates import validate_gates_config
+            errors.extend(
+                f"{project}/project.yaml: {err}"
+                for err in validate_gates_config(dev)
+            )
         return errors
 
     def context_path(self, project: str | None) -> Path:
@@ -195,6 +217,13 @@ class ConfigLoader:
                 "auto_push": False,
                 "create_pr": True,
                 "pr_body": "empty",
+                # Tier S merge policy (design §12, F2): the engine integrates
+                # on close when true. Only the Tier S engine reads it.
+                "auto_merge": True,
+                "budget_exclude": [],
+                # Tier S gates (design §11, F1): run by the orchestrator on every
+                # tier. Empty = none configured (telemetry note, not a block).
+                "gates": [],
                 # Global Tier S config: the single source of roles and pool.
                 # Projects must not set dev.tier_s (see validate_project).
                 # Accounts are interchangeable: swapping e.g. claudej -> clauded
@@ -203,29 +232,96 @@ class ConfigLoader:
                 "tier_s": {
                     "timeout_minutes": 15,
                     "min_available_families": 3,
+                    # Tier S engine budgets, waits and timeouts (design §13, §14,
+                    # §17.1 — F1/F2). Single global source; projects override
+                    # nothing here.
+                    "budgets": {
+                        "files_per_ticket": 8,
+                        "lines_per_ticket": 400,
+                        "hard_brake_factor": 2,
+                        "gate_retries": 2,
+                        "escalate_after": 2,
+                        "capsule_tokens": 2000,
+                        "handoff_words": 300,
+                        "agents_md_tokens": 3000,
+                    },
+                    "waiting": {
+                        "mid_cycle_hold_minutes": 30,
+                        "backoff_minutes": [15, 30, 60],
+                    },
+                    "timeouts_minutes": {
+                        "planner": 20,
+                        "objective_planner": 15,
+                        "plan_review": 15,
+                        "build": 60,
+                        "fix": 30,
+                        "arbiter": 10,
+                        "closer": 15,
+                    },
+                    # Roles run one-shot (live executor): `command` + `headless_args`
+                    # form the base argv, the prompt travels per `prompt_via`.
+                    # model/effort ride the command explicitly (§4.4); accounts
+                    # stay interchangeable via `account:` (+ command).
                     "roles": {
-                        "planner": {"provider": "claude", "account": "claudej", "label": "claudej", "model": "opus", "active": True, "command": ["claudej"]},
-                        "plan-reviewer": {"provider": "codex", "account": "codexj", "label": "codexj", "model": "gpt-6.1-sol", "active": True, "command": ["codexj"]},
-                        "builder": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "active": True, "command": ["muse", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"]},
+                        "planner": {"provider": "claude", "account": "claudej", "label": "claudej", "model": "opus", "effort": "max", "active": True, "command": ["claudej"], "headless_args": ["--print"], "prompt_via": "argv"},
+                        "plan-reviewer": {"provider": "codex", "account": "codexj", "label": "codexj", "model": "gpt-6.1-sol", "effort": "xhigh", "active": True, "command": ["codexj"], "headless_args": ["exec", "--ephemeral", "-"], "prompt_via": "stdin"},
+                        "builder": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "effort": "max", "active": True, "command": ["muse", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"], "prompt_via": "argv"},
+                        "objective_planner": {"provider": "claude", "account": "claudej", "label": "claudej", "model": "opus", "effort": "max", "active": True, "command": ["claudej"], "headless_args": ["--print"], "prompt_via": "argv"},
+                        "closer": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "effort": "max", "active": True, "command": ["muse", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"], "prompt_via": "argv"},
+                        "arbiter": {"provider": "claude", "account": "claudej", "label": "claudej", "model": "opus", "effort": "max", "active": True, "command": ["claudej"], "headless_args": ["--print"], "prompt_via": "argv"},
+                    },
+                    # Review pool (design §7.1, F3). Verified 2026-10-05 via
+                    # --help probes (zero spend): qwen positional prompt is
+                    # one-shot by default; codex exec takes -m/-c; claude
+                    # takes --print/--model/--effort; opencode run takes -m.
+                    # limit/expired patterns still need runtime capture (§20-4):
+                    # until then reactive slots only mark invalid reports.
+                    "review": {
+                        "round1_parallel": 3,
+                        "round2_parallel": 2,
+                        "quorum": 2,
+                        "distinct_by": "family",
+                        "min_available_families": 3,
+                        "max_rounds": 2,
+                        "reviewer_timeout_minutes": 15,
                     },
                     "reviewers": [
-                        {"label": "qwen-max", "provider": "qwen", "model": "qwen3.8-max", "family": "qwen", "active": True, "quota": "reactive", "expires_on": "2026-10-19", "command": ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"]},
+                        {"label": "qwen-max", "provider": "qwen", "model": "qwen3.8-max", "family": "qwen", "priority": 1, "active": True, "quota": "reactive", "expires_on": "2026-10-19", "prompt_via": "argv", "command": ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"], "limit_patterns": [], "expired_patterns": []},
                         # owner 2026-10-03: GLM via Qwen plan (claudeg retired). Qwen Code
                         # exposes no effort flag (verified --help 2026-10-04): model via -m only.
-                        {"label": "qwen-glm", "provider": "qwen", "model": "glm-5.3", "family": "glm", "active": True, "quota": "reactive", "command": ["qwen", "-m", "glm-5.3", "--approval-mode", "plan"]},
-                        {"label": "dsh", "provider": "dsh", "model": "deepseek-v4.1-flash", "family": "deepseek", "active": True, "quota": "reactive", "command": ["node", "/home/develop/development/Jardal/jardal-deepseek-harness/apps/cli/lib/bin.js", "--profile", "headless", "-"], "env": {"DSH_HOME": "/home/develop/.dsh"}},
-                        {"label": "claudep", "provider": "claude", "model": "deepseek-flash", "family": "deepseek", "active": False, "quota": "reactive", "command": ["claudep", "--model", "opus", "--tools", "Read,Glob,Grep"]},  # deepseek reserve while dsh serves
-                        {"label": "muse-review", "provider": "muse", "model": "muse-spark-1.3-contributor", "family": "muse", "active": True, "extra": True, "quota": "reactive", "command": ["muse", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max"]},  # extra: never counts for quorum (§7.3)
-                        {"label": "agyd", "provider": "gemini", "model": "gemini", "family": "gemini", "active": False, "command": ["agyd"]},
-                        {"label": "mimo", "provider": "opencode", "model": "opencode-go/mimo-v2.6-pro", "family": "mimo", "active": False, "command": ["opencode"]},
+                        {"label": "qwen-glm", "provider": "qwen", "model": "glm-5.3", "family": "glm", "priority": 2, "active": True, "quota": "reactive", "prompt_via": "argv", "command": ["qwen", "-m", "glm-5.3", "--approval-mode", "plan"], "limit_patterns": [], "expired_patterns": []},
+                        {"label": "dsh", "provider": "dsh", "model": "deepseek-v4.1-flash", "family": "deepseek", "priority": 3, "active": True, "quota": "reactive", "prompt_via": "stdin", "command": ["node", "/home/develop/development/Jardal/jardal-deepseek-harness/apps/cli/lib/bin.js", "--profile", "headless", "-"], "env": {"DSH_HOME": "/home/develop/.dsh"}, "limit_patterns": [], "expired_patterns": []},
+                        {"label": "claudep", "provider": "claude", "model": "deepseek-flash", "family": "deepseek", "priority": 9, "active": False, "quota": "reactive", "prompt_via": "argv", "command": ["claudep"], "headless_args": ["--print"]},  # deepseek reserve while dsh serves
+                        {"label": "muse-review", "provider": "muse", "model": "muse-spark-1.3-contributor", "family": "muse", "priority": 99, "active": True, "extra": True, "quota": "reactive", "prompt_via": "argv", "command": ["muse", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max"]},  # extra: never counts for quorum (§7.3)
+                        {"label": "agyd", "provider": "gemini", "model": "gemini", "family": "gemini", "priority": 60, "active": False, "prompt_via": "argv", "command": ["agyd"]},
+                        {"label": "mimo", "provider": "opencode", "model": "opencode-go/mimo-v2.6-pro", "family": "mimo", "priority": 4, "active": False, "quota": "reactive", "prompt_via": "argv", "command": ["opencode", "run", "-m", "opencode-go/mimo-v2.6-pro"]},
                     ],
+                    # Findings inbox promotion (design §8.3, F4) and fixed
+                    # fix-ticket tiers (design §3.3).
+                    "inbox": {
+                        "promotion": {"severity": "CRITICAL", "anchor": "strong", "min_families": 2, "or_category": "security"},
+                    },
+                    "fix_ticket_tiers": {"security": "tier_s", "critical": "tier_a", "default": "tier_c"},
+                    # Objectives (design §9, F6).
+                    "objectives": {
+                        "ticket_horizon": [2, 3],
+                        "max_tickets": 20,
+                        "max_planning_runs_without_progress": 2,
+                        "max_final_reviews": 2,
+                        "inbox_items_for_planner": 15,
+                    },
                 },
-                # Global simple-tier executors (design v2 §3.1, §17.1, F0.1).
+                # Global simple-tier executors (design v2 §3.1, §17.1, F0.1/F5).
                 # Projects must not set dev.tiers (see validate_project).
-                # model/effort are data here; explicit enforcement is F5.
+                # `model_args` are appended after the wrapper argv so the
+                # orchestrator's model/effort win explicitly (§4.4). Tier B
+                # needs none: its wrapper already pins the exact same
+                # values (-m gpt-6.1-sol, effort xhigh).
                 "tiers": {
-                    "tier_a": {"account": "claudej", "model": "opusplan", "effort": "xhigh"},
-                    "tier_b": {"account": "codexj", "model": "gpt-6.1-sol", "effort": "xhigh"},
+                    "tier_a": {"account": "claudej", "model": "opusplan", "effort": "xhigh",
+                               "model_args": ["--model", "opusplan", "--effort", "xhigh"]},
+                    "tier_b": {"account": "codexj", "model": "gpt-6.1-sol", "effort": "xhigh",
+                               "model_args": []},
                     "tier_c": {"chain": ["muse", "dsh", "claudep"],
                                "muse": {"model": "muse-spark-1.3-contributor", "effort": "max",
                                         "command": ["muse", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max"]},

@@ -129,7 +129,6 @@ graph._notion = notion_manager  # late-bind after creation
 # los tickets, asi que construir el cliente siempre. Construirlo NO abre red (el
 # httpx.AsyncClient es perezoso); si falta configuracion se avisa fuerte al arrancar.
 erpnext_adapter = ERPNextTicketAdapter(settings)
-dev_step_manager._consensus._erpnext = erpnext_adapter
 if not erpnext_adapter.is_enabled:
     logger.error(
         "ERPNext no esta configurado (%s). La creacion de tickets fallara hasta que lo este.",
@@ -158,6 +157,7 @@ task_service = TaskService(
 qa_review_service.set_task_service(task_service)
 pm_step_manager.set_task_service(task_service)
 workflow_service.set_task_service(task_service)
+dev_step_manager.set_task_service(task_service)  # Tier S notices + internal tickets (F3–F6)
 # El repositorio avisa de CADA transicion de estado; el servicio decide cuales se
 # propagan a ERPNext. Se instala aqui porque el repositorio es anterior al servicio.
 repo.set_status_observer(task_service.observe_task_status)
@@ -293,8 +293,6 @@ async def lifespan(_: FastAPI):
         await repo.mark_interrupted_pm_states()
         await repo.mark_interrupted_tasks()
         await repo.mark_interrupted_dev_sessions()
-        await dev_step_manager._consensus.reconcile_interrupted_runs()
-        await dev_step_manager._consensus.cleanup_expired_all()
         await dev_session_service.startup_reconcile()
         await scheduler.start()
         # Ojo: dentro de ``lifespan`` hay un ``settings = get_settings()`` mas
@@ -1391,9 +1389,19 @@ async def cancel_tier_s_run(
         or current_user.user_id not in (task.get("involved_user_ids") or [])
     ):
         raise HTTPException(status_code=403, detail="Access denied")
-    config = config_loader.load_project(str(task.get("project") or ""))
-    if not await dev_step_manager._consensus.cancel_run(task_id, config):
+    run = await repo.active_tier_s_run_for_task(task_id)
+    if run is None:
         raise HTTPException(status_code=409, detail="No active Tier S attempt")
+    await repo.patch_tier_s_run(run["run_id"], {
+        "status": "canceled",
+        "active_repo": None,
+        "updated_at": datetime.now(timezone.utc),
+    })
+    active_repo = run.get("active_repo")
+    if isinstance(active_repo, str) and active_repo:
+        holder = await repo.repo_lock_holder(active_repo)
+        if holder is not None and holder.get("holder") == f"tier-s:{run['run_id']}":
+            await repo.release_repo_lock(active_repo, f"tier-s:{run['run_id']}")
     await task_service.patch_task(task_id, {"waiting_reason": "Intento TIER S cancelado por el propietario"})
     return {"status": "cancelled"}
 

@@ -619,7 +619,7 @@ class TmuxRuntime:
             if provider == "claude":
                 continuation = (
                     "Continue working on the current ticket. "
-                    "Read CURRENT_PLAN.md and .consensus-status to see where you left off."
+                    "Check git status and recent files to see where you left off."
                 )
                 await asyncio.sleep(10)  # wait for TUI to load
                 await self._submit_text(pane, continuation)

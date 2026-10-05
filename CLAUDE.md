@@ -6,6 +6,8 @@ Guía y contrato de arquitectura para agentes y desarrolladores que interactúan
 `/home/develop/development/Jardal/jardal-knowledge/vault/` (usar el skill `obsidian-vault-links`).
 Trabajo temporal de tickets: `docs/work/TASK-2026-000NN-tema.md`.
 
+Instrucciones operativas del repo (F7a, los CLI del roster la cargan directamente): @AGENTS.md.
+
 ---
 
 ## 1. Arquitectura y Stack
