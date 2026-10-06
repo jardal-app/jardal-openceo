@@ -910,7 +910,7 @@ Muse Code headless, one fresh run per cycle over bounded OpenCEO-compiled state,
 
 The mandate is a versioned YAML beside `projects/<project>/project.yaml`: axes with KPI + data source, money/quota budget, active-work limits, CEO review cadence, and the escalation policy. The owner edits it by telling Horizon or the CEO ("nuevo eje: …"); an agent applies the change and git keeps history. The CEO never edits its own mandate. The owner is asked only for: new spend over the mandate threshold; a credential only they hold; an irreversible external action; strategic replanning; a mandate change; a policy-mandated human review. Consuming already-paid subscription quota is not new spend. Notice arrives as one ERPNext ticket in `Pending Review` with the exact human action, via the "Requiere humano" tray and Horizon, once.
 
-> pendiente: TASK-2026-00114 (mandato y escalado), TASK-2026-00118 (quitar aprobaciones manuales que no correspondan).
+> Implemented by TASK-2026-00114 (`projects/company_mandate.yaml` + `openceo-core/company_mandate.py`: validated load, `requires_owner`, owner-gated writer, escalation parked in waiting/Pending Review). Pendiente: TASK-2026-00118 (quitar aprobaciones manuales que no correspondan).
 
 ### CEO loop
 
