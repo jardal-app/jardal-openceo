@@ -8,6 +8,8 @@ Trabajo temporal de tickets: `docs/work/TASK-2026-000NN-tema.md`.
 
 Instrucciones operativas del repo (F7a, los CLI del roster las cargan directamente): §10 de este archivo (también visible como `AGENTS.md`, symlink a este archivo).
 
+Continuar el roadmap de autonomía: el dueño escribe **`sigue`** y la sesión aplica la receta de §11.
+
 ---
 
 ## 1. Arquitectura y Stack
@@ -121,7 +123,7 @@ cd openceo-voice-android
 ### Dev Tier S (Consenso Crítico Multi-IA)
 - Se activa enviando `"coding_tool": "tier_s"` en la raíz del ticket o dentro de `params`.
 - En proyectos con `dev.coding_tool: tier_s` en `project.yaml` (como `jardal-trading`), todos los tickets dev entran a Tier S de forma predeterminada.
-- Orquesta: Planner (`clauded`), Plan Reviewer (`codexj` / reasoning xhigh), Builder (`muse` con `--model muse-spark-1.3-contributor --reasoning-effort max --yolo` en tmux), y revisores cruzados (`codexj` obligatorio + `qwen`, `claudeg`, `claudep`) en 2 rondas de auditoría.
+- Orquesta: Planner (`clauded`), Plan Reviewer (`codexj` / reasoning xhigh), Builder (`musej` con `--model muse-spark-1.3-contributor --reasoning-effort max` en tmux), y revisores cruzados (`codexj` obligatorio + `qwen`, `claudeg`, `claudep`) en 2 rondas de auditoría.
 
 ---
 
@@ -170,6 +172,9 @@ cd openceo-react && npm run build
 4. **Respetar aislamiento de credenciales y paths**:
    - Host mode: usa `~/.codex`, `~/.claude`, `/home/develop/.local/bin/agyd`.
    - `gemini` en OpenCEO corre con `agyd` (`--dangerously-skip-permissions`).
+5. **`musej` es el `muse` de dev por defecto; `muse` pelado es la sesión aislada**:
+   - `/home/develop/.local/bin/musej` envuelve a `muse` añadiendo al final `--yolo --disable-sandbox --disable-approval --approval-mode never --trust-workspace` (acceso total, como `codexj`/`claudej`). Úsalo en builder, closer, tier C, sesiones dev sueltas y monitor de cuota.
+   - Para una sesión **aislada** (revisor read-only, auditoría sin contexto extra del workspace) invoca `muse` pelado directamente: sandbox + aprobaciones ON, sin `--trust-workspace`. Los flags del wrapper **no se pueden reescribir encima** (van los últimos y no existe `--no-yolo).
 
 ---
 
@@ -289,3 +294,48 @@ scripts/openceo-core-host.sh restart|status
   ticket API (ERPNext first).
 - No secrets, credentials, or personal data in notes or temp docs.
 - Conventions over configuration: mirror sibling code, reuse its helpers.
+- Owner rule (2026-10-06): no token-spending live tests (Tier S pilots,
+  live planner/CEO/Muse runs, real ticket launches as tests) until epic
+  TASK-2026-00110 F0–F6 are complete. Validate with unit/contract tests
+  and simulated executors (§11).
+
+---
+
+## 11. Continuar el roadmap: palabra clave `sigue` (sesiones del dueño)
+
+Solo sesiones del dueño; los ejecutores Tier S lo ignoran (§10).
+
+Cuando el dueño escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el ticket), no preguntes: aplica esta receta. El roadmap vigente es el épico **TASK-2026-00110** (OpenCEO autónomo). El orden y las dependencias están en su comentario «ROADMAP POR FASES».
+
+1. **Situarse, sin barridos.**
+   - `openceo_get_ticket TASK-2026-00110`.
+   - `openceo_search_tickets` con `project=jardal-openceo` y `query="[Autonomía"`, más TASK-2026-00013 y TASK-2026-00043.
+   - El primer párrafo de «Continuar aquí» en `STATUS.md`.
+   - `git status` y `git log --oneline -5`.
+2. **Elegir un ticket.** El indicado. Si no hay, el que esté a medias. Si tampoco, el primero no `Completed` cuyas dependencias (escritas en su descripción) estén `Completed`, priorizando la ruta crítica 00111 → 00112 → 00117 → 00119 → 00122. Si nada está listo, decir qué lo bloquea y parar.
+3. **Contexto mínimo.**
+   - Descripción y comentarios del ticket.
+   - `docs/work/TASK-2026-00110-objetivo-unico-ceo-autonomo.md` y el workfile del ticket si existe.
+   - La decisión del vault `decisions/2026-10-06-objetivo-unico-ceo-autonomo`, solo si hace falta el porqué.
+   - Código: búsqueda dirigida + LSP.
+4. **Implementar** en una rama `feat/<ticket>-<tema>`. El tier marca el rigor: en `tier_s`, plan escrito en el workfile antes de codificar y una revisión independiente de solo lectura antes del merge.
+5. **Probar solo lo necesario**: `py_compile` de lo tocado, los tests del área y la suite de §10, respetando la consigna de abajo.
+6. **Cerrar según §9.**
+   - Merge `--no-ff` a `main` + push.
+   - Restart + status + smoke si cambió el servicio.
+   - Ticket en su estado final, con un comentario de resultado.
+   - Rama borrada.
+   - Un párrafo corto al inicio de «Continuar aquí»: qué se cerró y cuál es el siguiente ticket.
+   - Vault solo si hay una decisión o un hecho durable nuevo.
+7. **Seguir.** Si queda margen, volver al paso 2. Al terminar, una línea: qué se cerró y qué sigue.
+
+Al dueño solo se le pregunta por la política de escalado del épico: gasto nuevo, credencial, acción irreversible, replanificación estratégica, cambio de mandato o revisión humana exigida por política. Lo demás se decide y se hace.
+
+**Consigna del dueño (2026-10-06): ninguna prueba que gaste tokens hasta completar la arquitectura.** Mientras F0–F6 del épico no estén `Completed`, queda prohibido:
+
+- correr pilotos o ciclos Tier S reales;
+- invocar en vivo el planner, el CEO o Muse;
+- lanzar tickets reales como prueba;
+- usar `chat.sh` contra modelos.
+
+Se valida con tests unitarios y de contrato, ejecutores o modelos simulados y `py_compile`. La única prueba real completa es **TASK-2026-00122** (F7), al final.

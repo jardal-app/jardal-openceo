@@ -34,7 +34,7 @@ dev:
       env: {}
 
     muse:
-      command: ["/home/develop/.local/bin/muse"]
+      command: ["/home/develop/.local/bin/musej"]
       cwd: /home/develop/development/Jardal/melanyryr
       env: {}
 

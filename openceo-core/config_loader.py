@@ -265,9 +265,9 @@ class ConfigLoader:
                     "roles": {
                         "planner": {"provider": "claude", "account": "claudej", "label": "claudej", "model": "opus", "effort": "max", "active": True, "command": ["claudej"], "headless_args": ["--print"], "prompt_via": "argv"},
                         "plan-reviewer": {"provider": "codex", "account": "codexj", "label": "codexj", "model": "gpt-6.1-sol", "effort": "xhigh", "active": True, "command": ["codexj"], "headless_args": ["exec", "--ephemeral", "-"], "prompt_via": "stdin"},
-                        "builder": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "effort": "max", "active": True, "command": ["muse", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"], "prompt_via": "argv"},
+                        "builder": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "effort": "max", "active": True, "command": ["musej", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"], "prompt_via": "argv"},
                         "objective_planner": {"provider": "claude", "account": "claudej", "label": "claudej", "model": "opus", "effort": "max", "active": True, "command": ["claudej"], "headless_args": ["--print"], "prompt_via": "argv"},
-                        "closer": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "effort": "max", "active": True, "command": ["muse", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"], "prompt_via": "argv"},
+                        "closer": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "effort": "max", "active": True, "command": ["musej", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"], "prompt_via": "argv"},
                         "arbiter": {"provider": "claude", "account": "claudej", "label": "claudej", "model": "opus", "effort": "max", "active": True, "command": ["claudej"], "headless_args": ["--print"], "prompt_via": "argv"},
                     },
                     # Review pool (design §7.1, F3). Verified 2026-10-05 via
@@ -292,7 +292,7 @@ class ConfigLoader:
                         {"label": "qwen-glm", "provider": "qwen", "model": "glm-5.3", "family": "glm", "priority": 2, "active": True, "quota": "reactive", "prompt_via": "argv", "command": ["qwen", "-m", "glm-5.3", "--approval-mode", "plan"], "limit_patterns": [], "expired_patterns": []},
                         {"label": "dsh", "provider": "dsh", "model": "deepseek-v4.1-flash", "family": "deepseek", "priority": 3, "active": True, "quota": "reactive", "prompt_via": "stdin", "command": ["node", "/home/develop/development/Jardal/jardal-deepseek-harness/apps/cli/lib/bin.js", "--profile", "headless", "-"], "env": {"DSH_HOME": "/home/develop/.dsh"}, "limit_patterns": [], "expired_patterns": []},
                         {"label": "claudep", "provider": "claude", "model": "deepseek-flash", "family": "deepseek", "priority": 9, "active": False, "quota": "reactive", "prompt_via": "argv", "command": ["claudep"], "headless_args": ["--print"]},  # deepseek reserve while dsh serves
-                        {"label": "muse-review", "provider": "muse", "model": "muse-spark-1.3-contributor", "family": "muse", "priority": 99, "active": True, "extra": True, "quota": "reactive", "prompt_via": "argv", "command": ["muse", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max"]},  # extra: never counts for quorum (§7.3)
+                        {"label": "muse-review", "provider": "muse", "model": "muse-spark-1.3-contributor", "family": "muse", "priority": 99, "active": True, "extra": True, "quota": "reactive", "prompt_via": "argv", "command": ["muse", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max"]},  # extra: never counts for quorum (§7.3). Plain muse on purpose: isolated reviewer (sandbox+approvals ON, no --trust-workspace); musej appends its flags last so they cannot be overridden.
                         {"label": "agyd", "provider": "gemini", "model": "gemini", "family": "gemini", "priority": 60, "active": False, "prompt_via": "argv", "command": ["agyd"]},
                         {"label": "mimo", "provider": "opencode", "model": "opencode-go/mimo-v2.6-pro", "family": "mimo", "priority": 4, "active": False, "quota": "reactive", "prompt_via": "argv", "command": ["opencode", "run", "-m", "opencode-go/mimo-v2.6-pro"]},
                     ],
@@ -324,7 +324,7 @@ class ConfigLoader:
                                "model_args": []},
                     "tier_c": {"chain": ["muse", "dsh", "claudep"],
                                "muse": {"model": "muse-spark-1.3-contributor", "effort": "max",
-                                        "command": ["muse", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max"]},
+                                        "command": ["musej", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max"]},
                                "dsh": {"model": "deepseek-v4.1-flash", "effort": "max",
                                        "command": ["node", "/home/develop/development/Jardal/jardal-deepseek-harness/apps/cli/lib/bin.js", "--profile", "headless", "-"],
                                        "env": {"DSH_HOME": "/home/develop/.dsh"}},

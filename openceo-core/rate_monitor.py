@@ -160,7 +160,8 @@ class RateMonitor:
             path = self._settings.CLAUDE_CODE_PATH
             cmd = f"{path} --dangerously-skip-permissions"
         elif provider == "muse":
-            # Bare: the monitor only runs /usage, no tools, no approvals needed.
+            # Dev default (musej): the monitor only runs /usage, no tools,
+            # so the wrapper flags are inert and the same account is measured.
             cmd = self._settings.MUSE_CLI_PATH
         else:
             raise ValueError(f"No monitor support for provider: {provider}")
