@@ -28,7 +28,7 @@ from agents.dev.tier_s.findings import (
     VerifiedFinding,
     _anchor_text,  # rendering only; anchors stay opaque otherwise
 )
-from agents.dev.tier_s.knowledge import AGENTS_PREAMBLE
+from agents.dev.tier_s.knowledge import with_preamble
 
 
 # ---------------------------------------------------------------------------
@@ -384,10 +384,10 @@ def reviewer_prompt(
     request_name: str,
     scope: str,
     round_no: int,
+    repo: Path | str | None = None,
 ) -> str:
     """Pointed review prompt (§7.5): diff-only, no tests, no-wide review."""
-    return (
-        f"{AGENTS_PREAMBLE}\n"
+    body = (
         f"You are review slot {slot_label}. Read {request_name} in this "
         "worktree (read-only checkout at the ticket head).\n"
         "Review ONLY the listed files, plus directly related ones when a "
@@ -403,6 +403,7 @@ def reviewer_prompt(
         "(whole file), `CRITERIO:<id>`. If clean, print `No findings.`.\n"
         f"End with REVIEW_DONE_{scope}_{round_no} on its own last line."
     )
+    return with_preamble(body, repo, "en")
 
 
 # ---------------------------------------------------------------------------
@@ -456,10 +457,10 @@ def muse_fix_prompt(
     round_no: int,
     findings_name: str,
     count: int,
+    repo: Path | str | None = None,
 ) -> str:
     """First-instance judge prompt (§7.9): fix or discard with reasons."""
-    return (
-        f"{AGENTS_PREAMBLE}\n"
+    body = (
         f"Decide every finding in {findings_name} ({count} findings, round "
         f"{round_no}). They are verified: they point at real code. Judge the "
         "reasoning: is the problem real, is the proposed fix correct, is it "
@@ -473,6 +474,7 @@ def muse_fix_prompt(
         "the inbox). Do not rewrite uninvolved code.\n"
         f"Then emit FIX_DONE_{round_no} in .tier-s/status."
     )
+    return with_preamble(body, repo, "en")
 
 
 # ---------------------------------------------------------------------------
@@ -536,10 +538,15 @@ def arbitration_candidates(
     return candidates
 
 
-def arbiter_prompt(finding: Finding, muse_reason: str, quote: str) -> str:
+def arbiter_prompt(
+    finding: Finding,
+    muse_reason: str,
+    quote: str,
+    repo: Path | str | None = None,
+) -> str:
     """Short arbitration session (§7.10): the verdict is final."""
     anchors = " + ".join(_anchor_text(a) for a in finding.anchors)
-    return (
+    body = (
         "Arbitrate ONE disputed CRITICAL finding (final verdict).\n"
         f"Finding: [{finding.category}] {anchors} — {finding.problem} → "
         f"{finding.fix}\nFamilies reporting: {', '.join(finding.families)}\n"
@@ -548,6 +555,7 @@ def arbiter_prompt(finding: Finding, muse_reason: str, quote: str) -> str:
         "Reply exactly one line: `REAL — <why>` or `FALSO — <verifiable "
         "technical reason>`. Then emit ARBITRATED in .tier-s/status."
     )
+    return with_preamble(body, repo, "en")
 
 
 # ---------------------------------------------------------------------------

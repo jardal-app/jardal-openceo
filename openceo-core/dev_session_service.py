@@ -17,6 +17,7 @@ from agents.dev.opencode_run import (
     parse_run_output,
 )
 from agents.dev.tmux_runtime import TmuxRuntime
+from agents.dev.tier_s.knowledge import detect_prompt_lang, with_preamble
 from config_loader import ConfigLoader
 from db.mongo import MongoRepository
 from events import RealtimeHub
@@ -58,6 +59,23 @@ _TIER_S_TMUX_SESSION_RE = re.compile(
     r"^dev-(?P<project>.+)-(?P<role>planner|plan-reviewer|builder|gemini-reviewer)$",
     flags=re.IGNORECASE,
 )
+
+
+def prepend_first_turn_preamble(
+    session: dict[str, Any], instruction: str,
+) -> str:
+    """Preamble on the session's first user turn only (TASK-2026-00123).
+
+    Later turns share the live CLI context, so repeating the read
+    instruction would duplicate it. Language follows the instruction.
+    """
+    user_turns = sum(
+        1 for msg in (session.get("messages") or [])
+        if str((msg or {}).get("role") or "") == SessionMessageRole.USER.value)
+    if user_turns != 1:
+        return instruction
+    repo = session.get("repo_path")
+    return with_preamble(instruction, repo, detect_prompt_lang(instruction))
 
 
 class DevSessionService:
@@ -585,6 +603,7 @@ class DevSessionService:
         """Send instruction to tmux and capture the result."""
         session_id = session["session_id"]
         project = session["project"]
+        instruction = prepend_first_turn_preamble(session, instruction)
 
         if self._settings.DEV_EXECUTION_MODE == "mock":
             # Mock mode: simulate response

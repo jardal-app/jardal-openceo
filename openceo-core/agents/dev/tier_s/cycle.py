@@ -281,6 +281,71 @@ def _complete_handoff(
     return "\n".join(out) + "\n"
 
 
+# -- retry/follow-up prompts (one-shot: each carries the preamble) -----------
+
+
+def _plan_retry_prompt(errors: str, signal: str, repo: Path) -> str:
+    return knowledge_mod.with_preamble(
+        f"Your PLAN.md is invalid: {errors}\nFix it in place "
+        f"and emit {signal} again.", repo, "en")
+
+
+def _plan_response_retry_prompt(
+    missing: Sequence[int], signal: str, repo: Path,
+) -> str:
+    return knowledge_mod.with_preamble(
+        f"PLAN_RESPONSE.md is incomplete: answer each of {list(missing)} "
+        f"exactly once (ACEPTADA/RECHAZADA/DIFERIDA), then emit {signal}.",
+        repo, "en")
+
+
+def _handoff_fix_prompt(signal: str, repo: Path) -> str:
+    return knowledge_mod.with_preamble(
+        "Write .tier-s/HANDOFF.md (executor sections ≤300 words) and emit "
+        f"{signal} again. Do not touch code.", repo, "en")
+
+
+def _gates_fix_prompt(tail: str, signal: str, repo: Path) -> str:
+    return knowledge_mod.with_preamble(
+        f"Gates failed:\n{tail[:6000]}\nFix the code (no commits), keep "
+        f"HANDOFF.md truthful, and emit {signal} again.", repo, "en")
+
+
+def _fix_retry_prompt(
+    fix_name: str, missing: Sequence[int], round_no: int, repo: Path,
+) -> str:
+    return knowledge_mod.with_preamble(
+        f"{fix_name} is incomplete: answer each of "
+        f"{['F' + str(index) for index in missing]} exactly once "
+        f"(CORREGIDO/DESCARTADO), then emit FIX_DONE_{round_no}.",
+        repo, "en")
+
+
+def _fix_gates_retry_prompt(round_no: int, tail: str, repo: Path) -> str:
+    return knowledge_mod.with_preamble(
+        f"Fix gates failed after FIX_{round_no}:\n{tail[:6000]}\n"
+        "Fix the code (no commits), keep HANDOFF.md truthful, and "
+        f"emit FIX_DONE_{round_no} again.", repo, "en")
+
+
+def _arbiter_retry_prompt(repo: Path) -> str:
+    return knowledge_mod.with_preamble(
+        "Reply exactly one line: `REAL — <why>` or "
+        "`FALSO — <verifiable technical reason>`.", repo, "en")
+
+
+def _arbitration_fix_prompt(
+    finding_id: int, category: str, problem: str, fix: str,
+    reason: str, repo: Path,
+) -> str:
+    return knowledge_mod.with_preamble(
+        f"Arbitration verdict REAL on F{finding_id} "
+        f"([{category}] {problem[:300]} → "
+        f"{fix[:300]}): {reason[:600]}\n"
+        "Fix the code (no commits) and emit "
+        "FIX_DONE_2 again.", repo, "en")
+
+
 class TierSCycle:
     """The F2 orchestrator. Deterministic; every LLM call goes via Executor."""
 
@@ -743,8 +808,8 @@ class TierSCycle:
                     patch_run=True, drop_branch=True)
                 return None
             if attempt == 0:
-                prompt = (f"Your PLAN.md is invalid: {errors}\nFix it in place "
-                          f"and emit {SIGNALS['plan_ready']} again.")
+                prompt = _plan_retry_prompt(
+                    errors, SIGNALS["plan_ready"], ctx.repo)
                 continue
             await self._park(
                 ctx, "needs_owner", f"invalid plan after retry: {errors}",
@@ -775,9 +840,8 @@ class TierSCycle:
         if missing:
             retry = await self._exec.run(
                 "planner",
-                f"PLAN_RESPONSE.md is incomplete: answer each of {missing} "
-                f"exactly once (ACEPTADA/RECHAZADA/DIFERIDA), then emit "
-                f"{SIGNALS['plan_responded']}.",
+                _plan_response_retry_prompt(
+                    missing, SIGNALS["plan_responded"], ctx.repo),
                 ctx.repo, timeout_s)
             self._record_session(ctx, "planner", "planner", retry)
             responses = parse_plan_responses(
@@ -823,9 +887,7 @@ class TierSCycle:
         handoff = self._read_artifact(ctx, "HANDOFF.md")
         if not handoff or _handoff_word_count(handoff) > 600:
             fix = await self._exec.run(
-                "builder",
-                "Write .tier-s/HANDOFF.md (executor sections ≤300 words) and emit "
-                f"{SIGNALS['build_done']} again. Do not touch code.",
+                "builder", _handoff_fix_prompt(SIGNALS["build_done"], ctx.repo),
                 ctx.repo, timeout_s)
             self._record_session(ctx, "builder", "builder", fix)
             handoff = self._read_artifact(ctx, "HANDOFF.md")
@@ -856,8 +918,7 @@ class TierSCycle:
                 for item in failed)
             fix = await self._exec.run(
                 "builder",
-                f"Gates failed:\n{tail[:6000]}\nFix the code (no commits), keep "
-                f"HANDOFF.md truthful, and emit {SIGNALS['build_done']} again.",
+                _gates_fix_prompt(tail, SIGNALS["build_done"], ctx.repo),
                 ctx.repo, timeout_s)
             self._record_session(ctx, "builder", "builder", fix)
             attempt += 1
@@ -1142,7 +1203,8 @@ class TierSCycle:
                 "reviewer_timeout_minutes", 15)) * 60
             result = await self._exec.run(
                 role, review_mod.reviewer_prompt(
-                    slot.label, request_name, "ticket", round_no),
+                    slot.label, request_name, "ticket", round_no,
+                    repo=worktree),
                 worktree, timeout_s)
             self._record_session(ctx, "reviewer", role, result)
             after = await asyncio.to_thread(
@@ -1219,7 +1281,8 @@ class TierSCycle:
         timeout_s = int(ctx.timeouts.get("fix", 30)) * 60
         result = await self._exec.run(
             "builder", review_mod.muse_fix_prompt(
-                round_no, f"FINDINGS_{round_no}.md", len(findings)),
+                round_no, f"FINDINGS_{round_no}.md", len(findings),
+                repo=ctx.repo),
             ctx.repo, timeout_s)
         self._record_session(ctx, "builder", "builder", result)
         verdicts = review_mod.parse_fix(self._read_artifact(ctx, fix_name))
@@ -1227,9 +1290,7 @@ class TierSCycle:
         if missing:
             retry = await self._exec.run(
                 "builder",
-                f"{fix_name} is incomplete: answer each of "
-                f"{['F' + str(index) for index in missing]} exactly once "
-                f"(CORREGIDO/DESCARTADO), then emit FIX_DONE_{round_no}.",
+                _fix_retry_prompt(fix_name, missing, round_no, ctx.repo),
                 ctx.repo, timeout_s)
             self._record_session(ctx, "builder", "builder", retry)
             verdicts = review_mod.parse_fix(self._read_artifact(ctx, fix_name))
@@ -1267,10 +1328,7 @@ class TierSCycle:
                 for item in failed)
             bump_gate_retries(ctx.metrics)
             fix = await self._exec.run(
-                "builder",
-                f"Fix gates failed after FIX_{round_no}:\n{tail[:6000]}\n"
-                "Fix the code (no commits), keep HANDOFF.md truthful, and "
-                f"emit FIX_DONE_{round_no} again.",
+                "builder", _fix_gates_retry_prompt(round_no, tail, ctx.repo),
                 ctx.repo, timeout_s)
             self._record_session(ctx, "builder", "builder", fix)
         self._commit_if_changed(ctx, f"wip({ctx.ref}) fix{round_no}")
@@ -1301,15 +1359,13 @@ class TierSCycle:
             quote = "\n".join(finding.quotes[:2])
             result = await self._exec.run(
                 "arbiter", review_mod.arbiter_prompt(
-                    finding, muse_reason, quote),
+                    finding, muse_reason, quote, repo=ctx.repo),
                 ctx.repo, timeout_s)
             self._record_session(ctx, "arbiter", "arbiter", result)
             verdict = self._parse_arbiter_verdict(result.output_tail or "")
             if verdict is None:
                 retry = await self._exec.run(
-                    "arbiter",
-                    "Reply exactly one line: `REAL — <why>` or "
-                    "`FALSO — <verifiable technical reason>`.",
+                    "arbiter", _arbiter_retry_prompt(ctx.repo),
                     ctx.repo, timeout_s)
                 self._record_session(ctx, "arbiter", "arbiter", retry)
                 verdict = self._parse_arbiter_verdict(retry.output_tail or "")
@@ -1336,11 +1392,9 @@ class TierSCycle:
             timeout_fix = int(ctx.timeouts.get("fix", 30)) * 60
             fix = await self._exec.run(
                 "builder",
-                f"Arbitration verdict REAL on F{finding.id} "
-                f"([{finding.category}] {finding.problem[:300]} → "
-                f"{finding.fix[:300]}): {reason[:600]}\n"
-                "Fix the code (no commits) and emit "
-                f"FIX_DONE_2 again.",
+                _arbitration_fix_prompt(
+                    finding.id, finding.category, finding.problem,
+                    finding.fix, reason, ctx.repo),
                 ctx.repo, timeout_fix)
             self._record_session(ctx, "builder", "builder", fix)
             results = await asyncio.to_thread(
@@ -1770,8 +1824,7 @@ class TierSCycle:
         if isinstance(acceptance, str):
             acceptance = [acceptance]
         criteria = "\n".join(f"- {line}" for line in acceptance)
-        return (
-            f"{knowledge_mod.AGENTS_PREAMBLE}\n"
+        body = (
             f"You plan ticket {ctx.ref}: {ticket.get('title', '')}\n"
             f"{ticket.get('description', '')}\n"
             f"Acceptance:\n{criteria or '- (derive verifiable criteria in PLAN.md)'}\n"
@@ -1787,10 +1840,11 @@ class TierSCycle:
             "Decide open questions yourself and record them in DECISIONS; only "
             "use [OWNER] when the ticket explicitly marks a decision so."
         )
+        return knowledge_mod.with_preamble(body, ctx.repo, "en")
 
     def _plan_review_prompt(self, ctx: _Ctx, plan: Plan) -> str:
         files = ", ".join(item.path for item in plan.files[:20])
-        return (
+        body = (
             "Read-only review of .tier-s/PLAN.md (pointers, no pasted diffs).\n"
             f"Ticket goal: {plan.goal}\nPlanned files: {files}\n"
             "Write .tier-s/PLAN_REVIEW.md with numbered observations "
@@ -1798,27 +1852,30 @@ class TierSCycle:
             "<suggestion>, each with a literal `>` quote), or `No findings.`.\n"
             "End the report with REVIEW_DONE_plan_0."
         )
+        return knowledge_mod.with_preamble(body, ctx.repo, "en")
 
     def _plan_response_prompt(
         self, ctx: _Ctx, observations: Sequence[Any]) -> str:
         if not observations:
-            return ("No plan observations. Emit "
-                    f"{SIGNALS['plan_responded']} in .tier-s/status.")
+            return knowledge_mod.with_preamble(
+                "No plan observations. Emit "
+                f"{SIGNALS['plan_responded']} in .tier-s/status.",
+                ctx.repo, "en")
         ids = ", ".join(f"O{obs.id}" for obs in observations)
-        return (
+        body = (
             f"Answer each plan observation ({ids}) in .tier-s/PLAN_RESPONSE.md: "
             "`O<n>: ACEPTADA — <what changed>` (and apply it to PLAN.md), "
             "`RECHAZADA — <reason>` or `DIFERIDA — <reason>`. "
             f"Then emit {SIGNALS['plan_responded']} in .tier-s/status."
         )
+        return knowledge_mod.with_preamble(body, ctx.repo, "en")
 
     def _builder_prompt(self, ctx: _Ctx, plan: Plan) -> str:
         files = "\n".join(f"- {item.path} ({item.operation}): {item.reason}"
                           for item in plan.files)
         steps = "\n".join(f"{num}. {step}"
                           for num, step in enumerate(plan.steps, 1))
-        return (
-            f"{knowledge_mod.AGENTS_PREAMBLE}\n"
+        body = (
             f"Implement ticket {ctx.ref} from .tier-s/PLAN.md + "
             ".tier-s/PLAN_RESPONSE.md.\n"
             f"Goal: {plan.goal}\nFiles:\n{files}\nSteps:\n{steps}\n"
@@ -1827,3 +1884,4 @@ class TierSCycle:
             "Write .tier-s/HANDOFF.md (§16.6, executor sections ≤300 words) "
             f"and emit {SIGNALS['build_done']} in .tier-s/status."
         )
+        return knowledge_mod.with_preamble(body, ctx.repo, "en")

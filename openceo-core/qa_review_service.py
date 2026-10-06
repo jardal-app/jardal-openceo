@@ -8,6 +8,7 @@ from typing import Any
 
 from agents.dev.kimi_session_manager import KimiSessionManager
 from agents.dev.opencode_session_manager import OpenCodeSessionManager
+from agents.dev.tier_s.knowledge import with_preamble
 from config_loader import ConfigLoader
 from db.mongo import MongoRepository
 from settings import Settings
@@ -162,7 +163,7 @@ class QAReviewService:
         project = str(ticket.get("project") or "default")
 
         # Original coding prompt (reconstruct the same one sent to the dev agent)
-        original_prompt = self._build_coding_prompt_replica(ticket)
+        original_prompt = self._build_coding_prompt_replica(ticket, repo=work_dir)
 
         # Search git for branch/PR
         branch_info, pr_info = await self._search_git_for_ticket(work_dir, ticket_number)
@@ -240,16 +241,14 @@ class QAReviewService:
 
         return "\n".join(lines)
 
-    def _build_coding_prompt_replica(self, ticket: dict[str, Any]) -> str:
+    def _build_coding_prompt_replica(
+        self, ticket: dict[str, Any], repo: Path | str | None = None,
+    ) -> str:
         """Reconstruct the same coding prompt that was sent to the dev agent."""
         pm = (ticket.get("params") or {}).get("pm_ticket") or {}
         ticket_num = ticket.get("ticket_number")
 
-        lines: list[str] = [
-            "Lee AGENTS.md en la raíz del proyecto antes de implementar y cumple cada regla exactamente.",
-            "",
-            "TAREA",
-        ]
+        lines: list[str] = ["TAREA"]
 
         if ticket_num is not None:
             lines.append(f"Ticket: #{ticket_num}")
@@ -277,7 +276,7 @@ class QAReviewService:
             lines.append("")
             lines.append(f"Adjuntos: {json.dumps(attachments)}")
 
-        return "\n".join(lines)
+        return with_preamble("\n".join(lines), repo, "es")
 
     async def _search_git_for_ticket(
         self,

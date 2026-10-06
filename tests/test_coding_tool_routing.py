@@ -8,6 +8,7 @@ No network, no CLI, no LLM.
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -400,24 +401,51 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
             return True, "did the thing", ""
 
         manager._run_process = fake_run_process  # type: ignore[method-assign]
-        with patch.object(DevSessionManager, "_resolve_tier_executor",
-                          AsyncMock(return_value=MagicMock(
-                              argv=["musej", "exec"], prompt_via="argv",
-                              cwd="/tmp/repo", env={}, label="tier_c:muse"))):
-            result = await manager._step_code(_task(), self._config(), CodingTool.TIER_C)
-        self.assertTrue(calls[0]["command"][-1].startswith("Lee AGENTS.md"))
+        with tempfile.TemporaryDirectory(prefix="tier-preamble-") as tmp:
+            repo = Path(tmp)
+            (repo / "AGENTS.md").write_text("# rules\n", encoding="utf-8")
+            config = self._config()
+            config["project"]["repos"][0]["local_path"] = str(repo)
+            with patch.object(DevSessionManager, "_resolve_tier_executor",
+                              AsyncMock(return_value=MagicMock(
+                                  argv=["musej", "exec"], prompt_via="argv",
+                                  cwd="/tmp/repo", env={}, label="tier_c:muse"))):
+                result = await manager._step_code(_task(), config, CodingTool.TIER_C)
+        self.assertTrue(calls[0]["command"][-1].startswith("Lee AGENTS.md y "))
         self.assertIsNone(calls[0]["stdin"])
         self.assertIn("tier_c:muse", result.step["detail"])
 
         calls.clear()
-        with patch.object(DevSessionManager, "_resolve_tier_executor",
-                          AsyncMock(return_value=MagicMock(
-                              argv=["codexj", "exec", "--ephemeral", "-"], prompt_via="stdin",
-                              cwd="/tmp/repo", env={}, label="tier_b"))):
-            await manager._step_code(_task(), self._config(), CodingTool.TIER_B)
+        with tempfile.TemporaryDirectory(prefix="tier-preamble-") as tmp:
+            repo = Path(tmp)
+            (repo / "CLAUDE.md").write_text("# rules\n", encoding="utf-8")
+            config = self._config()
+            config["project"]["repos"][0]["local_path"] = str(repo)
+            with patch.object(DevSessionManager, "_resolve_tier_executor",
+                              AsyncMock(return_value=MagicMock(
+                                  argv=["codexj", "exec", "--ephemeral", "-"], prompt_via="stdin",
+                                  cwd="/tmp/repo", env={}, label="tier_b"))):
+                await manager._step_code(_task(), config, CodingTool.TIER_B)
         self.assertEqual(calls[0]["command"], ["codexj", "exec", "--ephemeral", "-"])
         assert calls[0]["stdin"] is not None
-        self.assertTrue(calls[0]["stdin"].startswith("Lee AGENTS.md"))
+        self.assertTrue(calls[0]["stdin"].startswith("Lee CLAUDE.md y "))
+
+    async def test_step_code_without_repo_files_has_no_preamble(self) -> None:
+        manager = self._manager()
+        calls = []
+
+        async def fake_run_process(command, stdin_payload=None, timeout=120, cwd=None, env=None):
+            calls.append({"command": command, "stdin": stdin_payload})
+            return True, "did the thing", ""
+
+        manager._run_process = fake_run_process  # type: ignore[method-assign]
+        with patch.object(DevSessionManager, "_resolve_tier_executor",
+                          AsyncMock(return_value=MagicMock(
+                              argv=["musej", "exec"], prompt_via="argv",
+                              cwd="/tmp/repo", env={}, label="tier_c:muse"))):
+            await manager._step_code(_task(), self._config(), CodingTool.TIER_C)
+        # _config() points at /tmp/definitely-not-a-repo: nothing to name.
+        self.assertTrue(calls[0]["command"][-1].startswith("TAREA"))
 
 
 if __name__ == "__main__":
