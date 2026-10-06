@@ -28,6 +28,7 @@ import yaml
 
 from agents.dev.tier_s import findings as findings_mod
 from agents.dev.tier_s import inbox as inbox_mod
+from agents.dev.tier_s import knowledge as knowledge_mod
 from agents.dev.tier_s import review as review_mod
 
 
@@ -350,6 +351,7 @@ def _planner_prompt(
     inbox_md: str,
     deferred: Sequence[str],
     sizing_hint: str = "",
+    repo: Path | str | None = None,
 ) -> str:
     criteria = [f"- {item}" for item in (objective.get("anchor") or {}).get(
         "acceptance", [])] or ["- (derive verifiable criteria)"]
@@ -406,7 +408,7 @@ def _planner_prompt(
         "choose another tier only when the ticket demonstrably needs it, and",
         "say why in tier_reason (one line: what breaks on C).",
     ])
-    return "\n".join(lines)
+    return knowledge_mod.with_preamble("\n".join(lines), repo, "en")
 
 
 async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]:
@@ -447,7 +449,7 @@ async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]
     prompt = _planner_prompt(
         objective, (objective.get("capsule") or {}).get("text", ""),
         open_tickets, inbox_md or "INBOX\n(none)\n", deferred,
-        str(objective.get("sizing_hint") or ""))
+        str(objective.get("sizing_hint") or ""), repo=env.repo)
     scratch = env.repo / ".tier-s" / "objectives" / objective_id
     scratch.mkdir(parents=True, exist_ok=True)
     (scratch / "OBJECTIVE_CAPSULE.md").write_text(
@@ -839,7 +841,7 @@ async def _run_final_reviewer(
             f"review:{slot.label}",
             review_mod.reviewer_prompt(
                 slot.label, "OBJECTIVE_REVIEW_REQUEST.md",
-                "objective_final", 0),
+                "objective_final", 0, repo=worktree),
             worktree, timeout_s)
         after = await asyncio.to_thread(
             review_mod.worktree_snapshot, worktree)
@@ -904,6 +906,28 @@ async def _inbox_final_finding(
         pass
 
 
+def _closure_judge_prompt(
+    count: int, goal: str, capsule: str, repo: Path,
+) -> str:
+    return knowledge_mod.with_preamble(
+        "Judge the objective final findings in OBJECTIVE_FINDINGS.md "
+        f"({count} findings). They are verified: they point at "
+        "real code.\n"
+        f"Anchor goal: {goal[:500]}\n"
+        f"Capsule contracts:\n{capsule[:2000]}\n"
+        "Write OBJECTIVE_CLOSURE.md with one line per finding: "
+        "`F<n>: REAL — <why>` or `F<n>: FALSO — <verifiable technical "
+        "reason>`. Then emit CLOSURE_READY in .tier-s/status.",
+        repo, "en")
+
+
+def _closure_retry_prompt(missing: Sequence[int], repo: Path) -> str:
+    return knowledge_mod.with_preamble(
+        "OBJECTIVE_CLOSURE.md is incomplete: judge each of "
+        f"{['F' + str(index) for index in missing]} exactly once "
+        "(REAL/FALSO), then emit CLOSURE_READY.", repo, "en")
+
+
 async def _close_objective(
     env: ObjectiveEnv,
     objective: Mapping[str, Any],
@@ -917,16 +941,8 @@ async def _close_objective(
     timeout_s = int(env.timeouts.get("closer", 15)) * 60
     if not consolidated:
         return await _finish_objective(env, objective)
-    prompt = (
-        "Judge the objective final findings in OBJECTIVE_FINDINGS.md "
-        f"({len(consolidated)} findings). They are verified: they point at "
-        "real code.\n"
-        f"Anchor goal: {str(anchor.get('goal', ''))[:500]}\n"
-        f"Capsule contracts:\n{capsule[:2000]}\n"
-        "Write OBJECTIVE_CLOSURE.md with one line per finding: "
-        "`F<n>: REAL — <why>` or `F<n>: FALSO — <verifiable technical "
-        "reason>`. Then emit CLOSURE_READY in .tier-s/status."
-    )
+    prompt = _closure_judge_prompt(
+        len(consolidated), str(anchor.get("goal", "")), capsule, env.repo)
     await env.executor.run("closer", prompt, env.repo, timeout_s)
     try:
         await env.executor.cleanup("closer")
@@ -939,10 +955,7 @@ async def _close_objective(
     missing = [item.id for item in consolidated if item.id not in verdicts]
     if missing:
         await env.executor.run(
-            "closer",
-            f"OBJECTIVE_CLOSURE.md is incomplete: judge each of "
-            f"{['F' + str(index) for index in missing]} exactly once "
-            "(REAL/FALSO), then emit CLOSURE_READY.",
+            "closer", _closure_retry_prompt(missing, env.repo),
             env.repo, timeout_s)
         try:
             await env.executor.cleanup("closer")
@@ -997,7 +1010,8 @@ async def _arbitrate_final(
     timeout_s = int(env.timeouts.get("arbiter", 10)) * 60
     quote = "\n".join(item.quotes[:2])
     result = await env.executor.run(
-        "arbiter", review_mod.arbiter_prompt(item, muse_reason, quote),
+        "arbiter", review_mod.arbiter_prompt(item, muse_reason, quote,
+                                             repo=env.repo),
         env.repo, timeout_s)
     try:
         await env.executor.cleanup("arbiter")

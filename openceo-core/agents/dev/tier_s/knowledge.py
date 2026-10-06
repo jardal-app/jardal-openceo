@@ -1,9 +1,9 @@
-"""Project knowledge: AGENTS.md checks and vault notes (design §5.1, §9.8, F7).
+"""Project knowledge: repo rule-file checks and vault notes (§5.1, §9.8, F7).
 
-F7a (parallel, documentation): every CLI reads the repo ``AGENTS.md`` at its
+F7a (parallel, documentation): every CLI reads the repo rule file at its
 root instead of pasted prompts; Tier S never touches ``CONTEXT.md``. This
-module checks presence/size (telemetry, never blocking) and owns the prompt
-preamble every role prompt starts with.
+module checks presence/size (telemetry, never blocking) and owns the single
+prompt preamble every dev prompt starts with (TASK-2026-00123).
 
 F7b (after F6): on objective close — or a single ticket whose plan carries
 ``[durable: yes]`` decisions — ``muse`` writes one vault note through the
@@ -26,29 +26,103 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-#: Every Tier S role prompt starts with this (F7a): instructions live in the
-#: repo, not in the prompt.
-AGENTS_PREAMBLE = (
-    "Read AGENTS.md at the repo root first and follow it exactly; "
-    "project conventions there override generic habits."
+def _rules_files(repo: Path) -> list[str]:
+    """Ordered rule-file names the executor must read (TASK-2026-00123).
+
+    CLAUDE.md wins; AGENTS.md is added only when it is a different file
+    (a symlink onto CLAUDE.md names CLAUDE.md alone).
+    """
+    claude = repo / "CLAUDE.md"
+    agents = repo / "AGENTS.md"
+    names: list[str] = []
+    has_claude = claude.is_file()
+    if has_claude:
+        names.append("CLAUDE.md")
+    if agents.is_file():
+        try:
+            same = has_claude and agents.samefile(claude)
+        except OSError:
+            same = False
+        if not same:
+            names.append("AGENTS.md")
+    return names
+
+
+def repo_preamble(repo: Path | str | None, lang: str = "en") -> str:
+    """Single dev-prompt preamble (TASK-2026-00123), or ``""``.
+
+    Resolution per project repo: CLAUDE.md exists -> name it; only
+    AGENTS.md exists -> name it; AGENTS.md symlinks CLAUDE.md -> name
+    CLAUDE.md once; neither (or unknown repo) -> no preamble. Two
+    separate files name both. ``lang`` matches the prompt language.
+    """
+    if repo is None:
+        return ""
+    try:
+        names = _rules_files(Path(repo))
+    except OSError:
+        return ""
+    if not names:
+        return ""
+    if lang == "es":
+        tail = ("cumple cada regla exactamente; las convenciones del repo "
+                "prevalecen sobre hábitos genéricos.")
+        if len(names) == 1:
+            return f"Lee {names[0]} y {tail}"
+        return f"Lee {' y '.join(names)}; {tail}"
+    tail = ("follow each rule exactly; repo conventions override "
+            "generic habits.")
+    if len(names) == 1:
+        return f"Read {names[0]} and {tail}"
+    return f"Read {' and '.join(names)}; {tail}"
+
+
+_ES_MARKS = re.compile(r"[¿¡áéíóúñüÁÉÍÓÚÑÜ]")
+_ES_WORDS = re.compile(
+    r"\b(el|la|los|las|un|una|del|al|para|como|pero|porque|este|esta|"
+    r"estos|estas|está|están|quiero|quieres|haz|haga|crea|dime|revisa|"
+    r"corrige|implementa|agrega|explica|sigue|hola|gracias|vale|oye|"
+    r"por favor)\b",
+    re.IGNORECASE,
 )
+
+
+def detect_prompt_lang(text: str) -> str:
+    """``"es"`` or ``"en"`` for free-text turns (follow-ups, loose sessions).
+
+    Spanish markers win; anything else with latin letters reads as English;
+    empty/unknown defaults to Spanish (owner sessions).
+    """
+    body = text or ""
+    if _ES_MARKS.search(body) or _ES_WORDS.search(body):
+        return "es"
+    if re.search(r"[a-zA-Z]", body):
+        return "en"
+    return "es"
+
+
+def with_preamble(prompt: str, repo: Path | str | None, lang: str = "en") -> str:
+    """Prepend the repo preamble, or return ``prompt`` unchanged without one."""
+    head = repo_preamble(repo, lang)
+    return f"{head}\n{prompt}" if head else prompt
 
 
 def check_agents_md(repo: Path, budget_tokens: int = 3000) -> dict[str, Any]:
     """Presence + size check (telemetry only, §13: ~3k tokens warn)."""
-    path = repo / "AGENTS.md"
-    if not path.is_file():
+    names = _rules_files(repo)
+    if not names:
         return {"present": False, "tokens": 0, "over_budget": False,
-                "warning": "missing repo-root AGENTS.md (F7a)"}
+                "warning": "missing repo-root CLAUDE.md/AGENTS.md (F7a)"}
+    path = repo / names[0]
     try:
         chars = len(path.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return {"present": False, "tokens": 0, "over_budget": False,
-                "warning": "unreadable repo-root AGENTS.md"}
+                "warning": f"unreadable repo-root {names[0]}"}
     tokens = chars // 4
     return {"present": True, "tokens": tokens,
             "over_budget": tokens > budget_tokens,
-            "warning": (f"AGENTS.md ~{tokens} tokens over ~{budget_tokens}"
+            "warning": (f"{names[0]} ~{tokens} tokens over ~{budget_tokens}"
                         if tokens > budget_tokens else "")}
 
 
@@ -87,9 +161,9 @@ def _note_prompt(
     project: str,
     subject: str,
     evidence: str,
+    repo: Path | str | None = None,
 ) -> str:
-    return (
-        f"{AGENTS_PREAMBLE}\n"
+    body = (
         "Write ONE vault note with the obsidian-vault-links skill rules "
         f"(boundaries, frontmatter, local links): {note_abs}\n"
         f"Project: {project}. Subject: {subject}\n"
@@ -100,6 +174,7 @@ def _note_prompt(
         f"Evidence:\n{evidence[:6000]}\n"
         "Then emit VAULT_DONE in .tier-s/status."
     )
+    return with_preamble(body, repo, "en")
 
 
 async def _run_check(
@@ -160,7 +235,7 @@ async def write_objective_note(env: Any, objective: Mapping[str, Any]) -> str:
         "closer",
         _note_prompt(note, project,
                      f"objective {objective.get('objective_id')} close",
-                     evidence),
+                     evidence, repo=env.repo),
         env.repo, timeout_s)
     try:
         await env.executor.cleanup("closer")
@@ -203,7 +278,8 @@ async def write_ticket_note(
     ])
     timeout_s = int((getattr(env, "timeouts", None) or {}).get("closer", 15)) * 60
     await env.executor.run(
-        "closer", _note_prompt(note, project, f"ticket {ref}", evidence),
+        "closer", _note_prompt(note, project, f"ticket {ref}", evidence,
+                               repo=env.repo),
         env.repo, timeout_s)
     try:
         await env.executor.cleanup("closer")

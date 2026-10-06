@@ -18,6 +18,7 @@ from .routing import ROUTING_MISSING_REASON, TIER_C_CHAIN, resolve_coding_tool, 
 from .tier_s.cycle import AllowAllQuota, TierSCycle
 from .tier_s.gates import baseline_blocked, gates_failed, handoff_gates_section, load_gates, run_gates
 from .tier_s.inbox import InMemoryInboxStore, MongoInboxStore
+from .tier_s.knowledge import detect_prompt_lang, with_preamble
 from .tier_s.live import ProcessExecutor, RateMonitorQuota
 from .tier_s.objectives import (
     InMemoryObjectiveStore,
@@ -617,6 +618,7 @@ class DevSessionManager:
         prompt: str,
     ) -> None:
         """One follow-up turn on the work branch (gate/handoff fixes)."""
+        prompt = with_preamble(prompt, repo, detect_prompt_lang(prompt))
         try:
             executor = await self._resolve_tier_executor(tool, project_config)
         except ValueError:
@@ -1142,11 +1144,7 @@ class DevSessionManager:
         ticket_num = task.get("ticket_number")
         review_base_url = self._review_base_url(config)
 
-        lines: list[str] = [
-            "Lee AGENTS.md en la raíz del proyecto antes de implementar y cumple cada regla exactamente.",
-            "",
-            "TAREA",
-        ]
+        lines: list[str] = ["TAREA"]
 
         if ticket_num is not None:
             lines.append(f"Ticket: #{ticket_num}")
@@ -1210,7 +1208,8 @@ class DevSessionManager:
             ]
         )
 
-        return "\n".join(lines)
+        return with_preamble(
+            "\n".join(lines), self._resolve_repo_path(config), "es")
 
     def _resolve_repo_path(self, config: dict[str, Any]) -> str | None:
         repos = config.get("project", {}).get("repos", [])
