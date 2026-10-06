@@ -12,10 +12,13 @@ Decisiones deliberadas:
   el event loop entero del proceso, no solo esa peticion.
 - **Timeouts cortos (connect 2 s, total 5 s por defecto).** El cliente de Notion usa 20 s;
   copiar ese valor colgaria el turno de voz 20 segundos con ERPNext caido.
-- **Las excepciones distinguen tres casos**, porque el llamador tiene que reaccionar
+- **Las excepciones distinguen cuatro casos**, porque el llamador tiene que reaccionar
   distinto a cada uno: `ERPNextUnavailable` (timeout, red, 5xx) se marca como operacion
   pendiente; `ERPNextValidationError` (4xx de datos) es un fallo duro; `ERPNextDuplicateError`
-  (417) significa que la clave de idempotencia ya existia y hay que releer.
+  (417 de indice unico) significa que la clave de idempotencia ya existia y hay que
+  releer; `ERPNextDependencyBlockedError` (417 por dependientes abiertos) es transitorio
+  y se reintenta mas tarde. Frappe devuelve 417 para validaciones Y duplicados, asi
+  que el 417 se clasifica por contenido (`classify_417`), no por codigo.
 - **Solo se puede escribir en DocTypes de la allowlist.** El contrato pide que la superficie
   REST quede acotada; la allowlist lo garantiza en la capa mas baja, no solo en los tools.
 """
@@ -102,6 +105,62 @@ class ERPNextDuplicateError(ERPNextError):
     No es un fallo: significa que un intento anterior si llego a crear el documento.
     El llamador debe releer por la clave y tratarlo como exito idempotente.
     """
+
+
+class ERPNextDependencyBlockedError(ERPNextValidationError):
+    """Frappe rechazo completar porque hay dependientes abiertos (HTTP 417).
+
+    Es un fallo TRANSITORIO, no de datos: los hijos (`parent_task`) y las
+    dependencias (`depends_on`) cuentan como dependientes, y el ticket completa
+    cuando ellos cierren. El llamador debe reintentarlo mas tarde (marca
+    `pending_status`), no darlo por imposible. Verificado contra el sitio vivo
+    (TASK-2026-00013): `Cannot complete task ... dependant task ... are not
+    completed / cancelled`.
+    """
+
+
+def _payload_texts(payload: Any) -> str:
+    """Todo el texto comparable de un cuerpo de error de Frappe, en minusculas."""
+    parts: list[str] = []
+    if isinstance(payload, dict):
+        for key in ("exception", "exc_type", "message"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value)
+        server_messages = payload.get("_server_messages")
+        if isinstance(server_messages, list):
+            parts.extend(str(item) for item in server_messages if str(item).strip())
+        elif isinstance(server_messages, str) and server_messages.strip():
+            parts.append(server_messages)
+    return " ".join(parts).lower()
+
+
+def classify_417(payload: Any) -> type[ERPNextError]:
+    """Clasifica un HTTP 417 de Frappe por su contenido, no por su codigo.
+
+    Frappe devuelve 417 para validaciones de datos Y para duplicados de indice
+    unico, y tratarlos igual es un bug: un bloqueo por dependencias abiertas no
+    es un exito idempotente, y un `ParentIsGroupError` no se arregla releyendo.
+    Formas verificadas contra el sitio vivo (TASK-2026-00013):
+
+    - duplicado: `exc_type == UniqueValidationError`, `Duplicate entry ... for
+      key '...'` o `must be unique` -> `ERPNextDuplicateError`;
+    - bloqueo por dependientes abiertos: `dependant task ... not completed /
+      cancelled` -> `ERPNextDependencyBlockedError` (transitorio);
+    - resto (datos invalidos, padre no-grupo, enlaces, ...) ->
+      `ERPNextValidationError` (duro).
+    """
+    text = _payload_texts(payload)
+    exc_type = str(payload.get("exc_type") or "").strip() if isinstance(payload, dict) else ""
+    if (
+        exc_type == "UniqueValidationError"
+        or "duplicate entry" in text
+        or "must be unique" in text
+    ):
+        return ERPNextDuplicateError
+    if "dependant task" in text and "not completed" in text:
+        return ERPNextDependencyBlockedError
+    return ERPNextValidationError
 
 
 class ERPNextClient:
@@ -212,8 +271,11 @@ class ERPNextClient:
                 )
 
             if status == 417:
-                raise ERPNextDuplicateError(
-                    self._format_error(response), status_code=status, payload=self._safe_json(response)
+                # Frappe usa el 417 tanto para duplicados como para validaciones
+                # de datos: el codigo solo no distingue. Ver `classify_417`.
+                payload = self._safe_json(response)
+                raise classify_417(payload)(
+                    self._format_error(response), status_code=status, payload=payload
                 )
 
             if status in (401, 403):

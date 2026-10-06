@@ -375,6 +375,8 @@ def _register_openceo_tools(
         coding_tool: Literal["tier_s", "tier_a", "tier_b", "tier_c"] | None = None,
         coding_tier: Literal["tier1", "tier2", "tier3", "tier4"] | None = None,
         autorun: bool = False,
+        parent_task: str | None = None,
+        depends_on: list[str] | None = None,
     ) -> dict[str, Any]:
         req = TaskCreateRequest(
             title=title,
@@ -388,6 +390,8 @@ def _register_openceo_tools(
             coding_tool=CodingTool(coding_tool) if coding_tool else None,
             coding_tier=CodingTier(coding_tier) if coding_tier else None,
             autorun=autorun,
+            parent_task=parent_task,
+            depends_on=depends_on,
         )
         try:
             result = await task_service.create_task(req)
@@ -427,6 +431,8 @@ def _register_openceo_tools(
                         item.get("status"),
                     ),
                     autorun=autorun,
+                    parent_task=item.get("parent_task"),
+                    depends_on=item.get("depends_on"),
                 )
                 result = await task_service.create_task(req)
                 created += 1
@@ -503,6 +509,8 @@ def _register_openceo_tools(
                         item.get("status"),
                     ),
                     autorun=autorun,
+                    parent_task=item.get("parent_task"),
+                    depends_on=item.get("depends_on"),
                 )
                 result = await task_service.create_task(req)
                 created += 1
@@ -515,22 +523,22 @@ def _register_openceo_tools(
     server.tool(
         openceo_create_ticket,
         name="openceo_create_ticket",
-        description="Create a ticket in OpenCEO. It is registered in ERPNext (the business record) and in MongoDB (the execution record). Required: title. Optional: description, project, priority (low/medium/high/critical), status (queued/in_progress/completed/failed/escalated/interrupted/waiting), ticket_type, source, source_id, tags, due_date, external_url, coding_tool, coding_tier, autorun (default false). Set autorun=true ONLY when the ticket must start executing now; by default it is only registered. Before creating, consider openceo_search_tickets to avoid duplicating existing work.",
+        description="Create a ticket in OpenCEO. It is registered in ERPNext (the business record) and in MongoDB (the execution record). Required: title. Optional: description, project, priority (low/medium/high/critical), status (queued/in_progress/completed/failed/escalated/interrupted/waiting), ticket_type, source, source_id, tags, due_date, external_url, coding_tool, coding_tier, autorun (default false), parent_task (TASK-... group), depends_on (list of TASK-...). Set autorun=true ONLY when the ticket must start executing now; by default it is only registered. Before creating, consider openceo_search_tickets to avoid duplicating existing work.",
     )
     server.tool(
         openceo_create_tickets_batch,
         name="openceo_create_tickets_batch",
-        description='Batch-create tickets. Input: JSON array of objects with at least "title". Max 50. Registered but NOT executed unless autorun=true.',
+        description='Batch-create tickets. Input: JSON array of objects with at least "title" (each may also carry parent_task and depends_on with TASK-... names). Max 50. Registered but NOT executed unless autorun=true.',
     )
     server.tool(
         openceo_create_pm_tickets_batch,
         name="openceo_create_pm_tickets_batch",
-        description='Create child tickets (spillover/interview) from a parent ticket. Forces project/source/source_id across the batch. Required: project, source_id, tickets (JSON array with title and optional description, priority, tags, ticket_type, due_date, external_url). Optional: source (default "spillover"), autorun (default false).',
+        description='Create child tickets (spillover/interview) from a parent ticket. Forces project/source/source_id across the batch. Required: project, source_id, tickets (JSON array with title and optional description, priority, tags, ticket_type, due_date, external_url, parent_task, depends_on). Optional: source (default "spillover"), autorun (default false).',
     )
     server.tool(
         openceo_search_tickets,
         name="openceo_search_tickets",
-        description="Search business tickets in ERPNext before creating new ones. Returns ERPNext tickets (name, subject, status, priority, project, openceo_ref) plus execution_status from the runtime when the ticket has been started. Optional filters: query (substring of the subject), project (project_key, e.g. 'jardal-openceo'), status (Open/Working/Pending Review/Completed/Cancelled), limit (default 20).",
+        description="Search business tickets in ERPNext before creating new ones. Returns ERPNext tickets (name, subject, status, priority, project, openceo_ref, is_group, parent_task) plus execution_status from the runtime when the ticket has been started. Optional filters: query (substring of the subject), project (project_key, e.g. 'jardal-openceo'), status (Open/Working/Pending Review/Completed/Cancelled), limit (default 20).",
     )
     server.tool(
         openceo_get_ticket,

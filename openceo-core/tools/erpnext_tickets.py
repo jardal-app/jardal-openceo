@@ -18,6 +18,12 @@ Notas de esquema verificadas contra el sitio vivo (2026-09-24):
 - `Task.status` admite Open/Working/Pending Review/Overdue/Template/Completed/Cancelled.
 - `Task.priority` admite Low/Medium/High/**Urgent** (OpenCEO usa `critical`).
 - `Project` exige `naming_series`, `project_name` y `company`.
+- Jerarquia (TASK-2026-00013): `is_group` + `parent_task` (arbol `lft`/`rgt`) y la
+  child table `depends_on` (filas `{"task": "<TASK-...>"}`). El padre debe ser grupo
+  (`ParentIsGroupError` si no); un PUT reemplaza la tabla entera (`[]` la vacia); el
+  `list` NO devuelve child tables (solo el GET completo). Al enlazar un hijo, Frappe
+  anade solo una fila `depends_on` en el padre, asi que completar exige hijos y
+  dependencias cerrados (417 `... dependant task ... not completed / cancelled`).
 """
 
 from __future__ import annotations
@@ -85,7 +91,43 @@ _TASK_FIELDS = [
     "openceo_task_id",
     "openceo_coding_tool",
     "openceo_external_url",
+    # Jerarquia de negocio (TASK-2026-00013). `depends_on` no se pide aqui: el
+    # `list` no devuelve child tables; solo el GET completo la trae.
+    "is_group",
+    "parent_task",
 ]
+
+
+def depends_on_rows(depends_on: list[str] | None) -> list[dict[str, str]] | None:
+    """Normaliza nombres `TASK-...` a filas de la child table `depends_on`.
+
+    Devuelve None cuando no hay nada que escribir, para que el llamador omita el
+    campo (un PUT reemplaza la tabla entera: mandar `[]` sin querer la vaciaria).
+    Limpia blancos y duplicados conservando el orden.
+    """
+    names: list[str] = []
+    for entry in depends_on or []:
+        name = str(entry or "").strip()
+        if name and name not in names:
+            names.append(name)
+    if not names:
+        return None
+    return [{"task": name} for name in names]
+
+
+def depends_on_names(task: dict[str, Any] | None) -> list[str] | None:
+    """Nombres de `depends_on` de un documento completo, o None si no se saben.
+
+    El `list` no trae la child table: en filas de busqueda se omite en vez de
+    afirmar una lista vacia.
+    """
+    rows = (task or {}).get("depends_on")
+    if not isinstance(rows, list):
+        return None
+    names = [
+        str(row.get("task") or "").strip() for row in rows if isinstance(row, dict)
+    ]
+    return [name for name in names if name]
 
 
 def truncate_subject(title: str) -> str:
@@ -510,6 +552,9 @@ class ERPNextTicketAdapter:
         task_id: str | None = None,
         coding_tool: Any = None,
         external_url: str | None = None,
+        parent_task: str | None = None,
+        depends_on: list[str] | None = None,
+        is_group: bool = False,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "subject": truncate_subject(title),
@@ -517,6 +562,14 @@ class ERPNextTicketAdapter:
             "priority": map_priority(priority),
             "openceo_ref": ref,
         }
+        if is_group:
+            payload["is_group"] = 1
+        parent = str(parent_task or "").strip()
+        if parent:
+            payload["parent_task"] = parent
+        rows = depends_on_rows(depends_on)
+        if rows is not None:
+            payload["depends_on"] = rows
 
         body = to_html_description(description)
         # Si el titulo se trunco, el original completo sobrevive al principio del cuerpo.
@@ -573,13 +626,17 @@ class ERPNextTicketAdapter:
         task_id: str | None = None,
         coding_tool: Any = None,
         external_url: str | None = None,
+        parent_task: str | None = None,
+        depends_on: list[str] | None = None,
+        is_group: bool = False,
     ) -> dict[str, Any]:
         """Crea el Task. Idempotente por `ref`.
 
         No hace un GET previo en el camino feliz: un round trip en el caso normal en vez
-        de dos. Si el POST choca con el indice unico (HTTP 417), significa que un intento
-        anterior si llego a crear el documento, asi que se relee por `ref` y se devuelve
-        como exito idempotente.
+        de dos. Si el POST choca con el indice unico (HTTP 417 clasificado como
+        duplicado), significa que un intento anterior si llego a crear el documento, asi
+        que se relee por `ref` y se devuelve como exito idempotente. Un 417 de
+        validacion (p. ej. padre no-grupo) no entra aqui: lanza como error de datos.
         """
         project_name = await self.ensure_project(project_key) if project_key else None
         payload = await self.build_payload(
@@ -595,6 +652,9 @@ class ERPNextTicketAdapter:
             task_id=task_id,
             coding_tool=coding_tool,
             external_url=external_url,
+            parent_task=parent_task,
+            depends_on=depends_on,
+            is_group=is_group,
         )
 
         try:
@@ -606,6 +666,98 @@ class ERPNextTicketAdapter:
             return {"ok": True, "duplicate": True, "task": existing, "ref": ref}
 
         return {"ok": True, "duplicate": False, "task": created, "ref": ref}
+
+    # --- jerarquia de negocio (TASK-2026-00013) ------------------------------
+    #
+    # Operaciones cerradas sobre `is_group` / `parent_task` / `depends_on`. Nunca un
+    # `create_document` generico: el llamador no elige DocTypes ni campos. Todas
+    # resuelven identificadores (`TASK-...` u `openceo_ref`) antes de escribir, como
+    # el resto del adapter.
+
+    async def create_group_task(
+        self,
+        *,
+        ref: str,
+        title: str,
+        description: str = "",
+        project_key: str | None = None,
+        priority: str | None = None,
+        ticket_type: str | None = None,
+        tags: list[str] | None = None,
+        due_date: str | None = None,
+        ticket_number: int | None = None,
+        task_id: str | None = None,
+        coding_tool: Any = None,
+        external_url: str | None = None,
+        depends_on: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Crea un Task grupo (futuro padre). Idempotente por `ref`."""
+        return await self.create_ticket(
+            ref=ref,
+            title=title,
+            description=description,
+            project_key=project_key,
+            priority=priority,
+            ticket_type=ticket_type,
+            tags=tags,
+            due_date=due_date,
+            ticket_number=ticket_number,
+            task_id=task_id,
+            coding_tool=coding_tool,
+            external_url=external_url,
+            depends_on=depends_on,
+            is_group=True,
+        )
+
+    async def convert_to_group(self, identifier: str) -> dict[str, Any]:
+        """Convierte un Task existente en grupo. Idempotente.
+
+        Es como nace el Task grupo de un Objetivo desde `convert_ticket`: el ticket
+        padre pasa a ser el grupo, sin registro nuevo.
+        """
+        task = await self.resolve_task(identifier)
+        name = str(task.get("name") or "").strip()
+        if task.get("is_group"):
+            return {"ok": True, "duplicate": True, "ticket": self._ticket_view(task)}
+        updated = await self._client.update_doc("Task", name, {"is_group": 1})
+        return {"ok": True, "duplicate": False, "ticket": self._ticket_view({**task, **(updated or {})})}
+
+    async def link_child(self, child: str, parent: str) -> dict[str, Any]:
+        """Enlaza un hijo bajo un grupo (`parent_task`). Idempotente.
+
+        Frappe anade solo la fila `depends_on` correspondiente en el padre, asi que
+        el grupo no completa hasta que el hijo cierre: el orden topologico lo impone
+        el propio ERPNext. Si el padre no es grupo, Frappe responde
+        `ParentIsGroupError` (417 de validacion, no duplicado).
+        """
+        child_task = await self.resolve_task(child)
+        parent_task = await self.resolve_task(parent)
+        child_name = str(child_task.get("name") or "").strip()
+        parent_name = str(parent_task.get("name") or "").strip()
+        if str(child_task.get("parent_task") or "").strip() == parent_name:
+            return {"ok": True, "duplicate": True, "ticket": self._ticket_view(child_task)}
+        if child_name == parent_name:
+            raise ERPNextValidationError("Un ticket no puede ser hijo de si mismo.", status_code=400)
+        updated = await self._client.update_doc("Task", child_name, {"parent_task": parent_name})
+        return {
+            "ok": True,
+            "duplicate": False,
+            "ticket": self._ticket_view({**child_task, **(updated or {})}),
+        }
+
+    async def set_dependencies(self, identifier: str, depends_on: list[str] | None) -> dict[str, Any]:
+        """Fija las dependencias (`depends_on`) de un ticket. Reemplazo total.
+
+        Un PUT reemplaza la tabla entera (verificado contra el sitio vivo): pasar la
+        lista completa, no un delta. `[]` o None la vacia. Ojo en grupos: la tabla
+        incluye las filas que Frappe auto-anade por cada hijo, y vaciarla las borra
+        tambien (vuelven al re-enlazar al hijo).
+        """
+        task = await self.resolve_task(identifier)
+        name = str(task.get("name") or "").strip()
+        rows = depends_on_rows(depends_on) or []
+        updated = await self._client.update_doc("Task", name, {"depends_on": rows})
+        return {"ok": True, "ticket": self._ticket_view({**task, **(updated or {})})}
 
     async def update_status(
         self,
@@ -717,14 +869,22 @@ class ERPNextTicketAdapter:
         return ERPNextValidationError(f"No existe el ticket {identifier}.", status_code=404)
 
     def _ticket_view(self, task: dict[str, Any]) -> dict[str, Any]:
-        return {
+        view: dict[str, Any] = {
             "name": task.get("name"),
             "subject": task.get("subject"),
             "status": task.get("status"),
             "priority": task.get("priority"),
             "project": task.get("project"),
             "openceo_ref": task.get("openceo_ref"),
+            # Jerarquia de negocio (TASK-2026-00013). `depends_on` solo cuando el
+            # documento la trae (el `list` no devuelve child tables).
+            "is_group": bool(task.get("is_group")),
+            "parent_task": task.get("parent_task"),
         }
+        names = depends_on_names(task)
+        if names is not None:
+            view["depends_on"] = names
+        return view
 
     async def update_ticket(
         self,

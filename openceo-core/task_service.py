@@ -35,7 +35,12 @@ from state import (
     make_task_document,
     make_task_review_document,
 )
-from tools.erpnext_client import ERPNextError, ERPNextUnavailable, ERPNextValidationError
+from tools.erpnext_client import (
+    ERPNextDependencyBlockedError,
+    ERPNextError,
+    ERPNextUnavailable,
+    ERPNextValidationError,
+)
 from tools.erpnext_tickets import map_status
 
 if TYPE_CHECKING:
@@ -208,7 +213,46 @@ class TaskService:
         merged["_mirrors"] = mirrors
         return merged
 
-    async def _register_business_ticket(self, doc: Any) -> tuple[dict[str, Any] | None, bool]:
+    async def _blocked_by_business_names(self, blocked_by: Any) -> list[str]:
+        """Resuelve `blocked_by` (task_ids de ejecucion) a nombres `TASK-...`.
+
+        Es la mitad OpenCEO -> ERPNext del mapeo `blocked_by` <-> `depends_on`
+        (TASK-2026-00013): cada bloqueador aporta el `name` de su espejo de negocio.
+        Una entrada que ya es un nombre de negocio pasa tal cual; un bloqueador sin
+        espejo (sin contraparte en ERPNext) no puede referenciarse y se omite.
+        """
+        names: list[str] = []
+        repo = getattr(self, "_repo", None)
+        for entry in blocked_by or []:
+            raw = str(entry or "").strip()
+            if not raw or raw in names:
+                continue
+            if raw.upper().startswith("TASK-"):
+                names.append(raw)
+                continue
+            if repo is None:
+                continue
+            try:
+                blocker = await repo.get_task(raw)
+            except Exception:
+                logger.warning("No se pudo resolver el bloqueador %s", raw, exc_info=True)
+                blocker = None
+            mirror = self._task_params(blocker or {}).get("_mirrors", {})
+            business = mirror.get("erpnext", {}) if isinstance(mirror, dict) else {}
+            name = str(business.get("name") or "").strip() if isinstance(business, dict) else ""
+            if name and name not in names:
+                names.append(name)
+            elif not name:
+                logger.info("Bloqueador %s sin espejo de negocio: no entra en depends_on.", raw)
+        return names
+
+    async def _register_business_ticket(
+        self,
+        doc: Any,
+        *,
+        parent_task: str | None = None,
+        depends_on: list[str] | None = None,
+    ) -> tuple[dict[str, Any] | None, bool]:
         """Crea el ticket de negocio en ERPNext ANTES de persistir en Mongo.
 
         Devuelve `(mirror, pending)`:
@@ -246,6 +290,16 @@ class TaskService:
         priority = getattr(doc.priority, "value", None) or str(doc.priority or "")
         now = datetime.now(timezone.utc).isoformat()
 
+        # Jerarquia de negocio (TASK-2026-00013): el padre va tal cual y las
+        # dependencias son la union del `depends_on` explicito con el `blocked_by`
+        # resuelto a nombres de negocio.
+        business_parent = str(parent_task or "").strip() or None
+        business_deps = [str(entry or "").strip() for entry in depends_on or []]
+        business_deps = [entry for entry in business_deps if entry]
+        for name in await self._blocked_by_business_names(snapshot.get("blocked_by")):
+            if name not in business_deps:
+                business_deps.append(name)
+
         try:
             result = await adapter.create_ticket(
                 ref=ref,
@@ -262,6 +316,8 @@ class TaskService:
                 # tablero oculta que un ticket es Tier S (lento, caro, multi-revisor).
                 coding_tool=snapshot.get("coding_tool"),
                 external_url=params.get("external_url"),
+                parent_task=business_parent,
+                depends_on=business_deps or None,
             )
         except ERPNextUnavailable as exc:
             logger.warning("ERPNext no respondio al registrar el ticket %s: %s", ref, exc)
@@ -278,19 +334,23 @@ class TaskService:
         # coincidiria con el que devuelve Mongo y cada parche pareceria una transicion.
         status_value = snapshot.get("status")
         status_value = getattr(status_value, "value", status_value)
-        return (
-            {
-                "name": task.get("name"),
-                "ref": ref,
-                # `status_pushed` guarda SIEMPRE el vocabulario de OpenCEO, no el de
-                # ERPNext: el observador compara contra el, y comparar `in_progress`
-                # contra `Working` haria que cada parche pareciera una transicion nueva.
-                "status_pushed": str(status_value or ""),
-                "pending": False,
-                "linked_at": now,
-            },
-            False,
-        )
+        mirror: dict[str, Any] = {
+            "name": task.get("name"),
+            "ref": ref,
+            # `status_pushed` guarda SIEMPRE el vocabulario de OpenCEO, no el de
+            # ERPNext: el observador compara contra el, y comparar `in_progress`
+            # contra `Working` haria que cada parche pareciera una transicion nueva.
+            "status_pushed": str(status_value or ""),
+            "pending": False,
+            "linked_at": now,
+        }
+        # Lo que se empujo de jerarquia queda en el espejo (retiene la referencia
+        # de negocio, ARCH §Parent Task Tracking); la autoridad sigue en ERPNext.
+        if business_parent:
+            mirror["parent_task"] = business_parent
+        if business_deps:
+            mirror["depends_on"] = list(business_deps)
+        return mirror, False
 
     async def _enqueue_erpnext_registration(self, task: dict[str, Any]) -> None:
         """Reintenta el enlace de negocio de un ticket que quedo pendiente.
@@ -441,6 +501,19 @@ class TaskService:
                     return
                 await asyncio.sleep(delay)
                 delay *= 2
+            except ERPNextDependencyBlockedError as exc:
+                # Orden topologico (TASK-2026-00013): ERPNext no deja completar con
+                # hijos o dependencias abiertos. No es un error de datos: queda como
+                # `pending_status` y la reconciliacion lo reintenta cuando cierren.
+                # Sin reintento inmediato: lo que desbloquea es otro cierre, no el tiempo.
+                logger.warning(
+                    "ERPNext difiere %s -> %s por dependientes abiertos: %s",
+                    item["name"],
+                    item["status"],
+                    exc,
+                )
+                await self._record_status_outcome(item, pushed=False)
+                return
             except ERPNextError:
                 logger.exception(
                     "ERPNext rechazo la transicion %s -> %s", item["name"], item["status"]
@@ -502,7 +575,11 @@ class TaskService:
         # El ticket de negocio se crea ANTES de persistir la ejecucion. Si ERPNext rechaza
         # los datos, esto lanza y no queda nada en Mongo: un ticket de ejecucion sin
         # contraparte de negocio es el "competing business record" que el contrato prohibe.
-        erpnext_mirror, erpnext_pending = await self._register_business_ticket(doc)
+        erpnext_mirror, erpnext_pending = await self._register_business_ticket(
+            doc,
+            parent_task=payload.parent_task,
+            depends_on=payload.depends_on,
+        )
         if erpnext_mirror is not None:
             doc.params = self._merge_erpnext_mirror_params(doc.params, erpnext_mirror)
 

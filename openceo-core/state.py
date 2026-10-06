@@ -226,6 +226,11 @@ class TaskCreateRequest(BaseModel):
     blocked_by: list[str] | None = None
     origin: str | None = None
     finding_fingerprint: str | None = None
+    # Business hierarchy (TASK-2026-00013): ERPNext `Task` names, consumed at
+    # business registration and recorded in the erpnext mirror. They do NOT flow
+    # into TaskDocument: ERPNext owns the hierarchy, Mongo must not cache it.
+    parent_task: str | None = None
+    depends_on: list[str] | None = None
 
 
 class TaskDocument(BaseModel):
