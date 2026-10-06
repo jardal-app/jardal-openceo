@@ -1,14 +1,23 @@
-"""Dev objectives: multi-ticket work chains (design §9, F6).
+"""Company objectives: multi-ticket work chains (design §9, F6; F2 TASK-2026-00117).
 
-An objective is a chain of tickets created gradually by the single global
-objective planner (Muse Code headless → ``PlannerResult`` JSON, validated
-with Pydantic + deterministic rules), with OpenCEO-side dependencies, a
-deterministically compiled capsule, triggers, loop guardrails, a final pool
-review and a ``muse`` close. Not to be confused with Horizon objectives
-(``horizon_objectives``): those are the CEO's personal goals; these live in
-the ``objectives`` collection (§15.2) and drive dev execution.
+One Objective type for every domain. Identity lives in ERPNext — a group Task
+with real children (``parent_task``) and ``depends_on`` — while the
+``objectives`` collection (§15.2) holds execution state only: capsule,
+cycles, replans, final review and telemetry. Tickets are still created
+gradually by the single global objective planner (Muse Code headless →
+``PlannerResult`` JSON, validated with Pydantic + deterministic rules), with
+OpenCEO-side dependencies, a deterministically compiled capsule, triggers
+and loop guardrails. Not to be confused with Horizon objectives
+(``horizon_objectives``): those are the CEO's personal goals.
 
-Entry points: :func:`convert_ticket` (a Tier S ticket outgrew one session),
+Every objective has exactly one parent ticket that IS the ERP group: a
+conversion reuses the oversized ticket, a top-down creation mints a shell
+ticket (``origin=objective_shell``). Notifications, close and the inverse
+webhook all flow through that parent ticket.
+
+Entry points: :func:`create_objective` (top-down, for the CEO/owner; F5
+Horizon promotion calls it too), :func:`convert_ticket` (a ticket outgrew
+one session — inside its own objective when it already has one),
 :func:`plan_objective` (next horizon of tickets), :func:`on_ticket_closed`
 (triggers + capsule after any objective ticket closes) and
 :func:`run_final_review` (planner declared ``complete_candidate``).
@@ -44,11 +53,44 @@ class Quota(Protocol):
     async def check(self, accounts: Sequence[str]) -> Mapping[str, Any]: ...
 
 
+class ObjectiveErp(Protocol):
+    """Business-identity operations the engine needs (implemented by wiring).
+
+    The engine never imports the ERPNext adapter: group conversion is the
+    only ERP write it performs directly (children link through the common
+    ticket creation, close pushes through the parent ticket).
+    """
+
+    async def convert_to_group(self, identifier: str) -> dict[str, Any]: ...
+
+
+class ObjectiveRejected(ValueError):
+    """The objective was refused deterministically (bad input, no capacity)."""
+
+
+class ObjectiveLimitReached(ObjectiveRejected):
+    """An active-objective admission limit refused the creation."""
+
+
+class ObjectiveDuplicate(ObjectiveRejected):
+    """An active objective with the same project + goal already exists."""
+
+    def __init__(self, message: str, existing_id: str | None = None) -> None:
+        super().__init__(message)
+        self.existing_id = existing_id
+
+
+class ObjectiveErpError(RuntimeError):
+    """Business identity is unavailable (fail closed, never orphan)."""
+
+
 class ObjectiveStore(Protocol):
     async def create_objective(self, doc: dict[str, Any]) -> dict[str, Any]: ...
     async def get_objective(self, objective_id: str) -> dict[str, Any] | None: ...
     async def patch_objective(
         self, objective_id: str, updates: dict[str, Any]) -> dict[str, Any] | None: ...
+    async def list_active_objectives(
+        self, project: str | None = None) -> list[dict[str, Any]]: ...
 
 
 class ObjectiveTaskLister(Protocol):
@@ -79,6 +121,9 @@ class ObjectiveEnv:
     # role, timeout, agents registry). Empty in bare unit envs: planning
     # then parks instead of validating against no registry.
     planner_cfg: dict[str, Any] = field(default_factory=dict)
+    # Business identity (None in bare unit envs and legacy flows: the
+    # objective then works without an ERP group, as before TASK-2026-00117).
+    erp: ObjectiveErp | None = None
     timeouts: dict[str, int] = field(default_factory=dict)
     fix_tiers: dict[str, str] = field(default_factory=dict)
     inbox_rule: dict[str, Any] = field(default_factory=dict)
@@ -109,6 +154,13 @@ class InMemoryObjectiveStore:
         doc.update(updates)
         return dict(doc)
 
+    async def list_active_objectives(
+        self, project: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return [dict(doc) for doc in self.docs.values()
+                if doc.get("status") == "active"
+                and (not project or doc.get("project") == project)]
+
 
 class MongoObjectiveStore:
     def __init__(self, repo: Any) -> None:
@@ -124,6 +176,11 @@ class MongoObjectiveStore:
         self, objective_id: str, updates: dict[str, Any],
     ) -> dict[str, Any] | None:
         return await self._repo.patch_objective(objective_id, updates)
+
+    async def list_active_objectives(
+        self, project: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return await self._repo.list_active_objectives(project)
 
 
 class MongoObjectiveTaskLister:
@@ -162,44 +219,68 @@ def new_objective_id() -> str:
 
 TERMINAL_TICKET_STATUS = frozenset({"completed", "cancelled"})
 
+#: Origin marker of the parent ticket minted for a top-down objective.
+SHELL_ORIGIN = "objective_shell"
+
+#: Valid ``entry`` values on the objective document.
+ENTRIES = frozenset({"convert", "top_down", "horizon_promotion"})
+
 
 # ---------------------------------------------------------------------------
-# Conversion (§9.2)
+# Creation (§9.2, F2): conversion + top-down share one engine
 # ---------------------------------------------------------------------------
 
-async def convert_ticket(
-    env: ObjectiveEnv,
-    ticket: Mapping[str, Any],
+def normalize_goal(goal: str) -> str:
+    """Canonical goal text for the deterministic duplicate check."""
+    return re.sub(r"\s+", " ", str(goal or "")).strip().lower()
+
+
+def find_duplicate(
+    candidates: Sequence[Mapping[str, Any]],
+    project: str,
+    goal: str,
+) -> Mapping[str, Any] | None:
+    """Active objective with the same project + normalized goal, if any."""
+    want = normalize_goal(goal)
+    if not want:
+        return None
+    for candidate in candidates:
+        if normalize_goal((candidate.get("anchor") or {}).get("goal", "")) == want:
+            return candidate
+    return None
+
+
+def erp_group_name(ticket: Mapping[str, Any] | None) -> str:
+    """Business ``TASK-…`` name from the ticket's ERPNext mirror ("" when none)."""
+    if not isinstance(ticket, Mapping):
+        return ""
+    params = ticket.get("params")
+    mirrors = params.get("_mirrors") if isinstance(params, Mapping) else None
+    mirror = mirrors.get("erpnext") if isinstance(mirrors, Mapping) else None
+    if not isinstance(mirror, Mapping):
+        return ""
+    return str(mirror.get("name") or "").strip()
+
+
+def _new_objective_doc(
+    *,
+    objective_id: str,
+    project: str,
+    entry: str,
+    anchor: dict[str, Any],
+    source_task_id: str,
     cause: str,
-    sizing_text: str = "",
+    sizing_hint: str,
+    erp_group_ref: str | None,
+    base_sha: str,
+    branch: str,
 ) -> dict[str, Any]:
-    """Turn an oversized Tier S ticket into an objective (§9.2).
-
-    The ticket text becomes the immutable anchor; the ticket itself moves to
-    ``converted`` (its children carry the work) — never ``completed``: the
-    parent goes Completed in ERP only at objective close (§9.7). The ERP
-    parent mirror stays empty — the adapter has no parent/group task
-    support (§20-17) — and the objective planner launches immediately with
-    ``SIZING.md`` as a hint. Returns the objective document.
-    """
-    objective_id = new_objective_id()
-    task_id = str(ticket.get("task_id", ""))
-    project = str(ticket.get("project") or "")
-    acceptance = ticket.get("acceptance") or []
-    if isinstance(acceptance, str):
-        acceptance = [acceptance]
-    anchor = {
-        "goal": f"{ticket.get('title', '')}\n{ticket.get('description', '')}".strip(),
-        "acceptance": [str(item) for item in acceptance],
-        "constraints": [],
-        "out_of_scope": [],
-        "source_doc": None,
-    }
-    base_sha = _git(env.repo, "rev-parse", "HEAD").strip()
-    objective = await env.objectives.create_objective({
+    """Shared initial document for every entry (convert/top-down/promotion)."""
+    return {
         "objective_id": objective_id,
         "project": project,
-        "erp_parent_ref": None,  # §20-17: no adapter support; children comment it
+        "entry": entry,
+        "erp_group_ref": erp_group_ref,
         "anchor": anchor,
         "status": "active",
         "capsule": {"text": "", "compiled_at": None, "tokens": 0},
@@ -221,11 +302,239 @@ async def convert_ticket(
         "final_reviews": 0,
         "last_final_review_sha": None,
         "base_sha": base_sha,
-        "branch": "base" if env.auto_merge else f"objective/{objective_id}",
-        "conversion_source_task_id": task_id,
+        "branch": branch,
+        "conversion_source_task_id": source_task_id,
         "conversion_cause": cause,
-        "sizing_hint": sizing_text[:4000],
+        "sizing_hint": sizing_hint[:4000],
+    }
+
+
+async def ensure_erp_group(
+    env: ObjectiveEnv, objective: Mapping[str, Any],
+) -> str | None:
+    """Return the ERP group name, converting + recording it when missing.
+
+    ``None`` means business identity is unavailable (no wiring, no source
+    ticket, no mirror): the caller keeps the legacy group-less flow.
+    Raises :class:`ObjectiveErpError` when the conversion itself fails —
+    the caller must park, never plan orphan children.
+    """
+    ref = str(objective.get("erp_group_ref") or "").strip()
+    if ref:
+        return ref
+    if env.erp is None:
+        return None
+    source_id = str(objective.get("conversion_source_task_id") or "").strip()
+    if not source_id:
+        return None
+    try:
+        source = await env.tasks.get_task(source_id)
+    except Exception:
+        return None
+    name = erp_group_name(source)
+    if not name:
+        return None
+    try:
+        await env.erp.convert_to_group(name)
+    except Exception as exc:
+        raise ObjectiveErpError(
+            f"cannot convert {name} to the objective group: {exc}") from exc
+    await env.objectives.patch_objective(
+        str(objective.get("objective_id")), {"erp_group_ref": name})
+    return name
+
+
+async def _check_admission(
+    env: ObjectiveEnv, project: str, goal: str,
+) -> None:
+    """Deterministic admission: limits + duplicates (raises when refused)."""
+    cfg = env.objectives_cfg
+    max_global = int(cfg.get("max_active_objectives_global", 3))
+    max_per_project = int(cfg.get("max_active_objectives_per_project", 2))
+    siblings = await env.objectives.list_active_objectives(project)
+    if len(siblings) >= max_per_project:
+        raise ObjectiveLimitReached(
+            f"project {project} already has {len(siblings)} active objectives "
+            f"(max {max_per_project})")
+    if project:
+        everyone = await env.objectives.list_active_objectives()
+        if len(everyone) >= max_global:
+            raise ObjectiveLimitReached(
+                f"already {len(everyone)} active objectives "
+                f"(max {max_global})")
+    dupe = find_duplicate(siblings, project, goal)
+    if dupe is not None:
+        raise ObjectiveDuplicate(
+            f"active objective {dupe.get('objective_id')} already covers "
+            f"this goal in {project}",
+            existing_id=str(dupe.get("objective_id") or ""))
+
+
+async def create_objective(
+    env: ObjectiveEnv,
+    *,
+    project: str,
+    goal: str,
+    acceptance: Sequence[str] | None = None,
+    entry: str = "top_down",
+    source: str = "api",
+    source_id: str | None = None,
+    requester: str | None = None,
+) -> dict[str, Any]:
+    """Create a top-down objective: shell ticket (ERP group) + plan (§9.2, F2).
+
+    One objective = one project: ``project`` is required and the caller
+    (service layer) resolves it against the known projects. Admission is
+    deterministic (active limits + duplicates); the shell ticket is the ERP
+    group (``is_group`` through the common creation, ERP-first); the shell
+    moves to ``converted`` at birth so it never executes. Raises
+    :class:`ObjectiveRejected` when refused, :class:`ObjectiveErpError`
+    when business identity fails. Returns the objective document.
+    """
+    project = str(project or "").strip()
+    if not project:
+        raise ObjectiveRejected("an objective needs exactly one project")
+    goal = str(goal or "").strip()
+    if not goal:
+        raise ObjectiveRejected("an objective needs a goal")
+    if entry not in ENTRIES:
+        raise ObjectiveRejected(f"unknown entry {entry!r}")
+    await _check_admission(env, project, goal)
+
+    objective_id = new_objective_id()
+    criteria = [str(item).strip() for item in (acceptance or [])
+                if str(item).strip()]
+    shell = await env.create_ticket({
+        "title": f"[Objetivo] {goal[:120]}",
+        "description": "\n".join([
+            f"GOAL: {goal}",
+            "",
+            "ACCEPTANCE (delivery criteria):",
+            *([f"- {item}" for item in criteria]
+              or ["- (the planner derives verifiable criteria)"]),
+            "",
+            f"Entry: {entry}."
+            + (f" Requested by {requester}." if requester else ""),
+        ]),
+        "acceptance": criteria,
+        "project": project,
+        "objective_id": objective_id,
+        "origin": SHELL_ORIGIN,
+        "autorun": False,
+        "is_group": True,
+        "source": source,
+        "source_id": source_id or f"obj-shell:{objective_id}",
+        "tags": ["objetivo"],
     })
+    shell_id = str((shell or {}).get("task_id") or "")
+    if not shell_id:
+        raise ObjectiveErpError(
+            "the shell ticket was not registered; refusing a group-less "
+            "objective")
+    await env.patch_task(shell_id, {
+        "status": "converted",
+        "waiting_reason": None,
+        "resume_at": None,
+        "last_response_summary": (
+            f"Shell of objective {objective_id}: the group Task carries "
+            "the children; this ticket never executes."),
+    })
+    group = erp_group_name(shell)
+    anchor = {
+        "goal": goal,
+        "acceptance": criteria,
+        "constraints": [],
+        "out_of_scope": [],
+        "source_doc": None,
+    }
+    if requester:
+        anchor["constraints"] = [f"requested by {requester}"]
+    objective = await env.objectives.create_objective(_new_objective_doc(
+        objective_id=objective_id,
+        project=project,
+        entry=entry,
+        anchor=anchor,
+        source_task_id=shell_id,
+        cause=entry,
+        sizing_hint="",
+        erp_group_ref=group or None,
+        base_sha=_git(env.repo, "rev-parse", "HEAD").strip(),
+        branch="base" if env.auto_merge else f"objective/{objective_id}",
+    ))
+    if env.notify is not None:
+        await env.notify(
+            shell_id,
+            f"Objective {objective_id} created ({entry}) in {project}. "
+            f"Anchor goal: {goal[:200]}")
+    await plan_objective(env, objective_id)
+    final = await env.objectives.get_objective(objective_id)
+    return final or objective
+
+
+async def convert_ticket(
+    env: ObjectiveEnv,
+    ticket: Mapping[str, Any],
+    cause: str,
+    sizing_text: str = "",
+) -> dict[str, Any]:
+    """Turn an oversized ticket into an objective (§9.2).
+
+    The ticket text becomes the immutable anchor; the ticket itself moves to
+    ``converted`` (its children carry the work) — never ``completed``: the
+    parent goes Completed in ERP only at objective close (§9.7). The parent
+    ticket becomes the ERP group (no new record); planned children link
+    under it. A ticket that already belongs to an active objective
+    decomposes inside it instead of minting a second objective. When the
+    group conversion fails the objective parks as ``needs_owner`` — orphans
+    are never planned. Returns the objective document.
+    """
+    task_id = str(ticket.get("task_id", ""))
+    own_id = str(ticket.get("objective_id") or "").strip()
+    if own_id:
+        own = await env.objectives.get_objective(own_id)
+        if own is not None and own.get("status") == "active":
+            await env.patch_task(task_id, {
+                "status": "converted",
+                "waiting_reason": None,
+                "resume_at": None,
+                "last_response_summary": (
+                    f"Decomposing inside objective {own_id} ({cause}). "
+                    "The objective planner owns the follow-up tickets."),
+            })
+            if sizing_text.strip():
+                await env.objectives.patch_objective(
+                    own_id, {"sizing_hint": sizing_text[:4000]})
+            if env.notify is not None:
+                await env.notify(
+                    str(ticket.get("ref") or task_id[:8]),
+                    f"Ticket decomposes inside objective {own_id} ({cause}).")
+            await plan_objective(env, own_id)
+            final = await env.objectives.get_objective(own_id)
+            return final or own
+    objective_id = new_objective_id()
+    project = str(ticket.get("project") or "")
+    acceptance = ticket.get("acceptance") or []
+    if isinstance(acceptance, str):
+        acceptance = [acceptance]
+    anchor = {
+        "goal": f"{ticket.get('title', '')}\n{ticket.get('description', '')}".strip(),
+        "acceptance": [str(item) for item in acceptance],
+        "constraints": [],
+        "out_of_scope": [],
+        "source_doc": None,
+    }
+    objective = await env.objectives.create_objective(_new_objective_doc(
+        objective_id=objective_id,
+        project=project,
+        entry="convert",
+        anchor=anchor,
+        source_task_id=task_id,
+        cause=cause,
+        sizing_hint=sizing_text,
+        erp_group_ref=None,
+        base_sha=_git(env.repo, "rev-parse", "HEAD").strip(),
+        branch="base" if env.auto_merge else f"objective/{objective_id}",
+    ))
     await env.patch_task(task_id, {
         "status": "converted",
         "objective_id": objective_id,
@@ -240,6 +549,12 @@ async def convert_ticket(
             str(ticket.get("ref") or task_id[:8]),
             f"Ticket converted to objective {objective_id} ({cause}). "
             f"Anchor goal: {str(ticket.get('title', ''))[:200]}")
+    try:
+        await ensure_erp_group(env, objective)
+    except ObjectiveErpError as exc:
+        await _objective_park(env, objective, "needs_owner", str(exc)[:300])
+        final = await env.objectives.get_objective(objective_id)
+        return final or objective
     await plan_objective(env, objective_id)
     final = await env.objectives.get_objective(objective_id)
     return final or objective
@@ -472,6 +787,21 @@ async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]
         return await _objective_park(
             env, objective, "needs_owner",
             f"max_tickets ({cfg.get('max_tickets', 20)}) reached")
+    active = [item for item in tickets
+              if str(item.get("status")) not in TERMINAL_TICKET_STATUS
+              and str(item.get("status")) != "converted"]
+    max_active = int(cfg.get("max_active_tickets_per_objective", 6))
+    if len(active) >= max_active:
+        # Routine admission deferral, not a park: the objective stays
+        # active and the next close re-triggers planning. No owner ping.
+        return {"ok": False, "reason": "objective-full",
+                "detail": f"{len(active)} active tickets (max {max_active})"}
+    try:
+        await ensure_erp_group(env, objective)
+    except ObjectiveErpError as exc:
+        return await _objective_park(
+            env, objective, "needs_owner", str(exc)[:300])
+    objective = await env.objectives.get_objective(objective_id) or objective
     runs = objective.get("planning_runs") or []
     stalled = _trailing_stalled_runs(runs)
     closed_before = sum(1 for item in tickets
@@ -660,6 +990,9 @@ def _planned_params(ticket: planner_mod.PlannedTicket) -> dict[str, Any]:
     params: dict[str, Any] = {
         "target_agent": ticket.target_agent,
         "work_type": ticket.work_type,
+        # Delivery verification (F2): the final review checks every child
+        # against its acceptance criteria and expected artefacts.
+        "expected_artifacts": list(ticket.expected_artifacts),
     }
     if ticket.tier_reason:
         params["tier_reason"] = ticket.tier_reason
@@ -705,6 +1038,7 @@ async def _create_planned_tickets(
     created: list[dict[str, Any]] = []
     key_to_task: dict[str, str] = {}
     run_tag = uuid.uuid4().hex[:8]
+    group = str(objective.get("erp_group_ref") or "").strip()
     for key in order:
         item = by_key[key]
         blocked = [key_to_task.get(dep, dep) for dep in item.blocked_by]
@@ -726,6 +1060,9 @@ async def _create_planned_tickets(
             # tickets queued for verification (default true = §9.3 behavior).
             "autorun": bool(env.objectives_cfg.get("child_autorun", True)),
         }
+        if group:
+            # Real ERP children (F2): no LLM involved in the linking.
+            payload["parent_task"] = group
         row = await env.create_ticket(payload)
         task_id = str((row or {}).get("task_id") or "")
         if not task_id:
@@ -887,8 +1224,93 @@ async def _recompile_capsule(
 
 
 # ---------------------------------------------------------------------------
-# Final review + close (§9.7)
+# Final review + close (§9.7, F2: review by domain)
 # ---------------------------------------------------------------------------
+
+_DEV_TIERS = frozenset({"tier_s", "tier_a", "tier_b", "tier_c"})
+
+
+def _is_dev_ticket(ticket: Mapping[str, Any]) -> bool:
+    """True when the ticket is DEV work (any tier or dev target)."""
+    if str(ticket.get("coding_tool") or "") in _DEV_TIERS:
+        return True
+    params = ticket.get("params")
+    if isinstance(params, Mapping) \
+            and str(params.get("target_agent") or "") == "dev":
+        return True
+    return str(ticket.get("agent_hint") or "") == "dev"
+
+
+def verify_delivery(
+    objective: Mapping[str, Any],
+    children: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Deterministic delivery check over the objective children.
+
+    The parent/shell ticket and superseded (``converted``) tickets are not
+    work and are excluded. ``open_gaps`` (work still running) send the
+    objective back to planning; ``data_gaps`` (a terminal child without
+    acceptance criteria or expected artefacts) park it — no planner run
+    can fix a closed ticket. No LLM is involved, ever.
+    """
+    source_id = str(objective.get("conversion_source_task_id") or "")
+    work = [item for item in children
+            if str(item.get("task_id") or "") != source_id
+            and str(item.get("status") or "") != "converted"]
+    open_gaps: list[str] = []
+    data_gaps: list[str] = []
+    terminal = 0
+    for item in work:
+        short = str(item.get("task_id") or "")[:8]
+        status = str(item.get("status") or "")
+        if status not in TERMINAL_TICKET_STATUS:
+            open_gaps.append(f"{short}: still {status}")
+            continue
+        terminal += 1
+        if not item.get("acceptance"):
+            data_gaps.append(f"{short}: no acceptance criteria")
+        params = item.get("params")
+        artefacts = params.get("expected_artifacts") \
+            if isinstance(params, Mapping) else None
+        if not artefacts:
+            data_gaps.append(f"{short}: no expected artefacts")
+    dev = sum(1 for item in work if _is_dev_ticket(item))
+    return {
+        "ok": not open_gaps and not data_gaps,
+        "open_gaps": open_gaps,
+        "data_gaps": data_gaps,
+        "work_children": len(work),
+        "terminal_children": terminal,
+        "dev_children": dev,
+    }
+
+
+def _delivery_record(
+    objective: Mapping[str, Any],
+    children: Sequence[Mapping[str, Any]],
+    *,
+    verified_by: str,
+    review: str | None = None,
+) -> dict[str, Any]:
+    """Delivery verdict stored on close (criteria + counts + provenance).
+
+    The objective closes on its DELIVERY criteria. The business outcome
+    (KPI) is evaluated afterwards by the CEO (F4): ``outcome_kpi`` stays
+    ``None`` here — closing every ticket never claims a metric moved.
+    """
+    verdict = verify_delivery(objective, children)
+    return {
+        "criteria": list(
+            (objective.get("anchor") or {}).get("acceptance", [])),
+        "verified_at": _utcnow_iso(),
+        "verified_by": verified_by,
+        "review": review
+        or ("pool" if verdict["dev_children"] else "deterministic"),
+        "work_children": verdict["work_children"],
+        "terminal_children": verdict["terminal_children"],
+        "dev_children": verdict["dev_children"],
+        "outcome_kpi": None,
+    }
 
 _CLOSURE_RE = re.compile(
     r"^F(\d+)\s*:\s*(REAL|FALSO)\b\s*(?:[—–-]\s*(.*))?$",
@@ -908,7 +1330,14 @@ def parse_closure(text: str) -> dict[int, tuple[str, str]]:
 
 
 async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]:
-    """Final pool review + ``muse`` close (§9.7)."""
+    """Final review by domain + close (§9.7).
+
+    ``complete_candidate`` never closes directly: every path runs the
+    deterministic delivery verification first (no tokens). Open work
+    sends the objective back to planning; data gaps park it; clean
+    non-dev work closes deterministically; clean dev work goes through
+    the reviewer pool over the objective branch.
+    """
     objective = await env.objectives.get_objective(objective_id)
     if objective is None:
         return {"ok": False, "reason": "objective not found"}
@@ -916,9 +1345,35 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
     if reviews >= int(env.objectives_cfg.get("max_final_reviews", 2)):
         return await _objective_park(
             env, objective, "needs_owner", "max_final_reviews reached (§9.6)")
+    try:
+        await ensure_erp_group(env, objective)
+    except ObjectiveErpError as exc:
+        return await _objective_park(
+            env, objective, "needs_owner", str(exc)[:300])
+    objective = await env.objectives.get_objective(objective_id) or objective
+    children = await env.tasks.list_by_objective(objective_id)
+    verdict = verify_delivery(objective, children)
+    if verdict["data_gaps"]:
+        return await _objective_park(
+            env, objective, "needs_owner",
+            f"delivery data gaps: {'; '.join(verdict['data_gaps'][:5])}")
+    if verdict["open_gaps"]:
+        await env.objectives.patch_objective(objective_id, {
+            "status": "active", "final_reviews": reviews + 1})
+        if env.notify is not None:
+            await env.notify(
+                _notify_ref(objective),
+                f"Objective {objective_id} back to planning: "
+                f"{'; '.join(verdict['open_gaps'][:5])}")
+        return await plan_objective(env, objective_id)
     await env.objectives.patch_objective(
         objective_id, {"status": "final_review",
                        "final_reviews": reviews + 1})
+    if not verdict["dev_children"]:
+        # Non-dev: the deterministic verification above IS the review.
+        objective = await env.objectives.get_objective(objective_id) \
+            or objective
+        return await _finish_objective(env, objective)
     anchor = objective.get("anchor") or {}
     capsule = (objective.get("capsule") or {}).get("text", "")
     since = objective.get("last_final_review_sha") or objective.get("base_sha")
@@ -1199,7 +1654,7 @@ def _closure_fix_ticket(
         tier = tiers.get("default", "tier_c")
     anchors = " + ".join(findings_mod._anchor_text(a) for a in item.anchors)
     priority = "high" if (item.severity == "CRITICAL" or category == "security") else "medium"
-    return {
+    payload: dict[str, Any] = {
         "priority": priority,
         "title": f"[objective-final] {item.severity} {category}: "
                  f"{item.problem[:100]}",
@@ -1221,11 +1676,14 @@ def _closure_fix_ticket(
                      f"{uuid.uuid4().hex[:8]}",
         "autorun": True,
     }
+    group = str(objective.get("erp_group_ref") or "").strip()
+    if group:
+        payload["parent_task"] = group
+    return payload
 
 
 def _notify_ref(objective: Mapping[str, Any]) -> str:
-    """ERP comments land on the conversion-source ticket (objectives have no
-    business mirror of their own: no parent/group support in the adapter)."""
+    """ERP comments land on the parent ticket (the objective's group Task)."""
     return (str(objective.get("conversion_source_task_id") or "")
             or str(objective.get("objective_id")))
 
@@ -1234,12 +1692,23 @@ async def _finish_objective(
     env: ObjectiveEnv,
     objective: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Close the objective: ERP note, vault note, objective-branch PR (§9.7)."""
+    """Close the objective: delivery record, ERP note, vault note (§9.7).
+
+    The parent ticket (the ERP group) completes here, so the business
+    close pushes through the standard queue: children first, then the
+    group — a 417 parks as ``pending_status`` and the startup reconcile
+    retries it. No group push is done directly.
+    """
     from agents.dev.tier_s import knowledge as knowledge_mod
 
     objective_id = str(objective.get("objective_id"))
-    await env.objectives.patch_objective(
-        objective_id, {"status": "closed", "closed_at": _utcnow_iso()})
+    children = await env.tasks.list_by_objective(objective_id)
+    await env.objectives.patch_objective(objective_id, {
+        "status": "closed",
+        "closed_at": _utcnow_iso(),
+        "delivery": _delivery_record(
+            objective, children, verified_by="final_review"),
+    })
     parent_id = str(objective.get("conversion_source_task_id") or "")
     if parent_id:
         parent = await env.tasks.get_task(parent_id)
@@ -1278,6 +1747,85 @@ async def _finish_objective(
                 await env.notify(
                     ref, f"vault note failed (close stands): {exc}")
     return {"ok": True, "action": "closed", "objective_id": objective_id}
+
+
+# ---------------------------------------------------------------------------
+# Inverse webhook: the ERP group decision reaches the objective (F2)
+# ---------------------------------------------------------------------------
+
+#: Children worth cancelling when the group dies in ERPNext. Terminal and
+#: failed/escalated outcomes are history and are never rewritten.
+CASCADE_CANCEL_STATUSES = frozenset(
+    {"queued", "in_progress", "waiting", "interrupted"})
+
+
+async def reflect_group_decision(
+    env: ObjectiveEnv,
+    objective_id: str,
+    *,
+    target: str,
+    business_status: str,
+) -> dict[str, Any]:
+    """Reflect a group Task decision (Completed/Cancelled) on the objective.
+
+    Called after the parent ticket itself was patched with the anti-echo
+    guard: patching the objective never pushes back, so no loop is
+    possible. A business close wins over any pending review (the human is
+    the review); a cancel stops the open children in Mongo so nothing
+    keeps executing for a dead objective. Idempotent on retries.
+    """
+    objective = await env.objectives.get_objective(objective_id)
+    if objective is None:
+        return {"ok": False, "reason": "no-objective"}
+    if str(objective.get("status") or "") in {"closed", "cancelled"}:
+        return {"ok": True, "action": "already-terminal",
+                "objective_id": objective_id}
+    source_id = str(objective.get("conversion_source_task_id") or "")
+    children = await env.tasks.list_by_objective(objective_id)
+    if target == "completed":
+        await env.objectives.patch_objective(objective_id, {
+            "status": "closed",
+            "closed_at": _utcnow_iso(),
+            "closed_by": "business_decision",
+            "delivery": _delivery_record(
+                objective, children, verified_by="business_decision"),
+        })
+        if env.notify is not None:
+            await env.notify(
+                source_id or objective_id,
+                f"Objective {objective_id} closed from ERPNext "
+                f"({business_status}).")
+        return {"ok": True, "action": "closed-by-business",
+                "objective_id": objective_id}
+    cancelled: list[str] = []
+    for item in children:
+        child_id = str(item.get("task_id") or "")
+        if not child_id or child_id == source_id:
+            continue
+        if str(item.get("status") or "") not in CASCADE_CANCEL_STATUSES:
+            continue
+        await env.patch_task(child_id, {
+            "status": "cancelled",
+            "waiting_reason": None,
+            "resume_at": None,
+            "error": (f"Objective {objective_id} cancelled in ERPNext "
+                      f"({business_status})."),
+        })
+        cancelled.append(child_id)
+    await env.objectives.patch_objective(objective_id, {
+        "status": "cancelled",
+        "cancelled_at": _utcnow_iso(),
+        "cancel_reason": f"group {business_status} in ERPNext",
+        "cancelled_children": cancelled,
+    })
+    if env.notify is not None:
+        await env.notify(
+            source_id or objective_id,
+            f"Objective {objective_id} cancelled from ERPNext "
+            f"({business_status}): {len(cancelled)} open children cancelled.")
+    return {"ok": True, "action": "cancelled",
+            "objective_id": objective_id,
+            "cancelled_children": cancelled}
 
 
 # ---------------------------------------------------------------------------

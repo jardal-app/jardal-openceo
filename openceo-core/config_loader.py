@@ -81,7 +81,8 @@ class ConfigLoader:
         ``dev.tiers`` content in a project.yaml is invalid, and
         ``dev.coding_tool`` is obsolete (routing is per-task). The single
         global Objective Planner is likewise global: top-level
-        ``objective_planner`` content is invalid (TASK-2026-00112).
+        ``objective_planner`` content is invalid (TASK-2026-00112), and so
+        is top-level ``objectives`` (TASK-2026-00117).
         Callers park the project's tickets in ``waiting(config)`` when
         this is non-empty; other projects are unaffected.
         """
@@ -110,6 +111,20 @@ class ConfigLoader:
             else:
                 errors.append(
                     f"objective_planner in {project}/project.yaml must be "
+                    "a mapping or absent."
+                )
+        objectives = data.get("objectives")
+        if objectives is not None and objectives != {}:
+            if isinstance(objectives, dict):
+                found = ", ".join(sorted(str(key) for key in objectives))
+                errors.append(
+                    "objectives must not be set in project.yaml: "
+                    "company-level objectives are global. Remove it from "
+                    f"{project}/project.yaml (found: {found})."
+                )
+            else:
+                errors.append(
+                    f"objectives in {project}/project.yaml must be "
                     "a mapping or absent."
                 )
         dev = data.get("dev")
@@ -427,6 +442,22 @@ class ConfigLoader:
                     "research": {"enabled": False,
                                  "reason": "no ticket execution bridge yet"},
                 },
+            },
+            # Company-level objectives (autonomy epic TASK-2026-00110, F2
+            # TASK-2026-00117). The engine lives outside dev.tier_s, and so
+            # does its config; dev.tier_s.objectives stays as a legacy
+            # fallback for the flow keys. Projects must not set objectives
+            # (see validate_project). The company mandate (F4
+            # TASK-2026-00114) owns the real capacity numbers; these are
+            # safe deterministic defaults.
+            "objectives": {
+                "max_tickets": 20,
+                "max_planning_runs_without_progress": 2,
+                "max_final_reviews": 2,
+                "inbox_items_for_planner": 15,
+                "max_active_objectives_global": 3,
+                "max_active_objectives_per_project": 2,
+                "max_active_tickets_per_objective": 6,
             },
             "voice": {
                 "peer_programming": {

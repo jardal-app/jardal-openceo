@@ -898,13 +898,13 @@ Normative sources: vault decision `decisions/2026-10-06-objetivo-unico-ceo-auton
 
 One Objetivo corresponds to one project/repo. Its identity is an ERPNext group Task; children are real ERPNext Tasks (`parent_task`) and ordering is `depends_on` (mapped from OpenCEO `blocked_by`; ERPNext answers 417 while dependencies are open, so states move in topological order, children first). Mongo `objectives` carries only execution state. Four entries feed the same engine: the CEO (direct, inside the mandate), the owner (voice, chat, or ERPNext), a ticket that outgrows its session (`convert_ticket`: the ticket itself becomes the group Task, no new record), and automatic promotion from Horizon. A ticket already inside an Objetivo decomposes within it; loose tickets go through the common API without fabricating an objective. Business priorities and approvals come from ERPNext, and financial measurements come from Finance's dated ERPNext reads.
 
-> pendiente: TASK-2026-00013 (adapter writes `is_group`/`parent_task`/`depends_on`; no ERPNext pre-configuration needed), TASK-2026-00117 (objective engine outside Tier S; today objectives live in `agents/dev/tier_s/objectives.py` with the `claudej` planner), TASK-2026-00121 (Horizon promotion).
+> Implemented: TASK-2026-00013 (adapter group ops, no ERPNext pre-configuration needed) and TASK-2026-00117 (engine outside Tier S in `openceo-core/objectives/`; one parent ticket per objective that IS the ERP group; top-down/API/MCP/voice entries; deterministic admission limits; delivery verification with dev-pool / deterministic review by domain; inverse group propagation). Pendiente: TASK-2026-00121 (Horizon promotion).
 
 ### Single planner
 
 Muse Code headless, one fresh run per cycle over bounded OpenCEO-compiled state, returns `PlannerResult` JSON; Pydantic + deterministic validation, then OpenCEO persists the valid tickets. The CEO decides *whether*, *when*, and *how much* (mandate, limits, anti-bloat); the planner decides *which tickets*; Python enforces quotas and resources. The Claude/Codex plan of a Tier S ticket is implementation planning for that ticket, not a second planner; neither is Horizon's deterministic day order.
 
-> pendiente: TASK-2026-00112 (today: `claudej` → `TICKETS.yaml`, `openceo-core/agents/dev/tier_s/objectives.py`).
+> Implemented by TASK-2026-00112 (Muse headless → `PlannerResult`, `openceo-core/objectives/planner_models.py`).
 
 ### Company mandate and escalation
 

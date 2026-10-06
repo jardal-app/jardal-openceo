@@ -198,10 +198,17 @@ class PlannerCycleTests(unittest.IsolatedAsyncioTestCase):
         stored = await env.objectives.get_objective(
             objective["objective_id"])
         assert stored is not None
-        # Final review ran (empty pool: no quorum, parked with a note).
+        # F2 (TASK-2026-00117, deliberate contract change): with no dev
+        # children the deterministic delivery verification IS the final
+        # review — the reviewer pool only runs for dev work. The
+        # complete_candidate still went through final review
+        # (final_reviews == 1 with a delivery record); it never closed
+        # directly. The empty-pool quorum park moved to the dev-domain
+        # case in tests/test_company_objectives.py.
         self.assertEqual(stored["final_reviews"], 1)
-        self.assertEqual(stored["status"], "waiting")
-        self.assertIn("quorum", stored["waiting_reason"])
+        self.assertEqual(stored["status"], "closed")
+        assert stored["delivery"]["review"] == "deterministic"
+        assert stored["delivery"]["work_children"] == 0
 
     async def test_blocked_parks_with_summary(self) -> None:
         repo = _scratch_repo(self)

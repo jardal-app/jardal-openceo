@@ -790,6 +790,23 @@ class MongoRepository:
             {"objective_id": objective_id}, {"$set": patch})
         return await self.get_objective(objective_id)
 
+    async def list_active_objectives(
+        self, project: str | None = None, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Active objectives, optionally scoped to one project.
+
+        Backs the deterministic admission limits and the duplicate check of
+        company-level objectives (TASK-2026-00117). Covered by the
+        (project, status) index; bounded by `limit`, never a sweep.
+        """
+        query: dict[str, Any] = {"status": "active"}
+        if project:
+            query["project"] = project
+        rows = self.dev_objectives.find(
+            query, sort=[("created_at", ASCENDING)],
+        ).limit(limit)
+        return [self._clean(row) async for row in rows]
+
     async def list_tasks_by_objective(
         self, objective_id: str, limit: int = 100,
     ) -> list[dict[str, Any]]:

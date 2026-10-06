@@ -30,6 +30,7 @@ from objectives.engine import (
     checkout_and_update_objective_branch,
     on_ticket_closed,
 )
+from objectives.service import create_internal_ticket, erp_for_task_service
 from .tier_s.review import InMemoryReviewStore, InMemorySlotStore, MongoReviewStore, MongoSlotStore, parse_pool
 from .tier_s.stores import (
     InMemoryLockStore,
@@ -43,7 +44,7 @@ from .tmux_runtime import TmuxRuntime
 from config_loader import ConfigLoader
 from rate_monitor import RateMonitor
 from settings import Settings
-from state import AgentName, CodingTier, CodingTool, TaskCreateRequest, TaskSource, TaskStatus
+from state import CodingTier, CodingTool, TaskStatus
 
 from .tier_s_contract import child_env
 from .tier_selector import TierSelector
@@ -886,7 +887,9 @@ class DevSessionManager:
             if repo is not None:
                 await repo.patch_task(task_id, updates)
 
-        objectives_cfg = dict(tier_s.get("objectives", {}) or {})
+        # Global block wins; dev.tier_s.objectives stays as legacy fallback.
+        objectives_cfg = {**(tier_s.get("objectives", {}) or {}),
+                          **(project_config.get("objectives", {}) or {})}
         objectives_cfg["child_autorun"] = bool(
             self._settings.TIER_S_OBJECTIVE_CHILD_AUTORUN)
 
@@ -913,6 +916,8 @@ class DevSessionManager:
             objectives_cfg=objectives_cfg,
             planner_cfg=dict(
                 project_config.get("objective_planner", {}) or {}),
+            erp=(erp_for_task_service(self._task_service)
+                 if self._task_service is not None else None),
             timeouts=dict(tier_s.get("timeouts_minutes", {}) or {}),
             fix_tiers=dict(tier_s.get("fix_ticket_tiers", {}) or {}),
             inbox_rule=dict((tier_s.get("inbox", {}) or {}).get(
@@ -928,49 +933,13 @@ class DevSessionManager:
     ) -> dict[str, Any] | None:
         """Create inbox/objective tickets through the internal API (F4/F6).
 
-        ERPNext first (the service owns that contract), idempotent per
-        ``source_id``. ``agent_hint``/``params`` ride through from the
-        payload (planner targets; default dev). None when unbound:
-        promotions defer to telemetry instead of forking Mongo-only
-        tickets.
+        Single implementation in :mod:`objectives.service` (ERPNext first,
+        idempotent per ``source_id``): dev and company-level flows share
+        it, including the business hierarchy (``parent_task``/``depends_on``).
+        None when unbound: promotions defer to telemetry instead of
+        forking Mongo-only tickets.
         """
-        if self._task_service is None:
-            return None
-        data = dict(payload)
-        try:
-            source = TaskSource(str(data.pop("source", "spillover")))
-        except ValueError:
-            source = TaskSource.SPILLOVER
-        hint = data.get("agent_hint")
-        try:
-            agent_hint = AgentName(str(hint)) if hint else AgentName.DEV
-        except ValueError:
-            # Unknown to the router enum: leave it unset so the router
-            # classifies; the planner target stays in params.
-            agent_hint = None
-        request = TaskCreateRequest(
-            source=source,
-            source_id=data.get("source_id"),
-            title=str(data.get("title") or ""),
-            description=str(data.get("description") or ""),
-            project=data.get("project"),
-            priority=data.get("priority", "medium"),  # type: ignore[arg-type]
-            params=data.get("params"),
-            acceptance=data.get("acceptance"),
-            objective_id=data.get("objective_id"),
-            blocked_by=data.get("blocked_by"),
-            origin=data.get("origin"),
-            finding_fingerprint=data.get("finding_fingerprint"),
-            coding_tool=data.get("coding_tool"),  # type: ignore[arg-type]
-            autorun=bool(data.get("autorun", True)),
-            agent_hint=agent_hint,
-        )
-        try:
-            return await self._task_service.create_task(request)
-        except Exception:
-            logger.warning("internal ticket creation failed: %s",
-                           data.get("title"), exc_info=True)
-            return None
+        return await create_internal_ticket(self._task_service, payload)
 
     async def _step_code(
         self,

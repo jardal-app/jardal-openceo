@@ -336,6 +336,27 @@ def _register_openceo_tools(
             return _classify(exc)
         return {"ok": True, "ticket": enriched, **thread}
 
+    async def openceo_create_objective(
+        project: str,
+        goal: str,
+        acceptance: list[str] | None = None,
+        source_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Top-down company objective: ERP group + planner (F2)."""
+        try:
+            objective = await task_service.create_objective(
+                project=project,
+                goal=goal,
+                acceptance=acceptance,
+                source="api",
+                source_id=source_id,
+            )
+            return {"ok": True,
+                    "objective_id": objective.get("objective_id"),
+                    "objective": objective}
+        except Exception as exc:  # noqa: BLE001 - mismo contrato que create_ticket
+            return {"ok": False, "status": "error", "message": str(exc)}
+
     def _map_priority(priority: str | None) -> TaskPriority:
         try:
             return TaskPriority(priority.strip().lower()) if priority else TaskPriority.MEDIUM
@@ -545,6 +566,11 @@ def _register_openceo_tools(
         name="openceo_get_ticket",
         description="Read one ticket in full: fields, execution status, comments (newest first) and attachments with download URLs. Accepts the ERPNext name (e.g. 'TASK-2026-00025') or the OpenCEO ref.",
     )
+    server.tool(
+        openceo_create_objective,
+        name="openceo_create_objective",
+        description="Create a top-down company objective: one ERPNext group Task (business identity) whose children the planner creates. Required: project, goal. Optional: acceptance (delivery criteria), source_id. Refuses duplicates and admission limits deterministically.",
+    )
     # --- hilo del ticket: edicion, comentarios y adjuntos (TASK-2026-00079) ----
     #
     # Descripciones cortas a proposito: cada palabra viaja en **cada** peticion de la
@@ -658,6 +684,7 @@ def _register_openceo_tools(
         "openceo_create_pm_tickets_batch",
         "openceo_search_tickets",
         "openceo_get_ticket",
+        "openceo_create_objective",
         "openceo_update_ticket",
         "openceo_add_ticket_comment",
         "openceo_update_ticket_comment",
