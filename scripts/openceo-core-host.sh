@@ -93,7 +93,11 @@ start() {
   fi
   (
     cd "$APP_DIR"
-    nohup "$VENV_PY" main.py >>"$LOG_FILE" 2>&1 &
+    # setsid: detach into a new session so agent/tool shells reaping their
+    # process tree cannot take the daemon down with them (nohup alone stays
+    # in the invoker's session). $! is the short-lived setsid parent; the
+    # loop below re-resolves the real daemon pid.
+    setsid -f "$VENV_PY" main.py >>"$LOG_FILE" 2>&1 </dev/null &
     echo $! >"$PID_FILE"
   )
   local runtime_pid
