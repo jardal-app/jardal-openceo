@@ -270,7 +270,9 @@ class PlannerCycleTests(unittest.IsolatedAsyncioTestCase):
         result = await plan_objective(env, "OBJ-1")
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["reason"], "needs_owner")
+        # TASK-2026-00118: an executor fault is operational, not an owner
+        # decision; the next trigger retries planning.
+        self.assertEqual(result["reason"], "planner_error")
         self.assertIn("PLANNER_RESULT", result["detail"])
         self.assertEqual(created, [])
         self.assertEqual(planner.runs, 2)  # initial + one retry

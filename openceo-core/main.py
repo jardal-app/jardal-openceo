@@ -161,6 +161,7 @@ task_service = TaskService(
     settings=settings, repo=repo, graph=graph, realtime_hub=realtime_hub,
     notion=notion_manager, rate_monitor=rate_monitor, workflow_service=workflow_service,
     qa_service=qa_review_service, erpnext=erpnext_adapter,
+    config_loader=config_loader,
 )
 qa_review_service.set_task_service(task_service)
 pm_step_manager.set_task_service(task_service)
