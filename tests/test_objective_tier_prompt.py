@@ -17,8 +17,8 @@ CORE = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE) not in sys.path:
     sys.path.insert(0, str(CORE))
 
-from agents.dev.tier_s.objective_planner_models import DevTier
-from agents.dev.tier_s.objectives import _planner_prompt
+from objectives.planner_models import DevTier
+from objectives.engine import _planner_prompt
 
 
 def _prompt() -> str:

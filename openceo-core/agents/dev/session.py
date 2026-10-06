@@ -20,7 +20,7 @@ from .tier_s.gates import baseline_blocked, gates_failed, handoff_gates_section,
 from .tier_s.inbox import InMemoryInboxStore, MongoInboxStore
 from .tier_s.knowledge import detect_prompt_lang, with_preamble
 from .tier_s.live import ProcessExecutor, RateMonitorQuota
-from .tier_s.objectives import (
+from objectives.engine import (
     InMemoryObjectiveStore,
     InMemoryTaskLister,
     MongoObjectiveStore,

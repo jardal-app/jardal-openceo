@@ -29,7 +29,7 @@ from agents.dev.tier_s import findings as findings_mod
 from agents.dev.tier_s import inbox as inbox_mod
 from agents.dev.tier_s import knowledge as knowledge_mod
 from agents.dev.tier_s import review as review_mod
-from agents.dev.tier_s import objective_planner_models as planner_mod
+from objectives import planner_models as planner_mod
 
 
 class Runner(Protocol):

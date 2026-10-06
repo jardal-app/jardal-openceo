@@ -23,7 +23,7 @@ if str(CORE) not in sys.path:
     sys.path.insert(0, str(CORE))
 
 from agents.dev.session import DevSessionManager
-from agents.dev.tier_s.objectives import (
+from objectives.engine import (
     InMemoryObjectiveStore,
     InMemoryTaskLister,
     ObjectiveEnv,
@@ -386,7 +386,7 @@ class PlannerCycleTests(unittest.IsolatedAsyncioTestCase):
 
 class StallCounterTests(unittest.TestCase):
     def test_only_active_runs_count_as_stalled(self) -> None:
-        from agents.dev.tier_s.objectives import _trailing_stalled_runs
+        from objectives.engine import _trailing_stalled_runs
 
         active_empty = {"status": "active", "tickets_created": 0,
                         "complete": False}
