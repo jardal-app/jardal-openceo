@@ -121,7 +121,7 @@ cd openceo-voice-android
 ### Dev Tier S (Consenso Crítico Multi-IA)
 - Se activa enviando `"coding_tool": "tier_s"` en la raíz del ticket o dentro de `params`.
 - En proyectos con `dev.coding_tool: tier_s` en `project.yaml` (como `jardal-trading`), todos los tickets dev entran a Tier S de forma predeterminada.
-- Orquesta: Planner (`clauded`), Plan Reviewer (`codexj` / reasoning xhigh), Builder (`muse` con `--model muse-spark-1.3-contributor --reasoning-effort max --yolo` en tmux), y revisores cruzados (`codexj` obligatorio + `qwen`, `claudeg`, `claudep`) en 2 rondas de auditoría.
+- Orquesta: Planner (`clauded`), Plan Reviewer (`codexj` / reasoning xhigh), Builder (`musej` con `--model muse-spark-1.3-contributor --reasoning-effort max` en tmux), y revisores cruzados (`codexj` obligatorio + `qwen`, `claudeg`, `claudep`) en 2 rondas de auditoría.
 
 ---
 
@@ -170,6 +170,9 @@ cd openceo-react && npm run build
 4. **Respetar aislamiento de credenciales y paths**:
    - Host mode: usa `~/.codex`, `~/.claude`, `/home/develop/.local/bin/agyd`.
    - `gemini` en OpenCEO corre con `agyd` (`--dangerously-skip-permissions`).
+5. **`musej` es el `muse` de dev por defecto; `muse` pelado es la sesión aislada**:
+   - `/home/develop/.local/bin/musej` envuelve a `muse` añadiendo al final `--yolo --disable-sandbox --disable-approval --approval-mode never --trust-workspace` (acceso total, como `codexj`/`claudej`). Úsalo en builder, closer, tier C, sesiones dev sueltas y monitor de cuota.
+   - Para una sesión **aislada** (revisor read-only, auditoría sin contexto extra del workspace) invoca `muse` pelado directamente: sandbox + aprobaciones ON, sin `--trust-workspace`. Los flags del wrapper **no se pueden reescribir encima** (van los últimos y no existe `--no-yolo).
 
 ---
 

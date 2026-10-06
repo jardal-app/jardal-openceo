@@ -328,7 +328,7 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
                     "tier_b": {"account": "codexj"},
                     "tier_c": {
                         "chain": ["muse", "dsh", "claudep"],
-                        "muse": {"command": ["muse", "exec"]},
+                        "muse": {"command": ["musej", "exec"]},
                         "dsh": {"command": ["node", "/opt/dsh/bin.js", "--profile", "headless", "-"],
                                 "env": {"DSH_HOME": "/tmp/dsh"}},
                         "claudep": {"command": ["claudep"]},
@@ -337,7 +337,7 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
                 "providers": {
                     "claude": {"command": ["/home/develop/.local/bin/claudej"], "cwd": "/tmp/repo", "env": {}},
                     "codex": {"command": ["/home/develop/.local/bin/codexf"], "cwd": "/tmp/repo", "env": {}},
-                    "muse": {"command": ["/home/develop/.local/bin/muse"], "cwd": "/tmp/repo", "env": {}},
+                    "muse": {"command": ["/home/develop/.local/bin/musej"], "cwd": "/tmp/repo", "env": {}},
                 },
             },
         }
@@ -365,7 +365,7 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
         manager._rate_monitor = MagicMock()
         manager._rate_monitor.can_launch = AsyncMock(return_value=True)
         executor = await manager._resolve_tier_executor(CodingTool.TIER_C, self._config())
-        self.assertEqual(executor.argv, ["muse", "exec"])
+        self.assertEqual(executor.argv, ["musej", "exec"])
         self.assertEqual(executor.prompt_via, "argv")
         self.assertEqual(executor.label, "tier_c:muse")
 
@@ -402,7 +402,7 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
         manager._run_process = fake_run_process  # type: ignore[method-assign]
         with patch.object(DevSessionManager, "_resolve_tier_executor",
                           AsyncMock(return_value=MagicMock(
-                              argv=["muse", "exec"], prompt_via="argv",
+                              argv=["musej", "exec"], prompt_via="argv",
                               cwd="/tmp/repo", env={}, label="tier_c:muse"))):
             result = await manager._step_code(_task(), self._config(), CodingTool.TIER_C)
         self.assertTrue(calls[0]["command"][-1].startswith("Lee AGENTS.md"))

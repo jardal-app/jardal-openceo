@@ -207,11 +207,13 @@ class WaitErpCommentTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LooseSessionDefaultsTests(unittest.TestCase):
-    """Loose dev sessions use the owner's wrappers, muse by default.
+    """Loose dev sessions use the owner's wrappers, musej by default.
 
-    Product decision (F0 cleanup): every checked-in project resolves AUTO
-    to plain muse (no builder flags), and the explicit codex/claude entries
-    run the owner's account wrappers. codexj stays Tier S-only.
+    Product decision (2026-10-06, supersedes the F0 bare-muse default):
+    every checked-in project resolves AUTO to musej (full access, like
+    codexj/claudej), and the explicit codex/claude entries run the
+    owner's account wrappers. codexj stays Tier S-only. Plain muse is
+    reserved for isolated sessions (read-only reviewers).
     """
 
     def test_all_projects_default_to_muse_with_owner_wrappers(self) -> None:
@@ -226,7 +228,7 @@ class LooseSessionDefaultsTests(unittest.TestCase):
             providers = dev.get("providers") or {}
             self.assertEqual(
                 (providers.get("muse") or {}).get("command"),
-                ["/home/develop/.local/bin/muse"], name)
+                ["/home/develop/.local/bin/musej"], name)
             codex_cmd = (providers.get("codex") or {}).get("command") or []
             self.assertTrue(codex_cmd and str(codex_cmd[0]).endswith("codexf"), name)
             claude_cmd = (providers.get("claude") or {}).get("command") or []

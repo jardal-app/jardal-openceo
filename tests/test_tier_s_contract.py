@@ -122,6 +122,8 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
             roles = loader.load_project(name)["dev"]["tier_s"]["roles"]
             builder = roles["builder"]
             self.assertEqual(builder["provider"], "muse", name)
+            self.assertEqual(builder["command"][0], "musej", name)
+            self.assertEqual(roles["closer"]["command"][0], "musej", name)
             command = " ".join(str(part) for part in builder["command"])
             self.assertIn("--model muse-spark-1.3-contributor", command, name)
             self.assertIn("--reasoning-effort max", command, name)
@@ -146,6 +148,8 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(by_label["claudep"]["active"])
         self.assertEqual(by_label["claudep"]["family"], "deepseek")
         self.assertTrue(by_label["muse-review"]["extra"])
+        self.assertEqual(by_label["muse-review"]["command"][0], "muse",
+                         "muse-review stays isolated: plain muse, never musej")
         active_families = {item["family"] for item in reviewers
                            if item["active"] and not item.get("extra")}
         self.assertGreaterEqual(len(active_families), 3)
@@ -153,6 +157,7 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tiers["tier_a"]["account"], "claudej")
         self.assertEqual(tiers["tier_b"]["account"], "codexj")
         self.assertEqual(tiers["tier_c"]["chain"], ["muse", "dsh", "claudep"])
+        self.assertEqual(tiers["tier_c"]["muse"]["command"][0], "musej")
         # No checked-in project may carry routing or Tier S overrides.
         for name in loader.available_projects():
             with (repo / "projects" / name / "project.yaml").open(encoding="utf-8") as handle:

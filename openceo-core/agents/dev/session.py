@@ -1038,7 +1038,7 @@ class DevSessionManager:
             if link == "muse":
                 provider_cfg = providers.get("muse", {}) or {}
                 argv = self._as_argv(link_cfg.get("command")) or self._as_argv(
-                    provider_cfg.get("command")) or ["muse", "exec"]
+                    provider_cfg.get("command")) or ["musej", "exec"]
                 return TierExecutor(
                     argv=argv + self._model_args(link_cfg), prompt_via="argv",
                     cwd=self._provider_cwd(provider_cfg, repo_cwd),
