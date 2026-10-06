@@ -320,7 +320,7 @@ OpenCEO enforces technical approval gates through task phases and YAML `type: hu
 
 ERPNext owns business approvals and business workflow transitions. OpenCEO records the reference to an applicable business decision and uses it to gate execution; an OpenCEO QA approval cannot stand in for ERPNext business acceptance. Existing dashboard phases such as `pm_approval` and `client_signoff` remain compatibility interfaces until their business decisions are mapped explicitly to ERPNext. Technical YAML recipes remain deterministic while paused.
 
-Dashboard phase workflows are configured per project with reusable `workflow_templates`. A ticket stores a snapshot of the selected template so future project changes do not rewrite active work:
+Dashboard phase workflows are configured per project with reusable `workflow_templates`. A ticket stores a snapshot of the selected template so future project changes do not rewrite active work. Since TASK-2026-00118 the *default* attachment skips the human `qa_review` phase unless the project policy mandates human review (`dev.qa.require_human_review` in `project.yaml`); explicitly requested templates or phases keep their human gates:
 
 ```json
 {
@@ -910,7 +910,7 @@ Muse Code headless, one fresh run per cycle over bounded OpenCEO-compiled state,
 
 The mandate is a versioned YAML beside `projects/<project>/project.yaml`: axes with KPI + data source, money/quota budget, active-work limits, CEO review cadence, and the escalation policy. The owner edits it by telling Horizon or the CEO ("nuevo eje: …"); an agent applies the change and git keeps history. The CEO never edits its own mandate. The owner is asked only for: new spend over the mandate threshold; a credential only they hold; an irreversible external action; strategic replanning; a mandate change; a policy-mandated human review. Consuming already-paid subscription quota is not new spend. Notice arrives as one ERPNext ticket in `Pending Review` with the exact human action, via the "Requiere humano" tray and Horizon, once.
 
-> Implemented by TASK-2026-00114 (`projects/company_mandate.yaml` + `openceo-core/company_mandate.py`: validated load, `requires_owner`, owner-gated writer, escalation parked in waiting/Pending Review). Pendiente: TASK-2026-00118 (quitar aprobaciones manuales que no correspondan).
+> Implemented by TASK-2026-00114 (`projects/company_mandate.yaml` + `openceo-core/company_mandate.py`: validated load, `requires_owner`, owner-gated writer, escalation parked in waiting/Pending Review) and TASK-2026-00118 (autonomy by default: `waiting` pushes `Pending Review` only with a nameable human action — pending approval, owner escalation, phase waits; the default dev template skips human QA unless `dev.qa.require_human_review`; objective parks are operational reasons, `max_tickets` defers or completes; explicit discovery/HITL approvals and external `autorun=false` defaults stay).
 
 ### CEO loop
 

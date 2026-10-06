@@ -10,6 +10,7 @@ from company_mandate import (
     EscalationDecision,
     OwnerAction,
     build_escalation_ticket,
+    project_requires_human_review,
 )
 from db.mongo import MongoRepository
 from events import RealtimeHub
@@ -49,7 +50,7 @@ from tools.erpnext_client import (
     ERPNextUnavailable,
     ERPNextValidationError,
 )
-from tools.erpnext_tickets import map_status
+from tools.erpnext_tickets import resolve_erpnext_status
 
 if TYPE_CHECKING:
     from tools.erpnext_tickets import ERPNextTicketAdapter
@@ -99,6 +100,7 @@ class TaskService:
         qa_service: QAReviewService | None = None,
         workflow_service: WorkflowService | None = None,
         erpnext: "ERPNextTicketAdapter | None" = None,
+        config_loader: Any | None = None,
     ) -> None:
         self._settings = settings
         self._repo = repo
@@ -112,6 +114,11 @@ class TaskService:
         # se comporta exactamente como antes de la integracion. Los tests construyen
         # TaskService con __new__ y sin __init__, asi que todo uso tolera None.
         self._erpnext = erpnext
+        # Optional project.yaml reader (autonomy F4 TASK-2026-00118): the
+        # default phase template skips human QA unless the project policy
+        # demands it. Tests build TaskService without it; every use
+        # tolerates None (policy unreadable = keep the QA phase).
+        self._config_loader = config_loader
         self._locks: dict[str, asyncio.Lock] = {}
         self._project_locks: dict[str, asyncio.Lock] = {}
         self._notion_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -462,9 +469,11 @@ class TaskService:
             return
         if status == str(mirror.get("status_pushed") or ""):
             return
-        if map_status(status) is None:
+        if resolve_erpnext_status(task) is None:
             # Estado que no se empuja (failed, escalated, interrupted,
-            # converted: el padre se completa al cerrar el objetivo, §9.7).
+            # converted: el padre se completa al cerrar el objetivo, §9.7;
+            # esperas operativas sin accion humana, TASK-2026-00118: el
+            # negocio conserva Open/Working).
             return
 
         queue = getattr(self, "_erpnext_queue", None)
@@ -487,11 +496,15 @@ class TaskService:
         if adapter is None or not adapter.is_enabled:
             return
 
-        # QA condicional (TASK-2026-00040): el destino de `completed` se decide con el
-        # ticket fresco, no con el estado encolado. Si QA aprobo entre el encolado y el
-        # push, el ticket va a Done en vez de quedarse en revision.
+        # QA condicional (TASK-2026-00040) y esperas con accion humana
+        # (TASK-2026-00118): el destino de `completed`/`waiting` se decide con
+        # el ticket fresco, no con el estado encolado. Si QA aprobo o la espera
+        # se resolvio entre el encolado y el push, el ticket no va a revision.
         task = None
-        if str(item.get("status") or "").strip().lower() == TaskStatus.COMPLETED.value:
+        if str(item.get("status") or "").strip().lower() in {
+            TaskStatus.COMPLETED.value,
+            TaskStatus.WAITING.value,
+        }:
             try:
                 repo = getattr(self, "_repo", None)
                 if repo is not None:
@@ -694,9 +707,10 @@ class TaskService:
 
         agent = str((doc.agent_hint or doc.agent or AgentName.CEO).value if hasattr(doc.agent_hint or doc.agent, "value") else (doc.agent_hint or doc.agent or AgentName.CEO.value))
         templates = await self._project_workflow_templates(doc.project)
+        requested_key = doc.workflow_key
         key = resolve_template_key(
             templates,
-            requested_key=doc.workflow_key,
+            requested_key=requested_key,
             agent=agent,
             ticket_type=self._task_ticket_type(doc),
         )
@@ -707,6 +721,10 @@ class TaskService:
         phases = normalize_phases(template.get("phases") or [])
         if not phases:
             return
+        if not requested_key:
+            phases = self._drop_default_human_qa(phases, doc.project)
+            if not phases:
+                return
 
         index = first_executable_phase_index(phases)
         doc.workflow_key = key
@@ -715,6 +733,52 @@ class TaskService:
         doc.phase = phase_key(phases[index])
         doc.phase_assignments = dict(doc.phase_assignments or {})
         doc.phase_started_at = datetime.now(timezone.utc)
+
+    def _drop_default_human_qa(
+        self, phases: list[dict[str, Any]], project: str | None
+    ) -> list[dict[str, Any]]:
+        """Default templates skip human QA unless project policy demands it.
+
+        Autonomy F4 (TASK-2026-00118): the `dev.default` template parked every
+        dev ticket in a human `qa_review` phase, which pushed `Pending Review`
+        with no nameable human action. The escalation policy (TASK-2026-00114)
+        keeps human QA only when the project mandates it
+        (``dev.qa.require_human_review``); otherwise the technical gate
+        (green tests + no QA required, TASK-2026-00040) is the acceptance.
+        Only this default path filters, and only HUMAN `qa_review` phases:
+        explicit phases (creation payload, requested template key,
+        `apply_phase_workflow_to_task`) and other human phases
+        (`client_signoff`) are untouched. Without a config loader, or when
+        the project is unreadable, the policy is unknown and the phases
+        stay (safe default).
+        """
+        loader = getattr(self, "_config_loader", None)
+        if loader is None:
+            return phases
+        try:
+            project_config = loader.load_project(project)
+        except Exception:
+            logger.warning(
+                "Default phase workflow kept human QA: project %r unreadable",
+                project,
+            )
+            return phases
+        if project_requires_human_review(project_config):
+            return phases
+        kept = [
+            phase
+            for phase in phases
+            if not (
+                str(phase.get("type") or "") == WorkflowPhaseType.HUMAN.value
+                and str(phase.get("key") or "") == "qa_review"
+            )
+        ]
+        if not any(
+            str(phase.get("type") or "") != WorkflowPhaseType.TERMINAL.value
+            for phase in kept
+        ):
+            return phases
+        return kept
 
     async def apply_phase_workflow_to_task(
         self,
@@ -1177,10 +1241,18 @@ class TaskService:
             # El ticket existe pero una transicion no se pudo empujar.
             status = str(task.get("status") or "")
             pending_status = str(mirror.get("pending_status") or "").strip()
-            if queue is not None and pending_status and map_status(status) is not None:
-                queue.put_nowait(
-                    {"task_id": task.get("task_id"), "name": mirror["name"], "status": status}
-                )
+            if queue is not None and pending_status:
+                item = {
+                    "task_id": task.get("task_id"),
+                    "name": mirror["name"],
+                    "status": status,
+                }
+                if resolve_erpnext_status(task) is None:
+                    # Ya no hay nada que empujar (p. ej. espera operativa sin
+                    # accion humana): se limpia el pendiente sin HTTP.
+                    await self._record_status_outcome(item, pushed=True)
+                else:
+                    queue.put_nowait(item)
                 repaired += 1
 
         logger.info("Startup reconcile ERPNext: %d reparados de %d", repaired, len(pending))

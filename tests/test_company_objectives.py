@@ -390,7 +390,9 @@ class ConversionTests(unittest.IsolatedAsyncioTestCase):
             env, tasks["task-parent"], "OBJECTIVE_NEEDED", "")
 
         self.assertEqual(objective["status"], "waiting")
-        self.assertIn("needs_owner", objective["waiting_reason"])
+        # TASK-2026-00118: an ERP write failure is operational (retried on
+        # the next trigger), not an owner decision.
+        self.assertIn("erp_error", objective["waiting_reason"])
         self.assertEqual(planner.runs, 0)
         self.assertEqual(created, [])
 
@@ -554,7 +556,9 @@ class FinalReviewTests(unittest.IsolatedAsyncioTestCase):
         result = await run_final_review(env, "OBJ-1")
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["reason"], "needs_owner")
+        # TASK-2026-00118: missing delivery data parks operationally; the
+        # engine never pages the owner.
+        self.assertEqual(result["reason"], "data_gaps")
         self.assertIn("data gaps", result["detail"])
         self.assertEqual(planner.runs, 0)
         stored = await env.objectives.get_objective("OBJ-1")

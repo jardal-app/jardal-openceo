@@ -485,8 +485,9 @@ async def convert_ticket(
     ticket becomes the ERP group (no new record); planned children link
     under it. A ticket that already belongs to an active objective
     decomposes inside it instead of minting a second objective. When the
-    group conversion fails the objective parks as ``needs_owner`` — orphans
-    are never planned. Returns the objective document.
+    group conversion fails the objective parks as ``erp_error`` — orphans
+    are never planned. The next trigger retries the conversion. Returns the
+    objective document.
     """
     task_id = str(ticket.get("task_id", ""))
     own_id = str(ticket.get("objective_id") or "").strip()
@@ -552,7 +553,7 @@ async def convert_ticket(
     try:
         await ensure_erp_group(env, objective)
     except ObjectiveErpError as exc:
-        await _objective_park(env, objective, "needs_owner", str(exc)[:300])
+        await _objective_park(env, objective, "erp_error", str(exc)[:300])
         final = await env.objectives.get_objective(objective_id)
         return final or objective
     await plan_objective(env, objective_id)
@@ -783,13 +784,20 @@ async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]
     cfg = env.objectives_cfg
     planner_cfg = env.planner_cfg
     tickets = await env.tasks.list_by_objective(objective_id)
-    if len(tickets) >= int(cfg.get("max_tickets", 20)):
-        return await _objective_park(
-            env, objective, "needs_owner",
-            f"max_tickets ({cfg.get('max_tickets', 20)}) reached")
     active = [item for item in tickets
               if str(item.get("status")) not in TERMINAL_TICKET_STATUS
               and str(item.get("status")) != "converted"]
+    if len(tickets) >= int(cfg.get("max_tickets", 20)):
+        # Cost brake, not an owner decision (TASK-2026-00118): no new
+        # tickets are planned, but open work keeps running and the next
+        # close re-triggers planning. With nothing open the objective
+        # attempts completion instead of stalling.
+        if active:
+            return {"ok": False, "reason": "max_tickets_reached",
+                    "detail": f"{len(tickets)} lifetime tickets "
+                              f"(max {cfg.get('max_tickets', 20)}); "
+                              f"{len(active)} still open"}
+        return await run_final_review(env, objective_id)
     max_active = int(cfg.get("max_active_tickets_per_objective", 6))
     if len(active) >= max_active:
         # Routine admission deferral, not a park: the objective stays
@@ -800,7 +808,7 @@ async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]
         await ensure_erp_group(env, objective)
     except ObjectiveErpError as exc:
         return await _objective_park(
-            env, objective, "needs_owner", str(exc)[:300])
+            env, objective, "erp_error", str(exc)[:300])
     objective = await env.objectives.get_objective(objective_id) or objective
     runs = objective.get("planning_runs") or []
     stalled = _trailing_stalled_runs(runs)
@@ -809,18 +817,18 @@ async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]
     if stalled >= int(cfg.get("max_planning_runs_without_progress", 2)) \
             and closed_before == int(objective.get("_closed_at_last_plan", 0) or 0):
         return await _objective_park(
-            env, objective, "needs_owner",
+            env, objective, "stalled",
             "planning without progress (tope §9.6)")
     agents = planner_cfg.get("agents", {}) or {}
     if not agents:
         return await _objective_park(
-            env, objective, "needs_owner",
+            env, objective, "config",
             "planner agent registry is empty "
             "(global objective_planner.agents)")
     policy_text = planner_mod.load_policy_text(planner_cfg.get("policy_path"))
     if not policy_text:
         return await _objective_park(
-            env, objective, "needs_owner",
+            env, objective, "config",
             "planner routing policy unreadable; refusing to plan blind")
     open_tickets = [item for item in tickets
                     if str(item.get("status")) not in TERMINAL_TICKET_STATUS]
@@ -899,7 +907,7 @@ async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]
         pass
     if errors or result is None:
         return await _objective_park(
-            env, objective, "needs_owner",
+            env, objective, "planner_error",
             f"invalid {PLANNER_RESULT_FILE} after retry: "
             f"{'; '.join(errors)}")
     status = result.objective_status.value
@@ -1344,18 +1352,18 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
     reviews = int(objective.get("final_reviews") or 0)
     if reviews >= int(env.objectives_cfg.get("max_final_reviews", 2)):
         return await _objective_park(
-            env, objective, "needs_owner", "max_final_reviews reached (§9.6)")
+            env, objective, "stalled", "max_final_reviews reached (§9.6)")
     try:
         await ensure_erp_group(env, objective)
     except ObjectiveErpError as exc:
         return await _objective_park(
-            env, objective, "needs_owner", str(exc)[:300])
+            env, objective, "erp_error", str(exc)[:300])
     objective = await env.objectives.get_objective(objective_id) or objective
     children = await env.tasks.list_by_objective(objective_id)
     verdict = verify_delivery(objective, children)
     if verdict["data_gaps"]:
         return await _objective_park(
-            env, objective, "needs_owner",
+            env, objective, "data_gaps",
             f"delivery data gaps: {'; '.join(verdict['data_gaps'][:5])}")
     if verdict["open_gaps"]:
         await env.objectives.patch_objective(objective_id, {
@@ -1406,7 +1414,7 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
     valid = {item["slot"]: item["valid"] for item in outcomes}
     if not review_mod.quorum_met(valid, list(plan.reviewers), "muse", 2):
         return await _objective_park(
-            env, objective, "needs_owner",
+            env, objective, "no_quorum",
             "final review without quorum (pool exhausted)")
     verdicts: list[Any] = []
     for item in outcomes:

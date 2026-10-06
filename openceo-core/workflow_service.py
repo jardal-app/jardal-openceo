@@ -433,9 +433,15 @@ class WorkflowToolRegistry:
         ticket_type: str = "task",
         tags: list[str] | None = None,
         params: dict[str, Any] | None = None,
+        autorun: bool = True,
         **_: Any,
     ) -> dict[str, Any]:
-        """Creates an operational task in OpenCEO (MongoDB with automatic Notion sync)."""
+        """Creates an operational task in OpenCEO (MongoDB with automatic Notion sync).
+
+        Tickets created by a running workflow run by default (autonomy F4,
+        TASK-2026-00118): a held ticket with no human watching is a silent
+        gate. Pass ``autorun=False`` to hold one for review.
+        """
         from state import TaskCreateRequest, TaskPriority, TaskSource, AgentName
 
         priority_map = {
@@ -465,7 +471,7 @@ class WorkflowToolRegistry:
             source=TaskSource.API,
             tags=tags or [],
             params=merged_params,
-            autorun=False,
+            autorun=autorun,
         )
         if self._task_service is not None:
             created = await self._task_service.create_task(req)
@@ -499,6 +505,7 @@ class WorkflowToolRegistry:
                 ticket_type=item.get("ticket_type", "task"),
                 tags=item.get("tags"),
                 params=item.get("params"),
+                autorun=item.get("autorun", True),
             )
             results.append(res)
             if res.get("ok"):

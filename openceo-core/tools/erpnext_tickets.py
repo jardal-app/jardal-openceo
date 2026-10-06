@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from settings import Settings
-from state import QAReviewState
+from state import ApprovalState, QAReviewState
 from tools.erpnext_client import (
     ERPNextClient,
     ERPNextDuplicateError,
@@ -59,12 +59,16 @@ SUBJECT_MAX_LENGTH = 140
 # code migrates to v2. Omitting loses a display datum, never the ticket.
 _CODING_TOOLS: frozenset[str] = frozenset({"tier_s", "tier_a", "tier_b", "tier_c"})
 
-#: OpenCEO -> ERPNext. `completed` se resuelve por ticket (ver `resolve_erpnext_status`):
-#: con revision humana pendiente -> `Pending Review` (cola QA); sin ella -> `Completed`
-#: directo (Done). Decision del dueño 2026-09-28 (TASK-2026-00040, refina TASK-2026-00033):
-#: para trabajo rutinario el gate tecnico (tests verdes + ausencia de QA requerida)
-#: actua como aceptacion; la aceptacion manual queda para lo marcado. El mapa puro
-#: deja `completed` en `Pending Review` como defecto seguro cuando no hay contexto.
+#: OpenCEO -> ERPNext. `completed` y `waiting` se resuelven por ticket (ver
+#: `resolve_erpnext_status`): con revision humana pendiente -> `Pending Review`;
+#: sin ella -> `Completed` directo (Done) o sin push (el negocio conserva
+#: Open/Working: el trabajo sigue abierto). Decision del dueño 2026-09-28
+#: (TASK-2026-00040, refina TASK-2026-00033): para trabajo rutinario el gate
+#: tecnico (tests verdes + ausencia de QA requerida) actua como aceptacion; la
+#: aceptacion manual queda para lo marcado. TASK-2026-00118 extiende la regla a
+#: `waiting`: las esperas operativas (quota, transient, config, Tier S) no
+#: pagean al dueño; solo las que nombran una accion humana. El mapa puro deja
+#: `completed` y `waiting` en `Pending Review` como defecto seguro sin contexto.
 #: `failed`/`escalated`/`interrupted` tampoco empujan: son resultado de ejecucion, no de negocio.
 _STATUS_MAP: dict[str, str] = {
     "queued": "Open",
@@ -193,11 +197,46 @@ def task_needs_human_review(task: dict[str, Any] | None) -> bool:
     return task.get("qa_review_state") != QAReviewState.APPROVED.value
 
 
+def waiting_needs_human_review(task: dict[str, Any] | None) -> bool:
+    """Senal de "una espera nombra una accion humana" (TASK-2026-00118).
+
+    Solo estas esperas llegan a `Pending Review`: aprobaciones pendientes
+    (pasos YAML `human_in_the_loop`, fases humanas, discovery), escalados al
+    dueño (fase o motivo `owner_escalation`) y esperas de fase (`phase:*`).
+    Las operativas (quota, transient, config, Tier S, `blocked_by`) no empujan:
+    el negocio conserva Open/Working y el detalle queda en `waiting_reason`.
+    Sin contexto o sin motivo clasificable se asume revision, que es el
+    defecto seguro.
+    """
+    if not isinstance(task, dict):
+        return True
+    approval_pending = bool(task.get("approval_required")) and (
+        str(task.get("approval_state") or "").strip().lower()
+        == ApprovalState.PENDING.value
+    )
+    if approval_pending:
+        return True
+    if str(task.get("phase") or "").strip() == "owner_escalation":
+        return True
+    reason = str(task.get("waiting_reason") or "").strip()
+    if reason.startswith("owner_escalation:") or reason.startswith("phase:"):
+        return True
+    if not reason and not task.get("approval_required"):
+        return True
+    return False
+
+
 def resolve_erpnext_status(task: dict[str, Any] | None) -> str | None:
-    """Estado de ERPNext para un ticket completo, o None si no debe empujarse."""
+    """Estado de ERPNext para un ticket, o None si no debe empujarse.
+
+    `completed` es condicional (QA pendiente -> cola; si no -> Done) y
+    `waiting` tambien (accion humana nombrable -> cola; si no -> sin push).
+    """
     status = str((task or {}).get("status") or "").strip().lower()
     if status == "completed":
         return "Pending Review" if task_needs_human_review(task) else "Completed"
+    if status == "waiting":
+        return "Pending Review" if waiting_needs_human_review(task) else None
     return _STATUS_MAP.get(status)
 
 
@@ -768,15 +807,16 @@ class ERPNextTicketAdapter:
     ) -> dict[str, Any] | None:
         """Empuja una transicion de estado. Devuelve None si ese estado no se empuja.
 
-        Para `completed` el destino depende del ticket (QA condicional): con `task`
-        se resuelve (`Pending Review` o `Completed`); sin contexto rige el defecto
-        seguro (`Pending Review`).
+        Para `completed` (QA condicional) y `waiting` (accion humana nombrable,
+        TASK-2026-00118) el destino depende del ticket; sin contexto rige el
+        defecto seguro (`Pending Review`).
         """
         status = str(opencero_status or "").strip().lower()
-        if status == "completed":
-            # Sin contexto rige el defecto seguro (cola QA); con ticket se resuelve.
+        if status in ("completed", "waiting"):
+            # Sin contexto rige el defecto seguro (cola de revision); con
+            # ticket se resuelve (`Pending Review`, `Completed` o sin push).
             target = (
-                "Pending Review"
+                map_status(status)
                 if task is None
                 else resolve_erpnext_status({**task, "status": status})
             )
