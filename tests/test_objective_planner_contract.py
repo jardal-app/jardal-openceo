@@ -19,8 +19,8 @@ CORE = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE) not in sys.path:
     sys.path.insert(0, str(CORE))
 
-from agents.dev.tier_s import objective_planner_models as planner_mod
-from agents.dev.tier_s.objective_planner_models import (
+from objectives import planner_models as planner_mod
+from objectives.planner_models import (
     PlannerResult,
     parse_planner_result,
     validate_planner_result,

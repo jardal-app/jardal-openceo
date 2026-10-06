@@ -22,9 +22,9 @@ if str(CORE) not in sys.path:
     sys.path.insert(0, str(CORE))
 
 from agents.dev.session import DevSessionManager
-from agents.dev.tier_s import objectives as objectives_mod
+from objectives import engine as objectives_mod
 from agents.dev.tier_s.cycle import CycleOutcome
-from agents.dev.tier_s.objectives import (
+from objectives.engine import (
     InMemoryObjectiveStore,
     InMemoryTaskLister,
     ObjectiveEnv,

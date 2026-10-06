@@ -10,6 +10,7 @@ from db.mongo import MongoRepository
 from events import RealtimeHub
 from graph import OpenCEOGraph
 from horizon.privacy import is_personal_scope
+from objectives.engine import ObjectiveRejected
 from phase_workflows import (
     find_phase_index,
     first_executable_phase_index,
@@ -252,6 +253,7 @@ class TaskService:
         *,
         parent_task: str | None = None,
         depends_on: list[str] | None = None,
+        is_group: bool = False,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Crea el ticket de negocio en ERPNext ANTES de persistir en Mongo.
 
@@ -318,6 +320,7 @@ class TaskService:
                 external_url=params.get("external_url"),
                 parent_task=business_parent,
                 depends_on=business_deps or None,
+                is_group=is_group,
             )
         except ERPNextUnavailable as exc:
             logger.warning("ERPNext no respondio al registrar el ticket %s: %s", ref, exc)
@@ -350,6 +353,8 @@ class TaskService:
             mirror["parent_task"] = business_parent
         if business_deps:
             mirror["depends_on"] = list(business_deps)
+        if is_group:
+            mirror["is_group"] = True
         return mirror, False
 
     async def _enqueue_erpnext_registration(self, task: dict[str, Any]) -> None:
@@ -579,6 +584,7 @@ class TaskService:
             doc,
             parent_task=payload.parent_task,
             depends_on=payload.depends_on,
+            is_group=payload.is_group,
         )
         if erpnext_mirror is not None:
             doc.params = self._merge_erpnext_mirror_params(doc.params, erpnext_mirror)
@@ -1099,12 +1105,32 @@ class TaskService:
             task.get("task_id"),
             "eliminado" if deleted else business_status,
         )
-        return {
+        result: dict[str, Any] = {
             "ok": True,
             "status": "applied",
             "task_id": task.get("task_id"),
             "task_status": target,
         }
+        # Inverse webhook on an objective parent (TASK-2026-00117): the group
+        # decision reaches the objective. Children closing in ERP take the
+        # plain ticket path above; only a converted parent propagates.
+        if str(task.get("status") or "") == TaskStatus.CONVERTED.value \
+                and task.get("objective_id"):
+            service = getattr(self, "_objective_service", None)
+            if service is not None:
+                try:
+                    result["objective"] = await service.propagate_group_decision(
+                        task,
+                        target=target,
+                        business_status=("Deleted" if deleted
+                                         else str(business_status or "")),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Objective propagation failed for %s",
+                        task.get("task_id"), exc_info=True)
+                    result["objective"] = {"ok": False, "reason": str(exc)[:200]}
+        return result
 
     async def startup_reconcile_erpnext(self) -> int:
         """Repara al arrancar los enlaces de negocio que quedaron a medias.
@@ -1423,6 +1449,46 @@ class TaskService:
         except Exception:
             logger.warning("Could not comment on ERP for %s", task_id, exc_info=True)
             return False
+
+    def set_objective_service(self, service: Any | None) -> None:
+        """Company-level objectives entry (TASK-2026-00117, wired in main)."""
+        self._objective_service = service
+
+    async def create_objective(
+        self,
+        *,
+        project: str,
+        goal: str,
+        acceptance: list[str] | None = None,
+        entry: str = "top_down",
+        source: str = "api",
+        source_id: str | None = None,
+        requester: str | None = None,
+    ) -> dict[str, Any]:
+        """Top-down objective entry: the single surface for API/MCP/voice.
+
+        Raises :class:`ObjectiveRejected` (and its limits/duplicates
+        subclasses) when refused deterministically.
+        """
+        service = getattr(self, "_objective_service", None)
+        if service is None:
+            raise ObjectiveRejected("objective service is not wired")
+        return await service.create_objective(
+            project=project,
+            goal=goal,
+            acceptance=acceptance,
+            entry=entry,
+            source=source,
+            source_id=source_id,
+            requester=requester,
+        )
+
+    async def get_objective(self, objective_id: str) -> dict[str, Any] | None:
+        """Read one objective document (API/MCP status surface)."""
+        service = getattr(self, "_objective_service", None)
+        if service is None:
+            return await self._repo.get_objective(objective_id)
+        return await service.get_objective(objective_id)
 
     async def blockers_open(self, task: Mapping[str, Any]) -> bool:
         """True when any ``blocked_by`` dependency is not terminal (§9.5).

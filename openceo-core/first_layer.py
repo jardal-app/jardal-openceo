@@ -421,6 +421,7 @@ PERSONALIDAD Y TONO DE VOZ (CRÍTICO):
    - 'vamos al ticket 48', 'enfoca el 49', 'cómo va el 48' -> intent="focus_ticket" con ticket_number.
    - '¿por qué falló?', '¿qué falta?', '¿qué cambios pide?' con ticket en foco -> intent="ticket_query".
    - 'reintenta el ticket', 'ejecuta el ticket' -> intent="ticket_retry".
+   - 'crea un objetivo para ...', 'nuevo objetivo: ...', 'quiero un objetivo que ...' -> intent="objective_create" con dictation igual al objetivo pedido y project (el proyecto actual salvo que nombre otro). Un objetivo genera sus tickets solo; no pidas aprobación por ticket.
 9. SESIONES DEV (CÓDIGO/PROGRAMACIÓN) Y TERMINALES TMUX:
    - 'crea una sesión en jardal-trading', 'cree una sesión en jardal-trading', 'abre una sesión en trading', 'crea una sesión dev', 'abre sesión con codex|claude|muse|opencode' -> SIEMPRE intent="dev_session_start" con project y opcional provider. Toda petición de crear/abrir sesión para un proyecto de código es una sesión dev.
    - 'crea una sesión en el proyecto nro 1', 'crea sesión en el 1', 'crea una sesión en el proyecto 1', 'abre sesión en el 2', 'crea sesión en el nro 1' -> intent="dev_session_start" con el project correspondiente al número según la lista 'PROYECTOS DISPONIBLES' (ej: 1 -> jardal-openceo, 2 -> jardal-trading, etc.).
@@ -453,7 +454,7 @@ PERSONALIDAD Y TONO DE VOZ (CRÍTICO):
 
 Responde SIEMPRE en formato JSON estricto con esta estructura:
 {{
-  "intent": "focus_ticket" | "ticket_query" | "ticket_count" | "ticket_retry" | "list_tickets" | "preset_load" | "preset_dictate" | "preset_list" | "tmux_enter" | "preset_cancel" | "list_tmux" | "tmux_inspect" | "tmux_send" | "tmux_create" | "tmux_kill" | "dev_session_start" | "dev_session_stop" | "dev_instruction" | "dev_output" | "switch_project" | "list_projects" | "horizon_capture" | "horizon_next_action" | "horizon_progress" | "horizon_plan_query" | "horizon_capacity" | "horizon_plan_day" | "horizon_review" | "horizon_import" | "horizon_delegate" | "horizon_delivery" | "horizon_metrics" | "guidance" | "chat_response",
+  "intent": "focus_ticket" | "ticket_query" | "ticket_count" | "ticket_retry" | "objective_create" | "list_tickets" | "preset_load" | "preset_dictate" | "preset_list" | "tmux_enter" | "preset_cancel" | "list_tmux" | "tmux_inspect" | "tmux_send" | "tmux_create" | "tmux_kill" | "dev_session_start" | "dev_session_stop" | "dev_instruction" | "dev_output" | "switch_project" | "list_projects" | "horizon_capture" | "horizon_next_action" | "horizon_progress" | "horizon_plan_query" | "horizon_capacity" | "horizon_plan_day" | "horizon_review" | "horizon_import" | "horizon_delegate" | "horizon_delivery" | "horizon_metrics" | "guidance" | "chat_response",
   "ticket_number": int | null,
   "session_name": string | null,
   "project": string | null,
@@ -568,6 +569,25 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
                 msg = spoken_reply or f"Reintentando ticket #{t_num} en {proj} en segundo plano."
                 return True, msg
             return True, "No encontré el ticket que quieres reintentar. Di por ejemplo: reintenta el ticket 48."
+
+        # ------------------- 3b. OBJECTIVE CREATE (F2) -------------------
+        if intent == "objective_create":
+            goal = str(dictation_param or "").strip() or text.strip()
+            try:
+                await self.task_service.create_objective(
+                    project=target_proj,
+                    goal=goal,
+                    source="voice",
+                    requester=user_id,
+                )
+            except Exception as exc:
+                return True, (
+                    "No pudimos crear el objetivo en "
+                    f"{target_proj}: {str(exc)[:160]}. ¿Lo replanteamos?")
+            return True, (
+                f"Tenemos un objetivo nuevo en marcha en {target_proj}: "
+                "el planificador ya está creando sus tickets. "
+                "Te aviso cuando cierre por revisión final.")
 
         # ------------------- 4. TICKET COUNT & LIST TICKETS -------------------
         if intent in ("ticket_count", "list_tickets"):

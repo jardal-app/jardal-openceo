@@ -37,7 +37,7 @@ from agents.dev.tier_s import gates as gate_mod
 from agents.dev.tier_s import findings as findings_mod
 from agents.dev.tier_s import inbox as inbox_mod
 from agents.dev.tier_s import knowledge as knowledge_mod
-from agents.dev.tier_s import objectives as objectives_mod
+from objectives import engine as objectives_mod
 from agents.dev.tier_s import review as review_mod
 from agents.dev.tier_s.models import (
     BUDGETS_DEFAULTS,

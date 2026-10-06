@@ -231,6 +231,21 @@ class TaskCreateRequest(BaseModel):
     # into TaskDocument: ERPNext owns the hierarchy, Mongo must not cache it.
     parent_task: str | None = None
     depends_on: list[str] | None = None
+    # Group birth (TASK-2026-00117): the ticket is created as an ERPNext group
+    # (the parent of an objective). Same rule: registration-only, never cached
+    # in TaskDocument.
+    is_group: bool = False
+
+
+class ObjectiveCreateRequest(BaseModel):
+    """Top-down objective creation (TASK-2026-00117, F2)."""
+
+    project: str
+    goal: str
+    acceptance: list[str] | None = None
+    entry: str = "top_down"
+    source: str = "api"
+    source_id: str | None = None
 
 
 class TaskDocument(BaseModel):

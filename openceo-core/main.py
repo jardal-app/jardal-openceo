@@ -44,6 +44,13 @@ from integrations.openwebui_compat import (
     parse_agent_hint,
 )
 from mcp_server import build_global_mcp_mount, build_internal_mcp_mount
+from objectives.engine import (
+    ObjectiveDuplicate,
+    ObjectiveErpError,
+    ObjectiveLimitReached,
+    ObjectiveRejected,
+)
+from objectives.service import ObjectiveService
 from phase_workflows import merge_workflow_templates
 from project_service import ProjectService
 from qa_review_service import QAReviewService
@@ -62,6 +69,7 @@ from state import (
     DevSessionStatus,
     DiscoveryApprovalRequest,
     GroupDocument,
+    ObjectiveCreateRequest,
     ProjectDocument,
     ProjectSelectionRequest,
     TaskReviewCreateRequest,
@@ -158,6 +166,15 @@ qa_review_service.set_task_service(task_service)
 pm_step_manager.set_task_service(task_service)
 workflow_service.set_task_service(task_service)
 dev_step_manager.set_task_service(task_service)  # Tier S notices + internal tickets (F3–F6)
+# Company-level objectives (F2): top-down entries + inverse group propagation.
+objective_service = ObjectiveService(
+    repo=repo,
+    task_service=task_service,
+    config_loader=config_loader,
+    settings=settings,
+    rate_monitor=rate_monitor,
+)
+task_service.set_objective_service(objective_service)
 # El repositorio avisa de CADA transicion de estado; el servicio decide cuales se
 # propagan a ERPNext. Se instala aqui porque el repositorio es anterior al servicio.
 repo.set_status_observer(task_service.observe_task_status)
@@ -851,6 +868,46 @@ async def create_task(
     if idempotency_key and not str(data.get("source_id") or "").strip():
         data["source_id"] = idempotency_key.strip()
     return await task_service.create_task(TaskCreateRequest(**data))
+
+
+# ------------------------- objectives (company-level) -------------------------
+
+
+@app.post("/api/objectives")
+async def create_objective(
+    payload: ObjectiveCreateRequest,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Top-down objective entry (F2): shell group + planner, ERP first."""
+    try:
+        return await task_service.create_objective(
+            project=payload.project,
+            goal=payload.goal,
+            acceptance=payload.acceptance,
+            entry=payload.entry,
+            source=payload.source or "api",
+            source_id=payload.source_id,
+            requester=current_user.user_id,
+        )
+    except (ObjectiveDuplicate, ObjectiveLimitReached) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ObjectiveRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ObjectiveErpError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/objectives/{objective_id}")
+async def get_objective(
+    objective_id: str,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Read one objective document (execution state; business lives in ERP)."""
+    del current_user
+    doc = await task_service.get_objective(objective_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="objective not found")
+    return doc
 
 
 @app.post("/api/integrations/erpnext/task")

@@ -23,7 +23,7 @@ if str(CORE) not in sys.path:
     sys.path.insert(0, str(CORE))
 
 from agents.dev.session import DevSessionManager
-from agents.dev.tier_s.objectives import (
+from objectives.engine import (
     InMemoryObjectiveStore,
     InMemoryTaskLister,
     ObjectiveEnv,
@@ -198,10 +198,17 @@ class PlannerCycleTests(unittest.IsolatedAsyncioTestCase):
         stored = await env.objectives.get_objective(
             objective["objective_id"])
         assert stored is not None
-        # Final review ran (empty pool: no quorum, parked with a note).
+        # F2 (TASK-2026-00117, deliberate contract change): with no dev
+        # children the deterministic delivery verification IS the final
+        # review — the reviewer pool only runs for dev work. The
+        # complete_candidate still went through final review
+        # (final_reviews == 1 with a delivery record); it never closed
+        # directly. The empty-pool quorum park moved to the dev-domain
+        # case in tests/test_company_objectives.py.
         self.assertEqual(stored["final_reviews"], 1)
-        self.assertEqual(stored["status"], "waiting")
-        self.assertIn("quorum", stored["waiting_reason"])
+        self.assertEqual(stored["status"], "closed")
+        assert stored["delivery"]["review"] == "deterministic"
+        assert stored["delivery"]["work_children"] == 0
 
     async def test_blocked_parks_with_summary(self) -> None:
         repo = _scratch_repo(self)
@@ -386,7 +393,7 @@ class PlannerCycleTests(unittest.IsolatedAsyncioTestCase):
 
 class StallCounterTests(unittest.TestCase):
     def test_only_active_runs_count_as_stalled(self) -> None:
-        from agents.dev.tier_s.objectives import _trailing_stalled_runs
+        from objectives.engine import _trailing_stalled_runs
 
         active_empty = {"status": "active", "tickets_created": 0,
                         "complete": False}
