@@ -577,6 +577,10 @@ Parent execution: "close the month"  (MongoDB, linked to ERPNext work)
 
 The parent task always exists — it gives visibility of total progress. Children can be of different types depending on how the CEO resolved the task.
 
+Business hierarchy is separate and lives in ERPNext: group Tasks (`is_group`), real children (`parent_task`, `lft`/`rgt` tree), and the `depends_on` table. No ERPNext pre-configuration is needed — the DocType already brings these fields; the work is OpenCEO-side: closed semantic adapter operations, `parent_task`/`depends_on` parameters on ticket creation (so the planner, the CEO, and sessions link at creation), and a `blocked_by` ↔ `depends_on` mapping with topological state moves (ERPNext answers 417 while dependencies are open).
+
+> pendiente: TASK-2026-00013.
+
 #### External References and Notion Compatibility
 
 ERPNext holds the business hierarchy; OpenCEO holds execution dependencies and evidence. A Notion compatibility view may represent parent/child links with a Relation property, but it is not the authority for either hierarchy. Do not assume the conceptual parent relation is implemented by every adapter or duplicate one technical step as a business ticket in each external system.
@@ -878,65 +882,79 @@ Inspired by OpenCode team functions:
 
 ## Proactive CEO — Autonomous Objectives
 
-The CEO can propose and schedule execution under an explicit mandate, using capacity, deadlines, and results. Proactivity does not transfer ownership of business work from ERPNext or authorize an unrestricted stream of new tickets.
+The CEO acts autonomously under a company mandate approved once by the owner (2026-10-06, TASK-2026-00110): it creates company Objectives and tickets directly, without per-ticket approval. Doing nothing is a valid outcome. The owner steps in only where a human is required: new spend, a credential only they hold, an irreversible external action, a strategic replanning, a mandate change, or a policy-mandated human review. Autonomy never transfers ownership of business work from ERPNext and never authorizes an unrestricted stream of new tickets.
 
-> **One engine, two scopes.** Reuse Horizon's planning and trigger mechanisms.
-> Private objectives remain owner-scoped in `horizon_objectives`; company work
-> is referenced from ERPNext. Do not add a competing `objectives` collection,
-> a second planner, or a local business backlog. Scheduled work is persisted
-> with `next_run_at` and awakened reactively, never by per-minute database sweeps.
+> **Single company Objective, single planner (amends "One engine, two scopes", 2026-10-06, TASK-2026-00111).** Identity lives in ERPNext: a group Task with real children (`parent_task`) and `depends_on`. Mongo `objectives` holds execution state only (capsule, cycles, replans, final review, telemetry) — never a business backlog. One global planner (Muse Code headless, one fresh run per cycle, `PlannerResult` validated with Pydantic + deterministic rules) is the only component that decides which tickets exist for an Objective. A deterministic dispatcher (0 tokens) launches ready tickets on events, with a single conditional backup trigger while tickets wait for a slot. Work is persisted with `next_run_at` and awakened reactively, never by per-minute database sweeps.
 
-### Hierarchy
+Normative sources: vault decision `decisions/2026-10-06-objetivo-unico-ceo-autonomo`, `docs/objective-planner-routing-policy.md` (runtime policy the planner reads), `docs/decision-2026-10-05-planner-objetivos-muse.md` (ADR). Behaviour the code does not have yet is marked `pendiente: TASK-2026-00NNN` below.
 
-```
-Private Horizon objectives / authorized ERPNext business work
-      ↓ CEO applies mandate and capacity
-OpenCEO execution tasks (with the applicable business reference)
-      ↓ tiers 0-2
-Workflows / Discovery
-      ↓
-Execution
-```
+### Glossary
 
-Objectives are NOT tasks. Objectives generate tasks.
+- **Objetivo** = a company objective. The only unqualified use of "objective" in business context. Objectives are NOT tasks. Objectives generate tasks.
+- **objetivos personales** = Horizon's private objectives (`mission → objective → milestone → action → result`, `HorizonObjective` and related models in `openceo-core/horizon/models.py`). Always qualified; actions link execution by `task_id` and are never flattened into company tickets. Capacity, uncertainty, and owner scope remain explicit.
+- **mandato de empresa** = the company mandate: axes with KPIs, budget, limits, review cadence, escalation policy. Distinct from Horizon's personal mandate.
 
-### Objective Schema (MongoDB)
+### Identity and execution state
 
-The private hierarchy follows `HorizonObjective` and related models in `openceo-core/horizon/models.py`: mission, objective, milestone, action, and result. Actions link execution by `task_id`; objectives are not flattened into tickets. Capacity, uncertainty, owner scope, and the mandate remain explicit. Business priorities and approvals come from ERPNext, and financial measurements come from Finance's dated ERPNext reads, without duplicating their records in an objectives collection.
+One Objetivo corresponds to one project/repo. Its identity is an ERPNext group Task; children are real ERPNext Tasks (`parent_task`) and ordering is `depends_on` (mapped from OpenCEO `blocked_by`; ERPNext answers 417 while dependencies are open, so states move in topological order, children first). Mongo `objectives` carries only execution state. Four entries feed the same engine: the CEO (direct, inside the mandate), the owner (voice, chat, or ERPNext), a ticket that outgrows its session (`convert_ticket`: the ticket itself becomes the group Task, no new record), and automatic promotion from Horizon. A ticket already inside an Objetivo decomposes within it; loose tickets go through the common API without fabricating an objective. Business priorities and approvals come from ERPNext, and financial measurements come from Finance's dated ERPNext reads.
 
-### CEO Autonomous Loop — Two Triggers
+> pendiente: TASK-2026-00013 (adapter writes `is_group`/`parent_task`/`depends_on`; no ERPNext pre-configuration needed), TASK-2026-00117 (objective engine outside Tier S; today objectives live in `agents/dev/tier_s/objectives.py` with the `claudej` planner), TASK-2026-00121 (Horizon promotion).
 
-**Scheduled** (e.g., every Monday, daily at 8am): a persisted trigger becomes due → the CEO reviews the relevant plan and capacity → proposes or delegates a concrete action within its mandate. Creating business work goes through OpenCEO's ERPNext capability.
+### Single planner
 
-**Reactive** (when a workflow completes): the task result hook records evidence against the linked action, updates personal progress where applicable, and evaluates the next action. Business acceptance and transitions remain ERPNext decisions; agent completion and delivery to the user remain distinct events.
+Muse Code headless, one fresh run per cycle over bounded OpenCEO-compiled state, returns `PlannerResult` JSON; Pydantic + deterministic validation, then OpenCEO persists the valid tickets. The CEO decides *whether*, *when*, and *how much* (mandate, limits, anti-bloat); the planner decides *which tickets*; Python enforces quotas and resources. The Claude/Codex plan of a Tier S ticket is implementation planning for that ticket, not a second planner; neither is Horizon's deterministic day order.
 
-### Anti-Bloat Rules
+> pendiente: TASK-2026-00112 (today: `claudej` → `TICKETS.yaml`, `openceo-core/agents/dev/tier_s/objectives.py`).
+
+### Company mandate and escalation
+
+The mandate is a versioned YAML beside `projects/<project>/project.yaml`: axes with KPI + data source, money/quota budget, active-work limits, CEO review cadence, and the escalation policy. The owner edits it by telling Horizon or the CEO ("nuevo eje: …"); an agent applies the change and git keeps history. The CEO never edits its own mandate. The owner is asked only for: new spend over the mandate threshold; a credential only they hold; an irreversible external action; strategic replanning; a mandate change; a policy-mandated human review. Consuming already-paid subscription quota is not new spend. Notice arrives as one ERPNext ticket in `Pending Review` with the exact human action, via the "Requiere humano" tray and Horizon, once.
+
+> pendiente: TASK-2026-00114 (mandato y escalado), TASK-2026-00118 (quitar aprobaciones manuales que no correspondan).
+
+### CEO loop
+
+Scheduled review (mandate cadence) plus reactive review (objective closed or blocked, `capability_gap`, incident, research, deferred findings, KPI change) over the same persisted-trigger engine as Horizon and research. Each review ends in exactly one of: keep going, create an Objetivo, create a loose ticket, create a project, escalate, or do nothing. An axis without a measurable KPI produces a report, never new work. Missing capabilities are declared as `capability_gap`, never silently worked around. Business acceptance and transitions remain ERPNext decisions; agent completion and delivery to the user remain distinct events.
+
+> pendiente: TASK-2026-00119 (CEO autónomo; requires 00117 + 00113 + 00114), TASK-2026-00115 (crear proyecto end-to-end; until then the planner and the CEO answer `capability_gap`).
+
+### Dispatcher
+
+Deterministic, 0 tokens: wakes on ticket created/ready, ticket closed/failed/cancelled (frees a slot), dependency resolved, quota reset (persisted trigger), and service start (bounded reconciliation). While ready tickets wait for a slot it keeps a single persisted backup trigger (e.g. every 5 min); with an empty queue there is no timer. Admission checks active limits (global, per project, per objective), Claude/Codex quota and reservations for Tier S (A/B tickets that would invade them wait as `waiting(quota_reserved)`, never silently drop to C), free resources, the per-repo lock, and lease/fencing against double dispatch.
+
+> pendiente: TASK-2026-00113 (encolador; requires 00043 — the scheduler honouring `autorun=false`).
+
+### Anti-bloat rules (deterministic, before persist)
 
 1. **Max N active tickets per objective** — no new tickets if existing ones are incomplete
 2. **Concrete action required** — not "improve finances" but "generate Q1 expense report and compare with Q4"
 3. **Check existing tickets first** — no duplicates
-4. **Measurable KPIs** — ticket must move the indicator. If not, it's not created
-5. **Scope check** — ticket must align with the objective. If it deviates, discard
+4. **Measurable KPIs** — the ticket must move the indicator; an axis without one yields a report, not work
+5. **Scope check** — the ticket must align with the Objetivo; if it deviates, discard
+
+### Delivery vs outcome
+
+An Objetivo closes on its delivery criteria, after the final review (`complete_candidate` never closes directly). The business outcome (KPI) is evaluated by the CEO afterwards; closing every ticket does not prove a metric moved. Final review by domain: dev = the current pool over the `objective/<id>` branch; non-dev = verification against criteria and artefacts.
 
 ### Flow
 
 ```
-Relevant Horizon plan + authorized ERPNext work
+Company mandate (rules approved once)
       ↓
-Persisted trigger or task-result event
+CEO review (scheduled + reactive) → Objetivo | loose ticket | project | escalate | nothing
       ↓
-Reviews progress vs KPIs vs deadline
+Objetivo — identity: ERPNext group Task (+ real children, depends_on)
+           execution: Mongo `objectives`
       ↓
-Enough active tickets? → don't create more
-Missing concrete progress? → request authorized work with a specific action
+Single planner (Muse headless → PlannerResult → deterministic validation)
+      ↓ 1–3 tickets
+Dispatcher (deterministic, 0 tokens): events + conditional backup
+      ↓ limits · quotas/reservations · resources · lease
+Execution: dev (S/A/B/C) · research · workflows
       ↓
-Ticket enters normal flow (tiers 0-2)
+result → replan only if something changed → final review → close
       ↓
-Workflow executes
-      ↓
-Result updates execution evidence and the linked action
-      ↓
-Loop continues until objective met or deadline
+Only if policy requires: Pending Review + tray + Horizon → OWNER
 ```
 
 ---
@@ -998,13 +1016,18 @@ Scope and ownership must be explicit. `project: null` can mean company-level wor
 
 ## Tier S (Multi-AI Peer Review)
 
-> **SUPERSEDED 2026-10-04 (TASK-2026-00102, F0.1).** This section describes the
-> retired flow (persistent tmux reviewers, OpenCode compiler, per-project
-> `coding_tool`, `critical_consensus`). The vigente design is
-> `docs/work/TIER_S_DESIGN_FINAL.md` v2 (ticket = cycle = one builder
-> session; tiers `tier_s/a/b/c`; pool quorum; non-blocking plan review).
-> Do not implement from this section; it is kept for history until F2
-> replaces the engine and this section is rewritten.
+> **RETIRED FLOW — kept for history.** This section describes the pre-v2 flow
+> (persistent tmux reviewers, OpenCode compiler, per-project `coding_tool`,
+> `critical_consensus`). The vigente engine is `openceo-core/agents/dev/tier_s/`
+> (F1–F7, merged 2026-10-05; design `docs/work/TIER_S_DESIGN_FINAL.md` v2:
+> ticket = cycle = one builder session; tiers `tier_s/a/b/c`; pool quorum;
+> non-blocking plan review). Do not implement from this section.
+>
+> Autonomy delta (2026-10-06, TASK-2026-00110): the objective planner inside
+> Tier S (`claudej` → `TICKETS.yaml`) is superseded by the single global
+> planner (Muse headless + `PlannerResult`; pendiente: TASK-2026-00112), and
+> the objective engine moves out of Tier S (pendiente: TASK-2026-00117). See
+> §Proactive CEO for the contract.
 
 For high-stakes tickets (systems handling real money, critical infrastructure, complex algorithms, anything where a single bug has severe consequences), the Dev Agent activates a multi-AI peer review workflow. Claude Code acts as lead programmer. Codex and Gemini act as persistent tmux-based reviewers. OpenCode remains a single reviewer slot from Claude's perspective, but internally it runs a headless multi-model review pipeline and compiles its own consensus into `FEEDBACK-opencode.md`. The Dev Agent (`dev_session_service.py` for chat sessions, `session.py` for legacy task runs) orchestrates everything deterministically — it follows workflow steps, it does not think or generate content.
 

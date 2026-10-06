@@ -120,10 +120,15 @@ cd openceo-voice-android
 - El ticket se marca en `status: waiting` con `phase: <permission>` (ej. `qa_review`).
 - Al aprobar la acción desde la UI/API (`create_phase_action`), el motor reanuda el workflow automáticamente ejecutando los pasos restantes sin reiniciar.
 
+### Planner único de objetivos (global)
+- El único que decide qué tickets deben existir para un Objetivo: Muse Code headless, un run fresco por ciclo, salida `PlannerResult` validada (Pydantic + validación determinista).
+- Normativos: `docs/objective-planner-routing-policy.md` (el planner lo lee) y `docs/decision-2026-10-05-planner-objetivos-muse.md` (ADR).
+- Sustituye a `claudej`/`TICKETS.yaml` (pendiente: TASK-2026-00112; el código aún usa `agents/dev/tier_s/objectives.py`).
+- El plan Claude/Codex de un ticket Tier S planifica cómo implementar ese ticket, no es un segundo planner; tampoco lo es el orden determinista del día en Horizon.
+
 ### Dev Tier S (Consenso Crítico Multi-IA)
-- Se activa enviando `"coding_tool": "tier_s"` en la raíz del ticket o dentro de `params`.
-- En proyectos con `dev.coding_tool: tier_s` en `project.yaml` (como `jardal-trading`), todos los tickets dev entran a Tier S de forma predeterminada.
-- Orquesta: Planner (`clauded`), Plan Reviewer (`codexj` / reasoning xhigh), Builder (`musej` con `--model muse-spark-1.3-contributor --reasoning-effort max` en tmux), y revisores cruzados (`codexj` obligatorio + `qwen`, `claudeg`, `claudep`) en 2 rondas de auditoría.
+- Se activa enviando `"coding_tool": "tier_s"` en la raíz del ticket o dentro de `params` (routing per-task; `dev.coding_tool` en `project.yaml` está obsoleto).
+- Orquesta: Planner (`claudej`), Plan Reviewer (`codexj` no bloqueante), Builder y Closer (`musej` en tmux), árbitro (`claudej`), y pool de revisores con quorum por familias en 2 rondas (slots vigentes en `config_loader.py`).
 
 ---
 
@@ -133,6 +138,13 @@ Horizon **no es un agente separado** ni tiene runtime propio. Es la capacidad y 
 - **Especificación canónica**: [`jardal-horizon/README.md`](file:///home/develop/development/Jardal/jardal-openceo/jardal-horizon/README.md) v2.1.
 - **Implementación en Core**: [`openceo-core/horizon/`](file:///home/develop/development/Jardal/jardal-openceo/openceo-core/horizon/).
 - **Tracking operacional**: los tickets viven en ERPNext (`https://erp.jardal.app/app/task`); `STATUS.md` guarda el avance y los traspasos de sesión. `PENDINGS.md` es solo un puntero al backlog.
+
+### Horizon como cockpit del dueño (autonomía)
+- **Cockpit**: «qué sigue» y el brief diario combinan el plan personal, el status de lo que avanzó el CEO y las decisiones pendientes. Es la interfaz principal del dueño (pendiente: TASK-2026-00120).
+- **Promoción automática**: si una acción toca un proyecto o repo de la empresa, es trabajo de empresa y entra sola al Objetivo o ticket por la API común (ERPNext primero); solo viaja la especificación del trabajo. Pregunta solo si implica costo, gasto o replanificación (pendiente: TASK-2026-00121).
+- **Privacidad en un solo sentido**: lo de empresa entra a Horizon en solo lectura; lo personal (misión, finanzas, familia, salud) nunca sale. Sin interruptor general de exportación.
+- **Terminología**: los de Horizon son siempre «objetivos personales»; «Objetivo» a secas es objetivo de empresa (contrato: §Proactive CEO de `docs/ARCHITECTURE_REFERENCE_2026.md`; decisión del vault `decisions/2026-10-06-objetivo-unico-ceo-autonomo`).
+- Las tareas personales de Horizon no son tickets de empresa (excepción acotada en §10); la capacidad del dueño frena solo los escalados, no el trabajo autónomo; el plan del día sigue sin depender de un LLM.
 
 ### Fases de Implementación (Roadmap)
 1. **HZ-001 — Contexto personal del CEO** (Completada): Modelos de jerarquía (`models.py`), mandato (`mandate.py`), privacidad estricta (`privacy.py`), clasificador determinista antes de LLM (`classify.py`), colecciones Mongo `horizon_*` e importador idempotente (`importer.py`).
@@ -291,7 +303,9 @@ scripts/openceo-core-host.sh restart|status
 - No polling or Mongo/API sweeps: react to CRUD events only.
 - ERPNext owns business state (`Task`/`Project`); Mongo owns execution.
   Never create Mongo-only tickets: internal creation goes through the
-  ticket API (ERPNext first).
+  ticket API (ERPNext first). Bounded exception: Horizon personal tasks
+  are not company tickets and stay Mongo-only (no business mirror);
+  any work on a company project/repo goes to ERPNext first.
 - No secrets, credentials, or personal data in notes or temp docs.
 - Conventions over configuration: mirror sibling code, reuse its helpers.
 - Owner rule (2026-10-06): no token-spending live tests (Tier S pilots,
@@ -317,6 +331,7 @@ Cuando el dueño escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el ti
    - Descripción y comentarios del ticket.
    - `docs/work/TASK-2026-00110-objetivo-unico-ceo-autonomo.md` y el workfile del ticket si existe.
    - La decisión del vault `decisions/2026-10-06-objetivo-unico-ceo-autonomo`, solo si hace falta el porqué.
+   - El contrato normativo: `docs/ARCHITECTURE_REFERENCE_2026.md` §Proactive CEO (+ `docs/objective-planner-routing-policy.md` y el ADR del planner).
    - Código: búsqueda dirigida + LSP.
 4. **Implementar** en una rama `feat/<ticket>-<tema>`. El tier marca el rigor: en `tier_s`, plan escrito en el workfile antes de codificar y una revisión independiente de solo lectura antes del merge.
 5. **Probar solo lo necesario**: `py_compile` de lo tocado, los tests del área y la suite de §10, respetando la consigna de abajo.
