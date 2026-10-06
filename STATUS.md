@@ -4,6 +4,8 @@ Resumen operativo corto del estado real del repo.
 
 ## Continuar aquí (traspaso a la próxima sesión)
 
+**F0 00111 CERRADO (2026-10-06, `sigue`).** Contrato normativo mergeado (`10b0816`): ARCHITECTURE_REFERENCE §Proactive CEO + glosario + Parent Task Tracking + banner Tier S; CLAUDE.md §5/§6/§10/§11. `TASK-2026-00111` Completed (negocio + ejecución, push verificado). Suite §10: 66 passed. Sin restart (solo docs). Nota: `status_pushed` vive en `params._mirrors.erpnext`, no en top-level. Sigue **TASK-2026-00123** (F0 preámbulo, en paralelo); 00112 desbloqueado tras F0.
+
 **RUMBO AUTONOMÍA: épico TASK-2026-00110 + palabra clave `sigue` (2026-10-06).** Decisión del dueño: OpenCEO trabaja como un equipo humano real. El dueño solo entra por escalado: gasto nuevo, credencial, acción irreversible, replanificación estratégica, mandato o revisión exigida por política.
 
 Roadmap, detallado en el comentario del épico:
