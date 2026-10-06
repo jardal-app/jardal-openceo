@@ -1,7 +1,8 @@
 """Dev objectives: multi-ticket work chains (design §9, F6).
 
-An objective is a chain of mixed-tier tickets created gradually by an
-objective planner (``claudej``), with OpenCEO-side dependencies, a
+An objective is a chain of tickets created gradually by the single global
+objective planner (Muse Code headless → ``PlannerResult`` JSON, validated
+with Pydantic + deterministic rules), with OpenCEO-side dependencies, a
 deterministically compiled capsule, triggers, loop guardrails, a final pool
 review and a ``muse`` close. Not to be confused with Horizon objectives
 (``horizon_objectives``): those are the CEO's personal goals; these live in
@@ -10,7 +11,7 @@ the ``objectives`` collection (§15.2) and drive dev execution.
 Entry points: :func:`convert_ticket` (a Tier S ticket outgrew one session),
 :func:`plan_objective` (next horizon of tickets), :func:`on_ticket_closed`
 (triggers + capsule after any objective ticket closes) and
-:func:`run_final_review` (planner declared ``OBJECTIVE_COMPLETE``).
+:func:`run_final_review` (planner declared ``complete_candidate``).
 """
 
 from __future__ import annotations
@@ -24,12 +25,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
-import yaml
-
 from agents.dev.tier_s import findings as findings_mod
 from agents.dev.tier_s import inbox as inbox_mod
 from agents.dev.tier_s import knowledge as knowledge_mod
 from agents.dev.tier_s import review as review_mod
+from agents.dev.tier_s import objective_planner_models as planner_mod
 
 
 class Runner(Protocol):
@@ -75,6 +75,10 @@ class ObjectiveEnv:
     pool: list[review_mod.ReviewSlot] = field(default_factory=list)
     review_cfg: dict[str, Any] = field(default_factory=dict)
     objectives_cfg: dict[str, Any] = field(default_factory=dict)
+    # Single global planner config (global objective_planner block: engine,
+    # role, timeout, agents registry). Empty in bare unit envs: planning
+    # then parks instead of validating against no registry.
+    planner_cfg: dict[str, Any] = field(default_factory=dict)
     timeouts: dict[str, int] = field(default_factory=dict)
     fix_tiers: dict[str, str] = field(default_factory=dict)
     inbox_rule: dict[str, Any] = field(default_factory=dict)
@@ -158,8 +162,6 @@ def new_objective_id() -> str:
 
 TERMINAL_TICKET_STATUS = frozenset({"completed", "cancelled"})
 
-VALID_TIERS = ("tier_s", "tier_a", "tier_b", "tier_c")
-
 
 # ---------------------------------------------------------------------------
 # Conversion (§9.2)
@@ -206,6 +208,16 @@ async def convert_ticket(
         "tickets_log": [],
         "tickets_files": {},
         "planning_runs": [],
+        "material_failures": [],
+        "planner_telemetry": {
+            "cycles": 0,
+            "replans": 0,
+            "no_progress_cycles": 0,
+            "tickets_created": 0,
+            "cancelled_unnecessary": 0,
+            "agent_reassignments": 0,
+            "tier_reclassifications": 0,
+        },
         "final_reviews": 0,
         "last_final_review_sha": None,
         "base_sha": base_sha,
@@ -234,114 +246,27 @@ async def convert_ticket(
 
 
 # ---------------------------------------------------------------------------
-# Objective planner (§9.3)
+# Objective planner (§9.3): Muse headless → PlannerResult JSON
 # ---------------------------------------------------------------------------
 
-def parse_tickets_yaml(text: str) -> dict[str, Any]:
-    """Parse ``TICKETS.yaml`` (§16.7). Raises ValueError when malformed."""
-    try:
-        data = yaml.safe_load(text or "")
-    except yaml.YAMLError as exc:
-        raise ValueError(f"invalid TICKETS.yaml: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ValueError("TICKETS.yaml must be a mapping")
-    return data
+PLANNER_RESULT_FILE = "PLANNER_RESULT.json"
 
 
-def _local_cycles(tickets: Sequence[Mapping[str, Any]]) -> list[str]:
-    keys = {str(item.get("key") or "") for item in tickets
-            if str(item.get("key") or "")}
-    edges = {str(item.get("key") or ""):
-             [dep for dep in (item.get("blocked_by") or [])
-              if str(dep) in keys]
-             for item in tickets if str(item.get("key") or "")}
-    errors: list[str] = []
-    visiting: set[str] = set()
-    done: set[str] = set()
-
-    def visit(node: str, stack: list[str]) -> None:
-        if node in done:
-            return
-        if node in visiting:
-            errors.append(f"blocked_by cycle: {' -> '.join([*stack, node])}")
-            return
-        visiting.add(node)
-        for dep in edges.get(node, []):
-            visit(dep, [*stack, node])
-        visiting.discard(node)
-        done.add(node)
-
-    for key in edges:
-        visit(key, [])
-    return errors
-
-
-async def validate_tickets(
-    env: ObjectiveEnv,
-    objective: Mapping[str, Any],
-    data: Mapping[str, Any],
-) -> tuple[list[str], list[dict[str, Any]]]:
-    """Deterministic validation (§9.3). Returns (errors, tickets)."""
-    errors: list[str] = []
-    if str(data.get("objective") or "") != objective.get("objective_id"):
-        errors.append("objective id mismatch")
-    complete = bool(data.get("complete", False))
-    raw_tickets = data.get("tickets") or []
-    if complete and raw_tickets:
-        errors.append("complete:true must carry no tickets")
-    if complete:
-        return errors, []
-    if not isinstance(raw_tickets, list) or not raw_tickets:
-        return [*errors, "no tickets and complete is not true"], []
-    if len(raw_tickets) > 3:
-        errors.append(f"horizon is 2-3 tickets, got {len(raw_tickets)}")
-    tickets: list[dict[str, Any]] = []
-    seen_keys: set[str] = set()
-    for index, item in enumerate(raw_tickets):
-        where = f"tickets[{index}]"
-        if not isinstance(item, Mapping):
-            errors.append(f"{where}: must be a mapping")
+def _agents_section(agents: Mapping[str, Any]) -> str:
+    """Authoritative registry rendered for the planner prompt."""
+    lines = ["REGISTERED AGENTS (select target_agent ONLY from enabled):"]
+    for name in sorted(agents):
+        spec = agents.get(name)
+        if not isinstance(spec, Mapping):
             continue
-        key = str(item.get("key") or "").strip()
-        if not key:
-            errors.append(f"{where}: missing key")
-        elif key in seen_keys:
-            errors.append(f"{where}: duplicate key {key!r}")
-        seen_keys.add(key)
-        if not str(item.get("title") or "").strip():
-            errors.append(f"{where}: missing title")
-        if str(item.get("coding_tool") or "") not in VALID_TIERS:
-            errors.append(f"{where}: bad coding_tool (tier_s/a/b/c)")
-        if not str(item.get("tier_reason") or "").strip():
-            errors.append(f"{where}: missing tier_reason")
-        if not str(item.get("description") or "").strip():
-            errors.append(f"{where}: missing description")
-        acceptance = item.get("acceptance") or []
-        if not isinstance(acceptance, list) or not [
-                entry for entry in acceptance if str(entry).strip()]:
-            errors.append(f"{where}: missing acceptance criteria")
-        tickets.append(dict(item))
-    errors.extend(_local_cycles(tickets))
-    # blocked_by targets: local keys or existing tasks; no dupes of open ones.
-    keys = {str(item.get("key")) for item in tickets}
-    for item in tickets:
-        for dep in item.get("blocked_by") or []:
-            dep = str(dep)
-            if dep in keys:
-                continue
-            exists = await env.tasks.get_task(dep)
-            if exists is None:
-                errors.append(
-                    f"{item.get('key')}: blocked_by unknown {dep!r}")
-    siblings = await env.tasks.list_by_objective(
-        str(objective.get("objective_id")))
-    open_titles = {str(item.get("title") or "").strip().lower()
-                   for item in siblings
-                   if str(item.get("status") or "") not in TERMINAL_TICKET_STATUS}
-    for item in tickets:
-        if str(item.get("title") or "").strip().lower() in open_titles:
-            errors.append(f"{item.get('key')}: duplicates an open ticket")
-    return errors, tickets
+        if spec.get("enabled", False):
+            lines.append(f"- {name}: enabled")
+        else:
+            reason = str(spec.get("reason") or "disabled").strip()
+            lines.append(f"- {name}: DISABLED ({reason}) — never route here")
+    lines.append("Never invent an agent. If no enabled agent can do required "
+                 "work, return capability_gap with no tickets.")
+    return "\n".join(lines)
 
 
 def _planner_prompt(
@@ -351,15 +276,37 @@ def _planner_prompt(
     inbox_md: str,
     deferred: Sequence[str],
     sizing_hint: str = "",
+    blocked_tickets: Sequence[Mapping[str, Any]] = (),
+    agents_md: str = "",
+    policy_text: str = "",
+    handoffs: Sequence[str] = (),
+    roadmap: Sequence[str] = (),
     repo: Path | str | None = None,
 ) -> str:
+    """Planner prompt: bounded state + JSON contract (self-contained).
+
+    The prompt carries the full ``PlannerResult`` shape inline: the planner
+    runs in the project repo and cannot rely on reading OpenCEO sources.
+    """
     criteria = [f"- {item}" for item in (objective.get("anchor") or {}).get(
         "acceptance", [])] or ["- (derive verifiable criteria)"]
-    opened = [f"- {item.get('task_id')}: {item.get('title')} "
-              f"[{item.get('coding_tool')}] ({item.get('status')})"
-              for item in open_tickets] or ["- (none)"]
+
+    def _ticket_line(item: Mapping[str, Any]) -> str:
+        line = (f"- {item.get('task_id')}: {item.get('title')} "
+                f"[{item.get('coding_tool')}] ({item.get('status')})")
+        blockers = item.get("blocked_by") or []
+        if blockers:
+            line += f" blocked_by={list(blockers)}"
+        return line
+
+    opened = [_ticket_line(item) for item in open_tickets] or ["- (none)"]
+    blocked = [_ticket_line(item) for item in blocked_tickets] or ["- (none)"]
     lines = [
-        "You are the objective planner. You do NOT explore code.",
+        "You are the global OpenCEO Objective Planner and Agent Router.",
+        "This is one fresh headless planning cycle: reason from the durable",
+        "state below, not from memory. Do not explore the full codebase;",
+        "read a bounded number of files only when a decision materially",
+        "depends on them.",
         f"Objective {objective.get('objective_id')}:",
         f"GOAL: {(objective.get('anchor') or {}).get('goal', '')}",
         "ACCEPTANCE:",
@@ -371,64 +318,162 @@ def _planner_prompt(
         "OPEN TICKETS:",
         *opened,
         "",
+        "BLOCKED TICKETS:",
+        *blocked,
+        "",
+        "RECENT HANDOFFS (latest first):",
+        *([f"- {item}" for item in handoffs] or ["- (none)"]),
+        "",
+        "ROADMAP_REMAINING:",
+        *([f"- {item}" for item in roadmap] or ["- (none)"]),
+        "",
         "INBOX (pre-existing findings touching objective files, "
         "claim via includes_findings):",
         inbox_md,
     ]
     if deferred:
-        lines.extend(["", "DEFERRED (codexj suggestions out of scope):",
+        lines.extend(["", "DEFERRED (reviewer suggestions out of scope):",
                       *[f"- {item}" for item in deferred]])
     if sizing_hint:
         lines.extend(["", "SIZING HINT from the converted ticket:",
                       sizing_hint[:3000]])
+    if agents_md:
+        lines.extend(["", agents_md])
     lines.extend([
         "",
-        "Write .tier-s/TICKETS.yaml (§16.7): objective, complete flag,",
-        "roadmap_remaining, and a horizon of 2-3 tickets, each with key,",
-        "title, coding_tool, tier_reason,",
-        "self-contained description, acceptance, files_hint, blocked_by",
-        "(local keys or existing task_ids, acyclic) and includes_findings.",
-        "If the anchor acceptance is met, write complete:true with no",
-        "tickets instead. Then emit TICKETS_READY in .tier-s/status.",
+        "ROUTING (summary; the normative policy below rules on conflicts):",
+        "- Choose target_agent FIRST, only from enabled registered agents.",
+        "- DEV tiers apply only when target_agent == dev, in this order:",
+        "  1. tier_s: independent planning/challenge/review materially",
+        "     reduces high-impact residual risk. Justify with",
+        "     why_consensus_is_needed + why_single_session_is_insufficient,",
+        "     naming the residual failure other stages would catch.",
+        "  2. tier_a: discovering truth/root cause/architecture is the",
+        "     dominant difficulty.",
+        "  3. tier_c: a qualifying independent frozen oracle exists AND",
+        "     (the change is reversible OR its blast radius is bounded),",
+        "     and S/A are not required. builder_tests alone NEVER qualify.",
+        "     tier_reason must cite the oracle + reversibility/boundedness.",
+        "  4. tier_b: bounded non-trivial work not safely protected enough",
+        "     for C.",
+        "- Oracle types: preexisting_tests, contract_or_schema,",
+        "  bug_reproduction, separate_ticket_tests, planner_executable_spec",
+        "  (only when frozen before build), builder_tests (never qualifying",
+        "  alone).",
+        "- Quota never redefines the technical tier. Never choose",
+        "  runtime, CLI account, or model.",
         "",
-        "coding_tool MUST be exactly one of: tier_s, tier_a, tier_b, tier_c.",
-        "What they are (one-shot agents, except tier_s):",
-        "- tier_s: full Tier S machinery (own planning + review rounds + gates).",
-        "  Only when the ticket alone needs adversarial review or orchestration.",
-        "- tier_a: Opus one-shot (claudej). Ambiguous requirements, architecture",
-        "  calls, subtle classification: genuine Opus-grade judgment.",
-        "- tier_b: GPT one-shot (codexj). Tricky multi-file integration where a",
-        "  strong model adds margin.",
-        "- tier_c: Muse one-shot with automatic fallback (muse, then DeepSeek,",
-        "  then claudep). High-quality first-class models, a few benchmark",
-        "  points below A/B, effectively unlimited quota. DEFAULT for",
-        "  everything else: deterministic plumbing, fixed rules, mechanical",
-        "  refactors, docs, tests.",
-        "The letters order quota scarcity, NOT quality. Default to tier_c;",
-        "choose another tier only when the ticket demonstrably needs it, and",
-        "say why in tier_reason (one line: what breaks on C).",
+        f"OUTPUT: write .tier-s/{PLANNER_RESULT_FILE} with exactly this JSON",
+        "object (no YAML, no markdown fences around the file content):",
+        "{",
+        '  "objective_status": "active | complete_candidate | blocked | '
+        'capability_gap",',
+        '  "state_summary": "<what is resolved and what is next>",',
+        '  "information_gaps": [{"gap": "...", "materiality": '
+        '"low|medium|high|critical", "resolution": "..."}],',
+        '  "tickets": [ <1-3, ONLY when active> {',
+        '    "local_ref": "<unique short key>", "title": "...",',
+        '    "target_agent": "<enabled agent>", "work_type": '
+        '"<e.g. implementation|debugging|research|documentation>",',
+        '    "goal": "...", "why_now": "...",',
+        '    "inputs": [], "constraints": [], "out_of_scope": [],',
+        '    "acceptance_criteria": ["<at least one>"],',
+        '    "expected_artifacts": ["<at least one>"],',
+        '    "blocked_by": ["<local_ref or existing task_id, acyclic>"],',
+        '    "coding_tool": "<dev only: tier_s|tier_a|tier_b|tier_c>",',
+        '    "tier_reason": "<dev only: why this tier>",',
+        '    "oracle": {"type": "<oracle type>", "refs": [{"ref": "...",',
+        '      "description?": "..."}]},',
+        '    "why_consensus_is_needed?": "<tier_s only>",',
+        '    "why_single_session_is_insufficient?": "<tier_s only>",',
+        '    "includes_findings?": ["<inbox fingerprints claimed>"]',
+        "  } ],",
+        '  "roadmap_remaining": ["<speculative future work>"],',
+        '  "replan_when": ["<conditions that should trigger replanning>"]',
+        "}",
+        "Rules: active carries 1-3 tickets; complete_candidate, blocked and",
+        "capability_gap carry NO tickets. complete_candidate triggers final",
+        "review, it never closes the objective directly. Every ticket has",
+        "one responsibility and fits one bounded execution cycle. No",
+        "duplicate of an open ticket. Then emit PLANNER_READY in",
+        ".tier-s/status.",
     ])
+    if policy_text.strip():
+        lines.extend(["", "NORMATIVE ROUTING POLICY (authoritative):",
+                      policy_text.strip()[:60000]])
     return knowledge_mod.with_preamble("\n".join(lines), repo, "en")
 
 
+async def _task_exists(env: ObjectiveEnv, task_id: str) -> bool:
+    try:
+        return await env.tasks.get_task(task_id) is not None
+    except Exception:
+        return False
+
+
+def _trailing_stalled_runs(runs: Sequence[Mapping[str, Any]]) -> int:
+    """Trailing runs that planned nothing without completing (§9.6).
+
+    Only ``active`` runs count: ``blocked``/``capability_gap`` park the
+    objective explicitly instead of stalling silently. Entries without a
+    status predate the single planner and keep the legacy reading.
+    """
+    stalled = 0
+    for run in reversed(runs):
+        status = run.get("status")
+        if status is not None and status != "active":
+            break
+        if run.get("tickets_created", 0) == 0 and not run.get("complete"):
+            stalled += 1
+        else:
+            break
+    return stalled
+
+
+def _planner_retry_prompt(
+    errors: Sequence[str],
+    repo: Path | str | None,
+) -> str:
+    return knowledge_mod.with_preamble(
+        f"Your {PLANNER_RESULT_FILE} is invalid: {'; '.join(errors)}\n"
+        "Fix the file in place and emit PLANNER_READY again.",
+        repo, "en")
+
+
+def _telemetry_after_run(
+    objective: Mapping[str, Any],
+    runs: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Planner telemetry: cycles so far (ADR: measured from day one).
+
+    ``cancelled_unnecessary``/``agent_reassignments``/``tier_reclassifications``
+    start at zero: their signals arrive with TASK-2026-00116/00119.
+    """
+    tele = dict(objective.get("planner_telemetry") or {})
+    tele["cycles"] = len(runs)
+    tele["replans"] = max(0, len(runs) - 1)
+    tele["no_progress_cycles"] = _trailing_stalled_runs(runs)
+    tele.setdefault("tickets_created", 0)
+    tele.setdefault("cancelled_unnecessary", 0)
+    tele.setdefault("agent_reassignments", 0)
+    tele.setdefault("tier_reclassifications", 0)
+    return tele
+
+
 async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]:
-    """Run the objective planner once (§9.3). Returns a result summary."""
+    """Run the single global planner once (§9.3). Returns a result summary."""
     objective = await env.objectives.get_objective(objective_id)
     if objective is None:
         return {"ok": False, "reason": "objective not found"}
     cfg = env.objectives_cfg
+    planner_cfg = env.planner_cfg
     tickets = await env.tasks.list_by_objective(objective_id)
     if len(tickets) >= int(cfg.get("max_tickets", 20)):
         return await _objective_park(
             env, objective, "needs_owner",
             f"max_tickets ({cfg.get('max_tickets', 20)}) reached")
     runs = objective.get("planning_runs") or []
-    stalled = 0
-    for run in reversed(runs):
-        if run.get("tickets_created", 0) == 0 and not run.get("complete"):
-            stalled += 1
-        else:
-            break
+    stalled = _trailing_stalled_runs(runs)
     closed_before = sum(1 for item in tickets
                         if str(item.get("status")) in TERMINAL_TICKET_STATUS)
     if stalled >= int(cfg.get("max_planning_runs_without_progress", 2)) \
@@ -436,8 +481,23 @@ async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]
         return await _objective_park(
             env, objective, "needs_owner",
             "planning without progress (tope §9.6)")
+    agents = planner_cfg.get("agents", {}) or {}
+    if not agents:
+        return await _objective_park(
+            env, objective, "needs_owner",
+            "planner agent registry is empty "
+            "(global objective_planner.agents)")
+    policy_text = planner_mod.load_policy_text(planner_cfg.get("policy_path"))
+    if not policy_text:
+        return await _objective_park(
+            env, objective, "needs_owner",
+            "planner routing policy unreadable; refusing to plan blind")
     open_tickets = [item for item in tickets
                     if str(item.get("status")) not in TERMINAL_TICKET_STATUS]
+    blocked: list[Mapping[str, Any]] = []
+    ready: list[Mapping[str, Any]] = []
+    for item in open_tickets:
+        (blocked if await _blocked(env, item) else ready).append(item)
     files = sorted({name for paths in
                     (objective.get("tickets_files") or {}).values()
                     for name in paths})
@@ -446,10 +506,18 @@ async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]
         inbox_md = await inbox_mod.inbox_md_for_planner(
             env.inbox, files, int(cfg.get("inbox_items_for_planner", 15)))
     deferred = [str(item) for item in objective.get("deferred") or []]
+    handoffs = [str(entry.get("handoff_excerpt") or "").strip()
+                for entry in (objective.get("tickets_log") or [])[-3:]]
+    handoffs = [item for item in reversed(handoffs) if item]
     prompt = _planner_prompt(
         objective, (objective.get("capsule") or {}).get("text", ""),
-        open_tickets, inbox_md or "INBOX\n(none)\n", deferred,
-        str(objective.get("sizing_hint") or ""), repo=env.repo)
+        ready, inbox_md or "INBOX\n(none)\n", deferred,
+        str(objective.get("sizing_hint") or ""),
+        blocked_tickets=blocked, agents_md=_agents_section(agents),
+        policy_text=policy_text, handoffs=handoffs,
+        roadmap=[str(item) for item in
+                 objective.get("roadmap_remaining") or []],
+        repo=env.repo)
     scratch = env.repo / ".tier-s" / "objectives" / objective_id
     scratch.mkdir(parents=True, exist_ok=True)
     (scratch / "OBJECTIVE_CAPSULE.md").write_text(
@@ -457,50 +525,88 @@ async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]
         encoding="utf-8")
     (scratch / "INBOX.md").write_text(inbox_md or "INBOX\n(none)\n",
                                       encoding="utf-8")
-    timeout_s = int(env.timeouts.get("objective_planner", 15)) * 60
+    timeout_s = int(planner_cfg.get("timeout_minutes", 15)) * 60
     errors: list[str] = []
-    data: dict[str, Any] = {}
+    result: planner_mod.PlannerResult | None = None
+    candidates = [env.repo / ".tier-s" / PLANNER_RESULT_FILE,
+                  scratch / PLANNER_RESULT_FILE]
     for _attempt in range(2):
+        # Drop any previous cycle output: a run that writes nothing must
+        # read as missing, never as the last cycle's valid file.
+        for stale in candidates:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
         await env.executor.run("objective_planner", prompt, env.repo, timeout_s)
-        text = _read(env.repo / ".tier-s" / "TICKETS.yaml")
+        text = _read(candidates[0]) or _read(candidates[1])
         if not text:
-            text = _read(scratch / "TICKETS.yaml")
-        if not text:
-            errors = ["no TICKETS.yaml"]
+            errors = [f"no {PLANNER_RESULT_FILE}"]
         else:
             try:
-                data = parse_tickets_yaml(text)
+                candidate = planner_mod.parse_planner_result(text)
             except ValueError as exc:
                 errors = [str(exc)]
             else:
-                errors, _tickets = await validate_tickets(env, objective, data)
+                errors = await planner_mod.validate_planner_result(
+                    candidate,
+                    agents=agents,
+                    open_titles=[str(item.get("title") or "")
+                                 for item in open_tickets],
+                    task_exists=lambda dep: _task_exists(env, dep),
+                    material_failures=(objective.get("material_failures")
+                                       or []),
+                    horizon=planner_cfg.get("ticket_horizon"),
+                )
+                if not errors:
+                    result = candidate
         if not errors:
             break
-        prompt = (f"Your TICKETS.yaml is invalid: {'; '.join(errors)}\n"
-                  "Fix it in place and emit TICKETS_READY again.")
+        prompt = _planner_retry_prompt(errors, env.repo)
     try:
         await env.executor.cleanup("objective_planner")
     except Exception:
         pass
-    if errors:
+    if errors or result is None:
         return await _objective_park(
             env, objective, "needs_owner",
-            f"invalid TICKETS.yaml after retry: {'; '.join(errors)}")
-    runs.append({"at": _utcnow_iso(),
-                 "tickets_created": len(data.get("tickets") or []),
-                 "complete": bool(data.get("complete", False))})
+            f"invalid {PLANNER_RESULT_FILE} after retry: "
+            f"{'; '.join(errors)}")
+    status = result.objective_status.value
+    runs.append({"at": _utcnow_iso(), "status": status,
+                 "tickets_created": len(result.tickets),
+                 "complete": status == "complete_candidate"})
     await env.objectives.patch_objective(objective_id, {
         "planning_runs": runs,
-        "roadmap_remaining": list(data.get("roadmap_remaining") or []),
+        "roadmap_remaining": list(result.roadmap_remaining),
         "_closed_at_last_plan": closed_before,
         "sizing_hint": "",
+        "planner_telemetry": _telemetry_after_run(objective, runs),
     })
-    if data.get("complete", False):
+    if status == "complete_candidate":
         return await run_final_review(env, objective_id)
-    created = await _create_planned_tickets(env, objective, data)
+    if status == "blocked":
+        return await _objective_park(
+            env, objective, "blocked", result.state_summary[:300])
+    if status == "capability_gap":
+        await env.objectives.patch_objective(objective_id, {
+            "capability_gap": {
+                "declared_at": _utcnow_iso(),
+                "summary": result.state_summary[:2000],
+                "gaps": [gap.model_dump()
+                         for gap in result.information_gaps],
+            },
+        })
+        return await _objective_park(
+            env, objective, "capability_gap", result.state_summary[:300])
+    created = await _create_planned_tickets(env, objective, result)
+    tele = dict((await env.objectives.get_objective(objective_id) or {}
+                 ).get("planner_telemetry") or {})
+    tele["tickets_created"] = int(tele.get("tickets_created", 0)) + len(created)
     await env.objectives.patch_objective(objective_id, {
         "tickets": [*(objective.get("tickets") or []),
                     *(item["task_id"] for item in created)],
+        "planner_telemetry": tele,
     })
     return {"ok": True, "tickets_created": len(created),
             "task_ids": [item["task_id"] for item in created]}
@@ -522,14 +628,63 @@ async def _objective_park(
     return {"ok": False, "reason": reason, "detail": detail}
 
 
+def _planned_description(ticket: planner_mod.PlannedTicket) -> str:
+    """Self-contained executor description from a planned ticket."""
+    sections = [f"GOAL: {ticket.goal}", "", f"WHY NOW: {ticket.why_now}"]
+    if ticket.inputs:
+        sections.extend(["", "INPUTS:",
+                         *[f"- {item}" for item in ticket.inputs]])
+    if ticket.constraints:
+        sections.extend(["", "CONSTRAINTS:",
+                         *[f"- {item}" for item in ticket.constraints]])
+    if ticket.out_of_scope:
+        sections.extend(["", "OUT OF SCOPE:",
+                         *[f"- {item}" for item in ticket.out_of_scope]])
+    sections.extend(["", "EXPECTED ARTIFACTS:",
+                     *[f"- {item}" for item in ticket.expected_artifacts]])
+    if ticket.oracle is not None:
+        refs = ", ".join(ref.ref for ref in ticket.oracle.refs)
+        sections.extend(["", f"ORACLE ({ticket.oracle.type.value}): {refs}"])
+    if ticket.why_consensus_is_needed:
+        sections.extend(
+            ["", f"WHY CONSENSUS: {ticket.why_consensus_is_needed}"])
+    if ticket.why_single_session_is_insufficient:
+        sections.extend(
+            ["", "WHY NOT SINGLE SESSION: "
+             f"{ticket.why_single_session_is_insufficient}"])
+    return "\n".join(sections)
+
+
+def _planned_params(ticket: planner_mod.PlannedTicket) -> dict[str, Any]:
+    """Machine-readable planner fields carried on the ticket params."""
+    params: dict[str, Any] = {
+        "target_agent": ticket.target_agent,
+        "work_type": ticket.work_type,
+    }
+    if ticket.tier_reason:
+        params["tier_reason"] = ticket.tier_reason
+    if ticket.oracle is not None:
+        params["oracle"] = {
+            "type": ticket.oracle.type.value,
+            "refs": [ref.model_dump(exclude_none=True)
+                     for ref in ticket.oracle.refs],
+        }
+    if ticket.why_consensus_is_needed:
+        params["why_consensus_is_needed"] = ticket.why_consensus_is_needed
+    if ticket.why_single_session_is_insufficient:
+        params["why_single_session_is_insufficient"] = (
+            ticket.why_single_session_is_insufficient)
+    return params
+
+
 async def _create_planned_tickets(
     env: ObjectiveEnv,
     objective: Mapping[str, Any],
-    data: Mapping[str, Any],
+    result: planner_mod.PlannerResult,
 ) -> list[dict[str, Any]]:
     """Create every validated ticket in topological order (§9.3)."""
-    tickets = [dict(item) for item in data.get("tickets") or []]
-    keys = [str(item.get("key")) for item in tickets]
+    tickets = list(result.tickets)
+    keys = [ticket.local_ref for ticket in tickets]
     order: list[str] = []
     permanent: set[str] = set()
 
@@ -538,27 +693,29 @@ async def _create_planned_tickets(
             return
         permanent.add(node)
         item = next(entry for entry in tickets
-                    if str(entry.get("key")) == node)
-        for dep in item.get("blocked_by") or []:
-            if str(dep) in keys:
-                visit(str(dep))
+                    if entry.local_ref == node)
+        for dep in item.blocked_by:
+            if dep in keys:
+                visit(dep)
         order.append(node)
 
     for key in keys:
         visit(key)
-    by_key = {str(item.get("key")): item for item in tickets}
+    by_key = {ticket.local_ref: ticket for ticket in tickets}
     created: list[dict[str, Any]] = []
     key_to_task: dict[str, str] = {}
     run_tag = uuid.uuid4().hex[:8]
     for key in order:
         item = by_key[key]
-        blocked = [key_to_task.get(str(dep), str(dep))
-                   for dep in item.get("blocked_by") or []]
+        blocked = [key_to_task.get(dep, dep) for dep in item.blocked_by]
         payload = {
-            "title": str(item.get("title")),
-            "description": str(item.get("description")),
-            "acceptance": [str(entry) for entry in item.get("acceptance") or []],
-            "coding_tool": str(item.get("coding_tool")),
+            "title": item.title,
+            "description": _planned_description(item),
+            "acceptance": list(item.acceptance_criteria),
+            "coding_tool": (item.coding_tool.value
+                            if item.coding_tool is not None else None),
+            "agent_hint": item.target_agent,
+            "params": _planned_params(item),
             "blocked_by": blocked,
             "objective_id": str(objective.get("objective_id")),
             "origin": "objective_planner",
@@ -576,7 +733,7 @@ async def _create_planned_tickets(
         key_to_task[key] = task_id
         created.append({"task_id": task_id, "key": key})
         if env.inbox is not None:
-            for fp in item.get("includes_findings") or []:
+            for fp in item.includes_findings:
                 try:
                     await inbox_mod.mark_assigned(env.inbox, str(fp), task_id)
                 except Exception:
@@ -671,6 +828,7 @@ async def _absorb_close(
         "decisions": [str(entry)[:200] for entry in close.decisions[:10]],
         "deviations": [str(entry)[:300] for entry in close.deviations[:5]],
         "gotchas": [str(entry)[:300] for entry in close.gotchas[:5]],
+        "handoff_excerpt": str(close.handoff_excerpt or "")[:500],
     })
     files = dict(objective.get("tickets_files") or {})
     files[close.task_id] = list(close.files)

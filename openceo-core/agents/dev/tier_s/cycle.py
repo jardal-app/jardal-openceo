@@ -7,7 +7,8 @@ that Python can do is delegated to a model.
 Seams for later phases: review rounds + arbitration (F3) slot between the
 build gates and the final gates; the findings inbox (F4) receives
 out-of-scope verdicts; simple tiers (F5) reuse :mod:`gates`; objectives
-(F6) add conversion, ``TICKETS.yaml`` and the capsule. Live CLI executors
+(F6) add conversion, the ``PlannerResult`` planner and the capsule.
+Live CLI executors
 (tmux/process) implement :class:`Executor`; tests inject scripted fakes.
 """
 

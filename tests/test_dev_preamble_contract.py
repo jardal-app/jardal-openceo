@@ -311,6 +311,15 @@ class TierSPromptsTests(_RepoCases):
                 prompt = objectives_mod._closure_retry_prompt([1], repo)
                 self.assertPreamble(prompt, repo, "en")
 
+    def test_objective_planner_retry_prompt(self) -> None:
+        for repo in (self.claude_only, self.agents_only, self.symlink,
+                     self.neither, self.both):
+            with self.subTest(repo=repo.name):
+                prompt = objectives_mod._planner_retry_prompt(
+                    ["bad json"], repo)
+                self.assertPreamble(prompt, repo, "en")
+                self.assertIn("PLANNER_RESULT.json", prompt)
+
     def test_vault_note_prompt(self) -> None:
         for repo in (self.claude_only, self.agents_only, self.symlink,
                      self.neither, self.both):
