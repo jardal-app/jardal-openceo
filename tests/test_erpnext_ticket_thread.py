@@ -334,11 +334,18 @@ class UpdateTicketTests(TempRootCase):
         )
 
     def test_respuesta_acotada_a_la_vista_corta(self):
-        """El documento entero de `Task` no viaja al contexto del agente."""
+        """El documento entero de `Task` no viaja al contexto del agente.
+
+        Cambio de contrato deliberado (TASK-2026-00013): la vista suma `is_group`
+        y `parent_task` para que las operaciones de jerarquia (convertir, enlazar)
+        sean verificables en su propia respuesta, sin un GET extra. Sigue siendo
+        una vista corta y cerrada: ocho escalares como maximo, nunca el documento.
+        """
         result = run(self.adapter.update_ticket("TASK-2026-00079", subject="Titulo"))
         self.assertEqual(
             set(result["ticket"]),
-            {"name", "subject", "status", "priority", "project", "openceo_ref"},
+            {"name", "subject", "status", "priority", "project", "openceo_ref",
+             "is_group", "parent_task"},
         )
         self.assertEqual(result["changed"], ["subject"])
         self.assertEqual(result["ticket"]["status"], "Open")

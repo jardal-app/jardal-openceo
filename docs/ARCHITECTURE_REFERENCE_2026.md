@@ -579,7 +579,7 @@ The parent task always exists — it gives visibility of total progress. Childre
 
 Business hierarchy is separate and lives in ERPNext: group Tasks (`is_group`), real children (`parent_task`, `lft`/`rgt` tree), and the `depends_on` table. No ERPNext pre-configuration is needed — the DocType already brings these fields; the work is OpenCEO-side: closed semantic adapter operations, `parent_task`/`depends_on` parameters on ticket creation (so the planner, the CEO, and sessions link at creation), and a `blocked_by` ↔ `depends_on` mapping with topological state moves (ERPNext answers 417 while dependencies are open).
 
-> pendiente: TASK-2026-00013.
+> Implemented by TASK-2026-00013 (2026-10-06): `create_group_task`, `convert_to_group`, `link_child`, `set_dependencies` in `tools/erpnext_tickets.py`; content-based 417 classification (`classify_417`); `pending_status` retry for dependency-blocked pushes. Linking a child auto-adds a `depends_on` row on the parent (Frappe-side), so a group cannot complete with open children.
 
 #### External References and Notion Compatibility
 
