@@ -4,6 +4,8 @@ Resumen operativo corto del estado real del repo.
 
 ## Continuar aquí (traspaso a la próxima sesión)
 
+**F0 COMPLETO (2026-10-06, `sigue`): 00123 CERRADO.** Preámbulo único mergeado (`b2a26ba`): helper `repo_preamble`/`with_preamble` en `tier_s/knowledge.py`, 20 constructores cableados, oráculo `test_dev_preamble_contract.py` (33 tests/105 subtests). `TASK-2026-00123` Completed (negocio + ejecución). Suite completa: 1338 passed / 2 skipped / 0 failed. Servicio pid 8021 (openapi 200, health ok). Sigue **TASK-2026-00112** (F1 planner único, tier_s, ruta crítica — desbloqueado); en paralelo listos 00114, 00115 y 00013 (00113 espera a 00043).
+
 **F0 00111 CERRADO (2026-10-06, `sigue`).** Contrato normativo mergeado (`10b0816`): ARCHITECTURE_REFERENCE §Proactive CEO + glosario + Parent Task Tracking + banner Tier S; CLAUDE.md §5/§6/§10/§11. `TASK-2026-00111` Completed (negocio + ejecución, push verificado). Suite §10: 66 passed. Sin restart (solo docs). Nota: `status_pushed` vive en `params._mirrors.erpnext`, no en top-level. Sigue **TASK-2026-00123** (F0 preámbulo, en paralelo); 00112 desbloqueado tras F0.
 
 **RUMBO AUTONOMÍA: épico TASK-2026-00110 + palabra clave `sigue` (2026-10-06).** Decisión del dueño: OpenCEO trabaja como un equipo humano real. El dueño solo entra por escalado: gasto nuevo, credencial, acción irreversible, replanificación estratégica, mandato o revisión exigida por política.
