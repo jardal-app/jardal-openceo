@@ -4,6 +4,27 @@ Resumen operativo corto del estado real del repo.
 
 ## Continuar aquí (traspaso a la próxima sesión)
 
+**RUMBO AUTONOMÍA: épico TASK-2026-00110 + palabra clave `sigue` (2026-10-06).** Decisión del dueño: OpenCEO trabaja como un equipo humano real. El dueño solo entra por escalado: gasto nuevo, credencial, acción irreversible, replanificación estratégica, mandato o revisión exigida por política.
+
+Roadmap, detallado en el comentario del épico:
+- F0: contrato `00111` + preámbulo «Lee CLAUDE.md y …» en todos los prompts de dev `00123`.
+- F1: planner único Muse headless `00112`, `00116`.
+- F2: objetivo único con identidad ERPNext `00013`, `00117`.
+- F3: encolador híbrido `00113`, tras `00043`.
+- F4: mandato y escalado `00114`, sin aprobaciones sobrantes `00118`, CEO autónomo `00119`.
+- F5: Horizon cockpit `00120` + promoción `00121`.
+- F6: crear proyecto end-to-end `00115`.
+- F7: piloto real `00122`, la única prueba con tokens.
+
+Documentos:
+- Planner normativo en `docs/objective-planner-routing-policy.md` + `docs/decision-2026-10-05-planner-objetivos-muse.md`.
+- Consolidado local en `docs/work/TASK-2026-00110-objetivo-unico-ceo-autonomo.md`.
+- Vault: `decisions/2026-10-06-objetivo-unico-ceo-autonomo`.
+
+También quedó commiteado el cambio pendiente `musej` por defecto (de otra sesión; suite §10: 66 passed). Servicio reiniciado: pid 4136183, openapi 200, health ok.
+
+**Consigna:** sin pruebas con gasto de tokens hasta completar F0–F6 (CLAUDE.md §11). **Sigue:** escribir `sigue` → `TASK-2026-00111` y `TASK-2026-00123` (F0, en paralelo).
+
 **FIX PROMPT TIERS (2026-10-05, 00096).** El planner objetivo solo recibía «cheapest tier that suffices» sin tabla ni cuotas (los nombres los sacaba de priors/exploración del repo; S2: b/b/a, A3 «mayor capacidad, no el más barato»). Fix merge `32f818d`: bloque de tiers en el prompt (S/A/B/C definidos; C = Muse de alta calidad + cuota abundante + DEFECTO; letras = escasez, no calidad; `tier_reason` debe decir qué rompe en C); eliminado «cheap» (única aparición en código). 2 tests nuevos (mutación verificada), puerta 75 passed, servicio pid 848682 sano. Divergencia anotada: diseño §3 conserva «más económico» (congelado; ofrecer actualizar). Sigue **S3** + calibrar con datos (¿A1/A2 necesitaban B?).
 
 **FIX PADRE-CONVERTED + ANÁLISIS TIERS (2026-10-05, 00096).** Bug confirmado por el dueño: la conversión marcaba `completed` y empujaba `Completed` a ERP con hijos en cola (contra §9.7). Fix `3e96956` + merge `8354f6d`: estado `converted` (terminal, jamás se empuja; guardia run_task, terminal sets, `completed_at`, display cliente `En proceso` intactos); `_finish_objective` completa al padre al cerrar (§9.7 push). Suite **1302 passed / 0 failed** (7 tests nuevos, mutación 4-falla). 00096 reparado vía writers sancionados (ejecución `converted`, negocio `Working`, `status_pushed=in_progress`, 3 hijos intactos); servicio pid 746986 sano, instancia única. Análisis tiers (SIN cambios, por orden): el planner solo recibe «cheapest tier that suffices» sin tabla ni cuotas; S2 eligió b/b/a y A3 escribió «mayor capacidad, no el más barato» — el §3 (C=defecto, letras=coste) no llega al modelo. Opciones en comentario del ticket: inyectar §3 / cuota viva / defecto-C / monitorear S3. Sigue **S3** (orden dueño) + decisión tiers. Deuda: Cancel 00103/00104; remap v2 00089–00095; Qwen/muse `AGENTS.md` en vivo.
