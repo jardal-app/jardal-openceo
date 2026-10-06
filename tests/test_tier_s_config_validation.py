@@ -97,6 +97,33 @@ class ValidateProjectTests(unittest.TestCase):
         self.assertIn("dev.tiers", errors[0])
         self.assertIn("global", errors[0])
 
+    def test_objective_planner_section_is_rejected(self) -> None:
+        self._write("proj", "objective_planner:\n  engine: other\n")
+        errors = _loader_for(self.root).validate_project("proj")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("objective_planner", errors[0])
+        self.assertIn("global", errors[0])
+
+    def test_global_defaults_carry_single_planner(self) -> None:
+        loader = _loader_for(self.root)
+        cfg = loader.load_project("anything")
+        planner = cfg["objective_planner"]
+        self.assertEqual(planner["engine"], "muse_code")
+        self.assertEqual(planner["profile"], "muse_spark_1_3_max")
+        self.assertEqual(planner["invocation"], "headless")
+        self.assertEqual(planner["ticket_horizon"], [1, 3])
+        role = planner["role"]
+        self.assertEqual(role["model"], "muse-spark-1.3-max")
+        self.assertEqual(role["command"][0], "musej")
+        self.assertIn("--reasoning-effort", role["command"])
+        self.assertTrue(planner["agents"]["dev"]["enabled"])
+        self.assertFalse(planner["agents"]["research"]["enabled"])
+        # Moved out of Tier S: no planner role or timeout under dev.tier_s.
+        self.assertNotIn("objective_planner",
+                         cfg["dev"]["tier_s"]["roles"])
+        self.assertNotIn("objective_planner",
+                         cfg["dev"]["tier_s"]["timeouts_minutes"])
+
 
 class CreateSessionGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_project_refuses_session_creation(self) -> None:

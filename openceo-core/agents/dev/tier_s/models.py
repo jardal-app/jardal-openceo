@@ -19,7 +19,7 @@ SIGNALS: dict[str, str] = {
     "build_done": "BUILD_DONE",
     "fix_done_prefix": "FIX_DONE_",
     "review_done_prefix": "REVIEW_DONE_",
-    "tickets_ready": "TICKETS_READY",  # F6
+    "planner_ready": "PLANNER_READY",  # F6 (was TICKETS_READY pre-00112)
     "closure_ready": "CLOSURE_READY",  # F6
     "ticket_complete": "TICKET_COMPLETE",
     "objective_closed": "OBJECTIVE_CLOSED",  # F6
@@ -81,10 +81,11 @@ REVIEW_DEFAULTS: dict[str, Any] = {
     "reviewer_timeout_minutes": 15,
 }
 
-#: Per-role timeouts in minutes (design §17.1, initial).
+#: Per-role timeouts in minutes (design §17.1, initial). The objective
+#: planner timeout lives in the global objective_planner block
+#: (TASK-2026-00112), not here.
 TIMEOUTS_DEFAULTS: dict[str, int] = {
     "planner": 20,
-    "objective_planner": 15,  # F6
     "plan_review": 15,
     "build": 60,
     "fix": 30,  # F3

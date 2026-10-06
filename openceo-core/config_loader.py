@@ -79,9 +79,11 @@ class ConfigLoader:
         run. Tier S design v2 §3/§17: Tier S config and the simple-tier
         executors are global (the defaults above), so any ``dev.tier_s`` or
         ``dev.tiers`` content in a project.yaml is invalid, and
-        ``dev.coding_tool`` is obsolete (routing is per-task). Callers
-        park the project's tickets in ``waiting(config)`` when this is
-        non-empty; other projects are unaffected.
+        ``dev.coding_tool`` is obsolete (routing is per-task). The single
+        global Objective Planner is likewise global: top-level
+        ``objective_planner`` content is invalid (TASK-2026-00112).
+        Callers park the project's tickets in ``waiting(config)`` when
+        this is non-empty; other projects are unaffected.
         """
         if not project:
             return []
@@ -95,12 +97,28 @@ class ConfigLoader:
             return [f"{project}/project.yaml: unreadable ({exc})"]
         if not isinstance(data, dict):
             return [f"{project}/project.yaml: top level must be a mapping"]
+        errors: list[str] = []
+        planner = data.get("objective_planner")
+        if planner is not None and planner != {}:
+            if isinstance(planner, dict):
+                found = ", ".join(sorted(str(key) for key in planner))
+                errors.append(
+                    "objective_planner must not be set in project.yaml: "
+                    "the single Objective Planner is global. Remove it from "
+                    f"{project}/project.yaml (found: {found})."
+                )
+            else:
+                errors.append(
+                    f"objective_planner in {project}/project.yaml must be "
+                    "a mapping or absent."
+                )
         dev = data.get("dev")
         if dev is None:
-            return []
+            return errors
         if not isinstance(dev, dict):
-            return [f"{project}/project.yaml: 'dev' must be a mapping"]
-        errors: list[str] = []
+            errors.append(
+                f"{project}/project.yaml: 'dev' must be a mapping")
+            return errors
         if "coding_tool" in dev:
             errors.append(
                 "dev.coding_tool is obsolete: routing is per-task "
@@ -251,7 +269,6 @@ class ConfigLoader:
                     },
                     "timeouts_minutes": {
                         "planner": 20,
-                        "objective_planner": 15,
                         "plan_review": 15,
                         "build": 60,
                         "fix": 30,
@@ -266,7 +283,6 @@ class ConfigLoader:
                         "planner": {"provider": "claude", "account": "claudej", "label": "claudej", "model": "opus", "effort": "max", "active": True, "command": ["claudej"], "headless_args": ["--print"], "prompt_via": "argv"},
                         "plan-reviewer": {"provider": "codex", "account": "codexj", "label": "codexj", "model": "gpt-6.1-sol", "effort": "xhigh", "active": True, "command": ["codexj"], "headless_args": ["exec", "--ephemeral", "-"], "prompt_via": "stdin"},
                         "builder": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "effort": "max", "active": True, "command": ["musej", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"], "prompt_via": "argv"},
-                        "objective_planner": {"provider": "claude", "account": "claudej", "label": "claudej", "model": "opus", "effort": "max", "active": True, "command": ["claudej"], "headless_args": ["--print"], "prompt_via": "argv"},
                         "closer": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "effort": "max", "active": True, "command": ["musej", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"], "prompt_via": "argv"},
                         "arbiter": {"provider": "claude", "account": "claudej", "label": "claudej", "model": "opus", "effort": "max", "active": True, "command": ["claudej"], "headless_args": ["--print"], "prompt_via": "argv"},
                     },
@@ -302,9 +318,9 @@ class ConfigLoader:
                         "promotion": {"severity": "CRITICAL", "anchor": "strong", "min_families": 2, "or_category": "security"},
                     },
                     "fix_ticket_tiers": {"security": "tier_s", "critical": "tier_a", "default": "tier_c"},
-                    # Objectives (design §9, F6).
+                    # Objectives (design §9, F6). The planner horizon lives
+                    # in the global objective_planner block (TASK-2026-00112).
                     "objectives": {
-                        "ticket_horizon": [2, 3],
                         "max_tickets": 20,
                         "max_planning_runs_without_progress": 2,
                         "max_final_reviews": 2,
@@ -371,6 +387,45 @@ class ConfigLoader:
                     "playwright": "optional",
                     "confidence_threshold": 0.9,
                     "max_retries": 2,
+                },
+            },
+            # Single global Objective Planner (autonomy epic TASK-2026-00110,
+            # TASK-2026-00112; normative policy + ADR in docs/). It lives
+            # outside dev.tier_s on purpose: Tier S ticket planning
+            # (Claude/Codex plan for one ticket) is a different pipeline.
+            # Projects must not set objective_planner (see validate_project).
+            "objective_planner": {
+                "engine": "muse_code",
+                "profile": "muse_spark_1_3_max",
+                "invocation": "headless",
+                "ticket_horizon": [1, 3],
+                "timeout_minutes": 15,
+                # None = docs/objective-planner-routing-policy.md relative
+                # to the repo root (resolved by the planner module).
+                "policy_path": None,
+                # One-shot role spec (live executor shape): a fresh muse
+                # process per planning cycle, prompt via argv, result read
+                # back from .tier-s/PLANNER_RESULT.json. musej (full
+                # access): the planner writes the result file, it is not
+                # an isolated reviewer.
+                "role": {
+                    "provider": "muse", "account": "muse",
+                    "label": "muse", "model": "muse-spark-1.3-max",
+                    "effort": "max", "active": True,
+                    "command": ["musej", "exec", "--model",
+                                "muse-spark-1.3-max", "--reasoning-effort",
+                                "max", "--yolo"],
+                    "prompt_via": "argv",
+                },
+                # Authoritative agent registry for target_agent (policy
+                # §6): only real agents. dev executes objective children
+                # today; research is registered but disabled (no
+                # ticket->research bridge: research runs on its own
+                # scheduler/workflows with schedule identity).
+                "agents": {
+                    "dev": {"enabled": True},
+                    "research": {"enabled": False,
+                                 "reason": "no ticket execution bridge yet"},
                 },
             },
             "voice": {

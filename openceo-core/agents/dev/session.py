@@ -673,6 +673,30 @@ class DevSessionManager:
             params=task.get("params") if isinstance(task.get("params"), dict) else None,
         )
 
+    @staticmethod
+    def _executor_roles_with_planner(
+        project_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Tier S roles plus the single global planner role (TASK-2026-00112).
+
+        The planner role lives in the global ``objective_planner`` block,
+        outside ``dev.tier_s``; the live executor resolves every engine
+        role (including ``objective_planner``) from one roles mapping.
+        """
+        dev_cfg = project_config.get("dev", {}) or {}
+        tier_s = dev_cfg.get("tier_s", {}) or {}
+        roles = dict(tier_s.get("roles", {}) or {})
+        planner_role = (project_config.get("objective_planner", {}) or {}
+                        ).get("role")
+        if isinstance(planner_role, dict) \
+                and planner_role.get("active", True):
+            roles["objective_planner"] = planner_role
+        return roles
+
+    def _objective_quota(self) -> Any:
+        return (RateMonitorQuota(self._rate_monitor)
+                if self._rate_monitor is not None else AllowAllQuota())
+
     async def _simple_objective_trigger(
         self,
         task: dict[str, Any],
@@ -684,13 +708,31 @@ class DevSessionManager:
     ) -> str:
         """F6 triggers + capsule after an objective simple ticket closes."""
         try:
-            env = self._objective_env_for(project_config, branch.repo)
-            if env is None:
-                return ""
+            task_id = str(task.get("task_id", ""))
+
+            async def notify(ref: str, text: str) -> None:
+                del ref
+                if self._task_service is not None and task_id:
+                    try:
+                        await self._task_service.comment_on_ticket(
+                            task_id, text)
+                    except Exception:
+                        logger.warning(
+                            "objective trigger comment failed for %s",
+                            task_id, exc_info=True)
+
+            tier_s = (project_config.get("dev", {}) or {}).get(
+                "tier_s", {}) or {}
+            env = self._objective_env_for(
+                project_config, branch.repo,
+                ProcessExecutor(
+                    roles=self._executor_roles_with_planner(project_config),
+                    pool=tier_s.get("reviewers", []) or []),
+                self._objective_quota(), notify)
             await on_ticket_closed(
                 env, task,
                 TicketCloseContext(
-                    task_id=str(task.get("task_id", "")),
+                    task_id=task_id,
                     title=str(task.get("title", "")),
                     tier=str(task.get("coding_tool") or ""),
                     sha=sha, files=list(files),
@@ -747,10 +789,9 @@ class DevSessionManager:
                 params=params,
             )
         executor = ProcessExecutor(
-            roles=tier_s.get("roles", {}) or {},
+            roles=self._executor_roles_with_planner(project_config),
             pool=tier_s.get("reviewers", []) or [])
-        quota: Any = (RateMonitorQuota(self._rate_monitor)
-                      if self._rate_monitor is not None else AllowAllQuota())
+        quota: Any = self._objective_quota()
         notices: list[str] = []
 
         async def notify(ref: str, text: str) -> None:
@@ -870,6 +911,8 @@ class DevSessionManager:
             pool=list(parse_pool(tier_s.get("reviewers", []) or [])),
             review_cfg=dict(tier_s.get("review", {}) or {}),
             objectives_cfg=objectives_cfg,
+            planner_cfg=dict(
+                project_config.get("objective_planner", {}) or {}),
             timeouts=dict(tier_s.get("timeouts_minutes", {}) or {}),
             fix_tiers=dict(tier_s.get("fix_ticket_tiers", {}) or {}),
             inbox_rule=dict((tier_s.get("inbox", {}) or {}).get(
@@ -885,9 +928,11 @@ class DevSessionManager:
     ) -> dict[str, Any] | None:
         """Create inbox/objective tickets through the internal API (F4/F6).
 
-        ERPNext first (the service owns that contract), forced to the dev
-        agent, idempotent per ``source_id``. None when unbound: promotions
-        defer to telemetry instead of forking Mongo-only tickets.
+        ERPNext first (the service owns that contract), idempotent per
+        ``source_id``. ``agent_hint``/``params`` ride through from the
+        payload (planner targets; default dev). None when unbound:
+        promotions defer to telemetry instead of forking Mongo-only
+        tickets.
         """
         if self._task_service is None:
             return None
@@ -896,6 +941,13 @@ class DevSessionManager:
             source = TaskSource(str(data.pop("source", "spillover")))
         except ValueError:
             source = TaskSource.SPILLOVER
+        hint = data.get("agent_hint")
+        try:
+            agent_hint = AgentName(str(hint)) if hint else AgentName.DEV
+        except ValueError:
+            # Unknown to the router enum: leave it unset so the router
+            # classifies; the planner target stays in params.
+            agent_hint = None
         request = TaskCreateRequest(
             source=source,
             source_id=data.get("source_id"),
@@ -903,6 +955,7 @@ class DevSessionManager:
             description=str(data.get("description") or ""),
             project=data.get("project"),
             priority=data.get("priority", "medium"),  # type: ignore[arg-type]
+            params=data.get("params"),
             acceptance=data.get("acceptance"),
             objective_id=data.get("objective_id"),
             blocked_by=data.get("blocked_by"),
@@ -910,7 +963,7 @@ class DevSessionManager:
             finding_fingerprint=data.get("finding_fingerprint"),
             coding_tool=data.get("coding_tool"),  # type: ignore[arg-type]
             autorun=bool(data.get("autorun", True)),
-            agent_hint=AgentName.DEV,
+            agent_hint=agent_hint,
         )
         try:
             return await self._task_service.create_task(request)

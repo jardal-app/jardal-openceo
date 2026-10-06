@@ -123,10 +123,13 @@ class CodingTier(str, Enum):
 
 
 class CodingTool(str, Enum):
-    """Execution tier of a task (Tier S design v2 §3, F0.1).
+    """Execution tier of a task (routing policy §§18-27, TASK-2026-00112).
 
-    The letters order by scarce-quota cost, not quality; tier_c is the
-    default for most tickets. No account names here: accounts live only in
+    S = independent high assurance; A = discovery / architecture /
+    recovery; C = safe high-availability execution guarded by a
+    qualifying independent oracle; B = bounded strong solving when C is
+    not sufficiently protected. Quota is admission control, not the
+    tier definition. No account names here: accounts live only in
     configuration (``account:``). Explicit provider choice for loose chat
     sessions still uses :class:`DevProvider` and is unaffected.
     """
