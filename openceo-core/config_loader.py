@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from settings import Settings
+
+if TYPE_CHECKING:
+    from company_mandate import MandatoEmpresa
 
 
 class ConfigLoader:
@@ -189,6 +192,20 @@ class ConfigLoader:
                 for err in validate_gates_config(dev)
             )
         return errors
+
+    def company_mandate_path(self) -> Path:
+        """Exact path of the versioned company mandate (F4 TASK-2026-00114)."""
+        return self._resolve_projects_root() / "company_mandate.yaml"
+
+    def load_company_mandate(self) -> "MandatoEmpresa":
+        """Load the validated company mandate.
+
+        Raises :class:`MandateError` when the file is missing or invalid:
+        without a valid mandate there is no autonomy (fail-closed).
+        """
+        from company_mandate import load_mandate_file
+
+        return load_mandate_file(self.company_mandate_path())
 
     def context_path(self, project: str | None) -> Path:
         base = self._resolve_project_context_root() / (project or "_global")
@@ -402,6 +419,10 @@ class ConfigLoader:
                     "playwright": "optional",
                     "confidence_threshold": 0.9,
                     "max_retries": 2,
+                    # Project policy: human review mandated (e.g. a client
+                    # demanding human QA). Sixth escalation category
+                    # (autonomy F4 TASK-2026-00114); default False.
+                    "require_human_review": False,
                 },
             },
             # Single global Objective Planner (autonomy epic TASK-2026-00110,

@@ -1,0 +1,23 @@
+# Mandato de empresa (TASK-2026-00110, F4 TASK-2026-00114).
+# Reglas que el dueño da al CEO una sola vez. El CEO nunca lo modifica:
+# solo por instruccion del dueno (voz, Horizon o ticket). Esquema en
+# openceo-core/company_mandate.py; contrato en ARCHITECTURE_REFERENCE §Proactive CEO.
+version: 1
+ejes: []
+presupuesto:
+  moneda: USD
+  gasto_nuevo_sin_preguntar: "0.00"
+  cuota: suscripciones_ya_pagadas
+limites:
+  objetivos_activos: 3
+  objetivos_activos_por_proyecto: 2
+  tickets_activos_por_objetivo: 6
+revision_ceo:
+  cadencia: semanal
+escalar_al_dueno:
+  - gasto_nuevo
+  - credencial
+  - accion_irreversible
+  - replanificacion_estrategica
+  - cambio_de_mandato
+  - revision_exigida_por_politica

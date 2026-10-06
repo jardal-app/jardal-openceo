@@ -6,6 +6,11 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
 
 from agents.dev.routing import normalize_document_routing
+from company_mandate import (
+    EscalationDecision,
+    OwnerAction,
+    build_escalation_ticket,
+)
 from db.mongo import MongoRepository
 from events import RealtimeHub
 from graph import OpenCEOGraph
@@ -27,9 +32,11 @@ from state import (
     AgentName,
     ApprovalState,
     TaskCreateRequest,
+    TaskPriority,
     TaskReviewAction,
     TaskReviewActorType,
     TaskReviewCreateRequest,
+    TaskSource,
     TaskStatus,
     WorkflowPhaseType,
     WorkflowRunStatus,
@@ -1489,6 +1496,54 @@ class TaskService:
         if service is None:
             return await self._repo.get_objective(objective_id)
         return await service.get_objective(objective_id)
+
+    async def create_owner_escalation(
+        self,
+        *,
+        action: OwnerAction,
+        decision: EscalationDecision,
+        source_id: str | None = None,
+        priority: TaskPriority = TaskPriority.HIGH,
+    ) -> dict[str, Any]:
+        """Owner-escalation entry (autonomy F4 TASK-2026-00114).
+
+        Persists the escalation ERPNext-first through :meth:`create_task`
+        (autorun off, caller-provided ``source_id`` for idempotency), then
+        parks it in ``waiting``/``owner_escalation`` with any project phase
+        workflow cleared: the status observer pushes Pending Review, the
+        "Requiere humano" tray lists it by phase through the search API, and
+        Horizon F5 reads phase/waiting_reason/tag. No ``resume_at``: it waits
+        for the human, never for the scheduler.
+        """
+        if not decision.escalate:
+            raise ValueError("nothing to escalate: the decision is automatic")
+        spec = build_escalation_ticket(action, decision)
+        payload = TaskCreateRequest(
+            project=action.project,
+            source=TaskSource.API,
+            source_id=str(source_id).strip() if source_id else None,
+            title=spec["title"],
+            description=spec["description"],
+            priority=priority,
+            params=spec["params"],
+            tags=spec["tags"],
+            created_by="ceo",
+            autorun=False,
+        )
+        created = await self.create_task(payload)
+        parked = await self.patch_task(
+            created["task_id"],
+            {
+                "status": TaskStatus.WAITING.value,
+                "phase": spec["phase"],
+                "waiting_reason": spec["waiting_reason"],
+                "workflow_key": None,
+                "workflow_phases": [],
+                "phase_index": 0,
+                "phase_assignments": {},
+            },
+        )
+        return parked or created
 
     async def blockers_open(self, task: Mapping[str, Any]) -> bool:
         """True when any ``blocked_by`` dependency is not terminal (§9.5).
