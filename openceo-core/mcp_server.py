@@ -364,10 +364,34 @@ def _register_openceo_tools(
         human_action: str | None = None,
         evidence: str | None = None,
         owner_instruction: str | None = None,
+        secret: str | None = None,
+        sources_checked: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Explicit business-state move under the global policy (F4)."""
+        """Explicit business-state move under the global policy (F4).
+
+        With `secret`: missing-secret report (TASK-2026-00142) — the ticket
+        parks in Working naming the exact secret, and the cockpit reads it
+        as blocked, never as a decision. Only valid with `to_status` Working.
+        """
         if task_service is None:
             return {"ok": False, "status": "not_configured", "message": "Sin TaskService."}
+        if secret is not None or sources_checked is not None:
+            if to_status != "Working":
+                return {
+                    "ok": False,
+                    "status": "invalid_input",
+                    "message": "secret solo aparca en Working: un secreto ausente "
+                    "bloquea el trabajo, no lo cierra ni lo escala.",
+                }
+            try:
+                return await task_service.report_missing_secret(
+                    ticket,
+                    secret or "",
+                    sources_checked or [],
+                    note=reason,
+                )
+            except Exception as exc:  # noqa: BLE001 - el servicio ya clasifica lo esperado
+                return {"ok": False, "status": "error", "message": str(exc)}
         try:
             return await task_service.transition_ticket(
                 ticket,

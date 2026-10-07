@@ -402,8 +402,8 @@ class ConfigLoader:
                     "confidence_threshold": 0.9,
                     "max_retries": 2,
                     # Project policy: human review mandated (e.g. a client
-                    # demanding human QA). Sixth escalation category
-                    # (autonomy F4 TASK-2026-00114); default False.
+                    # demanding human QA). Fifth escalation category
+                    # (autonomy F4 TASK-2026-00114, TASK-2026-00142); default False.
                     "require_human_review": False,
                 },
             },

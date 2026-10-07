@@ -4,15 +4,19 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from agents.dev.routing import normalize_document_routing
 from company_mandate import (
     ESCALATION_PHASE,
     ESCALATION_TAG,
+    SECRET_BLOCK_BUSINESS_STATUS,
+    SECRET_BLOCK_PARAM,
     EscalationDecision,
+    MandateError,
     OwnerAction,
     build_escalation_ticket,
+    build_secret_block,
     project_requires_human_review,
     requires_owner,
 )
@@ -1328,12 +1332,18 @@ class TaskService:
         evidence: str = "",
         owner_instruction: str = "",
         previous: str = "",
+        secret_block: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Parche unico: estado de ejecucion + espejo coherente + auditoria.
 
         El guardia anti-eco es estructural: el parche escribe `status_pushed`
         con el mismo valor que el estado nuevo, asi que el observador no lo
         reenvia, y el webhook inverso vera `already_applied`/`ignored`.
+
+        El marcador de secreto ausente (TASK-2026-00142) viaja en el mismo
+        parche: se escribe cuando la transicion lo trae y se limpia en
+        cualquier otra transicion (al salir de Working el bloqueo se levanta
+        solo, sin lifecycle manual).
         """
         task_id = str(task.get("task_id") or "")
         if not task_id:
@@ -1358,9 +1368,18 @@ class TaskService:
             "business_synced_at": now,
             "transition": audit,
         }
+        merged_params = self._merge_erpnext_mirror_params(
+            self._task_params(task), mirror
+        )
+        if secret_block is not None:
+            merged_params[SECRET_BLOCK_PARAM] = secret_block
+        else:
+            # None borra en la fusion de patch_task: pop aqui no limpiaria
+            # nada porque la fusion conserva las claves ausentes.
+            merged_params[SECRET_BLOCK_PARAM] = None
         updates: dict[str, Any] = {
             "status": equivalent,
-            "params": self._merge_erpnext_mirror_params(self._task_params(task), mirror),
+            "params": merged_params,
         }
         if target == "Cancelled":
             # Terminal como la del camino inverso: sin despertador y con motivo.
@@ -1470,6 +1489,7 @@ class TaskService:
         human_action: str | None = None,
         evidence: str | None = None,
         owner_instruction: str | None = None,
+        secret_block: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Mueve el estado de NEGOCIO con el criterio global (TASK-2026-00132).
 
@@ -1479,6 +1499,8 @@ class TaskService:
         Completed exige `evidence` de verificacion y respeta el gate de QA;
         cancelar trabajo del dueno exige citar su orden en `owner_instruction`
         (sin ella se crea el escalado y no se cancela nada).
+        `secret_block` (TASK-2026-00142) solo aparca en Working: escribe el
+        marcador de secreto ausente que el cockpit lee como bloqueo.
 
         Devuelve `outcome` (`applied` | `already_applied` | `escalated`) con el
         estado de negocio RELEIDO, o `ok: False` con `status` clasificado. El
@@ -1498,6 +1520,24 @@ class TaskService:
             target = normalize_transition_status(to_status)
         except ERPNextValidationError as exc:
             return {"ok": False, "status": "invalid_input", "message": str(exc)}
+        clean_marker: dict[str, Any] | None = None
+        if secret_block is not None:
+            if target != SECRET_BLOCK_BUSINESS_STATUS:
+                return {
+                    "ok": False,
+                    "status": "invalid_input",
+                    "message": "secret_block solo aparca en Working: un secreto "
+                    "ausente bloquea el trabajo, no lo cierra ni lo escala.",
+                }
+            if not isinstance(secret_block, dict) or not str(
+                secret_block.get("secret") or ""
+            ).strip():
+                return {
+                    "ok": False,
+                    "status": "invalid_input",
+                    "message": "secret_block necesita el nombre exacto del secreto.",
+                }
+            clean_marker = dict(secret_block)
         clean_reason = _transition_audit_text(reason)
         if not clean_reason:
             return {
@@ -1530,19 +1570,33 @@ class TaskService:
         if current == target:
             # Idempotente: relee y devuelve. Si la ejecucion (no terminal)
             # discrepa del negocio, la alinea: es la reparacion del webhook
-            # perdido, no una resurreccion (un terminal no se toca).
+            # perdido, no una resurreccion (un terminal no se toca). Un no-op
+            # conserva el marcador de secreto ausente; un re-reporte con otro
+            # marcador lo actualiza.
             healed = False
             exec_status = str((task or {}).get("status") or "")
-            mirror = self._task_params(task or {}).get("_mirrors", {})
+            task_params = self._task_params(task or {})
+            mirror = task_params.get("_mirrors", {})
             pushed = mirror.get("erpnext", {}) if isinstance(mirror, dict) else {}
+            existing_marker = task_params.get(SECRET_BLOCK_PARAM)
             if (
                 task is not None
                 and exec_status not in _TERMINAL_TASK_STATUSES
                 and (
                     exec_status != equivalent
                     or str(pushed.get("status_pushed") or "") != equivalent
+                    or (
+                        clean_marker is not None
+                        and existing_marker != clean_marker
+                    )
                 )
             ):
+                if clean_marker is not None:
+                    healed_marker: dict[str, Any] | None = clean_marker
+                elif isinstance(existing_marker, dict):
+                    healed_marker = existing_marker
+                else:
+                    healed_marker = None
                 updated = await self._record_transition_mirror(
                     task,
                     name=name,
@@ -1553,6 +1607,7 @@ class TaskService:
                     evidence=_transition_audit_text(evidence),
                     owner_instruction=_transition_audit_text(owner_instruction),
                     previous=current,
+                    secret_block=healed_marker,
                 )
                 healed = updated is not None
                 if healed:
@@ -1715,6 +1770,7 @@ class TaskService:
                 evidence=clean_evidence,
                 owner_instruction=clean_instruction,
                 previous=current,
+                secret_block=clean_marker,
             )
             if updated is not None:
                 task_status = equivalent
@@ -1731,6 +1787,51 @@ class TaskService:
             "task_status": task_status,
             "mirror": mirror_state,
         }
+
+    async def report_missing_secret(
+        self,
+        ticket: str,
+        secret: str,
+        sources_checked: Sequence[str] | None,
+        *,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        """Aparca en Working por secreto ausente, con marcador para el cockpit.
+
+        Regla del dueno 2026-10-07 (TASK-2026-00142): el llamador ya busco el
+        secreto en todas las fuentes accesibles y no esta en ninguna. El
+        negocio pasa a Working con el secreto exacto nombrado en el motivo
+        (nunca Pending Review: no hay decision humana que tomar) y la
+        ejecucion recibe el marcador `params.secret_block`, que el cockpit
+        de Horizon lee como bloqueo. Sin registro de ejecucion (ticket de
+        desk) solo se mueve el negocio. Una entrada invalida no escribe nada.
+        """
+        try:
+            spec = build_secret_block(secret, sources_checked)
+        except MandateError as exc:
+            return {
+                "ok": False,
+                "status": "invalid_input",
+                "ticket": str(ticket or "").strip() or None,
+                "message": str(exc),
+            }
+        reason = str(spec["reason"])
+        clean_note = _transition_audit_text(note)
+        if clean_note:
+            reason = f"{reason} Nota del agente: {clean_note}"
+        result = await self.transition_ticket(
+            ticket,
+            str(spec["business_status"]),
+            reason,
+            secret_block=dict(spec["marker"]),
+        )
+        if not result.get("ok"):
+            return result
+        result["secret_block"] = {
+            "secret": spec["marker"]["secret"],
+            "sources_checked": spec["marker"]["sources_checked"],
+        }
+        return result
 
     async def startup_reconcile_erpnext(self) -> int:
         """Repara al arrancar los enlaces de negocio que quedaron a medias.

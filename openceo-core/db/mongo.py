@@ -535,14 +535,32 @@ class MongoRepository:
         return [self._clean(row) async for row in rows]
 
     async def list_blocked_tasks(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Tickets de empresa fallidos o escalados ("que esta bloqueado", F5).
+        """Tickets de empresa bloqueados ("que esta bloqueado", F5).
 
-        Sin alcance personal. ``interrupted`` no entra: es pausa del runtime,
-        no bloqueo de negocio.
+        Fallidos o escalados, mas los aparcados en Working por secreto
+        ausente (TASK-2026-00142: marcador ``params.secret_block`` con estado
+        no terminal). Sin alcance personal. ``interrupted`` no entra: es pausa
+        del runtime, no bloqueo de negocio.
         """
         query: dict[str, Any] = {
             **mirror_exclusion_filter(),
-            "status": {"$in": [TaskStatus.FAILED.value, TaskStatus.ESCALATED.value]},
+            "$or": [
+                {
+                    "status": {
+                        "$in": [TaskStatus.FAILED.value, TaskStatus.ESCALATED.value]
+                    }
+                },
+                {
+                    "status": {
+                        "$nin": [
+                            TaskStatus.COMPLETED.value,
+                            TaskStatus.CANCELLED.value,
+                            TaskStatus.CONVERTED.value,
+                        ]
+                    },
+                    "params.secret_block.secret": {"$exists": True, "$ne": ""},
+                },
+            ],
         }
         rows = self.tasks.find(query, sort=[("updated_at", DESCENDING)]).limit(
             max(1, int(limit))

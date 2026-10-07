@@ -17,6 +17,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from company_mandate import SECRET_BLOCK_PARAM
 from horizon import capacity as capacity_module
 from horizon import classify as classify_module
 from horizon import cockpit as cockpit_module
@@ -67,6 +68,28 @@ _MEASUREMENT_UNITS = {"minutes", "minutos"}
 _OPEN_STATUSES = frozenset({"queued", "in_progress", "waiting"})
 _BLOCKED_STATUSES = frozenset({"failed", "escalated"})
 _CLOSED_STATUSES = frozenset({"completed", "cancelled", "converted"})
+
+
+def _secret_block_marker(task: dict[str, Any]) -> dict[str, Any]:
+    params = task.get("params") if isinstance(task, dict) else None
+    marker = params.get(SECRET_BLOCK_PARAM) if isinstance(params, dict) else None
+    return marker if isinstance(marker, dict) else {}
+
+
+def _task_secret_blocked(task: dict[str, Any]) -> bool:
+    """Working aparcado por secreto ausente (TASK-2026-00142).
+
+    Cuenta como bloqueo de negocio aunque su estado de ejecucion siga
+    abierto; un terminal con marcador rancio no cuenta (el cierre manda).
+    """
+    if str(task.get("status") or "") in _CLOSED_STATUSES:
+        return False
+    return bool(str(_secret_block_marker(task).get("secret") or "").strip())
+
+
+def _secret_block_reason(task: dict[str, Any]) -> str:
+    marker = _secret_block_marker(task)
+    return str(marker.get("reason") or marker.get("secret") or "").strip()
 
 
 def _short_text(text: str, max_chars: int) -> str:
@@ -805,10 +828,16 @@ class HorizonService:
                         exc_info=True,
                     )
                 open_count = sum(
-                    1 for c in children if str(c.get("status") or "") in _OPEN_STATUSES
+                    1
+                    for c in children
+                    if str(c.get("status") or "") in _OPEN_STATUSES
+                    and not _task_secret_blocked(c)
                 )
                 blocked_count = sum(
-                    1 for c in children if str(c.get("status") or "") in _BLOCKED_STATUSES
+                    1
+                    for c in children
+                    if str(c.get("status") or "") in _BLOCKED_STATUSES
+                    or _task_secret_blocked(c)
                 )
                 closed_count = sum(
                     1 for c in children if str(c.get("status") or "") in _CLOSED_STATUSES
@@ -865,7 +894,8 @@ class HorizonService:
                     "status": t.get("status"),
                     "reason": _short_text(
                         str(
-                            t.get("error")
+                            _secret_block_reason(t)
+                            or t.get("error")
                             or t.get("waiting_reason")
                             or t.get("last_response_summary")
                             or ""
@@ -1551,7 +1581,6 @@ class HorizonService:
         instruction: str | None = None,
         dedupe_key: str | None = None,
         amount: Any | None = None,
-        needs_owner_credential: bool = False,
         irreversible: bool = False,
         strategic_replan: bool = False,
         human_action_hint: str | None = None,
@@ -1715,7 +1744,6 @@ class HorizonService:
                 summary=spec["title"],
                 project=company_project,
                 amount=amount,
-                needs_owner_credential=bool(needs_owner_credential),
                 irreversible=bool(irreversible),
                 strategic_replan=bool(strategic_replan),
                 human_action_hint=(str(human_action_hint or "").strip() or None),
