@@ -761,6 +761,42 @@ class AdapterOpTests(unittest.TestCase):
         with self.assertRaises(ERPNextValidationError):
             run(adapter.transition_status("TASK-2026-00010", "Done"))
 
+    def test_transition_status_vacia_coding_tool_v1_congelado(self):
+        """TASK-2026-00043: un valor v1 (p. ej. `codex`) congela CUALQUIER
+        escritura del documento (el Select v2 lo rechaza con 417); el mismo
+        PUT lo vacia para descongelar, sin inventar una letra."""
+        client = FakeClient(
+            [business_doc(status="Open", openceo_coding_tool="codex")]
+        )
+        adapter = make_adapter(client)
+        result = run(adapter.transition_status("TASK-2026-00010", "Completed"))
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            client.updated,
+            [
+                (
+                    "Task",
+                    "TASK-2026-00010",
+                    {"status": "Completed", "openceo_coding_tool": None},
+                )
+            ],
+        )
+        self.assertIsNone(client.docs["TASK-2026-00010"]["openceo_coding_tool"])
+
+    def test_transition_status_no_toca_coding_tool_vigente(self):
+        """Una letra v2 o un campo vacio viajan sin el campo extra."""
+        for stored in ("tier_b", "", None):
+            with self.subTest(stored=stored):
+                client = FakeClient(
+                    [business_doc(status="Open", openceo_coding_tool=stored)]
+                )
+                adapter = make_adapter(client)
+                run(adapter.transition_status("TASK-2026-00010", "Completed"))
+                self.assertEqual(
+                    client.updated,
+                    [("Task", "TASK-2026-00010", {"status": "Completed"})],
+                )
+
 
 class FakeMCPServer:
     """Servidor FastMCP minimo: guarda las funciones registradas por nombre."""
