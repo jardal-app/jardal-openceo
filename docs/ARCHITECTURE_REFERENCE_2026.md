@@ -1022,221 +1022,14 @@ Scope and ownership must be explicit. `project: null` can mean company-level wor
 
 ## Tier S (Multi-AI Peer Review)
 
-> **RETIRED FLOW — kept for history.** This section describes the pre-v2 flow
-> (persistent tmux reviewers, OpenCode compiler, per-project `coding_tool`,
-> `critical_consensus`). The vigente engine is `openceo-core/agents/dev/tier_s/`
-> (F1–F7, merged 2026-10-05; design `docs/work/TIER_S_DESIGN_FINAL.md` v2:
-> ticket = cycle = one builder session; tiers `tier_s/a/b/c`; pool quorum;
-> non-blocking plan review). Do not implement from this section.
->
-> Autonomy delta (2026-10-06, TASK-2026-00110): the objective planner inside
-> Tier S (`claudej` → `TICKETS.yaml`) is superseded by the single global
-> planner (Muse headless + `PlannerResult`; pendiente: TASK-2026-00112), and
-> the objective engine moves out of Tier S (pendiente: TASK-2026-00117). See
-> §Proactive CEO for the contract.
+High-stakes tickets (real money, critical infrastructure, security boundaries, durable architecture) go through Tier S: independent planning, plan challenge, one builder session, pool review with family quorum and arbitration of disputed CRITICAL findings. The previous flow (persistent tmux reviewers, OpenCode compiler, `consensus.py`, per-project `coding_tool`/`tier_s` keys, `critical_consensus`) was removed with the v2 merge `2be8e4f` (2026-10-05) and lives only in Git history.
 
-For high-stakes tickets (systems handling real money, critical infrastructure, complex algorithms, anything where a single bug has severe consequences), the Dev Agent activates a multi-AI peer review workflow. Claude Code acts as lead programmer. Codex and Gemini act as persistent tmux-based reviewers. OpenCode remains a single reviewer slot from Claude's perspective, but internally it runs a headless multi-model review pipeline and compiles its own consensus into `FEEDBACK-opencode.md`. The Dev Agent (`dev_session_service.py` for chat sessions, `session.py` for legacy task runs) orchestrates everything deterministically — it follows workflow steps, it does not think or generate content.
+- **Engine:** `openceo-core/agents/dev/tier_s/` (v2). Roles and reviewer slots live in the global config (`config_loader.py`); checked-in projects carry no routing or Tier S overrides.
+- **Design:** `docs/work/TIER_S_DESIGN_FINAL.md` v2 (TASK-2026-00085): one ticket = one cycle = one builder session; tiers `tier_s/a/b/c`; non-blocking plan review.
+- **Routing:** `coding_tool` per ticket (root or `params`). DEV tier semantics and the Tier C oracle rule are normative in `docs/objective-planner-routing-policy.md`.
+- **Large work:** decomposition belongs to the single objective planner (§Proactive CEO; TASK-2026-00112/00117), not to Tier S.
 
-### Principles
-
-- Claude Code does ALL intellectual work: planning, decomposing tickets into scripts, coding, generating review context (BRIEF.md), reading feedback, and correcting code.
-- The Dev Agent is a simple orchestrator (DeepSeek-based). It launches tmux sessions, sends commands via `send-keys`, polls for completion signals, and cleans files between cycles. It never generates code, context, or decisions.
-- Reviewers receive a role-primed prompt that establishes them as elite senior engineers. Their feedback is unidirectional toward Claude — they write it, Claude reads it and decides what to accept or reject internally. There is no RESOLUTION.md, no back-and-forth, no bidirectional conversation.
-- Each script goes through exactly 2 review iterations. Iteration 1 is full review. Iteration 2 is validation of corrections.
-- Claude/Codex/Gemini tmux sessions stay alive for the entire ticket to preserve conversation context across scripts.
-- OpenCode preserves context differently: each internal reviewer and the compiler persist their own `sessionID` from JSON output and reuse it with `--session` across iterations and scripts within the same Tier S ticket.
-
-### File Structure
-
-Files live in the real repository root selected for the project (for example `/home/develop/development/Jardal/jardal-openceo`). OpenCode also uses a transient internal artifacts directory for its own reviewer fan-out.
-
-These are execution/review artifacts. The `CONTEXT.md` references in this protocol document compatibility with existing prompts; durable engineering knowledge belongs in the vault. Adapting context loading must preserve the plan, feedback, signal, and session contracts.
-
-```
-{project_repo_root}/
-├── CONTEXT.md              # compatibility context for existing Tier S prompts
-├── CURRENT_PLAN.md         # Claude creates at ticket start: objective + ordered list of scripts
-├── BRIEF.md                # Claude generates after each script: context + plan + script path for reviewers
-├── .consensus-status       # orchestration signal file written by Claude
-├── FEEDBACK-codex.md       # reviewer feedback, cleaned before each iteration cycle
-├── FEEDBACK-gemini.md
-├── FEEDBACK-opencode.md
-├── .opencode-team-review/  # transient OpenCode reviewer artifacts per step/iteration
-├── .opencode-session-opencode-reviewer-*.id
-├── .opencode-session-opencode-compiler.id
-└── ...                     # code lives where it belongs, never copied
-```
-
-### tmux Sessions — Independent Per Project
-
-Each coding tool keeps an independent project session. Claude, Codex, and Gemini are real tmux conversations. OpenCode keeps a project tmux shell for symmetry with the rest of the runtime, but its Tier S reviews run as headless `opencode run` subprocesses and do not depend on typing into the tmux pane.
-
-```
-dev-{project}-claude        # lead programmer, always active
-dev-{project}-codex         # reviewer
-dev-{project}-gemini        # reviewer
-dev-{project}-opencode      # OpenCode project shell; review work is executed headlessly
-```
-
-One session per tool per project. `tmux ls` shows all sessions cleanly. Kill one reviewer without affecting others: `tmux kill-session -t dev-{project}-codex`. Kill all for a project: iterate over the 4 session names. Ticket completion and session closure are different events: finishing a Tier S ticket does not automatically destroy the project sessions, but explicitly closing or canceling the dev session does tear down the 4 tmux sessions for that project. When that happens, OpenCode also deletes its persisted `.opencode-session-*.id` files so the next Tier S session starts with a fresh internal review context.
-
-### Completion Signals
-
-Each phase uses a unique signal that the Dev Agent polls for in the corresponding file. Signals are designed to avoid false positives across iterations:
-
-- Claude after implementing + generating BRIEF.md: `.consensus-status = STEP_COMPLETE_{step_number}` (e.g. `STEP_COMPLETE_1`)
-- Reviewers after writing feedback: `REVIEW_DONE_{step_number}_{iteration}` (e.g. `REVIEW_DONE_1_1` for step 1, iteration 1)
-- Claude after correcting from feedback: `.consensus-status = CORRECTION_DONE_{step_number}_{iteration}` (e.g. `CORRECTION_DONE_1_1`)
-- Ticket closure: `.consensus-status = TICKET_COMPLETE`
-
-Step number increments per script. Iteration is 1 or 2. This guarantees the Dev Agent never confuses a signal from a previous cycle with the current one.
-
-### Reviewer System Prompt
-
-Codex and Gemini receive a role-establishing prompt that maximizes review quality without constraining their thinking to specific categories. OpenCode uses a different mechanism: five headless reviewers with a shared structure but model-specific `Suggested strength areas`, `context_focus`, and `specialty`, all defined in `openceo-core/agents/dev/consensus.py`. Those strengths are hints, not scope limits.
-
-```
-You are one of the most experienced senior software engineers in the world.
-You have mass-scale production experience, decades of debugging the hardest systems,
-and an obsessive attention to detail. Your reputation is built on finding the problems
-that everyone else misses. You do not let anything slide. You do not give superficial reviews.
-You treat every review as if the code will run unsupervised in a high-stakes production
-environment where failures have real consequences.
-
-Read BRIEF.md for the full context: the project objective, the implementation plan,
-and the path to the script under review. Open the script and review it with absolute rigor.
-
-If it is perfect, say it is perfect. If it has problems, tear it apart. Be specific:
-identify the exact location, explain the problem, and suggest the fix.
-Do not hold back. Do not be polite about bad code.
-Write your complete analysis in FEEDBACK-{name}.md.
-When you are finished, write REVIEW_DONE_{step}_{iteration} as the last line.
-```
-
-This prompt does three things: (1) assigns an elite identity that the AI will try to live up to, (2) gives complete freedom to find any type of problem without limiting to a checklist, (3) demands specificity so the feedback is actionable, not vague.
-
-### Flow — Step by Step
-
-**Phase 0 — Dev Agent launches sessions.**
-Creates the 4 independent project sessions. Positions each in the project directory. Launches Claude Code in the claude session. Launches Codex/Gemini in their reviewer sessions with their reviewer system prompt loaded. Keeps the OpenCode project shell available, but OpenCode Tier S review execution itself happens later as headless subprocesses. Claude/Codex/Gemini sessions stay alive for the duration of the ticket; OpenCode context persists via saved `sessionID` files.
-
-**Phase 1 — Claude plans, decomposes, and implements first script.**
-Dev Agent sends to claude session:
-
-```
-Read CONTEXT.md.
-Ticket: {ticket_description}
-
-Create CURRENT_PLAN.md with:
-- The ticket objective
-- An ordered list of scripts to implement, one per step
-- For each script: what it does, what it depends on, what risks you see
-
-Implement ONLY the first script from the plan.
-
-After implementing, generate BRIEF.md with:
-- The ticket objective (from the ticket description)
-- Your plan (from CURRENT_PLAN.md)
-- The path to the script you just wrote (NOT the code itself, just the path so reviewers open it)
-- The relevant sections from CONTEXT.md that a reviewer would need to understand the script
-
-When everything is ready, overwrite .consensus-status with STEP_COMPLETE_1 and print STEP_COMPLETE_1
-```
-
-Claude generates everything: the plan, the code, and the BRIEF.md. The Dev Agent only waits for the signal.
-
-**Phase 2 — Dev Agent triggers reviewers (iteration 1).**
-Dev Agent detects `STEP_COMPLETE_{N}`. Deletes the 3 feedback files (ensures clean state). Sends Codex and Gemini their review instruction via tmux. For OpenCode, it launches a headless internal review pipeline:
-
-- batch 1: `GLM-5 + Kimi K2.5`
-- batch 2: `MiniMax M2.5 + MiniMax M2.7`
-- `DeepSeek Reasoner` runs in parallel from the beginning
-- once the 5 reviewer artifacts exist, a standalone MiniMax M2.7 compiler deduplicates them into `FEEDBACK-opencode.md`
-
-Codex and Gemini still receive the classic prompt:
-
-```
-Read BRIEF.md and open the script indicated there. Review it completely.
-Write your analysis in FEEDBACK-{name}.md.
-When finished, write REVIEW_DONE_{step}_1 as the last line.
-```
-
-From Claude's perspective there are still only 3 reviewer outputs: `FEEDBACK-codex.md`, `FEEDBACK-gemini.md`, and `FEEDBACK-opencode.md`.
-
-**Phase 3 — Dev Agent waits.**
-Polls for `REVIEW_DONE_{step}_1` in each of the 3 feedback files. Codex and Gemini are monitored through their feedback files as before. OpenCode waits for its internal pipeline to finish and for `FEEDBACK-opencode.md` to end with the expected signal. Each OpenCode subprocess can run up to 10 minutes before forced termination.
-
-**Phase 4 — Claude reads feedback and corrects.**
-Dev Agent sends to claude session:
-
-```
-Reviewers finished. Read FEEDBACK-codex.md, FEEDBACK-gemini.md, FEEDBACK-opencode.md.
-Correct what you consider valid in the script.
-When done, overwrite .consensus-status with CORRECTION_DONE_{step}_1 and print it
-```
-
-Claude reads all feedback, decides internally what to accept or reject, and applies corrections directly to the code. No documentation of what was accepted or rejected — the corrected code is the resolution.
-
-**Phase 5 — Iteration 2 (validation pass).**
-Dev Agent detects `CORRECTION_DONE_{step}_1`. Deletes the 3 feedback files again. Sends Codex/Gemini their second-pass review prompt and re-runs the OpenCode headless pipeline on the corrected target. OpenCode reuses saved `sessionID`s for its internal reviewers and compiler so it can keep context across the ticket while still executing each review as a standalone subprocess.
-No new BRIEF.md is generated. Reviewers already have full context from iteration 1. They just re-read the corrected script.
-
-Dev Agent waits for `REVIEW_DONE_{step}_2`, then sends to Claude:
-
-```
-Second review completed. Read FEEDBACK-codex.md, FEEDBACK-gemini.md, FEEDBACK-opencode.md.
-Apply final corrections if needed.
-When done, overwrite .consensus-status with CORRECTION_DONE_{step}_2 and print it
-```
-
-**Phase 6 — Next script.**
-Dev Agent sends to claude session:
-
-```
-Script {N} completed with 2 review iterations.
-Update CURRENT_PLAN.md marking this step as done.
-Implement the next script from the plan.
-After implementing, generate a new BRIEF.md for the new script.
-When ready, overwrite .consensus-status with STEP_COMPLETE_{N+1} and print it
-```
-
-Feedback files are cleaned at the start of the next iteration cycle. BRIEF.md is overwritten by Claude with the context for the new script. Repeat from Phase 2 for each script in the plan.
-
-**Phase 7 — Ticket closure.**
-After the last script completes both iterations, Dev Agent sends to Claude:
-
-```
-All scripts completed. Update CONTEXT.md with what was implemented.
-Overwrite .consensus-status with TICKET_COMPLETE and print TICKET_COMPLETE.
-```
-
-Dev Agent closes the ticket, sends notifications. The 4 tmux sessions stay alive for the next ticket on the same project (preserving context). If the user later closes or cancels the dev session, OpenCEO tears down those tmux sessions and, for the OpenCode reviewer slot, also removes the persisted `.opencode-session-opencode-reviewer-*.id` and `.opencode-session-opencode-compiler.id` files.
-
-Here, closing the ticket means closing execution work. ERPNext business acceptance is a separate transition. Settled engineering decisions go to linked vault notes under the vault skill; copying every ticket result or review artifact into the vault is not required.
-
-### Who Decomposes Large Tickets
-
-The PM or a human creates tickets at the functional level ("implement trading bot", "design database schema", "build payment pipeline"). Claude as lead programmer receives the functional ticket and decomposes it into individual scripts inside CURRENT_PLAN.md. This is a technical decision — the PM does not need to know which files are needed. Claude decides the architecture and the implementation order. Each script in the plan goes through the full 2-iteration review cycle independently.
-
-### Configuration in project.yaml
-
-```yaml
-dev:
-  coding_tool: codex | claude | tier_s
-  tier_s:
-    enabled: true
-    iterations: 2
-    timeout_minutes: 15
-    max_steps: 12
-    lead: claude
-    reviewers:
-      - codex
-      - gemini
-      - opencode
-    keep_sessions_alive: true
-```
-
-The `coding_tool` field replaces the old `coding_tier` as the runtime default. The owner selects which tool to use per project: `codex` for Codex CLI, `claude` for Claude Code, or `tier_s` for the multi-AI review flow. The legacy alias `critical_consensus` is still accepted for backward compatibility. In chat, an explicit provider request like `crea una sesión codex` still overrides the project default for that session.
+Still-live settings from the retired section:
 
 For the legacy task queue only, an explicit `coding_tier: tier3` still has a meaning: it maps to a one-shot OpenCode run using `opencode run --format json --agent build`. That legacy tier mapping does not modify the persistent `openceo-dev` chat sessions.
 
@@ -1376,7 +1169,7 @@ RATE_STATUS_STALE_SECONDS=300
 - `openceo-core/task_service.py` — Pre-launch gating + post-completion hook
 - `openceo-core/scheduler.py` — Periodic retry of queued tickets
 - `openceo-core/agents/dev/tmux_runtime.py` — Mid-task detection + wait-and-resume in polling loop
-- `openceo-core/agents/dev/consensus.py` — Pre-launch check for Tier S
+- `openceo-core/agents/dev/tier_s/live.py` — Pre-launch check for Tier S (v2)
 
 ---
 
@@ -1833,11 +1626,10 @@ openceo/
 ├── deploy/
 │   └── systemd/
 ├── docs/
-│   ├── AGENTS.md
 │   ├── OPENCEO_DIRECTION.md          # Domain ownership and integration direction
+│   ├── objective-planner-routing-policy.md  # Read at runtime by the single objective planner
+│   ├── decision-2026-10-05-planner-objetivos-muse.md
 │   ├── finance-erpnext-integration-contract.md
-│   ├── PROJECTS.md
-│   ├── ROADMAP_PHASE1_PHASE2.md
 │   └── SETUP.md
 ├── openceo-core/                     # Backend: FastAPI + OpenWebUI-compatible API + MCP
 │   ├── .env.example
@@ -1878,7 +1670,7 @@ openceo/
 │   │   │   ├── requirements.txt
 │   │   │   ├── .env.example
 │   │   │   ├── session.py
-│   │   │   ├── consensus.py
+│   │   │   ├── tier_s/                   # Tier S v2 engine
 │   │   │   ├── tmux_runtime.py
 │   │   │   └── opencode_run.py
 │   │   ├── pm/
