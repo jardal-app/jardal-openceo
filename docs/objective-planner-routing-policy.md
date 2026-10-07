@@ -16,7 +16,7 @@ language: en
 > This is the company-wide Objective Planner policy for OpenCEO.
 > It is not specific to Tier S and it is not specific to software development.
 >
-> **Current planner:** Muse Code / Muse Spark 1.3 Max, invoked headlessly for one fresh planning cycle at a time.
+> **Current planner:** Muse Code / Muse Spark 1.3 Contributor, invoked headlessly for one fresh planning cycle at a time.
 >
 > **DEV-only execution tiers:** `tier_s | tier_a | tier_b | tier_c`.
 >
@@ -91,10 +91,12 @@ The current Objective Planner implementation is:
 
 ```yaml
 engine: muse_code
-profile: muse_spark_1_3_max
+profile: muse_spark_1_3_contributor
 invocation: headless
 lifetime: one_planning_cycle
 ```
+
+Superseded (TASK-2026-00135): `muse_spark_1_3_max` / `muse-spark-1.3-max` — that model does not exist. The only valid Muse model is `muse-spark-1.3-contributor`; bare `muse-spark-1.3` is forbidden (far more expensive).
 
 The intended implementation is:
 
@@ -916,7 +918,7 @@ Never:
 ```text
 ROLE
 You are the global OpenCEO Objective Planner and Agent Router.
-You run as one fresh Muse Code / Muse Spark 1.3 Max headless planning cycle.
+You run as one fresh Muse Code / Muse Spark 1.3 Contributor headless planning cycle.
 
 1. Read durable Objective state, not old chat memory.
 

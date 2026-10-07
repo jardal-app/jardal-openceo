@@ -7,6 +7,7 @@ one-shot ERP wait comment. No network, no CLI, no LLM.
 
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -109,11 +110,11 @@ class ValidateProjectTests(unittest.TestCase):
         cfg = loader.load_project("anything")
         planner = cfg["objective_planner"]
         self.assertEqual(planner["engine"], "muse_code")
-        self.assertEqual(planner["profile"], "muse_spark_1_3_max")
+        self.assertEqual(planner["profile"], "muse_spark_1_3_contributor")
         self.assertEqual(planner["invocation"], "headless")
         self.assertEqual(planner["ticket_horizon"], [1, 3])
         role = planner["role"]
-        self.assertEqual(role["model"], "muse-spark-1.3-max")
+        self.assertEqual(role["model"], "muse-spark-1.3-contributor")
         self.assertEqual(role["command"][0], "musej")
         self.assertIn("--reasoning-effort", role["command"])
         self.assertTrue(planner["agents"]["dev"]["enabled"])
@@ -123,6 +124,66 @@ class ValidateProjectTests(unittest.TestCase):
                          cfg["dev"]["tier_s"]["roles"])
         self.assertNotIn("objective_planner",
                          cfg["dev"]["tier_s"]["timeouts_minutes"])
+
+
+class MuseModelGuardTests(unittest.TestCase):
+    """No runtime role/tier/config may pin a wrong Muse model (TASK-2026-00135).
+
+    ``muse-spark-1.3-max`` does not exist and bare ``muse-spark-1.3`` is
+    forbidden (far more expensive). The only valid Muse model anywhere is
+    ``muse-spark-1.3-contributor``. No historical fixtures are excluded:
+    the ticket sweep found none.
+    """
+
+    FORBIDDEN = re.compile(r"muse[-_]spark[-_]1[-_]3(?!-contributor|_contributor)")
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _strings(self, node, where="cfg"):
+        if isinstance(node, str):
+            yield where, node
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                yield from self._strings(value, f"{where}.{key}")
+        elif isinstance(node, (list, tuple)):
+            for index, value in enumerate(node):
+                yield from self._strings(value, f"{where}[{index}]")
+
+    def test_no_forbidden_muse_model_in_global_config(self) -> None:
+        cfg = _loader_for(self.root).load_project("anything")
+        bad = [f"{where}={value!r}" for where, value in self._strings(cfg)
+               if self.FORBIDDEN.search(value)]
+        self.assertEqual([], bad)
+
+    def test_objective_planner_resolves_to_contributor(self) -> None:
+        planner = _loader_for(self.root).load_project("anything")["objective_planner"]
+        self.assertEqual(planner["profile"], "muse_spark_1_3_contributor")
+        role = planner["role"]
+        self.assertEqual(role["model"], "muse-spark-1.3-contributor")
+        argv = role["command"]
+        self.assertEqual(argv[argv.index("--model") + 1],
+                         "muse-spark-1.3-contributor")
+
+    def test_settings_muse_defaults_are_contributor(self) -> None:
+        settings = Settings(_env_file=None, PROJECTS_DIR=str(self.root))
+        fields = ("MUSE_DEFAULT_ARGS", "RESEARCH_META_MODEL",
+                  "RESEARCH_OPENCODE_TEST_MODEL", "RESEARCH_OPENCODE_PROD_MODEL")
+        for field in fields:
+            value = getattr(settings, field)
+            self.assertIsNone(self.FORBIDDEN.search(value), f"{field}={value!r}")
+
+    def test_project_yamls_carry_no_forbidden_model(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        yamls = sorted((repo / "projects").glob("*/project.yaml"))
+        self.assertTrue(yamls, "no project.yaml found under projects/")
+        for path in yamls:
+            self.assertIsNone(self.FORBIDDEN.search(path.read_text(encoding="utf-8")),
+                              path.name)
 
 
 class CreateSessionGateTests(unittest.IsolatedAsyncioTestCase):
