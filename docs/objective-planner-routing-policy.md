@@ -214,6 +214,13 @@ The planner may select only agents that are enabled and known by this authoritat
 
 If no agent can perform required work, return `capability_gap`.
 
+Registered Tier-0 capabilities are not gaps. Creating a company project
+end-to-end is one: the deterministic `operations.create_project` workflow
+(ERPNext Project, git repo, templates, validated `project.yaml`, vault hub,
+DNS for web projects) runs from a ticket carrying `params.workflow` (or
+`use_workflow` with a matching title). A need to create a project routes to
+such a ticket, never to `capability_gap` (TASK-2026-00115).
+
 ## 7. Domain ownership is separate from execution mechanism
 
 `target_agent` answers:

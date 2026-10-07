@@ -112,7 +112,7 @@ cd openceo-voice-android
 
 ### Autodiscovery de Workflows (`deepseek-flash`)
 - Activación explícita con `params: {"discover_workflow": true}`.
-- DeepSeek Flash recibe el catálogo exacto de las 15 herramientas disponibles (`WorkflowToolRegistry.describe()`) y sintetiza una propuesta en YAML libre de alucinaciones.
+- DeepSeek Flash recibe el catálogo exacto de las herramientas disponibles (`WorkflowToolRegistry.describe()`) y sintetiza una propuesta en YAML libre de alucinaciones.
 - Crea un registro en `discovery_runs` (`status: proposed`) y el ticket queda en `waiting`. Al aprobarse, se guarda el YAML en disco como nuevo workflow cristalizado.
 
 ### Human-in-the-Loop (HITL) en YAMLs

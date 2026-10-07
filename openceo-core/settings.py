@@ -200,6 +200,10 @@ class Settings(BaseSettings):
     TIER_S_OBJECTIVE_CHILD_AUTORUN: bool = True
     WAITING_POLL_SECONDS: int = 60
     PROJECTS_DIR: str = "projects"
+    # F6 (TASK-2026-00115): roots for end-to-end project creation. Repos live
+    # as siblings of the OpenCEO checkout; the vault lives in jardal-knowledge.
+    PROJECT_REPOS_ROOT: str = str(CORE_DIR.parent.parent)
+    VAULT_ROOT: str = str(CORE_DIR.parent.parent / "jardal-knowledge" / "vault")
     PROJECT_CONTEXTS_DIR: str = str(CORE_DIR.parent / ".runtime" / "project-context")
     DEFAULT_PROJECT: str = "example-project"
     WORKFLOWS_DIR: str = str(CORE_DIR.parent / "workflows")

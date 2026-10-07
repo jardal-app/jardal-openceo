@@ -1,0 +1,75 @@
+workflow: operations.create_project
+name: Crear proyecto end-to-end
+agent: operations
+description: "Deterministic end-to-end project creation (autonomy F6, TASK-2026-00115). Spend-gated by the company mandate, then ERPNext Project, local git repo, initial templates commit, validated project.yaml, vault hub, and DNS for web projects. Every step is idempotent."
+auto_match: true
+triggers:
+  - crear proyecto
+  - nuevo proyecto
+  - create project
+  - new project
+keywords:
+  - proyecto
+  - project
+  - scaffold
+steps:
+  - id: check_spend
+    tool: ops.check_project_spend
+    params:
+      project_key: "{{params.project_key}}"
+      summary: "{{params.summary}}"
+      costs: "{{params.costs}}"
+  - id: escalate
+    tool: ops.escalate_project_spend
+    when: "{{check_spend.escalate}}"
+    params:
+      project_key: "{{params.project_key}}"
+      summary: "{{params.summary}}"
+      amount: "{{check_spend.amount}}"
+      human_action_hint: "{{check_spend.human_action}}"
+      source_id: "{{params.escalation_source_id}}"
+  - id: wait_owner
+    type: human_in_the_loop
+    permission: owner_escalation
+    when: "{{check_spend.escalate}}"
+    prompt: "{{check_spend.human_action}}"
+  - id: erpnext_project
+    tool: ops.ensure_erpnext_project
+    params:
+      project_key: "{{params.project_key}}"
+      display_name: "{{params.display_name}}"
+  - id: git_repo
+    tool: ops.ensure_git_repo
+    params:
+      project_key: "{{params.project_key}}"
+      repo_name: "{{params.repo_name}}"
+      remote_url: "{{params.remote_url}}"
+  - id: repo_templates
+    tool: ops.ensure_repo_templates
+    params:
+      project_key: "{{params.project_key}}"
+      repo_name: "{{params.repo_name}}"
+      display_name: "{{params.display_name}}"
+      org: "{{params.org}}"
+      description: "{{params.description}}"
+      remote_url: "{{git_repo.remote_url}}"
+  - id: project_config
+    tool: ops.ensure_project_config
+    params:
+      project_key: "{{params.project_key}}"
+      repo_name: "{{params.repo_name}}"
+      org: "{{params.org}}"
+      remote_url: "{{git_repo.remote_url}}"
+  - id: vault_entry
+    tool: ops.ensure_vault_entry
+    params:
+      project_key: "{{params.project_key}}"
+      repo_name: "{{params.repo_name}}"
+      org: "{{params.org}}"
+      display_name: "{{params.display_name}}"
+      description: "{{params.description}}"
+  - id: dns
+    tool: ops.ensure_dns_record
+    when: "{{params.is_web}}"
+    params:
+      hostname: "{{params.hostname}}"

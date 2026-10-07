@@ -916,7 +916,13 @@ The mandate is a versioned YAML beside `projects/<project>/project.yaml`: axes w
 
 Scheduled review (mandate cadence) plus reactive review (objective closed or blocked, `capability_gap`, incident, research, deferred findings, KPI change) over the same persisted-trigger engine as Horizon and research. Each review ends in exactly one of: keep going, create an Objetivo, create a loose ticket, create a project, escalate, or do nothing. An axis without a measurable KPI produces a report, never new work. Missing capabilities are declared as `capability_gap`, never silently worked around. Business acceptance and transitions remain ERPNext decisions; agent completion and delivery to the user remain distinct events.
 
-> pendiente: TASK-2026-00119 (CEO autónomo; requires 00117 + 00113 + 00114), TASK-2026-00115 (crear proyecto end-to-end; until then the planner and the CEO answer `capability_gap`).
+> pendiente: TASK-2026-00119 (CEO autónomo; requires 00117 + 00113 + 00114).
+
+### Create project end-to-end
+
+Project creation is a Tier-0 deterministic workflow (`operations.create_project`): the mandate spend gate first (new spend parks for the owner through the standard escalation ticket plus a `human_in_the_loop` wait), then the ERPNext `Project` (semantic `ensure_project`, idempotent by `project_key`), the local git repo with the conventional remote URL (local `remote add` only; provisioning the GitHub remote stays out — it needs a credential), the initial commit with README/CLAUDE.md/AGENTS.md-symlink/.gitignore/docs/work, a validated `projects/<key>/project.yaml` mirror, the vault hub plus its own `vault/README.md` line, and the Cloudflare subdomain for web projects. Every step is idempotent — re-running reports `existed` and duplicates nothing — and a failing `project.yaml` validation fails the run. Needs to create a project route here; they are no longer a `capability_gap`.
+
+> Implemented by TASK-2026-00115 (`openceo-core/ops/create_project.py`, `ops.*` tools, `workflows/operations/create_project.yaml`).
 
 ### Dispatcher
 
