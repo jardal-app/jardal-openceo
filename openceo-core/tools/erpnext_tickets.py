@@ -875,11 +875,23 @@ class ERPNextTicketAdapter:
         `create_document` generico. El 417 por dependientes abiertos sube
         clasificado (`ERPNextDependencyBlockedError`) para que el servicio lo
         reporte con detalle.
+
+        Excepcion (TASK-2026-00043): si el valor guardado de
+        `openceo_coding_tool` no es vacio ni una letra v2 vigente, el Select
+        del desk rechaza CUALQUIER escritura del documento (417) y el ticket
+        queda congelado. En ese caso el mismo PUT vacia el campo (null =
+        sin valor, igual que los tickets creados sin tier): el valor v1
+        (p. ej. `codex`, un provider) no tiene traduccion fiel a letras y
+        conservarlo impediria hasta cerrar el ticket.
         """
         target = normalize_transition_status(to_status)
         task = await self.resolve_task(identifier)
         name = str(task.get("name") or "").strip()
-        updated = await self._client.update_doc("Task", name, {"status": target})
+        body: dict[str, Any] = {"status": target}
+        stored_tool = str(task.get("openceo_coding_tool") or "").strip()
+        if stored_tool and stored_tool not in _CODING_TOOLS:
+            body["openceo_coding_tool"] = None
+        updated = await self._client.update_doc("Task", name, body)
         return {"ok": True, "ticket": self._ticket_view({**task, **(updated or {})})}
 
     async def update_tier_s_progress(self, name: str, summary: dict[str, Any]) -> None:
