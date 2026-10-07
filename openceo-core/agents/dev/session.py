@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from .review_links import ReviewLinksExtraction, apply_review_links_to_params, extract_review_links
-from .routing import ROUTING_MISSING_REASON, TIER_C_CHAIN, resolve_coding_tool, select_tier_c_link
+from .loose_tier import ASSIGNED_BY, LooseTierDecision, classify_loose_tier
+from .routing import (ROUTING_MISSING_REASON, TIER_C_CHAIN, RoutingDecision,
+                      resolve_coding_tool, select_tier_c_link)
 from .tier_oracle import freeze_oracle, verify_oracle
 from .tier_s.cycle import TierSCycle
 from .tier_s.gates import baseline_blocked, gates_failed, handoff_gates_section, load_gates, run_gates
@@ -147,6 +149,47 @@ class _SimpleBranch:
     oracle_frozen: dict[str, Any] | None = None
 
 
+def _task_with_loose_tier(
+    task: dict[str, Any], classified: LooseTierDecision,
+) -> dict[str, Any]:
+    """Copy of ``task`` carrying the loose-tier assignment in ``params``.
+
+    Same keys the planner path uses (``tier_reason``, ``oracle``,
+    ``why_*`` for S) plus provenance, so downstream (oracle freeze,
+    telemetry, persistence funnel) treats both paths uniformly.
+    """
+    params = dict(task.get("params") or {})
+    params["tier_reason"] = classified.reason
+    params["tier_assigned_by"] = ASSIGNED_BY
+    params["tier_signals"] = list(classified.signals)
+    if classified.oracle is not None:
+        params["oracle"] = classified.oracle
+    if classified.why_consensus_is_needed is not None:
+        params["why_consensus_is_needed"] = classified.why_consensus_is_needed
+    if classified.why_single_session_is_insufficient is not None:
+        params["why_single_session_is_insufficient"] = (
+            classified.why_single_session_is_insufficient)
+    return {**task, "params": params}
+
+
+def _merge_loose_params(
+    enriched: dict[str, Any] | None, downstream: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Reattach classification keys dropped by the execution path.
+
+    Downstream keys win on conflict; keys only differ in practice for
+    ``tier_reason``-style classification outputs, which downstream never
+    writes.
+    """
+    if not enriched:
+        return downstream
+    if downstream is None:
+        return dict(enriched)
+    merged = dict(enriched)
+    merged.update(downstream)
+    return merged
+
+
 class DevSessionManager:
     """Runs deterministic step-based Dev Agent sessions."""
 
@@ -180,13 +223,34 @@ class DevSessionManager:
                 "deprecated routing source=%s task_id=%s (%s)",
                 decision.source, task.get("task_id"), decision.detail,
             )
+        classified: LooseTierDecision | None = None
         if decision.tool is None:
-            # Not dispatched: no tier selection (it may call an LLM) and no
-            # fallback. The ERP comment for the wait is posted by task_service.
-            return DevExecutionOutput(
-                status=TaskStatus.WAITING,
-                waiting_reason=f"{ROUTING_MISSING_REASON}: {decision.detail}",
-                params=task.get("params") if isinstance(task.get("params"), dict) else None,
+            if task.get("objective_id"):
+                # Objective children must arrive with the planner tier; auto-
+                # assigning one would mask a planner/validation gap, so this
+                # path stays fail-closed. The ERP comment for the wait is
+                # posted by task_service.
+                return DevExecutionOutput(
+                    status=TaskStatus.WAITING,
+                    waiting_reason=f"{ROUTING_MISSING_REASON}: {decision.detail}",
+                    params=task.get("params") if isinstance(task.get("params"), dict) else None,
+                )
+            # Loose ticket (TASK-2026-00137): deterministic tier authority,
+            # zero tokens. Never parks in routing_missing.
+            classified = classify_loose_tier(
+                str(task.get("title") or ""),
+                str(task.get("description") or ""),
+                task.get("attachments") or [],
+            )
+            logger.info(
+                "loose tier task_id=%s tier=%s signals=%s",
+                task.get("task_id"), classified.tier.value,
+                ",".join(classified.signals) or "default",
+            )
+            task = _task_with_loose_tier(task, classified)
+            decision = RoutingDecision(
+                classified.tier, "loose_classifier", False,
+                f"loose_classifier={classified.tier.value}",
             )
 
         # Invalid project config parks every ticket, whatever the tier.
@@ -255,6 +319,11 @@ class DevSessionManager:
                 await self._repo.release_repo_lock(repo, holder)
             elif output.status == TaskStatus.WAITING:
                 await self._repo.touch_repo_lock(repo, holder)
+        if classified is not None:
+            # The simple-tier path drops input params when no review links
+            # change; reattach the classification so it persists.
+            output.params = _merge_loose_params(
+                task.get("params"), output.params)
         return output
 
     async def _run_simple_tool(

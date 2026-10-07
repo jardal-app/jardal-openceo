@@ -936,6 +936,8 @@ Deterministic, 0 tokens: wakes on ticket created/ready, ticket closed/failed/can
 
 > pendiente: TASK-2026-00113 (encolador; requires 00043 — the scheduler honouring `autorun=false`).
 
+Loose tickets (no `objective_id`) without a tier self-classify at dev dispatch (TASK-2026-00137): deterministic heuristic classifier (`agents/dev/loose_tier.py`, 0 tokens, S → A → C → B order mirroring the routing policy), persisted via the normal execution funnel with `tier_reason` + provenance. Safe default is `tier_b` (upward bias on doubt; C needs explicit freezable oracle evidence); `routing_missing` survives only for objective children without the planner tier (planner/validation gap, fail-closed). The dispatcher consumes the tier and may peek with the same pure function for admission without persisting.
+
 ### Anti-bloat rules (deterministic, before persist)
 
 1. **Max N active tickets per objective** — no new tickets if existing ones are incomplete

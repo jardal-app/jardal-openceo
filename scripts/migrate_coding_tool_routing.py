@@ -4,8 +4,11 @@
 Tier S design §3.3 (TASK-2026-00086, F0): open tasks whose routing still lives
 in ``params.coding_tool`` or ``coding_tier`` get it promoted to the top-level
 field, with a deprecation note per task. Terminal tasks are left untouched.
-Tasks with no routing value anywhere are REPORTED, not guessed: the tier
-authority must assign their ``coding_tool`` explicitly.
+Tasks with no routing value anywhere are REPORTED with the tier the
+dispatch classifier (TASK-2026-00137) would assign: loose tickets
+self-classify at their next dev dispatch, so their tier is previewed, not
+written; only objective children without a tier still need an explicit
+assignment (planner/validation gap).
 
 Idempotent: re-running promotes nothing (migrated tasks already carry a valid
 top-level value). Dry-run by default; pass --apply to write.
@@ -26,6 +29,7 @@ from pathlib import Path
 REPO_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_DIR / "openceo-core"))
 
+from agents.dev.loose_tier import classify_loose_tier  # noqa: E402
 from agents.dev.routing import plan_routing_migration  # noqa: E402
 from db.mongo import MongoRepository  # noqa: E402
 from settings import get_settings  # noqa: E402
@@ -66,7 +70,18 @@ async def main_async(*, apply: bool) -> int:
         task = by_id.get(task_id) or {}
         agent = task.get("agent_hint") or task.get("agent") or "?"
         title = str(task.get("title") or "")[:70]
-        print(f"  needs assignment task_id={task_id} agent={agent} title={title!r}")
+        if task.get("objective_id"):
+            print(f"  needs assignment task_id={task_id} agent={agent} title={title!r} "
+                  f"(objective child without planner tier: assign explicitly)")
+            continue
+        preview = classify_loose_tier(
+            str(task.get("title") or ""),
+            str(task.get("description") or ""),
+            task.get("attachments") or [],
+        )
+        signals = ",".join(preview.signals) or "default"
+        print(f"  needs assignment task_id={task_id} agent={agent} title={title!r} "
+              f"-> loose preview {preview.tier.value} [{signals}] (assigned at dispatch)")
     if not apply:
         print("dry-run: no writes (pass --apply to write)")
         await repo.close()

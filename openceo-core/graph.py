@@ -83,6 +83,7 @@ class OpenCEOGraph:
             "status": task.get("status", TaskStatus.QUEUED.value),
             "coding_tier": task.get("coding_tier"),
             "coding_tool": task.get("coding_tool"),
+            "objective_id": task.get("objective_id"),
         }
         return await self._graph.ainvoke(initial_state)
 
@@ -181,6 +182,7 @@ class OpenCEOGraph:
             "priority": state.get("priority", "medium"),
             "coding_tier": state.get("coding_tier"),
             "coding_tool": state.get("coding_tool"),
+            "objective_id": state.get("objective_id"),
         }
 
         result = await self._dev_session.run(task, state.get("project_config", {}))
