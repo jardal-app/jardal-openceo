@@ -417,8 +417,8 @@ def _presets_yaml() -> str:
         "    description: \"Refactorizar y optimizar código reciente\"\n"
         "  sync_context:\n"
         "    number: 4\n"
-        '    prompt: "Revisa el estado del proyecto y actualiza STATUS.md y CONTEXT.md con un resumen claro del trabajo realizado y estado vigente."\n'
-        "    description: \"Sincronizar STATUS.md y contexto\"\n"
+        '    prompt: "Revisa el estado del proyecto y actualiza STATUS.md y el ticket ERPNext correspondiente con un resumen claro del trabajo realizado y estado vigente."\n'
+        "    description: \"Sincronizar STATUS.md y ticket\"\n"
         "  security_audit:\n"
         "    number: 5\n"
         '    prompt: "Audita el código en busca de posibles vulnerabilidades, endpoints expuestos sin autenticación o fugas de configuración."\n'

@@ -181,7 +181,7 @@ qmd update
 
 The checker must report zero errors and no warnings on touched notes. Task plans, progress logs, transcripts, secrets, build output, copies of code, and copies of existing repository documentation do not belong in the vault. Link to repository contracts such as this README instead of duplicating them.
 
-`CURRENT_PLAN.md`, `BRIEF.md`, feedback files, and session output remain execution artifacts. Existing `CONTEXT.md` readers/writers are compatibility mechanisms, not the target engineering memory. The session service resolves its context file through `ConfigLoader.context_path()` and `PROJECT_CONTEXTS_DIR`; Tier S can also use repository-local artifacts. Preserve files required by those consumers until the consumers are deliberately adapted, and retain source documents when migrating knowledge.
+`CURRENT_PLAN.md`, `BRIEF.md`, feedback files, and session output remain execution artifacts. The legacy per-project `CONTEXT.md` writers were retired in TASK-2026-00143 (no readers remained; session completion lives in Mongo `dev_sessions`, Tier S flows write `HANDOFF.md`). Tier S can also use repository-local artifacts. Retain source documents when migrating knowledge.
 
 Code topology is read on demand and is not copied into the vault or MongoDB. Graphify is outside the agent architecture: no registered Graphify MCP and no dependency on its manually refreshed graph. The repository explains connections; vault notes explain design decisions. If a note disagrees with the code, verify the code and correct the note.
 
@@ -756,7 +756,7 @@ Two modes:
 
 Without an active session, `openceo-dev` retains local Spanish conversation. Generic conversation and administrative queries do not authorize starting code execution. Explicit provider choice, project/session selection, progress queries, and session close/cancel remain part of the session contract.
 
-Project knowledge comes from the Obsidian vault and current repository evidence. Existing `CONTEXT.md` use remains a compatibility detail of the runtime; plans, review context, and completion signals keep their execution roles.
+Project knowledge comes from the Obsidian vault and current repository evidence. The legacy `CONTEXT.md` runtime memory was retired in TASK-2026-00143; plans, review context, and completion signals keep their execution roles.
 
 ### PM Agent
 
@@ -1384,7 +1384,7 @@ project:
       message: string
 ```
 
-Adding an execution project means configuring `projects/{name}/project.yaml` and linking the same `project_key` to its ERPNext business identity, repository, and vault hub where applicable. Existing local projects remain usable before that mapping is integrated. `CONTEXT.md` is retained only where an existing consumer requires it, not created as a second engineering knowledge base.
+Adding an execution project means configuring `projects/{name}/project.yaml` and linking the same `project_key` to its ERPNext business identity, repository, and vault hub where applicable. Existing local projects remain usable before that mapping is integrated. No per-project memory file is created as a second engineering knowledge base.
 
 Adding an execution process means defining a technical workflow for a registered worker. Business workflow rules and approvals belong in ERPNext; project YAML selects and configures how OpenCEO executes authorized work.
 
@@ -1458,7 +1458,7 @@ Choose the owning system before choosing a storage format: business records go t
 
 **Layer 2 — Supplementary `workflow_state` design.** A fixed envelope with workflow-local `data` for bounded intermediate outputs, attempt logs, and rebuildable snapshots when `params` is insufficient. The envelope supports basic lookups (`owner_id`, `workflow`, `kind`, `key`, `tags`). It is not permission for workflows to persist arbitrary business entities or build a memory database.
 
-**Layer 3 — Execution artifacts** (`CURRENT_PLAN.md`, `BRIEF.md`, feedback, and compatibility `CONTEXT.md`). Narrative material for the current task/review. Durable architecture and decisions belong in linked vault notes; implementation contracts remain versioned in Git. Neither type of Markdown replaces structured execution state.
+**Layer 3 — Execution artifacts** (`CURRENT_PLAN.md`, `BRIEF.md`, and feedback). Narrative material for the current task/review. Durable architecture and decisions belong in linked vault notes; implementation contracts remain versioned in Git. Neither type of Markdown replaces structured execution state.
 
 #### `workflow_state` Envelope Schema
 
@@ -1794,7 +1794,6 @@ DEV_EXECUTION_MODE=cli
 DEV_TURN_TIMEOUT_SECONDS=1800
 DEV_IDLE_TIMEOUT_SECONDS=45
 DEV_MAX_CONTEXT_MESSAGES=60
-DEV_CONTEXT_MAX_CHARS=20000
 TMUX_POLL_INTERVAL_MS=300
 TMUX_TURN_TIMEOUT_SECONDS=600
 TMUX_STABILITY_CHECKS=3
@@ -1889,7 +1888,7 @@ LiveKit Android: Open `openceo-voice-android/` in Android Studio → Build → R
 
 1. For business work, identify the ERPNext project and stable `project_key`; preserve the explicit mapping to the local execution name.
 2. Create `projects/{name}/project.yaml` with repository/provider/routing configuration. Existing local-only execution remains compatible until an ERPNext adapter is integrated.
-3. Link the project to its vault hub using `obsidian-vault-links`; reuse existing knowledge and validate links. Keep `CONTEXT.md` only where a runtime consumer requires it.
+3. Link the project to its vault hub using `obsidian-vault-links`; reuse existing knowledge and validate links. New projects get no `CONTEXT.md`: status goes to `STATUS.md` and work to ERPNext tickets (preset `sync_context`).
 
 ## Adding a New Business Process
 

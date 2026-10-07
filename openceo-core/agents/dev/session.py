@@ -1127,24 +1127,6 @@ class DevSessionManager:
             review_links=review_links,
         )
 
-    async def _step_update_files(self, task: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-        """Legacy CONTEXT.md writer (kept; tier flows write HANDOFF.md, F7)."""
-        try:
-            project = task.get("project", "default")
-            context_path = self._config_loader.context_path(project)
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-            context_line = (
-                f"\n## {now} - {task.get('task_id')}\n"
-                f"- Title: {task.get('title')}\n"
-                f"- Summary: {self._truncate(task.get('description', ''), 300)}\n"
-            )
-            self._append_text(context_path, context_line)
-
-            return self._step("update_files", "ok", "CONTEXT.md updated")
-        except Exception as exc:
-            return self._step("update_files", "skipped", f"CONTEXT.md unavailable: {exc}")
-
     async def _resolve_tier_executor(
         self,
         tool: CodingTool,
@@ -1473,12 +1455,6 @@ class DevSessionManager:
             return ProcessRunResult(False, output, err, process.returncode)
 
         return ProcessRunResult(True, output or "ok", err, process.returncode)
-
-    @staticmethod
-    def _append_text(path: Path, text: str) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(text)
 
     @staticmethod
     def _truncate(value: str, max_len: int) -> str:

@@ -227,11 +227,6 @@ class ConfigLoader:
 
         return load_mandate_file(self.company_mandate_path())
 
-    def context_path(self, project: str | None) -> Path:
-        base = self._resolve_project_context_root() / (project or "_global")
-        base.mkdir(parents=True, exist_ok=True)
-        return base / "CONTEXT.md"
-
     def project_root(self, project: str | None) -> Path:
         base = self._resolve_projects_root() / (project or "_global")
         base.mkdir(parents=True, exist_ok=True)
@@ -254,12 +249,6 @@ class ConfigLoader:
 
         # Fallback path even if it does not exist yet.
         return self._repo_root / self._settings.PROJECTS_DIR
-
-    def _resolve_project_context_root(self) -> Path:
-        configured = Path(self._settings.PROJECT_CONTEXTS_DIR)
-        if configured.is_absolute():
-            return configured
-        return (Path(__file__).resolve().parent / configured).resolve()
 
     @staticmethod
     def _has_project_configs(path: Path) -> bool:

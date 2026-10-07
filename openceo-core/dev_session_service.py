@@ -280,7 +280,6 @@ class DevSessionService:
             )
             if updated is None:
                 raise ValueError("Session not found")
-            await self._finalize_project_memory(updated)
             await self._hub.broadcast("dev_session_updated", updated)
             return updated
 
@@ -1213,32 +1212,3 @@ class DevSessionService:
             cwd=cwd,
             shell_mode=False,
         )
-
-    async def _finalize_project_memory(self, session: dict[str, Any]) -> None:
-        project = session["project"]
-        context_path = self._config_loader.context_path(project)
-
-        completed_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        block = (
-            f"\n## {completed_at} | Session {session['session_id']}\n"
-            f"- Title: {session.get('title')}\n"
-            f"- Provider: {session.get('provider')}\n"
-            f"- Summary: {str(session.get('last_output') or '')[:600]}\n"
-        )
-        _append_text(context_path, block, max_chars=self._settings.DEV_CONTEXT_MAX_CHARS)
-
-
-def _append_text(path: Path, text: str, max_chars: int | None = None) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if max_chars and max_chars > 0:
-        existing = ""
-        if path.exists():
-            existing = path.read_text(encoding="utf-8", errors="replace")
-        merged = existing + text
-        if len(merged) > max_chars:
-            merged = merged[-max_chars:]
-        path.write_text(merged, encoding="utf-8")
-        return
-
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(text)
