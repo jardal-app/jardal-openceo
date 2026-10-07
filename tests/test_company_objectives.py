@@ -1220,5 +1220,37 @@ class PackageLocationTests(unittest.TestCase):
         self.assertFalse((tier_s / "objective_planner_models.py").exists())
 
 
+class SharedScratchRootTests(unittest.TestCase):
+    """`.tier-s/` is the orchestrator-wide scratch (TASK-2026-00136).
+
+    The objectives engine keeps ``objectives/<id>/``,
+    ``PLANNER_RESULT.json`` and ``OBJECTIVE_CLOSURE.md`` under the same
+    root as the Tier S executor files and the shared ``status`` signal
+    bus. The simulated planners in these tests keep pinning the literal
+    paths independently (wire format); this class pins the engine side.
+    TASK-2026-00141 owns any future split of the root.
+    """
+
+    def test_dirname_is_pinned(self) -> None:
+        self.assertEqual(engine_mod.SCRATCH_DIRNAME, ".tier-s")
+
+    def test_helpers_resolve_under_repo(self) -> None:
+        repo = _scratch_repo(self)
+        self.assertEqual(engine_mod.scratch_root(repo), repo / ".tier-s")
+        self.assertEqual(engine_mod.objective_scratch(repo, "OBJ-X"),
+                         repo / ".tier-s" / "objectives" / "OBJ-X")
+
+    def test_root_is_shared_with_tier_s(self) -> None:
+        from agents.dev.tier_s import cycle as cycle_mod
+
+        repo = _scratch_repo(self)
+        self.assertEqual(engine_mod.scratch_root(repo), cycle_mod._tier_dir(repo))
+
+    def test_closure_prompt_names_canonical_status(self) -> None:
+        repo = _scratch_repo(self)
+        prompt = engine_mod._closure_judge_prompt(1, "goal", "capsule", repo)
+        self.assertIn(f"{engine_mod.SCRATCH_DIRNAME}/status", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()
