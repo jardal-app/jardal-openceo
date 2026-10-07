@@ -10,7 +10,6 @@ project:
 dev:
   # Tier S design §3/§15: no dev.coding_tool (routing is per-task) and no
   # dev.tier_s (roles and pool are global in config_loader.py).
-  coding_tier: auto
   default_provider: muse
   branch_pattern: "{session_id}-{slug}"
   auto_push: false

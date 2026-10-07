@@ -6,7 +6,6 @@ import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
-from agents.dev.routing import normalize_document_routing
 from company_mandate import (
     ESCALATION_PHASE,
     ESCALATION_TAG,
@@ -680,10 +679,6 @@ class TaskService:
                 return existing
 
         doc = make_task_document(payload)
-        # Transition (Tier S design §3.3): legacy routing paths are promoted to
-        # the top-level field at ingest, with a deprecation warning per task.
-        for routing_warning in normalize_document_routing(doc):
-            logger.warning("deprecated routing task_id=%s (%s)", doc.task_id, routing_warning)
         await self._apply_default_phase_workflow_to_document(doc)
         if doc.ticket_number is None:
             doc.ticket_number = await self._repo.get_next_ticket_number()
@@ -2032,11 +2027,8 @@ class TaskService:
                 "resume_at": graph_out.get("resume_at"),
                 "error": graph_out.get("error"),
             }
-            # Preserve ticket-level tier/tool if the graph didn't return them
+            # Preserve the ticket-level tool if the graph didn't return it
             # (e.g. error before _dev_node, or fallback path)
-            graph_tier = graph_out.get("coding_tier")
-            if graph_tier is not None:
-                updates["coding_tier"] = graph_tier
             graph_tool = graph_out.get("coding_tool")
             if graph_tool is not None:
                 updates["coding_tool"] = graph_tool

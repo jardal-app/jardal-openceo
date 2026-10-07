@@ -1,8 +1,8 @@
 """Global Tier S config and project validation (Tier S design §3/§15, F0).
 
 Covers ConfigLoader.validate_project against synthetic project dirs, the
-global roster defaults, the one-shot migration planner (pure) and the
-one-shot ERP wait comment. No network, no CLI, no LLM.
+global roster defaults and the one-shot ERP wait comment. No network, no
+CLI, no LLM.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ if str(CORE) not in sys.path:
 
 import tempfile  # noqa: E402
 
-from agents.dev.routing import plan_routing_migration  # noqa: E402
 from config_loader import ConfigLoader  # noqa: E402
 from dev_session_service import DevSessionService  # noqa: E402
 from settings import Settings  # noqa: E402
@@ -47,7 +46,7 @@ class ValidateProjectTests(unittest.TestCase):
         (path / "project.yaml").write_text(body, encoding="utf-8")
 
     def test_clean_project_is_valid(self) -> None:
-        self._write("proj", "dev:\n  coding_tier: auto\n  default_provider: codex\n")
+        self._write("proj", "dev:\n  default_provider: codex\n")
         self.assertEqual(_loader_for(self.root).validate_project("proj"), [])
 
     def test_missing_project_is_valid(self) -> None:
@@ -234,38 +233,6 @@ class InteractiveTriggerCleanupTests(unittest.TestCase):
         config = {"dev": {"coding_tool": "opencode", "default_provider": "codex"}}
         session = {"provider": DevProvider.AUTO.value}
         self.assertEqual(service._resolve_provider(session, config), DevProvider.CODEX)
-
-
-class PlanRoutingMigrationTests(unittest.TestCase):
-    def test_buckets(self) -> None:
-        tasks = [
-            {"task_id": "ok", "coding_tool": "tier_s"},
-            {"task_id": "legacy", "coding_tool": "codex"},
-            {"task_id": "params", "params": {"coding_tool": "claude"}},
-            {"task_id": "tier", "coding_tier": "tier3"},
-            {"task_id": "bad-root", "coding_tool": "nope", "params": {"coding_tool": "kimi"}},
-            {"task_id": "none"},
-        ]
-        plan = plan_routing_migration(tasks)
-        self.assertEqual(plan.already_ok, 1)
-        self.assertEqual(
-            {entry["task_id"]: entry["patch"] for entry in plan.promoted},
-            {"legacy": {"coding_tool": "tier_b"},
-             "params": {"coding_tool": "tier_a"},
-             "tier": {"coding_tool": "tier_c"},
-             "bad-root": {"coding_tool": "tier_c"}},
-        )
-        self.assertTrue(all(entry["warnings"] for entry in plan.promoted))
-        self.assertEqual(plan.needs_assignment, ["none"])
-
-    def test_idempotent(self) -> None:
-        tasks = [{"task_id": "a", "params": {"coding_tool": "codex"}}]
-        plan = plan_routing_migration(tasks)
-        migrated = [{**tasks[0], **plan.promoted[0]["patch"]}]
-        rerun = plan_routing_migration(migrated)
-        self.assertEqual(rerun.promoted, [])
-        self.assertEqual(rerun.needs_assignment, [])
-        self.assertEqual(rerun.already_ok, 1)
 
 
 class WaitErpCommentTests(unittest.IsolatedAsyncioTestCase):

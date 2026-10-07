@@ -86,7 +86,8 @@ class ConfigLoader:
         run. Tier S design v2 §3/§17: Tier S config and the simple-tier
         executors are global (the defaults above), so any ``dev.tier_s`` or
         ``dev.tiers`` content in a project.yaml is invalid, and
-        ``dev.coding_tool`` is obsolete (routing is per-task). The single
+        ``dev.coding_tool`` is obsolete (routing is per-task), as is
+        ``dev.coding_tier`` (numeric tiers retired, TASK-2026-00138). The single
         global Objective Planner is likewise global: top-level
         ``objective_planner`` content is invalid (TASK-2026-00112), and so
         is top-level ``objectives`` (TASK-2026-00117). The shared review
@@ -161,6 +162,13 @@ class ConfigLoader:
             errors.append(
                 "dev.coding_tool is obsolete: routing is per-task "
                 "(TaskDocument.coding_tool, set at creation). Remove it from "
+                f"{project}/project.yaml."
+            )
+        if "coding_tier" in dev:
+            errors.append(
+                "dev.coding_tier is obsolete: numeric tiers are retired, "
+                "routing is per-task (TaskDocument.coding_tool, set at "
+                "creation). Remove it from "
                 f"{project}/project.yaml."
             )
         tier_s = dev.get("tier_s")
@@ -270,7 +278,6 @@ class ConfigLoader:
                 # No dev.coding_tool default: routing is per-task
                 # (TaskDocument.coding_tool). A project default would silently
                 # route untagged tickets (Tier S design §3).
-                "coding_tier": "auto",
                 "default_provider": "auto",
                 "branch_pattern": "{session_id}-{slug}",
                 "auto_push": False,

@@ -667,9 +667,7 @@ class MongoRepository:
 
     async def mark_interrupted_tasks(self) -> int:
         tier_result = await self.tasks.update_many(
-            {"status": TaskStatus.IN_PROGRESS.value, "$or": [
-                {"coding_tool": "tier_s"}, {"params.coding_tool": "tier_s"},
-            ]},
+            {"status": TaskStatus.IN_PROGRESS.value, "coding_tool": "tier_s"},
             {"$set": {"status": TaskStatus.WAITING.value,
                       "waiting_reason": "Tier S pausado por reinicio; relanza el ticket para reanudar el mismo intento",
                       "resume_at": None, "updated_at": datetime.now(timezone.utc)}},

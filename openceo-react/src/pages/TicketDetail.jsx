@@ -17,7 +17,6 @@ import {
   MagnifyingGlassIcon,
   ArrowTopRightOnSquareIcon,
   CpuChipIcon,
-  WrenchIcon,
   DocumentTextIcon,
   ListBulletIcon,
   BeakerIcon,
@@ -58,19 +57,17 @@ const statusColors = {
 }
 
 const tierLabels = {
-  tier1: 'Tier 1 · Codex',
-  tier2: 'Tier 2 · Claude',
-  tier3: 'Tier 3 · OpenCode',
-  tier4: 'Tier 4 · Kimi',
   tier_s: 'Tier S · Consensus',
+  tier_a: 'Tier A',
+  tier_b: 'Tier B',
+  tier_c: 'Tier C',
 }
 
 const tierColors = {
-  tier1: 'badge-active',
-  tier2: 'badge-info',
-  tier3: 'badge-warning',
-  tier4: 'badge-danger',
   tier_s: 'badge-danger',
+  tier_a: 'badge-info',
+  tier_b: 'badge-active',
+  tier_c: 'badge-warning',
 }
 
 const approvalLabels = {
@@ -783,13 +780,10 @@ export default function TicketDetail() {
             <span className={`status-badge ${statusColors[ticket.status] || 'badge-active'}`}>
               {statusLabels[ticket.status] || ticket.status}
             </span>
-            {ticket.coding_tier && (
-              <span className={`status-badge ${tierColors[ticket.coding_tier] || 'badge-neutral'}`}>
-                {tierLabels[ticket.coding_tier] || ticket.coding_tier}
+            {ticket.coding_tool && (
+              <span className={`status-badge ${tierColors[ticket.coding_tool] || 'badge-neutral'}`}>
+                {tierLabels[ticket.coding_tool] || ticket.coding_tool}
               </span>
-            )}
-            {ticket.coding_tool && !ticket.coding_tier && (
-              <span className="status-badge badge-neutral">{ticket.coding_tool}</span>
             )}
             {ticket.approval_required && (
               <span className={`status-badge ${approvalColors[ticket.approval_state] || 'badge-active'}`}>
@@ -888,20 +882,14 @@ export default function TicketDetail() {
                 <dt className="info-label"><UserIcon className="w-4 h-4" /> Agente</dt>
                 <dd className="info-value capitalize">{ticket.agent_hint || ticket.agent || 'ceo'}</dd>
               </div>
-              {ticket.coding_tier && (
+              {ticket.coding_tool && (
                 <div className="info-row">
                   <dt className="info-label"><CogIcon className="w-4 h-4" /> Tier</dt>
                   <dd className="info-value">
-                    <span className={`status-badge ${tierColors[ticket.coding_tier] || 'badge-neutral'}`}>
-                      {tierLabels[ticket.coding_tier] || ticket.coding_tier}
+                    <span className={`status-badge ${tierColors[ticket.coding_tool] || 'badge-neutral'}`}>
+                      {tierLabels[ticket.coding_tool] || ticket.coding_tool}
                     </span>
                   </dd>
-                </div>
-              )}
-              {ticket.coding_tool && (
-                <div className="info-row">
-                  <dt className="info-label"><WrenchIcon className="w-4 h-4" /> Herramienta</dt>
-                  <dd className="info-value">{ticket.coding_tool}</dd>
                 </div>
               )}
               {ticket.coding_session_title && (

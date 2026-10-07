@@ -1104,16 +1104,12 @@ class DevSessionService:
             return requested
 
         # No dev.coding_tool fallback: the key was removed (§15.3) and no
-        # consumer may read it. AUTO resolves via default_provider only.
+        # consumer may read it. AUTO resolves via default_provider only,
+        # else the fixed default (the numeric-tier fallback is retired,
+        # TASK-2026-00138).
         default_provider = str(config.get("dev", {}).get("default_provider", "auto")).strip().lower()
         if default_provider in DevProvider._value2member_map_ and default_provider != DevProvider.AUTO.value:
             return DevProvider(default_provider)
-
-        tier = str(config.get("dev", {}).get("coding_tier", "auto")).strip().lower()
-        if tier == "tier1":
-            return DevProvider.CODEX
-        if tier == "tier3":
-            return DevProvider.OPENCODE
         return DevProvider.CLAUDE
 
     def _resolve_command(

@@ -10,7 +10,6 @@ dev:
   # tier_s default silently routed every untagged ticket to the costliest
   # pipeline) and no dev.tier_s (roles and pool are global in
   # config_loader.py; planner is claudej there).
-  coding_tier: auto
   default_provider: muse
   branch_pattern: "{session_id}-{slug}"
   auto_push: false

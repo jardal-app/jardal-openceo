@@ -16,7 +16,7 @@ from tools.erpnext_client import (
     ERPNextValidationError,
 )
 from tools.erpnext_tickets import AttachmentRejected
-from state import CodingTier, CodingTool, TaskCreateRequest, TaskPriority, TaskSource
+from state import CodingTool, TaskCreateRequest, TaskPriority, TaskSource
 
 logger = logging.getLogger(__name__)
 
@@ -491,7 +491,6 @@ def _register_openceo_tools(
         due_date: str | None = None,
         external_url: str | None = None,
         coding_tool: Literal["tier_s", "tier_a", "tier_b", "tier_c"] | None = None,
-        coding_tier: Literal["tier1", "tier2", "tier3", "tier4"] | None = None,
         autorun: bool = False,
         parent_task: str | None = None,
         depends_on: list[str] | None = None,
@@ -506,7 +505,6 @@ def _register_openceo_tools(
             tags=tags,
             params=_build_params(ticket_type, due_date, external_url, status),
             coding_tool=CodingTool(coding_tool) if coding_tool else None,
-            coding_tier=CodingTier(coding_tier) if coding_tier else None,
             autorun=autorun,
             parent_task=parent_task,
             depends_on=depends_on,
@@ -641,7 +639,7 @@ def _register_openceo_tools(
     server.tool(
         openceo_create_ticket,
         name="openceo_create_ticket",
-        description="Create a ticket in OpenCEO. It is registered in ERPNext (the business record) and in MongoDB (the execution record). Required: title. Optional: description, project, priority (low/medium/high/critical), status (queued/in_progress/completed/failed/escalated/interrupted/waiting), ticket_type, source, source_id, tags, due_date, external_url, coding_tool, coding_tier, autorun (default false), parent_task (TASK-... group), depends_on (list of TASK-...). Set autorun=true ONLY when the ticket must start executing now; by default it is only registered. Before creating, consider openceo_search_tickets to avoid duplicating existing work.",
+        description="Create a ticket in OpenCEO. It is registered in ERPNext (the business record) and in MongoDB (the execution record). Required: title. Optional: description, project, priority (low/medium/high/critical), status (queued/in_progress/completed/failed/escalated/interrupted/waiting), ticket_type, source, source_id, tags, due_date, external_url, coding_tool, autorun (default false), parent_task (TASK-... group), depends_on (list of TASK-...). Set autorun=true ONLY when the ticket must start executing now; by default it is only registered. Before creating, consider openceo_search_tickets to avoid duplicating existing work.",
     )
     server.tool(
         openceo_create_tickets_batch,

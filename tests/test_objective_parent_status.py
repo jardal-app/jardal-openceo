@@ -32,7 +32,7 @@ from objectives.engine import (
     convert_ticket,
 )
 from settings import Settings
-from state import CodingTier, TaskStatus
+from state import TaskStatus
 from task_service import TaskService
 from tools.erpnext_tickets import map_status
 
@@ -125,8 +125,7 @@ class ObjectiveParentStatusTests(unittest.IsolatedAsyncioTestCase):
                 "project": "p"}
         with patch("agents.dev.session.TierSCycle") as cycle_cls:
             cycle_cls.return_value.run = AsyncMock(return_value=outcome)
-            output = await manager._run_tier_s(
-                task, project_config, CodingTier.TIER1, {})
+            output = await manager._run_tier_s(task, project_config, {})
 
         self.assertEqual(output.status, TaskStatus.CONVERTED)
         self.assertIn("OBJ-1", output.last_response_summary or "")

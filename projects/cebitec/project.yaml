@@ -6,7 +6,6 @@ project:
       local_path: /home/develop/development/DigitalInnovations/CEBITEC
 
 dev:
-  coding_tier: auto
   default_provider: muse
   branch_pattern: "{session_id}-{slug}"
   auto_push: false

@@ -30,7 +30,7 @@ from agents.dev.session import (  # noqa: E402
     _merge_loose_params,
 )
 from graph import OpenCEOGraph  # noqa: E402
-from state import CodingTier, CodingTool, TaskStatus  # noqa: E402
+from state import CodingTool, TaskStatus  # noqa: E402
 from task_service import TaskService  # noqa: E402
 
 
@@ -276,7 +276,6 @@ class LooseParamsTests(unittest.TestCase):
 class SessionDispatchTests(unittest.IsolatedAsyncioTestCase):
     def _manager(self) -> DevSessionManager:
         settings = MagicMock()
-        settings.DEEPSEEK_API_KEY = None  # keep TierSelector offline
         loader = MagicMock()
         loader.validate_project = MagicMock(return_value=[])
         return DevSessionManager(settings, loader, repo=None)
@@ -288,7 +287,6 @@ class SessionDispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_loose_ticket_without_tier_is_classified(self) -> None:
         manager = self._manager()
-        manager._tier_selector.select = AsyncMock(return_value=CodingTier.TIER1)
         manager._step_code = AsyncMock(return_value=CodingStepResult(
             step={"step": "code", "status": "ok"}, prompt="p", summary="s"))
         output = await manager.run(
@@ -306,7 +304,6 @@ class SessionDispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_loose_signal_selects_tier_at_dispatch(self) -> None:
         manager = self._manager()
-        manager._tier_selector.select = AsyncMock(return_value=CodingTier.TIER1)
         manager._step_code = AsyncMock(return_value=CodingStepResult(
             step={"step": "code", "status": "ok"}, prompt="p", summary="s"))
         output = await manager.run(
@@ -319,7 +316,6 @@ class SessionDispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_field_beats_classifier(self) -> None:
         manager = self._manager()
-        manager._tier_selector.select = AsyncMock(return_value=CodingTier.TIER1)
         manager._step_code = AsyncMock(return_value=CodingStepResult(
             step={"step": "code", "status": "ok"}, prompt="p", summary="s"))
         output = await manager.run(
@@ -331,13 +327,12 @@ class SessionDispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_objective_child_without_tier_still_waits(self) -> None:
         manager = self._manager()
-        manager._tier_selector.select = AsyncMock(
-            side_effect=AssertionError("selector must not run without routing"))
+        manager._step_code = AsyncMock()
         output = await manager.run(self._task(objective_id="OBJ-1"), {})
         self.assertEqual(output.status, TaskStatus.WAITING)
         assert output.waiting_reason is not None
         self.assertTrue(output.waiting_reason.startswith("routing_missing"))
-        manager._tier_selector.select.assert_not_called()
+        manager._step_code.assert_not_called()
 
 
 class GraphObjectiveIdTests(unittest.IsolatedAsyncioTestCase):
@@ -350,7 +345,6 @@ class GraphObjectiveIdTests(unittest.IsolatedAsyncioTestCase):
                 output = MagicMock()
                 output.status = TaskStatus.COMPLETED
                 output.steps = []
-                output.coding_tier = None
                 output.coding_tool = CodingTool.TIER_B
                 output.coding_session_id = None
                 output.coding_session_title = None

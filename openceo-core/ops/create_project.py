@@ -464,7 +464,6 @@ def _project_yaml(
         f"  # Tier S design §3/§15: no dev.coding_tool (routing is per-task) and no\n"
         f"  # dev.tier_s (cycle config is global in config_loader.py, as are the\n"
         f"  # shared review/objectives/objective_planner blocks).\n"
-        f"  coding_tier: auto\n"
         f"  default_provider: muse\n"
         f"  branch_pattern: \"{{session_id}}-{{slug}}\"\n"
         f"  auto_push: false\n"

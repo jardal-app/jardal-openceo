@@ -115,13 +115,6 @@ class WorkflowPhaseType(str, Enum):
     TERMINAL = "terminal"
 
 
-class CodingTier(str, Enum):
-    TIER1 = "tier1"
-    TIER2 = "tier2"
-    TIER3 = "tier3"
-    TIER4 = "tier4"
-
-
 class CodingTool(str, Enum):
     """Execution tier of a task (routing policy §§18-27, TASK-2026-00112).
 
@@ -216,7 +209,6 @@ class TaskCreateRequest(BaseModel):
     tags: list[str] | None = None
     created_by: str | None = None
     autorun: bool = True
-    coding_tier: CodingTier | None = None
     coding_tool: CodingTool | None = None
     # Tier S design v2 §15.1 (F4/F6): internal creation (inbox promotion,
     # objective planner, closure fixes) sets these at creation, like any
@@ -276,7 +268,6 @@ class TaskDocument(BaseModel):
     # None = legacy sin campo, el scheduler lo trata como True. TASK-2026-00043: el
     # campo no existia y el False del registro se perdia -> Working fantasma.
     autorun: bool | None = None
-    coding_tier: CodingTier | None = None
     coding_tool: CodingTool | None = None
     # Tier S design v2 §15.1 (F2/F6): objective membership, OpenCEO-side
     # dependencies (the enqueuer never dispatches with open blockers),
@@ -401,7 +392,6 @@ class TaskPatchRequest(BaseModel):
     approval_state: ApprovalState | None = None
     updated_by: str | None = None
     params: dict[str, Any] | None = None
-    coding_tier: CodingTier | None = None
     coding_tool: CodingTool | None = None
 
 
@@ -594,7 +584,6 @@ class GraphState(TypedDict, total=False):
     error: str | None
     waiting_reason: str | None
     resume_at: datetime | None
-    coding_tier: str | None
     coding_tool: str | None
     objective_id: str | None
     coding_session_id: str | None

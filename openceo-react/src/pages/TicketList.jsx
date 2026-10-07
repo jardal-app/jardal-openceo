@@ -56,19 +56,17 @@ const priorityColors = {
 }
 
 const tierLabels = {
-  tier1: 'Tier 1 · Codex',
-  tier2: 'Tier 2 · Claude',
-  tier3: 'Tier 3 · OpenCode',
-  tier4: 'Tier 4 · Kimi',
   tier_s: 'Tier S · Consensus',
+  tier_a: 'Tier A',
+  tier_b: 'Tier B',
+  tier_c: 'Tier C',
 }
 
 const tierColors = {
-  tier1: 'badge-active',
-  tier2: 'badge-info',
-  tier3: 'badge-warning',
-  tier4: 'badge-danger',
   tier_s: 'badge-danger',
+  tier_a: 'badge-info',
+  tier_b: 'badge-active',
+  tier_c: 'badge-warning',
 }
 
 const phaseLabels = {
@@ -95,11 +93,8 @@ function getPhaseInfo(ticket) {
 }
 
 function getEngineInfo(ticket) {
-  if (ticket.coding_tier) {
-    return { label: tierLabels[ticket.coding_tier] || ticket.coding_tier, color: tierColors[ticket.coding_tier] || 'badge-neutral' }
-  }
   if (ticket.coding_tool) {
-    return { label: ticket.coding_tool, color: 'badge-neutral' }
+    return { label: tierLabels[ticket.coding_tool] || ticket.coding_tool, color: tierColors[ticket.coding_tool] || 'badge-neutral' }
   }
   if (ticket.workflow_key) {
     return { label: ticket.workflow_key, color: 'badge-info' }
