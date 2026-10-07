@@ -457,6 +457,16 @@ class HorizonAction(BaseModel):
     # Un vencimiento externo no se mueve desde el planificador (seccion 9.10):
     # una fecha comprometida con un tercero no es una palanca interna.
     external_due_date: bool = False
+    # F5: promocion automatica a empresa (TASK-2026-00121). Declaracion
+    # explicita de que la accion toca trabajo de empresa; sin ella la accion
+    # es personal (fail-closed hacia privacidad). `promotion_*` guardan el
+    # resultado de promover, para idempotencia y reintento tras escalado.
+    company_project: str | None = None
+    company_repo: str | None = None
+    promoted_at: datetime | None = None
+    promotion_kind: str | None = None
+    promotion_ref: str | None = None
+    promotion_escalation_task_id: str | None = None
     # HZ-003: Delegacion y dev movil
     delegated_at: datetime | None = None
     delegated_project: str | None = None
@@ -543,6 +553,23 @@ class HorizonDelegateRequest(BaseModel):
     project: str | None = None
     instruction: str | None = None
     dedupe_key: str | None = None
+
+
+class HorizonPromoteRequest(BaseModel):
+    """Promocion de una accion a trabajo de empresa (F5, TASK-2026-00121)."""
+
+    action_id: str | None = None
+    project: str | None = None
+    repo: str | None = None
+    kind: str = "ticket"
+    instruction: str | None = None
+    dedupe_key: str | None = None
+    # Dinero nuevo en cadena decimal; nunca float (company_mandate lo rechaza).
+    amount: str | None = None
+    needs_owner_credential: bool = False
+    irreversible: bool = False
+    strategic_replan: bool = False
+    human_action_hint: str | None = None
 
 
 class HorizonMetricsRequest(BaseModel):

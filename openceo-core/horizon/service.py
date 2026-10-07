@@ -24,6 +24,7 @@ from horizon import importer as importer_module
 from horizon import mandate as mandate_module
 from horizon import planner as planner_module
 from horizon import privacy as privacy_module
+from horizon import promotion as promotion_module
 from horizon import triggers as triggers_module
 from horizon.models import (
     ActionOwner,
@@ -150,6 +151,7 @@ class HorizonService:
         self._repo = repo
         self._task_service = task_service
         self._company_reader: Any | None = None
+        self._company_config: Any | None = None
 
     def set_task_service(self, task_service: Any) -> None:
         self._task_service = task_service
@@ -161,6 +163,15 @@ class HorizonService:
         (``unknown``), nunca en cero y nunca inventada.
         """
         self._company_reader = reader
+
+    def set_company_config(self, config_loader: Any | None) -> None:
+        """Configuracion de empresa (proyectos + mandato). Opcional.
+
+        Sin ella no se puede validar el toque de empresa ni leer el mandato:
+        toda promocion se rechaza (fail-closed) y la delegacion personal
+        sigue intacta.
+        """
+        self._company_config = config_loader
 
     # ------------------------------------------------------------------
     # Perfil e importacion
@@ -1416,7 +1427,7 @@ class HorizonService:
     # ------------------------------------------------------------------
 
     async def acknowledge_task_result(self, task: dict[str, Any]) -> dict[str, Any]:
-        """Registra el resultado de una tarea personal y pide replanificar.
+        """Registra el resultado de una tarea personal o promovida y replanifica.
 
         Se resuelve por ``task_id``, nunca por cercania temporal en el chat: un
         resultado de agente es evidencia objetiva y no debe depender de cual fue
@@ -1425,6 +1436,13 @@ class HorizonService:
         user_id = privacy_module.personal_owner(task)
         task_id = str(task.get("task_id") or "")
         status = str(task.get("status") or "")
+        if not user_id and promotion_module.is_horizon_promoted(task):
+            # Trabajo promovido: resuelve por proveniencia, no por alcance
+            # personal (un promovido nunca es personal). Sin esto las
+            # promovidas quedarian en curso para siempre y la entrega unica
+            # no las veria.
+            params = task.get("params") if isinstance(task.get("params"), dict) else {}
+            user_id = str(params.get(promotion_module.PROMOTION_OWNER_KEY) or "")
         if not user_id or not task_id:
             return {"recorded": False, "reason": "not_personal_scope"}
 
@@ -1472,6 +1490,385 @@ class HorizonService:
         }
 
     # ------------------------------------------------------------------
+    # F5: promocion automatica a empresa (TASK-2026-00121)
+    # ------------------------------------------------------------------
+
+    def _company_mandate(self) -> Any | None:
+        """Mandato de empresa validado, o None si falta o es ilegible.
+
+        None no deshabilita la promocion: ``requires_owner`` escala todo sin
+        mandato valido (fail-closed hacia preguntar, no hacia actuar).
+        """
+        loader = self._company_config
+        if loader is None:
+            return None
+        try:
+            return loader.load_company_mandate()
+        except Exception:
+            logger.warning(
+                "Company mandate unreadable; promotion escalates fail-closed",
+                exc_info=True,
+            )
+            return None
+
+    async def _promotion_objective_link(
+        self, project: str
+    ) -> tuple[str | None, str | None]:
+        """Enlace (parent_task, objective_id) hacia el objetivo del proyecto.
+
+        Solo cuando hay EXACTAMENTE un objetivo activo Y tiene grupo ERP:
+        cero, dos o mas, o uno sin grupo van sueltos (sin medio enlace).
+        Sin listador (tests) tambien sueltos.
+        """
+        lister = getattr(self._repo, "list_active_objectives", None)
+        if lister is None:
+            return None, None
+        try:
+            rows = await lister(project)
+        except Exception:
+            return None, None
+        actives = [
+            row
+            for row in (rows or [])
+            if isinstance(row, dict) and str(row.get("status") or "") == "active"
+        ]
+        if len(actives) != 1:
+            return None, None
+        ref = str(actives[0].get("erp_group_ref") or "").strip()
+        if not ref:
+            return None, None
+        objective_id = str(actives[0].get("objective_id") or "").strip() or None
+        return ref, objective_id
+
+    async def promote_action(
+        self,
+        user_id: str,
+        *,
+        action_id: str | None = None,
+        project: str | None = None,
+        repo: str | None = None,
+        kind: str = "ticket",
+        instruction: str | None = None,
+        dedupe_key: str | None = None,
+        amount: Any | None = None,
+        needs_owner_credential: bool = False,
+        irreversible: bool = False,
+        strategic_replan: bool = False,
+        human_action_hint: str | None = None,
+        task_service: Any | None = None,
+    ) -> dict[str, Any]:
+        """Promueve una accion de empresa a Objetivo o ticket (ERPNext primero).
+
+        Solo viaja la especificacion del trabajo (``promotion.build_work_spec``).
+        Pregunta al dueno solo si la politica de escalado (TASK-2026-00114) lo
+        exige; lo demas se hace sin preguntar. La capacidad del dueno no se
+        consulta: frena los escalados (la pregunta espera), nunca el trabajo
+        autonomo. Idempotente por accion y por ``source_id`` de la API.
+        """
+        target_action: dict[str, Any] | None = None
+        if action_id:
+            target_action = await self._repo.get_horizon_action(action_id)
+            if not target_action or target_action.get("user_id") != user_id:
+                return {
+                    "promoted": False,
+                    "reason": "action_not_found",
+                    "message": "Acción no encontrada.",
+                }
+        else:
+            chosen_res = await self.next_action(user_id)
+            if not chosen_res.get("has_action") or not chosen_res.get("action"):
+                return {
+                    "promoted": False,
+                    "reason": "no_action_available",
+                    "message": "No hay ninguna acción lista para promover.",
+                }
+            target_action = chosen_res["action"]
+
+        aid = str(target_action.get("action_id") or "")
+        svc = task_service or self._task_service
+        if svc is None:
+            return {
+                "promoted": False,
+                "reason": "task_service_unavailable",
+                "message": "El servicio de tareas no está disponible para promover.",
+            }
+
+        resolved_kind = str(kind or "ticket").strip().lower()
+        if resolved_kind not in ("ticket", "objective"):
+            return {
+                "promoted": False,
+                "reason": "unknown_kind",
+                "message": f"Destino desconocido: {kind}. Usa ticket u objective.",
+            }
+
+        classification = promotion_module.classify_action(
+            target_action,
+            explicit_project=project,
+            explicit_repo=repo,
+            company_config=self._company_config,
+        )
+        scope = classification["scope"]
+        if scope == promotion_module.SCOPE_PERSONAL:
+            return {
+                "promoted": False,
+                "reason": "not_company_work",
+                "action_id": aid,
+                "message": (
+                    "Esa acción es personal: no toca ningún proyecto o repo "
+                    "de empresa. Para ejecutarla en dev usa delegar."
+                ),
+            }
+        if scope == promotion_module.SCOPE_REFUSED:
+            reason = str(classification["reason"])
+            return {
+                "promoted": False,
+                "reason": reason,
+                "action_id": aid,
+                "message": promotion_module.REFUSAL_MESSAGES.get(
+                    reason, "Promoción rechazada; no se creó nada."
+                ),
+            }
+
+        company_project = str(classification["project"] or "")
+
+        # Declaraciones explicitas validadas: persisten para que la proxima
+        # delegacion promueva sola. "" borra. Solo se escriben en caminos
+        # con efecto; los no-op no mutan estado.
+        declarations: dict[str, Any] = {}
+        if project is not None:
+            declarations["company_project"] = str(project or "").strip() or None
+        if repo is not None:
+            declarations["company_repo"] = str(repo or "").strip() or None
+
+        current_status = str(target_action.get("status") or "")
+        if (
+            target_action.get("promoted_at")
+            and current_status == ActionStatus.IN_PROGRESS.value
+        ):
+            return {
+                "promoted": True,
+                "already_promoted": True,
+                "action_id": aid,
+                "task_id": target_action.get("task_id"),
+                "project": target_action.get("delegated_project") or company_project,
+                "kind": target_action.get("promotion_kind") or "ticket",
+                "message": "Esa acción ya está promovida y en curso.",
+            }
+        if (
+            target_action.get("task_id")
+            and current_status == ActionStatus.IN_PROGRESS.value
+        ):
+            return {
+                "promoted": False,
+                "reason": "already_delegated_personal",
+                "action_id": aid,
+                "task_id": target_action.get("task_id"),
+                "message": (
+                    "Esa acción ya está delegada como personal; "
+                    "no la duplico como empresa."
+                ),
+            }
+
+        # Escalado pendiente: relee la decision grabada, no el estado (aprobar
+        # y denegar dejan `completed`). Sin registro, se re-escala con el
+        # mismo source_id.
+        skip_escalation = False
+        escalation_id = str(target_action.get("promotion_escalation_task_id") or "")
+        if escalation_id and current_status == ActionStatus.WAITING.value:
+            escalation_task = await svc.get_task(escalation_id)
+            outcome = promotion_module.escalation_outcome(escalation_task)
+            if outcome == promotion_module.ESCALATION_WAITING:
+                return {
+                    "promoted": False,
+                    "escalated": True,
+                    "already_escalated": True,
+                    "action_id": aid,
+                    "escalation_task_id": escalation_id,
+                    "message": (
+                        "Esa promoción sigue esperando tu respuesta; "
+                        "no la dupliqué."
+                    ),
+                }
+            if outcome in (
+                promotion_module.ESCALATION_DENIED,
+                promotion_module.ESCALATION_CLOSED,
+            ):
+                return {
+                    "promoted": False,
+                    "reason": "escalation_denied",
+                    "action_id": aid,
+                    "escalation_task_id": escalation_id,
+                    "message": (
+                        "Esa promoción fue denegada; no se creó "
+                        "trabajo de empresa."
+                    ),
+                }
+            skip_escalation = outcome == promotion_module.ESCALATION_APPROVED
+
+        spec = promotion_module.build_work_spec(target_action, instruction)
+
+        if not skip_escalation:
+            from company_mandate import OwnerAction, requires_owner
+
+            owner_action = OwnerAction(
+                kind="horizon_promotion",
+                summary=spec["title"],
+                project=company_project,
+                amount=amount,
+                needs_owner_credential=bool(needs_owner_credential),
+                irreversible=bool(irreversible),
+                strategic_replan=bool(strategic_replan),
+                human_action_hint=(str(human_action_hint or "").strip() or None),
+            )
+            try:
+                decision = requires_owner(owner_action, self._company_mandate())
+            except Exception as exc:
+                return {
+                    "promoted": False,
+                    "reason": "invalid_signals",
+                    "action_id": aid,
+                    "detail": str(exc)[:300],
+                    "message": (
+                        "Las señales de la promoción no son válidas; "
+                        "no se creó nada."
+                    ),
+                }
+            if decision.escalate:
+                created = await svc.create_owner_escalation(
+                    action=owner_action,
+                    decision=decision,
+                    source_id=promotion_module.promotion_escalation_source_id(aid),
+                )
+                esc_task_id = str(created.get("task_id") or "")
+                updates = {
+                    **declarations,
+                    "status": ActionStatus.WAITING.value,
+                    "blocked_reason": "owner_escalation",
+                    "promotion_escalation_task_id": esc_task_id,
+                    "promotion_kind": resolved_kind,
+                }
+                await self._repo.patch_horizon_action(aid, updates)
+                category = getattr(decision.category, "value", decision.category)
+                human_action = decision.human_action or decision.reason
+                return {
+                    "promoted": False,
+                    "escalated": True,
+                    "already_escalated": False,
+                    "action_id": aid,
+                    "escalation_task_id": esc_task_id,
+                    "category": str(category or ""),
+                    "human_action": decision.human_action,
+                    "message": f"Antes de promover necesito tu respuesta: {human_action}",
+                }
+
+        from state import AgentName, TaskCreateRequest, TaskPriority, TaskSource
+
+        priority_val = int(target_action.get("priority") or 100)
+        task_priority = TaskPriority.HIGH if priority_val <= 50 else TaskPriority.MEDIUM
+
+        if resolved_kind == "objective":
+            from objectives.engine import ObjectiveErpError, ObjectiveRejected
+
+            acceptance = " ".join(str(target_action.get("acceptance") or "").split())
+            try:
+                created_obj = await svc.create_objective(
+                    project=company_project,
+                    goal=spec["title"],
+                    acceptance=[acceptance] if acceptance else None,
+                    entry="horizon_promotion",
+                    source=TaskSource.API.value,
+                    source_id=promotion_module.promotion_objective_source_id(aid),
+                    requester=user_id,
+                )
+            except (ObjectiveRejected, ObjectiveErpError) as exc:
+                return {
+                    "promoted": False,
+                    "reason": "objective_rejected",
+                    "action_id": aid,
+                    "detail": str(exc)[:300],
+                    "message": "El objetivo no fue admitido; no se creó nada.",
+                }
+            objective_id = str(created_obj.get("objective_id") or "")
+            updates = {
+                **declarations,
+                "task_id": str(created_obj.get("conversion_source_task_id") or "") or None,
+                "status": ActionStatus.IN_PROGRESS.value,
+                "owner": ActionOwner.AGENT.value,
+                "delegated_at": _now(),
+                "delegated_project": company_project,
+                "delivered_at": None,
+                "result_summary": None,
+                "promoted_at": _now(),
+                "promotion_kind": "objective",
+                "promotion_ref": objective_id or None,
+            }
+            await self._repo.patch_horizon_action(aid, updates)
+            return {
+                "promoted": True,
+                "already_promoted": False,
+                "action_id": aid,
+                "objective_id": objective_id,
+                "task_id": updates["task_id"],
+                "project": company_project,
+                "kind": "objective",
+                "message": f"Promoví «{spec['title']}» a objetivo de {company_project}.",
+            }
+
+        parent_task, objective_id = await self._promotion_objective_link(
+            company_project
+        )
+        task_req = TaskCreateRequest(
+            project=company_project,
+            source=TaskSource.API,
+            source_id=promotion_module.promotion_source_id(aid),
+            title=spec["title"][:120],
+            description=spec["description"],
+            agent_hint=AgentName.DEV,
+            priority=task_priority,
+            autorun=True,
+            params=promotion_module.promotion_params(user_id, aid, dedupe_key),
+            parent_task=parent_task,
+            objective_id=objective_id,
+        )
+        created = await svc.create_task(task_req)
+        task_id = str(created.get("task_id") or "")
+        promotion_ref = None
+        created_params = created.get("params")
+        mirrors = (
+            created_params.get("_mirrors")
+            if isinstance(created_params, dict)
+            else None
+        )
+        if isinstance(mirrors, dict):
+            erp = mirrors.get("erpnext")
+            if isinstance(erp, dict):
+                promotion_ref = str(erp.get("name") or "").strip() or None
+        updates = {
+            **declarations,
+            "task_id": task_id,
+            "status": ActionStatus.IN_PROGRESS.value,
+            "owner": ActionOwner.AGENT.value,
+            "delegated_at": _now(),
+            "delegated_project": company_project,
+            "delivered_at": None,
+            "result_summary": None,
+            "promoted_at": _now(),
+            "promotion_kind": "ticket",
+            "promotion_ref": promotion_ref,
+        }
+        await self._repo.patch_horizon_action(aid, updates)
+        return {
+            "promoted": True,
+            "already_promoted": False,
+            "action_id": aid,
+            "task_id": task_id,
+            "project": company_project,
+            "kind": "ticket",
+            "objective_id": objective_id,
+            "message": f"Promoví «{spec['title']}» a ticket de {company_project}.",
+        }
+
+    # ------------------------------------------------------------------
     # HZ-003: Delegacion autonoma y dev movil
     # ------------------------------------------------------------------
 
@@ -1509,6 +1906,32 @@ class HorizonService:
             target_action = chosen_res["action"]
 
         aid = str(target_action.get("action_id") or "")
+
+        # F5 (TASK-2026-00121): una accion que toca empresa no se delega como
+        # personal solo-Mongo; se promueve por la API comun (ERPNext primero).
+        # El `project` del encargo es substrato, no propiedad: no declara.
+        touch = promotion_module.classify_action(
+            target_action, company_config=self._company_config
+        )
+        if touch["scope"] == promotion_module.SCOPE_COMPANY:
+            result = await self.promote_action(
+                user_id,
+                action_id=aid,
+                instruction=instruction,
+                dedupe_key=dedupe_key,
+                task_service=task_service,
+            )
+            result["delegated"] = bool(result.get("promoted"))
+            return result
+        if touch["scope"] == promotion_module.SCOPE_REFUSED:
+            reason = str(touch["reason"])
+            return {
+                "delegated": False,
+                "reason": reason,
+                "message": promotion_module.REFUSAL_MESSAGES.get(
+                    reason, "No se puede delegar; no se creó nada."
+                ),
+            }
 
         # Idempotencia y reconexion movil: si ya tiene tarea activa en curso, devolverla sin duplicar
         existing_task_id = target_action.get("task_id")
