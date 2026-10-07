@@ -65,6 +65,10 @@ class ConfigLoader:
             return False
         return (self._resolve_projects_root() / project / "project.yaml").exists()
 
+    def projects_root(self) -> Path:
+        """Resolved projects directory (F6 TASK-2026-00115 writes new configs here)."""
+        return self._resolve_projects_root()
+
     def load_project(self, project: str | None) -> dict[str, Any]:
         if not project:
             return self._merge_with_defaults("", {})

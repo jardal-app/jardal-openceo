@@ -142,6 +142,16 @@ class WorkflowToolRegistry:
         self.register("cloudflare.upsert_dns_record", self._cloudflare_upsert_dns)
         self.register("cloudflare.delete_dns_record", self._cloudflare_delete_dns)
 
+        # Operations (autonomy F6, TASK-2026-00115): end-to-end project creation
+        self.register("ops.check_project_spend", self._ops_check_project_spend)
+        self.register("ops.escalate_project_spend", self._ops_escalate_project_spend)
+        self.register("ops.ensure_erpnext_project", self._ops_ensure_erpnext_project)
+        self.register("ops.ensure_git_repo", self._ops_ensure_git_repo)
+        self.register("ops.ensure_repo_templates", self._ops_ensure_repo_templates)
+        self.register("ops.ensure_project_config", self._ops_ensure_project_config)
+        self.register("ops.ensure_vault_entry", self._ops_ensure_vault_entry)
+        self.register("ops.ensure_dns_record", self._ops_ensure_dns_record)
+
     def set_horizon_service(self, horizon_service: Any) -> None:
         self._horizon = horizon_service
 
@@ -805,6 +815,212 @@ class WorkflowToolRegistry:
     def _cloudflare_delete_dns(self, hostname: str, **_: Any) -> dict[str, Any]:
         from tools.cloudflare import CloudflareDNSManager
         return CloudflareDNSManager(self._settings).delete(hostname)
+
+    def set_ops_erpnext(self, adapter: Any) -> None:
+        """Inject the ERPNext adapter for `ops.*` tools (tests)."""
+        self._ops_erpnext = adapter
+
+    def _ops_mandate(self) -> Any | None:
+        from company_mandate import MandateError
+        from config_loader import ConfigLoader
+        try:
+            return ConfigLoader(self._settings).load_company_mandate()
+        except MandateError:
+            return None
+
+    def _ops_erpnext_adapter(self) -> Any:
+        adapter = getattr(self, "_ops_erpnext", None)
+        if adapter is not None:
+            return adapter
+        from tools.erpnext_tickets import ERPNextTicketAdapter
+        return ERPNextTicketAdapter(self._settings)
+
+    def _ops_check_project_spend(
+        self,
+        project_key: str,
+        summary: str = "",
+        costs: list[dict[str, Any]] | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Decide whether creating a project needs the owner (mandate gate).
+
+        Costs are [{label, amount}] in mandate currency (domain purchase,
+        hosting, paid service...). Over the threshold — or without a valid
+        mandate — the creation must escalate before any side effect.
+        """
+        from ops.create_project import check_spend
+        return check_spend(
+            project_key=project_key,
+            summary=summary,
+            costs=costs,
+            mandate=self._ops_mandate(),
+        )
+
+    async def _ops_escalate_project_spend(
+        self,
+        project_key: str,
+        summary: str = "",
+        amount: Any = "0",
+        human_action_hint: str = "",
+        source_id: str = "",
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Park a project creation carrying new spend for the owner.
+
+        Creates the Pending Review escalation ticket ERPNext-first
+        (idempotent by source_id). The YAML gates this behind a
+        human_in_the_loop step on the same condition.
+        """
+        from company_mandate import OwnerAction, requires_owner
+        from ops.create_project import escalation_source_id
+        if self._task_service is None:
+            return {"ok": False, "error": "TaskService not configured in registry"}
+        action = OwnerAction(
+            kind="crear-proyecto",
+            summary=(summary or f"Crear el proyecto {project_key}").strip(),
+            project=None,
+            amount=0 if amount in (None, "") else amount,
+            human_action_hint=(human_action_hint or "").strip() or None,
+            details={"project_key": project_key},
+        )
+        decision = requires_owner(action, self._ops_mandate())
+        if not decision.escalate:
+            return {"ok": False, "error": "nothing to escalate: the decision is automatic"}
+        created = await self._task_service.create_owner_escalation(
+            action=action,
+            decision=decision,
+            source_id=(source_id or "").strip() or escalation_source_id(project_key),
+        )
+        return {
+            "ok": True,
+            "task_id": created.get("task_id"),
+            "ticket": created.get("ticket") or created.get("ticket_number"),
+            "category": decision.category.value if decision.category else None,
+            "human_action": decision.human_action,
+        }
+
+    async def _ops_ensure_erpnext_project(
+        self,
+        project_key: str,
+        display_name: str = "",
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Ensure the ERPNext Project identity (idempotent by project_key)."""
+        from ops.create_project import normalize_key
+        key = normalize_key(project_key)
+        adapter = self._ops_erpnext_adapter()
+        existing = await adapter.find_project(key)
+        name = await adapter.ensure_project(key, (display_name or "").strip() or None)
+        return {"name": name, "created": not existing}
+
+    def _ops_ensure_git_repo(
+        self,
+        project_key: str,
+        repo_name: str = "",
+        remote_url: str = "",
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Ensure the local git repo with the conventional remote URL."""
+        from ops.create_project import ensure_git_repo, normalize_key
+        key = normalize_key(project_key)
+        return ensure_git_repo(
+            self._settings.PROJECT_REPOS_ROOT,
+            (repo_name or "").strip() or key,
+            remote_url=remote_url,
+        )
+
+    def _ops_ensure_repo_templates(
+        self,
+        project_key: str,
+        repo_name: str = "",
+        display_name: str = "",
+        org: str = "",
+        description: str = "",
+        remote_url: str = "",
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Write README/CLAUDE.md/AGENTS.md/.gitignore/docs/work + commit."""
+        from pathlib import Path
+        from ops.create_project import default_remote_url, ensure_repo_templates, normalize_key
+        key = normalize_key(project_key)
+        repo = (repo_name or "").strip() or key
+        url = (remote_url or "").strip() or default_remote_url(repo)
+        return ensure_repo_templates(
+            str(Path(self._settings.PROJECT_REPOS_ROOT).expanduser() / repo),
+            project_key=key,
+            display_name=display_name,
+            org=(org or "").strip() or "jardal",
+            description=description,
+            vault_root=self._settings.VAULT_ROOT,
+            remote_url=url,
+        )
+
+    def _ops_ensure_project_config(
+        self,
+        project_key: str,
+        repo_name: str = "",
+        org: str = "",
+        remote_url: str = "",
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Write projects/<key>/project.yaml once, then validate it.
+
+        Fails the step when ConfigLoader reports errors, so a template bug
+        never persists a config that would park the project's tickets.
+        """
+        from pathlib import Path
+        from config_loader import ConfigLoader
+        from ops.create_project import default_remote_url, ensure_project_config, normalize_key
+        key = normalize_key(project_key)
+        repo = (repo_name or "").strip() or key
+        org_name = (org or "").strip() or "jardal"
+        url = (remote_url or "").strip() or default_remote_url(repo)
+        repos_root = str(Path(self._settings.PROJECT_REPOS_ROOT).expanduser().resolve())
+        projects_root = ConfigLoader(self._settings).projects_root()
+        result = ensure_project_config(
+            projects_root,
+            key,
+            remote_url=url,
+            repo_path=str(Path(repos_root) / repo),
+            vault_root=str(Path(self._settings.VAULT_ROOT).expanduser()),
+            vault_project=f"projects/{org_name}/{key}",
+        )
+        errors = ConfigLoader(self._settings).validate_project(key)
+        if errors:
+            raise ValueError(f"{key}/project.yaml invalid: {'; '.join(errors)}")
+        return {**result, "errors": []}
+
+    def _ops_ensure_vault_entry(
+        self,
+        project_key: str,
+        repo_name: str = "",
+        org: str = "",
+        display_name: str = "",
+        description: str = "",
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Create the vault hub and append its README line (own entry only)."""
+        from pathlib import Path
+        from ops.create_project import ensure_vault_entry, normalize_key
+        key = normalize_key(project_key)
+        repo = (repo_name or "").strip() or key
+        source = str(Path(self._settings.PROJECT_REPOS_ROOT).expanduser().resolve() / repo)
+        return ensure_vault_entry(
+            self._settings.VAULT_ROOT,
+            (org or "").strip() or "jardal",
+            key,
+            display_name=display_name,
+            description=description,
+            source_path=source,
+        )
+
+    def _ops_ensure_dns_record(self, hostname: str = "", **_: Any) -> dict[str, Any]:
+        """Ensure the web project's subdomain (same manager as the MCP tool)."""
+        from tools.cloudflare import CloudflareDNSManager
+        fqdn = (hostname or "").strip()
+        if not fqdn or "." not in fqdn:
+            raise ValueError("is_web projects need params.hostname as a valid FQDN")
+        return CloudflareDNSManager(self._settings).check_or_create(fqdn)
 
     @staticmethod
     def _build_kwargs(fn: Callable[..., Any], params: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
