@@ -639,9 +639,9 @@ export default function KanbanBoard({
                           )}
 
                           {/* Coding Tier */}
-                          {ticket.coding_tier && (
+                          {ticket.coding_tool && (
                             <span className="badge-neutral font-mono text-[0.68rem] px-1.5 py-0.5 rounded">
-                              {ticket.coding_tier}
+                              {ticket.coding_tool}
                             </span>
                           )}
                         </div>

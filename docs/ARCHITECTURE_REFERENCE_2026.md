@@ -1040,12 +1040,12 @@ High-stakes tickets (real money, critical infrastructure, security boundaries, d
 
 - **Engine:** `openceo-core/agents/dev/tier_s/` (v2, single-ticket cycle). Shared executors, review pool/rounds, findings, inbox and knowledge live in `openceo-core/orchestration/` (TASK-2026-00141). Cycle roles and reviewer slots live in the global config (`config_loader.py`); checked-in projects carry no routing or Tier S overrides.
 - **Design:** `docs/work/TIER_S_DESIGN_FINAL.md` v2 (TASK-2026-00085): one ticket = one cycle = one builder session; tiers `tier_s/a/b/c`; non-blocking plan review.
-- **Routing:** `coding_tool` per ticket (root or `params`). DEV tier semantics and the Tier C oracle rule are normative in `docs/objective-planner-routing-policy.md`.
+- **Routing:** `coding_tool` per ticket (top-level only). DEV tier semantics and the Tier C oracle rule are normative in `docs/objective-planner-routing-policy.md`.
 - **Large work:** decomposition belongs to the single objective planner (§Proactive CEO; TASK-2026-00112/00117), not to Tier S.
 
 Still-live settings from the retired section:
 
-For the legacy task queue only, an explicit `coding_tier: tier3` still has a meaning: it maps to a one-shot OpenCode run using `opencode run --format json --agent build`. That legacy tier mapping does not modify the persistent `openceo-dev` chat sessions.
+Superseded by TASK-2026-00138: the numeric tiers (`tier1`→B, `tier2`→A, `tier3`/`tier4`→C), the LLM tier selector, the MCP `coding_tier` parameter, the `dev.coding_tier` default and every deprecated routing source were retired once the migration ran dry. `coding_tool` (tier_s/a/b/c) is the only routing; the previous sentence about `coding_tier: tier3` mapping to a one-shot OpenCode run no longer applies and lives only in Git history.
 
 ```yaml
 pm:
@@ -1426,7 +1426,7 @@ The ERPNext adapter and event mapping are integration contracts to implement, no
 Persistent tmux runtime with explicit provider sessions. Deterministic Python orchestrates the flow around the coding CLI.
 
 1. **Branch Setup** — checkout, pull, create feature branch.
-2. **Code** — send task description. Coding tool uses CLAUDE.md/skills + MCP tools (DNS, Docker) if needed. If `coding_tool` is `tier_s`, execute the Tier S flow instead of steps 2-4. In the legacy one-shot ticket runner, `coding_tier: tier3` maps to `OpenCode build` for that ticket only.
+2. **Code** — send task description. Coding tool uses CLAUDE.md/skills + MCP tools (DNS, Docker) if needed. If `coding_tool` is `tier_s`, execute the Tier S flow instead of steps 2-4.
 3. **QA** — conditional on config. Run tests, retry on fail, escalate if exhausted.
 4. **Push + PR** — conditional on config and confidence threshold.
 5. **Record execution result and knowledge** — preserve existing context-file closeout where required by the runtime; write durable engineering conclusions to the vault through its skill. If the user then closes the dev session, OpenCEO tears down the tmux runtime; in Tier S it also purges persisted OpenCode `sessionID` files so the next session starts clean.

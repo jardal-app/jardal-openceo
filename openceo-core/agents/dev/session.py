@@ -55,10 +55,9 @@ from .tmux_runtime import TmuxRuntime
 from config_loader import ConfigLoader
 from rate_monitor import RateMonitor
 from settings import Settings
-from state import CodingTier, CodingTool, TaskStatus
+from state import CodingTool, TaskStatus
 
 from .tier_s_contract import child_env
-from .tier_selector import TierSelector
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +89,6 @@ def _resolve_execution_repo(project_config: dict[str, Any]) -> str | None:
 class DevExecutionOutput:
     status: TaskStatus
     steps: list[dict[str, Any]] = field(default_factory=list)
-    coding_tier: CodingTier | None = None
     coding_tool: CodingTool | None = None
     coding_session_id: str | None = None
     coding_session_title: str | None = None
@@ -106,7 +104,6 @@ class DevExecutionOutput:
         return {
             "status": self.status.value,
             "steps": self.steps,
-            "coding_tier": self.coding_tier.value if self.coding_tier else None,
             "coding_tool": self.coding_tool.value if self.coding_tool else None,
             "coding_session_id": self.coding_session_id,
             "coding_session_title": self.coding_session_title,
@@ -197,7 +194,6 @@ class DevSessionManager:
                  rate_monitor: RateMonitor | None = None, repo: Any | None = None) -> None:
         self._settings = settings
         self._config_loader = config_loader
-        self._tier_selector = TierSelector(settings)
         self._rate_monitor = rate_monitor
         self._repo = repo
         self._task_service: Any | None = None
@@ -212,17 +208,11 @@ class DevSessionManager:
         self._task_service = task_service
 
     async def run(self, task: dict[str, Any], project_config: dict[str, Any]) -> DevExecutionOutput:
-        dev_cfg = project_config.get("dev", {})
-        qa_cfg = dev_cfg.get("qa", {})
+        qa_cfg = project_config.get("dev", {}).get("qa", {})
 
-        # Single routing reader (Tier S design §3): the top-level coding_tool,
-        # with legacy fallbacks during the deprecation transition.
-        decision = resolve_coding_tool(task, project_config)
-        if decision.deprecated:
-            logger.warning(
-                "deprecated routing source=%s task_id=%s (%s)",
-                decision.source, task.get("task_id"), decision.detail,
-            )
+        # Single routing reader (Tier S design §3): the top-level
+        # coding_tool, a tier letter written at creation.
+        decision = resolve_coding_tool(task)
         classified: LooseTierDecision | None = None
         if decision.tool is None:
             if task.get("objective_id"):
@@ -249,7 +239,7 @@ class DevSessionManager:
             )
             task = _task_with_loose_tier(task, classified)
             decision = RoutingDecision(
-                classified.tier, "loose_classifier", False,
+                classified.tier, "loose_classifier",
                 f"loose_classifier={classified.tier.value}",
             )
 
@@ -260,30 +250,6 @@ class DevSessionManager:
                 status=TaskStatus.WAITING,
                 waiting_reason=f"{CONFIG_INVALID_REASON}: {'; '.join(config_errors)}",
                 params=task.get("params") if isinstance(task.get("params"), dict) else None,
-            )
-
-        # Respect ticket-level tier overrides (e.g. manual classification)
-        task_params = task.get("params") if isinstance(task.get("params"), dict) else {}
-        task_tier = task.get("coding_tier") or task_params.get("coding_tier")
-
-        if task_tier:
-            try:
-                tier = CodingTier(task_tier)
-            except ValueError:
-                logger.warning(
-                    "invalid coding_tier=%r task_id=%s; falling back to selector",
-                    task_tier, task.get("task_id"),
-                )
-                tier = await self._tier_selector.select(
-                    str(dev_cfg.get("coding_tier", "auto")),
-                    task.get("title", ""),
-                    task.get("description", ""),
-                )
-        else:
-            tier = await self._tier_selector.select(
-                str(dev_cfg.get("coding_tier", "auto")),
-                task.get("title", ""),
-                task.get("description", ""),
             )
 
         # Common execution lock (§11.1): one repo, one execution, every tier.
@@ -305,9 +271,9 @@ class DevSessionManager:
                 )
         try:
             if decision.tool == CodingTool.TIER_S:
-                output = await self._run_tier_s(task, project_config, tier, qa_cfg)
+                output = await self._run_tier_s(task, project_config, qa_cfg)
             else:
-                output = await self._run_simple_tool(task, project_config, decision.tool, tier, qa_cfg)
+                output = await self._run_simple_tool(task, project_config, decision.tool, qa_cfg)
         except Exception:
             if outer_lock:
                 assert repo is not None
@@ -331,7 +297,6 @@ class DevSessionManager:
         task: dict[str, Any],
         project_config: dict[str, Any],
         tool: CodingTool,
-        tier: CodingTier,
         qa_cfg: dict[str, Any],
     ) -> DevExecutionOutput:
         """Simple tiers (design §10, F5): one ticket, one session, gates.
@@ -347,7 +312,6 @@ class DevSessionManager:
         del qa_cfg
         output = DevExecutionOutput(
             status=TaskStatus.IN_PROGRESS,
-            coding_tier=tier,
             coding_tool=tool,
         )
 
@@ -951,7 +915,6 @@ class DevSessionManager:
         self,
         task: dict[str, Any],
         project_config: dict[str, Any],
-        tier: CodingTier,
         qa_cfg: dict[str, Any],
     ) -> DevExecutionOutput:
         """Tier S dispatch: full engine cycle with live CLI executors.
@@ -961,7 +924,7 @@ class DevSessionManager:
         graph and ``run_task`` converge on the same values. No fallback to
         another tier, ever.
         """
-        del tier, qa_cfg
+        del qa_cfg
         task_id = str(task.get("task_id") or "")
         params = task.get("params") if isinstance(task.get("params"), dict) else None
         if self._settings.DEV_EXECUTION_MODE == "mock":
@@ -1039,7 +1002,6 @@ class DevSessionManager:
             return DevExecutionOutput(
                 status=(TaskStatus.CONVERTED if converted
                         else TaskStatus.COMPLETED),
-                coding_tier=None,
                 coding_tool=CodingTool.TIER_S,
                 last_response_summary=(
                     f"Tier S cycle {detail} (run {outcome.run_id}). {summary}"

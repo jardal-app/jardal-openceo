@@ -81,7 +81,6 @@ class OpenCEOGraph:
             "workflow_phases": task.get("workflow_phases") or [],
             "steps": [],
             "status": task.get("status", TaskStatus.QUEUED.value),
-            "coding_tier": task.get("coding_tier"),
             "coding_tool": task.get("coding_tool"),
             "objective_id": task.get("objective_id"),
         }
@@ -180,7 +179,6 @@ class OpenCEOGraph:
             "attachments": state.get("attachments", []),
             "params": state.get("params") or {},
             "priority": state.get("priority", "medium"),
-            "coding_tier": state.get("coding_tier"),
             "coding_tool": state.get("coding_tool"),
             "objective_id": state.get("objective_id"),
         }
@@ -191,7 +189,6 @@ class OpenCEOGraph:
             "selected_agent": AgentName.DEV.value,
             "status": result.status.value,
             "steps": [*(state.get("steps") or []), *result.steps],
-            "coding_tier": result.coding_tier.value if result.coding_tier else None,
             "coding_tool": result.coding_tool.value if result.coding_tool else None,
             "coding_session_id": result.coding_session_id,
             "coding_session_title": result.coding_session_title,

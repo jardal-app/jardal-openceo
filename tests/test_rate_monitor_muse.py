@@ -65,8 +65,10 @@ class ParseMuseUsageTests(unittest.TestCase):
         reset = RateMonitor._muse_current_to_utc("4:54 PM", now)
         self.assertEqual((reset.day, reset.hour, reset.minute), (5, 16, 54))
 
-    def test_legacy_muse_value_resolves_to_tier_c(self) -> None:
-        self.assertEqual(resolved_tool_name({"coding_tool": "muse"}), "tier_c")
+    def test_retired_muse_value_no_longer_resolves(self) -> None:
+        # TASK-2026-00138: pre-v2 provider values are not routing.
+        self.assertEqual(resolved_tool_name({"coding_tool": "muse"}), "")
+        self.assertEqual(resolved_tool_name({"coding_tool": "tier_c"}), "tier_c")
 
 
 if __name__ == "__main__":

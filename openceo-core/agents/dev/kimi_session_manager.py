@@ -230,7 +230,7 @@ class KimiSessionManager:
     def touch_existing_session(self, work_dir: str, session_id: str) -> dict[str, Any]:
         """Bump the mtime of an existing session so it floats to the top in the UI.
 
-        Used when the ticket was already developed with Kimi (tier4) — no need to
+        Used when the ticket was already developed with Kimi — no need to
         recreate context, just refresh the session timestamp.
         """
         sdir = self._session_dir(work_dir, session_id)

@@ -44,7 +44,7 @@ from agents.dev.session import DevExecutionOutput, DevSessionManager
 from config_loader import ConfigLoader
 from graph import OpenCEOGraph
 from settings import Settings
-from state import CodingTool, CodingTier, TaskStatus
+from state import CodingTool, TaskStatus
 from task_service import TaskService
 
 
@@ -94,7 +94,6 @@ class GraphDevPayloadTests(unittest.IsolatedAsyncioTestCase):
                 return DevExecutionOutput(
                     status=TaskStatus.COMPLETED,
                     steps=[],
-                    coding_tier=CodingTier.TIER3,
                     coding_tool=CodingTool.TIER_C,
                 )
 
@@ -110,7 +109,6 @@ class GraphDevPayloadTests(unittest.IsolatedAsyncioTestCase):
             "attachments": ["a.txt"],
             "params": {"pm_ticket": {"module": "Ventas"}},
             "priority": "medium",
-            "coding_tier": "tier4",
             "coding_tool": "tier_c",
             "project_config": {},
             "steps": [],
