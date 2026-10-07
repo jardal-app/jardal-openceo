@@ -1516,7 +1516,9 @@ class TierSCycle:
             if self._create_ticket is None:
                 ctx.metrics.setdefault("promotion_pending", []).append(fp)
                 continue
-            payload = inbox_mod.promotion_ticket(entry, ctx.fix_tiers or None)
+            attribution = await self._attribute_promotion(ctx, entry)
+            payload = inbox_mod.promotion_ticket(
+                entry, ctx.fix_tiers or None, attribution)
             payload["project"] = str(ctx.ticket.get("project") or "")
             payload["source"] = "spillover"
             payload["source_id"] = f"inbox:{fp}"
@@ -1529,11 +1531,81 @@ class TierSCycle:
             task_id = str((created or {}).get("task_id") or "")
             if task_id:
                 try:
-                    await inbox_mod.mark_promoted(self._inbox, fp, task_id)
+                    await inbox_mod.mark_promoted(
+                        self._inbox, fp, task_id, attribution)
                 except Exception:
                     pass
                 ctx.metrics.setdefault("promoted", []).append(
                     {"fp": fp, "task_id": task_id})
+
+    async def _attribute_promotion(
+        self, ctx: _Ctx, entry: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Best-effort §31 attribution for a promoted finding.
+
+        Unknown origins return None (the payload stays unchanged); a C
+        origin also records the Tier C late failure (§32). Never raises:
+        attribution must not break a promotion.
+        """
+        env = self._objective_env
+        objective_id = str(ctx.ticket.get("objective_id") or "")
+        if env is None or not objective_id:
+            return None
+        try:
+            objective = await env.objectives.get_objective(objective_id)
+            log = (objective or {}).get("tickets_log") or []
+            candidates = []
+            for item in log:
+                if not isinstance(item, Mapping):
+                    continue
+                sha = str(item.get("sha") or "")
+                origin_id = str(item.get("task_id") or "")
+                if not sha or not origin_id:
+                    continue
+                try:
+                    detail = await env.tasks.get_task(origin_id) or {}
+                except Exception:
+                    detail = {}
+                params = detail.get("params") or {} \
+                    if isinstance(detail, Mapping) else {}
+                oracle = params.get("oracle") or {}
+                oracle = oracle if isinstance(oracle, Mapping) else {}
+                tool = str(detail.get("coding_tool") or "") \
+                    if isinstance(detail, Mapping) else ""
+                candidates.append({
+                    "sha": sha,
+                    "task_id": origin_id,
+                    "objective_id": objective_id,
+                    "coding_tool": tool or str(item.get("tier") or ""),
+                    "tier_reason": str(params.get("tier_reason") or ""),
+                    "oracle_type": str(oracle.get("type") or "") or None,
+                    "oracle_refs": [
+                        str(ref.get("ref") or "")
+                        for ref in oracle.get("refs") or []
+                        if isinstance(ref, Mapping)],
+                    "files": [str(name)
+                              for name in item.get("files") or []],
+                })
+            result = inbox_mod.attribute_finding(
+                ctx.repo, str(entry.get("file") or ""),
+                str(entry.get("quote") or ""), candidates)
+            if result.get("status") != "attributed":
+                return None
+            if result.get("coding_tool") == "tier_c" \
+                    and result.get("ticket_ids"):
+                short = ",".join(
+                    str(item)[:12] for item in result.get("shas") or [])
+                try:
+                    await objectives_mod.record_tier_c(
+                        env.objectives, objective_id, "late_failure",
+                        task_id=str(result["ticket_ids"][0]),
+                        severity=str(entry.get("severity_max") or ""),
+                        detail=f"{entry.get('_id')}: {short}")
+                except Exception:
+                    pass
+            return result
+        except Exception:
+            return None
 
     # -- round helpers -----------------------------------------------------------
 
