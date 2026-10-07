@@ -43,6 +43,10 @@ INTENT_IMPORT = "horizon_import"
 INTENT_DELEGATE = "horizon_delegate"
 INTENT_DELIVERY = "horizon_delivery"
 INTENT_METRICS = "horizon_metrics"
+# F5: cockpit del dueno (TASK-2026-00120).
+INTENT_BRIEF = "horizon_brief"
+INTENT_DECISIONS = "horizon_decisions"
+INTENT_DECIDE = "horizon_decide"
 
 # Verbos de registro explicito: precedencia maxima.
 _CAPTURE_PREFIX_PATTERNS = (
@@ -228,6 +232,61 @@ _METRICS_PATTERNS = (
     r"\bhubo\s+(?:retrabajo|que\s+corregir)\b",
 )
 
+# F5: brief con empresa, bandeja y respuesta. Estrechos a proposito: una frase
+# dev ("revisa el ticket", "mergea la rama") nunca cae aqui aunque mencione
+# tickets, porque exige vocabulario de brief/decision.
+_BRIEF_PATTERNS = (
+    r"\bbrief\s+(?:del\s+d[ií]a|diario|de\s+hoy|de\s+la\s+empresa|empresarial)\b",
+    r"\bbriefing\s+(?:del\s+d[ií]a|diario|matutino)\b",
+    r"\bresumen\s+(?:del\s+d[ií]a|de\s+hoy)\b",
+    r"\bqu[eé]\s+avanz[oó]\s+(?:el\s+ceo|la\s+empresa|hoy|esta\s+semana)\b",
+    r"\bestado\s+de\s+la\s+empresa\b",
+    r"\bc[oó]mo\s+va\s+la\s+empresa\b",
+    r"\bqu[eé]\s+(?:pas[oó]|hay)\s+en\s+la\s+empresa\b",
+)
+
+_DECISIONS_PATTERNS = (
+    r"\bdecisiones?\s+pendientes\b",
+    r"\bpendientes?\s+de\s+(?:decisi[oó]n|aprobaci[oó]n)\b",
+    r"\bqu[eé]\s+(?:espera|esperan|necesita|necesitan|requiere|requieren)\s+(?:mi|tu|nuestra)\s+(?:decisi[oó]n|aprobaci[oó]n|respuesta)\b",
+    r"\bqu[eé]\s+tengo\s+que\s+(?:decidir|aprobar|responder)\b",
+    r"\bbandeja\s+(?:de\s+decisiones|requiere\s+humano)\b",
+    r"\brequiere\s+humano\b",
+)
+
+# F5: responder una decision. Exige verbo + (sustantivo de decision | ordinal
+# | "ticket N"): un "apruebalo" suelto o un "si" no deciden nada. "Autorizo"
+# NO entra: un compromiso personal ("autorizo el pago") es captura, no una
+# respuesta a la bandeja de empresa.
+_DECIDE_APPROVE_VERBS = (
+    r"\baprueb\w*\b",
+    r"\baprobad\w*\b",
+)
+_DECIDE_DENY_VERBS = (
+    r"\brechaz\w*\b",
+    r"\bdenieg\w*\b",
+    r"\bdenegad\w*\b",
+)
+_DECIDE_NOUNS = (
+    r"\bdecisi[oó]n(?:es)?\b",
+    r"\bescalado\b",
+    r"\baprobaci[oó]n\b",
+)
+_DECIDE_ORDINALS = (
+    r"\bprimera\b",
+    r"\bsegunda\b",
+    r"\btercera\b",
+    r"\bcuarta\b",
+    r"\bquinta\b",
+)
+_ORDINAL_VALUES = {
+    "primera": 1,
+    "segunda": 2,
+    "tercera": 3,
+    "cuarta": 4,
+    "quinta": 5,
+}
+
 _MEASUREMENT_PATTERN = re.compile(
     r"\b(\d{1,4})\s*(minutos?|min|horas?|h)\b",
     re.IGNORECASE,
@@ -304,6 +363,55 @@ def _matches(text: str, patterns: tuple[str, ...]) -> bool:
         if re.search(pattern, normalized, re.IGNORECASE):
             return True
     return False
+
+
+def _is_decide(normalized: str) -> bool:
+    """Verbo de decision + sustantivo, ordinal o "ticket N"."""
+    has_verb = _matches(normalized, _DECIDE_APPROVE_VERBS) or _matches(
+        normalized, _DECIDE_DENY_VERBS
+    )
+    if not has_verb:
+        return False
+    if _matches(normalized, _DECIDE_NOUNS):
+        return True
+    if _matches(normalized, _DECIDE_ORDINALS):
+        return True
+    if re.search(r"\bticket\s+\d+\b", normalized):
+        return True
+    return bool(re.search(r"\b(?:la|el)\s+\d{1,2}\b", normalized))
+
+
+def parse_decide_input(text: str) -> dict[str, Any]:
+    """Extrae veredicto (aprueba/rechaza) y destino (ordinal/ticket).
+
+    ``approve`` es None si hay verbos de ambos lados o de ninguno: quien
+    llama aclara en vez de adivinar.
+    """
+    normalized = normalize_text(text)
+    approve_hit = _matches(normalized, _DECIDE_APPROVE_VERBS)
+    deny_hit = _matches(normalized, _DECIDE_DENY_VERBS)
+    approve: bool | None = None
+    if approve_hit and not deny_hit:
+        approve = True
+    elif deny_hit and not approve_hit:
+        approve = False
+
+    ordinal: int | None = None
+    for word, value in _ORDINAL_VALUES.items():
+        if re.search(rf"\b{word}\b", normalized):
+            ordinal = value
+            break
+    if ordinal is None:
+        m = re.search(r"\b(?:la|el)\s+(\d{1,2})\b", normalized)
+        if m:
+            ordinal = int(m.group(1))
+
+    ticket_number: int | None = None
+    m = re.search(r"\bticket\s+(\d+)\b", normalized)
+    if m:
+        ticket_number = int(m.group(1))
+
+    return {"approve": approve, "ordinal": ordinal, "ticket_number": ticket_number}
 
 
 def _first_match(text: str, patterns: tuple[str, ...]) -> str | None:
@@ -400,6 +508,16 @@ def classify(text: str) -> str | None:
         return INTENT_DELEGATE
     if _matches(normalized, _DELIVERY_PATTERNS):
         return INTENT_DELIVERY
+
+    # 2b. Cockpit F5: brief, bandeja y respuesta. Van antes de direccion
+    #     porque "que sigue" también trae empresa, pero el brief y la bandeja
+    #     son superficies propias con vocabulario propio.
+    if _matches(normalized, _BRIEF_PATTERNS):
+        return INTENT_BRIEF
+    if _matches(normalized, _DECISIONS_PATTERNS):
+        return INTENT_DECISIONS
+    if _is_decide(normalized):
+        return INTENT_DECIDE
 
     # 3. Consultas de direccion.
     if _matches(normalized, _NEXT_ACTION_PATTERNS):

@@ -19,6 +19,7 @@ from typing import Any
 
 from horizon import capacity as capacity_module
 from horizon import classify as classify_module
+from horizon import cockpit as cockpit_module
 from horizon import importer as importer_module
 from horizon import mandate as mandate_module
 from horizon import planner as planner_module
@@ -59,6 +60,50 @@ _MAX_TEXT_CHARS = 2000
 # contenido + dia. Asi reenviar el mismo mensaje no duplica progreso (seccion
 # 9.10), pero la misma frase en dias distintos si cuenta.
 _MEASUREMENT_UNITS = {"minutes", "minutos"}
+
+# Rollup de hijos por objetivo (cockpit F5). "failed" cuenta como abierto para
+# el encolador (no se hizo el trabajo), pero aqui es bloqueo de negocio.
+_OPEN_STATUSES = frozenset({"queued", "in_progress", "waiting"})
+_BLOCKED_STATUSES = frozenset({"failed", "escalated"})
+_CLOSED_STATUSES = frozenset({"completed", "cancelled", "converted"})
+
+
+def _short_text(text: str, max_chars: int) -> str:
+    cleaned = " ".join(str(text or "").split())
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max_chars - 1].rstrip() + "…"
+
+
+def _has_human_phase(task: dict[str, Any]) -> bool:
+    """True si la fase vigente del ticket espera a un humano.
+
+    Espeja la resolucion de ``TaskService._current_phase`` (por ``phase`` y,
+    si no, por ``phase_index``): la vista previa de la bandeja no puede pedir
+    prestado el metodo privado del otro servicio.
+    """
+    phases = task.get("workflow_phases") or []
+    if not phases:
+        return False
+    index = 0
+    try:
+        index = int(task.get("phase_index") or 0)
+    except (TypeError, ValueError):
+        index = 0
+    current_phase = str(task.get("phase") or "")
+    if current_phase:
+        for position, phase in enumerate(phases):
+            if not isinstance(phase, dict):
+                continue
+            key = str(phase.get("key") or phase.get("name") or "")
+            if key == current_phase:
+                index = position
+                break
+    index = max(0, min(index, len(phases) - 1))
+    current = phases[index]
+    if not isinstance(current, dict):
+        return False
+    return str(current.get("type") or "") == "human"
 
 
 def _now() -> datetime:
@@ -104,9 +149,18 @@ class HorizonService:
         self._settings = settings
         self._repo = repo
         self._task_service = task_service
+        self._company_reader: Any | None = None
 
     def set_task_service(self, task_service: Any) -> None:
         self._task_service = task_service
+
+    def set_company_reader(self, reader: Any | None) -> None:
+        """Lector del registro de negocio (ERPNext). Opcional.
+
+        Sin lector, la seccion de empresa del cockpit queda en desconocido
+        (``unknown``), nunca en cero y nunca inventada.
+        """
+        self._company_reader = reader
 
     # ------------------------------------------------------------------
     # Perfil e importacion
@@ -471,11 +525,17 @@ class HorizonService:
     # Decision: que sigue
     # ------------------------------------------------------------------
 
-    async def next_action(self, user_id: str) -> dict[str, Any]:
+    async def next_action(self, user_id: str, *, include_company: bool = False) -> dict[str, Any]:
         """Elige UNA accion principal, con su motivo y su siguiente paso.
 
         Seccion 9.5: una accion principal y hasta dos secundarias. Horizon no
         pregunta "que quieres hacer hoy" si puede elegir con lo que ya sabe.
+
+        Con ``include_company`` (F5, TASK-2026-00120) suma ``company`` y
+        ``decisions``: el "que sigue" del dueno trae plan personal + status de
+        empresa + decisiones pendientes. Las llamadas internas que solo
+        necesitan la accion (delegacion) lo dejan apagado para no pagar las
+        lecturas de empresa.
         """
         profile = await self.ensure_profile(user_id)
         mandate = mandate_module.HorizonMandate(**(profile.get("mandate") or {}))
@@ -496,34 +556,50 @@ class HorizonService:
         )
 
         if not ordered:
-            return {
+            result: dict[str, Any] = {
                 "has_action": False,
                 "message": await self._no_action_message(user_id),
                 "active_growth_goal": self._growth_goal(objectives),
                 "ready_count": 0,
                 "in_progress_count": 0,
             }
+        else:
+            primary = ordered[0]
+            secondary = ordered[1:3]
+            objective = objectives_by_id.get(str(primary.get("objective_id") or ""))
+            result = {
+                "has_action": True,
+                "action": primary,
+                "secondary": secondary,
+                "objective": objective,
+                "milestone": self._milestone_of(objective, primary.get("milestone_id")),
+                "active_growth_goal": self._growth_goal(objectives),
+                "ready_count": len(ready),
+                "in_progress_count": len(in_progress),
+                "limits": {
+                    "ready_max": mandate.personal_ready_actions_max,
+                    "in_progress_max": mandate.personal_in_progress_max,
+                    "capacity_fraction": mandate.personal_capacity_fraction,
+                },
+                "message": self.describe_next_action(primary, objective),
+            }
 
-        primary = ordered[0]
-        secondary = ordered[1:3]
-        objective = objectives_by_id.get(str(primary.get("objective_id") or ""))
-
-        return {
-            "has_action": True,
-            "action": primary,
-            "secondary": secondary,
-            "objective": objective,
-            "milestone": self._milestone_of(objective, primary.get("milestone_id")),
-            "active_growth_goal": self._growth_goal(objectives),
-            "ready_count": len(ready),
-            "in_progress_count": len(in_progress),
-            "limits": {
-                "ready_max": mandate.personal_ready_actions_max,
-                "in_progress_max": mandate.personal_in_progress_max,
-                "capacity_fraction": mandate.personal_capacity_fraction,
-            },
-            "message": self.describe_next_action(primary, objective),
-        }
+        if include_company:
+            company = await self.company_status()
+            decisions = await self.pending_decisions(user_id)
+            result["company"] = company
+            result["decisions"] = decisions
+            extra = " ".join(
+                part
+                for part in (
+                    str(company.get("message") or ""),
+                    str(decisions.get("message") or ""),
+                )
+                if part
+            )
+            if extra:
+                result["message"] = f"{result['message']} {extra}"
+        return result
 
     def _growth_goal(self, objectives: list[dict[str, Any]]) -> dict[str, Any] | None:
         for objective in objectives:
@@ -653,6 +729,363 @@ class HorizonService:
         if parked:
             parts.append(f"Hay {len(parked)} ideas aparcadas esperando su condición de revisión.")
         return " ".join(parts)
+
+    # ------------------------------------------------------------------
+    # Cockpit del dueno (F5, TASK-2026-00120)
+    # ------------------------------------------------------------------
+
+    async def cockpit(self, user_id: str, *, now: datetime | None = None) -> dict[str, Any]:
+        """Plan del dia + status de empresa + decisiones pendientes.
+
+        Es la interfaz principal del dueno: "que sigue" y el brief combinan
+        lo personal con lo que avanzo el CEO y lo que espera decision. Hasta
+        que exista el status del CEO (TASK-2026-00119), la empresa se lee de
+        ERPNext y de los objetivos directamente. Sin LLM, como todo Horizon.
+        """
+        moment = now or _now()
+        personal = await self.next_action(user_id, include_company=False)
+        plan = await self.plan_today(user_id, channel="cockpit", now=moment)
+        company = await self.company_status()
+        decisions = await self.pending_decisions(user_id, now=moment)
+        message = " ".join(
+            part
+            for part in (
+                str(plan.get("message") or ""),
+                str(company.get("message") or ""),
+                str(decisions.get("message") or ""),
+            )
+            if part
+        )
+        return {
+            "personal": personal,
+            "plan": plan,
+            "company": company,
+            "decisions": decisions,
+            "message": message,
+        }
+
+    async def company_status(self) -> dict[str, Any]:
+        """Status de empresa: objetivos, cerrados, bloqueados y negocio.
+
+        Cada fuente degrada a desconocido por separado: una lectura caida no
+        vacia las demas. Desconocido es ``None``/``*_unknown``, nunca ``0``.
+        """
+        objectives: list[dict[str, Any]] = []
+        objectives_unknown = False
+        try:
+            active = await self._repo.list_active_objectives()
+        except Exception:
+            logger.warning("cockpit: objetivos no legibles", exc_info=True)
+            active = None
+        if active is None:
+            objectives_unknown = True
+        else:
+            for objective in list(active)[:10]:
+                objective_id = str(objective.get("objective_id") or "")
+                children: list[dict[str, Any]] = []
+                try:
+                    children = await self._repo.list_tasks_by_objective(
+                        objective_id, limit=100
+                    )
+                except Exception:
+                    logger.warning(
+                        "cockpit: hijos del objetivo %s no legibles",
+                        objective_id,
+                        exc_info=True,
+                    )
+                open_count = sum(
+                    1 for c in children if str(c.get("status") or "") in _OPEN_STATUSES
+                )
+                blocked_count = sum(
+                    1 for c in children if str(c.get("status") or "") in _BLOCKED_STATUSES
+                )
+                closed_count = sum(
+                    1 for c in children if str(c.get("status") or "") in _CLOSED_STATUSES
+                )
+                anchor = objective.get("anchor") if isinstance(objective.get("anchor"), dict) else {}
+                objectives.append(
+                    {
+                        "objective_id": objective_id,
+                        "project": objective.get("project"),
+                        "entry": objective.get("entry"),
+                        "goal": _short_text(str(anchor.get("goal") or ""), 200),
+                        "erp_group_ref": objective.get("erp_group_ref"),
+                        "status": objective.get("status"),
+                        "open_children": open_count,
+                        "blocked_children": blocked_count,
+                        "closed_children": closed_count,
+                    }
+                )
+
+        closed: list[dict[str, Any]] = []
+        closed_unknown = False
+        try:
+            rows = await self._repo.list_recently_closed_tasks(
+                limit=cockpit_module.COMPANY_CLOSED_LIMIT
+            )
+            closed = [
+                {
+                    "task_id": str(t.get("task_id") or ""),
+                    "erp_name": cockpit_module.erp_mirror_name(t),
+                    "ticket_number": t.get("ticket_number"),
+                    "title": str(t.get("title") or ""),
+                    "project": t.get("project"),
+                    "completed_at": t.get("completed_at"),
+                }
+                for t in rows
+            ]
+        except Exception:
+            logger.warning("cockpit: cerrados no legibles", exc_info=True)
+            closed_unknown = True
+
+        blocked: list[dict[str, Any]] = []
+        blocked_unknown = False
+        try:
+            rows = await self._repo.list_blocked_tasks(
+                limit=cockpit_module.COMPANY_BLOCKED_LIMIT
+            )
+            blocked = [
+                {
+                    "task_id": str(t.get("task_id") or ""),
+                    "erp_name": cockpit_module.erp_mirror_name(t),
+                    "ticket_number": t.get("ticket_number"),
+                    "title": str(t.get("title") or ""),
+                    "project": t.get("project"),
+                    "status": t.get("status"),
+                    "reason": _short_text(
+                        str(
+                            t.get("error")
+                            or t.get("waiting_reason")
+                            or t.get("last_response_summary")
+                            or ""
+                        ),
+                        200,
+                    ),
+                }
+                for t in rows
+            ]
+        except Exception:
+            logger.warning("cockpit: bloqueados no legibles", exc_info=True)
+            blocked_unknown = True
+
+        business_open: list[dict[str, Any]] = []
+        business_unknown = False
+        if self._company_reader is None:
+            business_unknown = True
+        else:
+            try:
+                rows = await self._company_reader.search_tickets(
+                    status=["Open", "Working", "Pending Review"],
+                    limit=cockpit_module.COMPANY_BUSINESS_LIMIT,
+                )
+            except Exception:
+                logger.warning("cockpit: ERPNext no legible", exc_info=True)
+                business_unknown = True
+            else:
+                desk_only = [r for r in (rows or []) if not str(r.get("openceo_ref") or "").strip()]
+                business_open = [
+                    {
+                        "erp_name": str(r.get("name") or ""),
+                        "subject": str(r.get("subject") or ""),
+                        "status": str(r.get("status") or ""),
+                        "project": r.get("project"),
+                    }
+                    for r in desk_only[:10]
+                ]
+
+        company = {
+            "objectives": objectives,
+            "objectives_unknown": objectives_unknown,
+            "recently_closed": closed,
+            "closed_unknown": closed_unknown,
+            "blocked": blocked,
+            "blocked_unknown": blocked_unknown,
+            "business_open_without_execution": business_open,
+            "business_unknown": business_unknown,
+        }
+        company["message"] = cockpit_module.describe_company(company)
+        return company
+
+    async def pending_decisions(
+        self, user_id: str, *, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Bandeja de decisiones: misma fuente que Requiere humano.
+
+        Filtra las esperas operativas con ``waiting_needs_human_review`` (F4):
+        la bandeja trae lo que nombra una accion humana, no temporizadores ni
+        parques automaticos. Urgente primero; el resto agrupado. Lo personal
+        nunca entra (el repo ya lo excluye y aqui se vuelve a comprobar).
+        """
+        from tools.erpnext_tickets import waiting_needs_human_review
+
+        moment = now or _now()
+        rows = await self._repo.list_tasks_needing_human(
+            limit=cockpit_module.DECISIONS_LIMIT
+        )
+        candidates = []
+        for task in rows:
+            if privacy_module.is_personal_scope(task):
+                continue
+            qa_state = str(task.get("qa_review_state") or "")
+            if qa_state in ("pending", "changes_requested") or waiting_needs_human_review(task):
+                candidates.append(task)
+
+        ids = [str(t.get("task_id") or "") for t in candidates if t.get("task_id")]
+        with_dependents = await self._repo.tasks_with_dependents(ids)
+        blocked_runs = await self._repo.latest_blocked_runs(ids)
+
+        urgent: list[dict[str, Any]] = []
+        grouped: list[dict[str, Any]] = []
+        for task in candidates:
+            task_id = str(task.get("task_id") or "")
+            reason = cockpit_module.urgency_reason(
+                task, now=moment, has_dependents=task_id in with_dependents
+            )
+            delivered = (
+                await self._repo.get_horizon_event_by_source(
+                    user_id, cockpit_module.delivery_source_id(task_id)
+                )
+            ) is not None
+            answerable = (
+                task_id in blocked_runs
+                or _has_human_phase(task)
+                or (
+                    str(task.get("phase") or "") == "owner_escalation"
+                    and str(task.get("status") or "") == "waiting"
+                )
+            )
+            item = cockpit_module.normalize_decision(
+                task,
+                ordinal=0,
+                delivered=delivered,
+                urgent=reason is not None,
+                urgency=reason,
+                answerable=answerable,
+            )
+            (urgent if reason is not None else grouped).append(item)
+
+        ordered = urgent + grouped
+        for position, item in enumerate(ordered, start=1):
+            item["ordinal"] = position
+        fresh_grouped = [item for item in grouped if not item.get("delivered")]
+        return {
+            "urgent": urgent,
+            "grouped": grouped,
+            "count": len(ordered),
+            "urgent_count": len(urgent),
+            "undelivered_grouped_count": len(fresh_grouped),
+            "message": cockpit_module.describe_decisions(urgent, fresh_grouped),
+        }
+
+    async def mark_decisions_delivered(
+        self,
+        user_id: str,
+        decisions: list[dict[str, Any]],
+        *,
+        channel: str = "api",
+    ) -> dict[str, Any]:
+        """Marca decisiones como entregadas (entrega unica, HZ-003).
+
+        Solo guarda referencia (task_id + titulo): dato de empresa en solo
+        lectura dentro del espacio personal. Idempotente por
+        ``(user_id, source_id, entity)``.
+        """
+        marked = 0
+        for item in decisions or []:
+            task_id = str((item or {}).get("task_id") or "")
+            if not task_id:
+                continue
+            source_id = cockpit_module.delivery_source_id(task_id)
+            existing = await self._repo.get_horizon_event_by_source(user_id, source_id)
+            if existing is not None:
+                continue
+            title = str(item.get("title") or task_id)
+            event = HorizonProgressEvent(
+                user_id=user_id,
+                kind=ProgressKind.RESULT,
+                entity=cockpit_module.DECISION_DELIVERY_ENTITY,
+                entity_id=task_id,
+                source=channel,
+                source_id=source_id,
+                text=f"Decisión mostrada: {title}"[:500],
+            )
+            try:
+                await self._repo.create_horizon_event(document_dump(event))
+            except Exception:
+                # Carrera con otra entrega: el indice unico ya la marco.
+                logger.debug("cockpit: entrega duplicada de %s", task_id, exc_info=True)
+                continue
+            marked += 1
+        return {"marked": marked}
+
+    async def answer_decision(
+        self,
+        user_id: str,
+        *,
+        task_id: str | None = None,
+        ordinal: int | None = None,
+        ticket_number: int | None = None,
+        approve: bool = True,
+        comment: str = "",
+        channel: str = "api",
+    ) -> dict[str, Any]:
+        """Aplica la respuesta del dueno a una decision pendiente.
+
+        El destino se da de exactamente una forma: ``task_id`` (movil/API),
+        ``ordinal`` de la bandeja actual (voz) o ``ticket_number`` de negocio.
+        """
+        targets = [
+            value
+            for value in (task_id, ordinal, ticket_number)
+            if value is not None and str(value).strip() != ""
+        ]
+        if len(targets) != 1:
+            return {"applied": False, "reason": "ambiguous_target"}
+        if self._task_service is None:
+            return {"applied": False, "reason": "task_service_unavailable"}
+
+        resolved_id = str(task_id or "").strip()
+        if ordinal is not None:
+            tray = await self.pending_decisions(user_id)
+            ordered = list(tray.get("urgent") or []) + list(tray.get("grouped") or [])
+            try:
+                position = int(ordinal)
+            except (TypeError, ValueError):
+                return {"applied": False, "reason": "ordinal_not_found"}
+            if position < 1 or position > len(ordered):
+                return {"applied": False, "reason": "ordinal_not_found"}
+            resolved_id = str(ordered[position - 1].get("task_id") or "")
+        elif ticket_number is not None:
+            try:
+                number = int(ticket_number)
+            except (TypeError, ValueError):
+                return {"applied": False, "reason": "ticket_not_found"}
+            found = await self._repo.get_task_by_ticket_number(number)
+            if not found:
+                return {"applied": False, "reason": "ticket_not_found"}
+            resolved_id = str(found.get("task_id") or "")
+        if not resolved_id:
+            return {"applied": False, "reason": "task_not_found"}
+
+        result = await self._task_service.apply_owner_decision(
+            resolved_id,
+            approve=approve,
+            actor_id=user_id,
+            comment=comment,
+        )
+        if not result.get("applied"):
+            return result
+        task = result.get("task") or {}
+        title = str(task.get("title") or resolved_id)
+        verb = "aprobé" if approve else "rechacé"
+        result["message"] = f"Listo, {verb} {title}."
+        try:
+            await self.mark_decisions_delivered(
+                user_id, [{"task_id": resolved_id, "title": title}], channel=channel
+            )
+        except Exception:
+            logger.warning("cockpit: no se pudo marcar entrega de %s", resolved_id, exc_info=True)
+        return result
 
     # ------------------------------------------------------------------
     # Identidad del espacio personal

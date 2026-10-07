@@ -140,7 +140,7 @@ Horizon **no es un agente separado** ni tiene runtime propio. Es la capacidad y 
 - **Tracking operacional**: los tickets viven en ERPNext (`https://erp.jardal.app/app/task`); `STATUS.md` guarda el avance y los traspasos de sesión. `PENDINGS.md` es solo un puntero al backlog.
 
 ### Horizon como cockpit del dueño (autonomía)
-- **Cockpit**: «qué sigue» y el brief diario combinan el plan personal, el status de lo que avanzó el CEO y las decisiones pendientes. Es la interfaz principal del dueño (pendiente: TASK-2026-00120).
+- **Cockpit**: «qué sigue» y el brief diario combinan el plan personal, el status de lo que avanzó el CEO y las decisiones pendientes. Es la interfaz principal del dueño (TASK-2026-00120: `horizon/cockpit.py`, bandeja con la fuente de Requiere humano, respuesta por voz/móvil/API, entrega única, privacidad un solo sentido).
 - **Promoción automática**: si una acción toca un proyecto o repo de la empresa, es trabajo de empresa y entra sola al Objetivo o ticket por la API común (ERPNext primero); solo viaja la especificación del trabajo. Pregunta solo si implica costo, gasto o replanificación (pendiente: TASK-2026-00121).
 - **Privacidad en un solo sentido**: lo de empresa entra a Horizon en solo lectura; lo personal (misión, finanzas, familia, salud) nunca sale. Sin interruptor general de exportación.
 - **Terminología**: los de Horizon son siempre «objetivos personales»; «Objetivo» a secas es objetivo de empresa (contrato: §Proactive CEO de `docs/ARCHITECTURE_REFERENCE_2026.md`; decisión del vault `decisions/2026-10-06-objetivo-unico-ceo-autonomo`).

@@ -17,7 +17,7 @@ from research.contracts import (
     can_transition,
 )
 from settings import Settings
-from state import DevSessionStatus, TaskStatus
+from state import DevSessionStatus, TaskStatus, WorkflowRunStatus
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +243,14 @@ class MongoRepository:
         await self.agent_status.create_index(
             [("slot", ASCENDING)], unique=True,
             partialFilterExpression={"slot": {"$type": "string"}},
+        )
+        await self.tasks.create_index(
+            [("status", ASCENDING), ("completed_at", DESCENDING)],
+            name="idx_tasks_recently_closed",
+        )
+        await self.tasks.create_index(
+            [("blocked_by", ASCENDING), ("status", ASCENDING)],
+            name="idx_tasks_blocked_by",
         )
         await self.tasks.create_index(
             [("objective_id", ASCENDING), ("status", ASCENDING)],
@@ -486,6 +494,59 @@ class MongoRepository:
 
     async def list_tasks_by_status(self, status: TaskStatus, limit: int = 200) -> list[dict[str, Any]]:
         rows = self.tasks.find({"status": status.value}, sort=[("created_at", 1)]).limit(limit)
+        return [self._clean(row) async for row in rows]
+
+    async def list_tasks_needing_human(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Bandeja Requiere humano (misma fuente que HumanInbox, TASK-2026-00041).
+
+        Tickets en ``waiting`` (cualquier fase) mas QA pendiente o con cambios
+        pedidos. El cockpit de Horizon (F5, TASK-2026-00120) lee de aqui: una
+        sola consulta acotada en vez de las tres de la vista. El alcance
+        personal queda fuera: una delegacion privada no es una decision de
+        empresa y "nada personal sale".
+        """
+        query: dict[str, Any] = {
+            **mirror_exclusion_filter(),
+            "$or": [
+                {"status": TaskStatus.WAITING.value},
+                {"qa_review_state": "pending"},
+                {"qa_review_state": "changes_requested"},
+            ],
+        }
+        rows = self.tasks.find(query, sort=[("updated_at", DESCENDING)]).limit(
+            max(1, int(limit))
+        )
+        return [self._clean(row) async for row in rows]
+
+    async def list_recently_closed_tasks(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Tickets de empresa cerrados, del mas reciente al mas viejo.
+
+        Fuente del "que avanzo" del cockpit (F5). Solo ``completed`` con fecha
+        de cierre conocida; sin alcance personal.
+        """
+        query: dict[str, Any] = {
+            **mirror_exclusion_filter(),
+            "status": TaskStatus.COMPLETED.value,
+            "completed_at": {"$ne": None},
+        }
+        rows = self.tasks.find(query, sort=[("completed_at", DESCENDING)]).limit(
+            max(1, int(limit))
+        )
+        return [self._clean(row) async for row in rows]
+
+    async def list_blocked_tasks(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Tickets de empresa fallidos o escalados ("que esta bloqueado", F5).
+
+        Sin alcance personal. ``interrupted`` no entra: es pausa del runtime,
+        no bloqueo de negocio.
+        """
+        query: dict[str, Any] = {
+            **mirror_exclusion_filter(),
+            "status": {"$in": [TaskStatus.FAILED.value, TaskStatus.ESCALATED.value]},
+        }
+        rows = self.tasks.find(query, sort=[("updated_at", DESCENDING)]).limit(
+            max(1, int(limit))
+        )
         return [self._clean(row) async for row in rows]
 
     async def list_tasks_missing_notion_mirror(self, limit: int = 200) -> list[dict[str, Any]]:
@@ -826,6 +887,46 @@ class MongoRepository:
             sort=[("created_at", ASCENDING)],
         ).limit(limit)
         return [self._clean(row) async for row in rows]
+
+    async def tasks_with_dependents(self, task_ids: list[str]) -> set[str]:
+        """Subset of ``task_ids`` with waiting/queued tickets behind them.
+
+        Una sola consulta para la urgencia "bloqueo" del cockpit (F5,
+        TASK-2026-00120): sin esto habria una consulta por decision en bandeja.
+        """
+        ids = [str(t) for t in (task_ids or []) if str(t or "").strip()]
+        if not ids:
+            return set()
+        rows = self.tasks.find(
+            {"blocked_by": {"$in": ids}, "status": {"$in": ["waiting", "queued"]}},
+            sort=[("created_at", ASCENDING)],
+        ).limit(max(1, len(ids) * 4))
+        blocked: set[str] = set()
+        async for row in rows:
+            for blocker in row.get("blocked_by") or []:
+                if str(blocker) in ids:
+                    blocked.add(str(blocker))
+        return blocked
+
+    async def latest_blocked_runs(self, task_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Ultimo run BLOCKED_HUMAN por ticket, para la bandeja F5.
+
+        Dice que esperas YAML puede reanudar una respuesta del dueno sin una
+        consulta por ticket.
+        """
+        ids = [str(t) for t in (task_ids or []) if str(t or "").strip()]
+        if not ids:
+            return {}
+        rows = self.workflow_runs.find(
+            {"task_id": {"$in": ids}, "status": WorkflowRunStatus.BLOCKED_HUMAN.value},
+            sort=[("created_at", DESCENDING)],
+        ).limit(max(1, len(ids) * 2))
+        latest: dict[str, dict[str, Any]] = {}
+        async for row in rows:
+            key = str(row.get("task_id") or "")
+            if key and key not in latest:
+                latest[key] = self._clean(row)
+        return latest
 
     async def expired_tier_s_runs(self, now: datetime, repo_path: str,
                                   limit: int = 50) -> list[dict[str, Any]]:

@@ -552,6 +552,19 @@ class HorizonMetricsRequest(BaseModel):
     note: str | None = None
 
 
+class HorizonDecisionAnswerRequest(BaseModel):
+    """Respuesta del dueno a una decision (F5, TASK-2026-00120)."""
+
+    decision: str = "approve"
+    comment: str = ""
+
+
+class HorizonDecisionsDeliverRequest(BaseModel):
+    """Marca decisiones como entregadas. Sin ids, marca las agrupadas vistas."""
+
+    task_ids: list[str] | None = None
+
+
 def normalize_document(value: Any) -> Any:
     """Convierte enums a su valor y recorre dicts y listas.
 

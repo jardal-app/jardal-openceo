@@ -918,6 +918,12 @@ Scheduled review (mandate cadence) plus reactive review (objective closed or blo
 
 > pendiente: TASK-2026-00119 (CEO autónomo; requires 00117 + 00113 + 00114).
 
+### Horizon cockpit
+
+Horizon is the owner's primary interface: "qué sigue" and the daily brief combine the personal plan with what the CEO advanced (objectives, closed tickets), what is blocked, and what awaits a decision. The decisions tray reads the same source as the "Requiere humano" view (waiting tickets plus pending/changes-requested QA), filtered to waits that name a human action; the owner answers by voice, mobile, or API and the answer is applied (a blocked YAML run resumes or fails, a human phase decides, a standalone owner-escalation records the decision and closes to Completed). Escalations group into the brief except urgent ones (cost deadline, blocking); grouped items deliver once, urgent ones re-surface until answered. Company data enters Horizon read-only; nothing personal leaves. The day plan still runs without any LLM.
+
+> Implemented by TASK-2026-00120 (`horizon/cockpit.py`, `HorizonService.cockpit/company_status/pending_decisions/answer_decision`, `TaskService.apply_owner_decision`, `/api/horizon/cockpit|decisions|decisions/*/answer`, voice intents `horizon_brief/decisions/decide`). Until TASK-2026-00119 lands, company status reads ERPNext and the objectives directly. Push delivery stays pending (TASK-2026-00026).
+
 ### Create project end-to-end
 
 Project creation is a Tier-0 deterministic workflow (`operations.create_project`): the mandate spend gate first (new spend parks for the owner through the standard escalation ticket plus a `human_in_the_loop` wait), then the ERPNext `Project` (semantic `ensure_project`, idempotent by `project_key`), the local git repo with the conventional remote URL (local `remote add` only; provisioning the GitHub remote stays out — it needs a credential), the initial commit with README/CLAUDE.md/AGENTS.md-symlink/.gitignore/docs/work, a validated `projects/<key>/project.yaml` mirror, the vault hub plus its own `vault/README.md` line, and the Cloudflare subdomain for web projects. Every step is idempotent — re-running reports `existed` and duplicates nothing — and a failing `project.yaml` validation fails the run. Needs to create a project route here; they are no longer a `capability_gap`.

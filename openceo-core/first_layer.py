@@ -14,6 +14,7 @@ from config_loader import ConfigLoader
 from db.mongo import MongoRepository
 from dev_session_service import DevSessionService
 from horizon import classify as horizon_classify
+from horizon import cockpit as horizon_cockpit
 from horizon.models import CaptureChannel
 from horizon.service import HorizonService
 from project_service import ProjectService
@@ -450,11 +451,14 @@ PERSONALIDAD Y TONO DE VOZ (CRÍTICO):
    - 'delega la siguiente acción', 'encarga la siguiente tarea', 'haz la siguiente acción en dev' -> intent="horizon_delegate".
    - 'qué resultado dio la tarea', 'cómo va lo delegado', 'qué entregó el dev' -> intent="horizon_delivery".
    - 'anota 15 minutos de supervisión', 'fueron 10 minutos de retrabajo' -> intent="horizon_metrics".
+   - 'brief del día', 'resumen de hoy', 'qué avanzó el CEO', 'cómo va la empresa' -> intent="horizon_brief" (cockpit: plan + empresa + decisiones).
+   - 'decisiones pendientes', 'qué espera mi decisión', 'qué tengo que decidir', 'bandeja requiere humano' -> intent="horizon_decisions".
+   - 'aprueba la decisión', 'rechaza el escalado', 'aprueba la primera', 'rechaza el ticket 170' -> intent="horizon_decide" con dictation igual al texto original. Solo con verbo aprueba/rechaza MÁS sustantivo (decisión/escalado/aprobación), ordinal o 'ticket N'. Un 'sí'/'dale' suelto NUNCA es horizon_decide. 'Autorizo ...' es un compromiso personal -> horizon_capture, nunca horizon_decide.
    REGLA DE ORO: una frase sobre tu vida personal NUNCA es una instrucción de código. Ante duda entre dev_instruction y horizon_capture, si la frase habla de tu vida, tu familia, tu dinero, tu salud, tu voz, tus clientes o una idea tuya, elige horizon_capture. NUNCA envíes notas personales a tmux.
 
 Responde SIEMPRE en formato JSON estricto con esta estructura:
 {{
-  "intent": "focus_ticket" | "ticket_query" | "ticket_count" | "ticket_retry" | "objective_create" | "list_tickets" | "preset_load" | "preset_dictate" | "preset_list" | "tmux_enter" | "preset_cancel" | "list_tmux" | "tmux_inspect" | "tmux_send" | "tmux_create" | "tmux_kill" | "dev_session_start" | "dev_session_stop" | "dev_instruction" | "dev_output" | "switch_project" | "list_projects" | "horizon_capture" | "horizon_next_action" | "horizon_progress" | "horizon_plan_query" | "horizon_capacity" | "horizon_plan_day" | "horizon_review" | "horizon_import" | "horizon_delegate" | "horizon_delivery" | "horizon_metrics" | "guidance" | "chat_response",
+  "intent": "focus_ticket" | "ticket_query" | "ticket_count" | "ticket_retry" | "objective_create" | "list_tickets" | "preset_load" | "preset_dictate" | "preset_list" | "tmux_enter" | "preset_cancel" | "list_tmux" | "tmux_inspect" | "tmux_send" | "tmux_create" | "tmux_kill" | "dev_session_start" | "dev_session_stop" | "dev_instruction" | "dev_output" | "switch_project" | "list_projects" | "horizon_capture" | "horizon_next_action" | "horizon_progress" | "horizon_plan_query" | "horizon_capacity" | "horizon_plan_day" | "horizon_review" | "horizon_import" | "horizon_delegate" | "horizon_delivery" | "horizon_metrics" | "horizon_brief" | "horizon_decisions" | "horizon_decide" | "guidance" | "chat_response",
   "ticket_number": int | null,
   "session_name": string | null,
   "project": string | null,
@@ -957,6 +961,9 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
             "horizon_delegate",
             "horizon_delivery",
             "horizon_metrics",
+            "horizon_brief",
+            "horizon_decisions",
+            "horizon_decide",
         ):
             horizon_text = (dictation_param or text).strip()
             handled, reply = await self._handle_horizon(user_id, intent, horizon_text)
@@ -1012,7 +1019,7 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
                 return True, str(result.get("message") or "Registrado el avance.")
 
             if intent == "horizon_next_action":
-                result = await self.horizon.next_action(owner)
+                result = await self.horizon.next_action(owner, include_company=True)
                 return True, str(result.get("message") or "No tengo una acción lista ahora mismo.")
 
             if intent == "horizon_plan_query":
@@ -1078,6 +1085,71 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
                     )
                     return True, str(res.get("message") or "Métricas registradas.")
                 return True, "No encontré una acción delegada para registrar esas métricas."
+
+            if intent == "horizon_brief":
+                cockpit = await self.horizon.cockpit(owner)
+                await self.horizon.deliver_plan(
+                    owner, cockpit.get("plan") or {}, channel="chat"
+                )
+                fresh = [
+                    item
+                    for item in (cockpit.get("decisions") or {}).get("grouped") or []
+                    if not item.get("delivered")
+                ]
+                await self.horizon.mark_decisions_delivered(owner, fresh, channel="chat")
+                return True, str(cockpit.get("message") or "No tengo el brief ahora mismo.")
+
+            if intent == "horizon_decisions":
+                tray = await self.horizon.pending_decisions(owner)
+                ordered = list(tray.get("urgent") or []) + list(tray.get("grouped") or [])
+                fresh = [item for item in tray.get("grouped") or [] if not item.get("delivered")]
+                await self.horizon.mark_decisions_delivered(owner, fresh, channel="chat")
+                if not ordered:
+                    return True, "No hay decisiones esperando."
+                listing = horizon_cockpit.describe_decision_list(ordered)
+                return True, f"{tray.get('message') or ''} {listing}".strip()
+
+            if intent == "horizon_decide":
+                parsed = horizon_classify.parse_decide_input(text)
+                approve = parsed.get("approve")
+                if approve is None:
+                    return True, (
+                        "¿La apruebas o la rechazas? Dime 'aprueba la primera' "
+                        "o 'rechaza la decisión'."
+                    )
+                ordinal = parsed.get("ordinal")
+                ticket_number = parsed.get("ticket_number")
+                if ordinal is None and ticket_number is None:
+                    tray = await self.horizon.pending_decisions(owner)
+                    ordered = list(tray.get("urgent") or []) + list(tray.get("grouped") or [])
+                    if len(ordered) == 1:
+                        only = ordered[0]
+                        res = await self.horizon.answer_decision(
+                            owner,
+                            task_id=str(only.get("task_id") or ""),
+                            approve=bool(approve),
+                            comment="",
+                            channel="chat",
+                        )
+                        return True, str(
+                            res.get("message") or "No pude aplicar esa respuesta."
+                        )
+                    listing = horizon_cockpit.describe_decision_list(ordered)
+                    return True, f"¿Cuál? {listing}"
+                res = await self.horizon.answer_decision(
+                    owner,
+                    ordinal=ordinal,
+                    ticket_number=ticket_number,
+                    approve=bool(approve),
+                    comment="",
+                    channel="chat",
+                )
+                if not res.get("applied"):
+                    return True, str(
+                        res.get("message")
+                        or "No pude aplicar esa respuesta. Se responde desde la bandeja."
+                    )
+                return True, str(res.get("message") or "Aplicada.")
         except Exception:
             logger.warning("Horizon handling failed for intent %s", intent, exc_info=True)
             return True, "No pude completar esa operación del espacio personal. Lo intentamos de nuevo."

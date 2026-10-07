@@ -545,7 +545,7 @@ class ERPNextTicketAdapter:
         *,
         query: str | None = None,
         project_key: str | None = None,
-        status: str | None = None,
+        status: str | list[str] | None = None,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
         """Busca tickets de negocio en ERPNext.
@@ -556,7 +556,9 @@ class ERPNextTicketAdapter:
         tarea de ejecucion asociada.
 
         Solo lectura: un `project_key` inexistente devuelve lista vacia en vez de crear el
-        proyecto, que es lo que haria `ensure_project`.
+        proyecto, que es lo que haria `ensure_project`. `status` acepta una lista
+        (una sola llamada con `in`): lo usa el cockpit F5 para los estados
+        abiertos sin N llamadas.
         """
         filters: list[list[Any]] = []
         if query:
@@ -566,7 +568,11 @@ class ERPNextTicketAdapter:
             if not project_name:
                 return []
             filters.append(["project", "=", project_name])
-        if status:
+        if isinstance(status, (list, tuple)):
+            wanted = [str(s).strip() for s in status if str(s or "").strip()]
+            if wanted:
+                filters.append(["status", "in", wanted])
+        elif status:
             filters.append(["status", "=", str(status).strip()])
 
         return await self._client.list_docs(
