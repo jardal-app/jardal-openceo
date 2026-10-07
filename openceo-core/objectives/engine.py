@@ -568,6 +568,25 @@ async def convert_ticket(
 
 PLANNER_RESULT_FILE = "PLANNER_RESULT.json"
 
+#: Orchestrator-wide scratch dir inside the project repo (TASK-2026-00136).
+#: Shared with the Tier S executor files (PLAN, reviews, HANDOFF) and the
+#: common ``status`` signal bus: the objectives engine keeps
+#: ``objectives/<id>/``, ``PLANNER_RESULT.json`` and
+#: ``OBJECTIVE_CLOSURE.md`` under this same root. Deliberately a local
+#: constant, not imported from ``tier_s``: the root is shared, the engines
+#: are not (decoupling: TASK-2026-00141).
+SCRATCH_DIRNAME = ".tier-s"
+
+
+def scratch_root(repo: Path) -> Path:
+    """Canonical objectives scratch root: ``repo/.tier-s`` (see above)."""
+    return repo / SCRATCH_DIRNAME
+
+
+def objective_scratch(repo: Path, objective_id: str) -> Path:
+    """Per-objective scratch dir: ``repo/.tier-s/objectives/<id>``."""
+    return scratch_root(repo) / "objectives" / objective_id
+
 
 def _agents_section(agents: Mapping[str, Any]) -> str:
     """Authoritative registry rendered for the planner prompt."""
@@ -692,7 +711,7 @@ def _planner_prompt(
         "- Quota never redefines the technical tier. Never choose",
         "  runtime, CLI account, or model.",
         "",
-        f"OUTPUT: write .tier-s/{PLANNER_RESULT_FILE} with exactly this JSON",
+        f"OUTPUT: write {SCRATCH_DIRNAME}/{PLANNER_RESULT_FILE} with exactly this JSON",
         "object (no YAML, no markdown fences around the file content):",
         "{",
         '  "objective_status": "active | complete_candidate | blocked | '
@@ -725,7 +744,7 @@ def _planner_prompt(
         "review, it never closes the objective directly. Every ticket has",
         "one responsibility and fits one bounded execution cycle. No",
         "duplicate of an open ticket. Then emit PLANNER_READY in",
-        ".tier-s/status.",
+        f"{SCRATCH_DIRNAME}/status.",
     ])
     if policy_text.strip():
         lines.extend(["", "NORMATIVE ROUTING POLICY (authoritative):",
@@ -1041,7 +1060,7 @@ async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]
         roadmap=[str(item) for item in
                  objective.get("roadmap_remaining") or []],
         repo=env.repo)
-    scratch = env.repo / ".tier-s" / "objectives" / objective_id
+    scratch = objective_scratch(env.repo, objective_id)
     scratch.mkdir(parents=True, exist_ok=True)
     (scratch / "OBJECTIVE_CAPSULE.md").write_text(
         (objective.get("capsule") or {}).get("text", "") or "(empty)\n",
@@ -1051,7 +1070,7 @@ async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]
     timeout_s = int(planner_cfg.get("timeout_minutes", 15)) * 60
     errors: list[str] = []
     result: planner_mod.PlannerResult | None = None
-    candidates = [env.repo / ".tier-s" / PLANNER_RESULT_FILE,
+    candidates = [scratch_root(env.repo) / PLANNER_RESULT_FILE,
                   scratch / PLANNER_RESULT_FILE]
     for _attempt in range(2):
         # Drop any previous cycle output: a run that writes nothing must
@@ -1605,7 +1624,7 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
     for item in outcomes:
         verdicts.extend(item["verdicts"])
     consolidated = findings_mod.consolidate(verdicts)
-    scratch = env.repo / ".tier-s" / "objectives" / objective_id
+    scratch = objective_scratch(env.repo, objective_id)
     scratch.mkdir(parents=True, exist_ok=True)
     (scratch / "OBJECTIVE_FINDINGS.md").write_text(
         findings_mod.render_findings(consolidated, 0, head,
@@ -1723,7 +1742,7 @@ def _closure_judge_prompt(
         f"Capsule contracts:\n{capsule[:2000]}\n"
         "Write OBJECTIVE_CLOSURE.md with one line per finding: "
         "`F<n>: REAL — <why>` or `F<n>: FALSO — <verifiable technical "
-        "reason>`. Then emit CLOSURE_READY in .tier-s/status.",
+        f"reason>`. Then emit CLOSURE_READY in {SCRATCH_DIRNAME}/status.",
         repo, "en")
 
 
@@ -1754,8 +1773,8 @@ async def _close_objective(
         await env.executor.cleanup("closer")
     except Exception:
         pass
-    scratch = env.repo / ".tier-s" / "objectives" / objective_id
-    text = _read(env.repo / ".tier-s" / "OBJECTIVE_CLOSURE.md") or _read(
+    scratch = objective_scratch(env.repo, objective_id)
+    text = _read(scratch_root(env.repo) / "OBJECTIVE_CLOSURE.md") or _read(
         scratch / "OBJECTIVE_CLOSURE.md")
     verdicts = parse_closure(text)
     missing = [item.id for item in consolidated if item.id not in verdicts]
@@ -1767,7 +1786,7 @@ async def _close_objective(
             await env.executor.cleanup("closer")
         except Exception:
             pass
-        text = _read(env.repo / ".tier-s" / "OBJECTIVE_CLOSURE.md") or _read(
+        text = _read(scratch_root(env.repo) / "OBJECTIVE_CLOSURE.md") or _read(
             scratch / "OBJECTIVE_CLOSURE.md")
         verdicts = parse_closure(text)
     real: list[Any] = []
