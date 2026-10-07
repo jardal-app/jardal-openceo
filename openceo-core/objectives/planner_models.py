@@ -378,7 +378,7 @@ def load_policy_text(policy_path: str | Path | None = None) -> str:
     """Read the normative routing policy ("" when unreadable)."""
     if policy_path is None:
         # objectives/planner_models.py -> parents[2] is the repo root
-        # (TASK-2026-00117 moved this module out of agents/dev/tier_s).
+        # (TASK-2026-00117 moved this module out of the Tier S package).
         candidate = (Path(__file__).resolve().parents[2] / "docs"
                      / "objective-planner-routing-policy.md")
     else:

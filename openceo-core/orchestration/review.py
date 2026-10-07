@@ -3,8 +3,9 @@
 Pool selection by slot priority and family, quorum-2 of distinct families,
 read-only detached worktrees with write detection, pointer review requests,
 ``FIX_<r>`` verdict parsing and the arbitration trigger. The deterministic
-finding pipeline lives in :mod:`agents.dev.tier_s.findings`; the round flow
-that calls these helpers lives in :mod:`agents.dev.tier_s.cycle`.
+finding pipeline lives in :mod:`orchestration.findings`; the round flows
+that call these helpers live in the Tier S single-ticket cycle and in
+:mod:`objectives.engine` (final review).
 
 Slot availability persists in ``agent_status``: ``available``,
 ``cooling_down(until)`` or ``disabled(reason)`` (§7.2). Reactive slots are
@@ -23,12 +24,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
-from agents.dev.tier_s.findings import (
+from orchestration.findings import (
     Finding,
     VerifiedFinding,
     _anchor_text,  # rendering only; anchors stay opaque otherwise
 )
-from agents.dev.tier_s.knowledge import with_preamble
+from orchestration.knowledge import with_preamble
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +56,7 @@ class ReviewSlot:
 
 
 def parse_pool(raw: Sequence[Mapping[str, Any]] | None) -> list[ReviewSlot]:
-    """Parse the global ``reviewers`` list (config_loader ``dev.tier_s``)."""
+    """Parse the global ``reviewers`` list (config_loader ``review``)."""
     slots: list[ReviewSlot] = []
     for entry in raw or []:
         if not isinstance(entry, Mapping):

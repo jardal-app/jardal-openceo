@@ -16,11 +16,11 @@ from typing import Any
 from .review_links import ReviewLinksExtraction, apply_review_links_to_params, extract_review_links
 from .routing import ROUTING_MISSING_REASON, TIER_C_CHAIN, resolve_coding_tool, select_tier_c_link
 from .tier_oracle import freeze_oracle, verify_oracle
-from .tier_s.cycle import AllowAllQuota, TierSCycle
+from .tier_s.cycle import TierSCycle
 from .tier_s.gates import baseline_blocked, gates_failed, handoff_gates_section, load_gates, run_gates
-from .tier_s.inbox import InMemoryInboxStore, MongoInboxStore
-from .tier_s.knowledge import detect_prompt_lang, with_preamble
-from .tier_s.live import ProcessExecutor, RateMonitorQuota
+from orchestration.inbox import InMemoryInboxStore, MongoInboxStore
+from orchestration.knowledge import detect_prompt_lang, with_preamble
+from orchestration.live import AllowAllQuota, ProcessExecutor, RateMonitorQuota
 from objectives.engine import (
     InMemoryObjectiveStore,
     InMemoryTaskLister,
@@ -34,8 +34,13 @@ from objectives.engine import (
     record_material_failure,
     record_tier_c,
 )
-from objectives.service import create_internal_ticket, erp_for_task_service
-from .tier_s.review import InMemoryReviewStore, InMemorySlotStore, MongoReviewStore, MongoSlotStore, parse_pool
+from objectives.service import (
+    create_internal_ticket,
+    erp_for_task_service,
+    objectives_process_executor,
+    objectives_wiring_config,
+)
+from orchestration.review import InMemoryReviewStore, InMemorySlotStore, MongoReviewStore, MongoSlotStore, parse_pool
 from .tier_s.stores import (
     InMemoryLockStore,
     InMemoryRunStore,
@@ -780,13 +785,9 @@ class DevSessionManager:
                             "material-failure notify failed for %s",
                             task_id, exc_info=True)
 
-            tier_s = (project_config.get("dev", {}) or {}).get(
-                "tier_s", {}) or {}
             env = self._objective_env_for(
                 project_config, repo,
-                ProcessExecutor(
-                    roles=self._executor_roles_with_planner(project_config),
-                    pool=tier_s.get("reviewers", []) or []),
+                objectives_process_executor(project_config),
                 self._objective_quota(), notify)
             await record_material_failure(
                 env.objectives, objective_id, task_id=task_id,
@@ -833,26 +834,6 @@ class DevSessionManager:
             logger.warning("tier_c telemetry failed for %s",
                            task.get("task_id"), exc_info=True)
 
-    @staticmethod
-    def _executor_roles_with_planner(
-        project_config: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Tier S roles plus the single global planner role (TASK-2026-00112).
-
-        The planner role lives in the global ``objective_planner`` block,
-        outside ``dev.tier_s``; the live executor resolves every engine
-        role (including ``objective_planner``) from one roles mapping.
-        """
-        dev_cfg = project_config.get("dev", {}) or {}
-        tier_s = dev_cfg.get("tier_s", {}) or {}
-        roles = dict(tier_s.get("roles", {}) or {})
-        planner_role = (project_config.get("objective_planner", {}) or {}
-                        ).get("role")
-        if isinstance(planner_role, dict) \
-                and planner_role.get("active", True):
-            roles["objective_planner"] = planner_role
-        return roles
-
     def _objective_quota(self) -> Any:
         return (RateMonitorQuota(self._rate_monitor)
                 if self._rate_monitor is not None else AllowAllQuota())
@@ -881,13 +862,9 @@ class DevSessionManager:
                             "objective trigger comment failed for %s",
                             task_id, exc_info=True)
 
-            tier_s = (project_config.get("dev", {}) or {}).get(
-                "tier_s", {}) or {}
             env = self._objective_env_for(
                 project_config, branch.repo,
-                ProcessExecutor(
-                    roles=self._executor_roles_with_planner(project_config),
-                    pool=tier_s.get("reviewers", []) or []),
+                objectives_process_executor(project_config),
                 self._objective_quota(), notify)
             await on_ticket_closed(
                 env, task,
@@ -938,7 +915,6 @@ class DevSessionManager:
                 params=params,
             )
         dev_cfg = project_config.get("dev", {}) or {}
-        tier_s = dev_cfg.get("tier_s", {}) or {}
         cycle_cfg = TierSCycle.config_from_project(project_config)
         try:
             gate_specs = load_gates(dev_cfg)
@@ -948,9 +924,12 @@ class DevSessionManager:
                 waiting_reason=f"{CONFIG_INVALID_REASON}: gates: {exc}",
                 params=params,
             )
+        # Each engine gets its own executor (TASK-2026-00141): the cycle
+        # runs its roles from cycle_cfg, the objective env resolves the
+        # planner role and the review machinery from the global wiring.
+        # No planner role is fused into the Tier S roles anymore.
         executor = ProcessExecutor(
-            roles=self._executor_roles_with_planner(project_config),
-            pool=tier_s.get("reviewers", []) or [])
+            roles=cycle_cfg["roles"], pool=cycle_cfg["reviewers"])
         quota: Any = self._objective_quota()
         notices: list[str] = []
 
@@ -965,7 +944,8 @@ class DevSessionManager:
 
         repo = self._repo
         obj_env = self._objective_env_for(
-            project_config, Path(repo_path), executor, quota, notify)
+            project_config, Path(repo_path),
+            objectives_process_executor(project_config), quota, notify)
         cycle = TierSCycle(
             MongoRunStore(repo) if repo is not None else InMemoryRunStore(),
             MongoLockStore(repo) if repo is not None else InMemoryLockStore(),
@@ -1037,7 +1017,6 @@ class DevSessionManager:
     ) -> ObjectiveEnv:
         """Shared F6 env for Tier S cycles and simple-tier triggers."""
         dev_cfg = project_config.get("dev", {}) or {}
-        tier_s = dev_cfg.get("tier_s", {}) or {}
         repo = self._repo
         repos = project_config.get("project", {}).get("repos", []) or []
         base = str((repos[0].get("branch_base") if repos else None) or "main")
@@ -1046,9 +1025,8 @@ class DevSessionManager:
             if repo is not None:
                 await repo.patch_task(task_id, updates)
 
-        # Global block wins; dev.tier_s.objectives stays as legacy fallback.
-        objectives_cfg = {**(tier_s.get("objectives", {}) or {}),
-                          **(project_config.get("objectives", {}) or {})}
+        wiring = objectives_wiring_config(project_config)
+        objectives_cfg = dict(wiring["objectives_cfg"])
         objectives_cfg["child_autorun"] = bool(
             self._settings.TIER_S_OBJECTIVE_CHILD_AUTORUN)
 
@@ -1069,18 +1047,16 @@ class DevSessionManager:
                    else InMemoryInboxStore()),
             notify=notify,
             repo=repo_path,
-            roles=dict(tier_s.get("roles", {}) or {}),
-            pool=list(parse_pool(tier_s.get("reviewers", []) or [])),
-            review_cfg=dict(tier_s.get("review", {}) or {}),
+            roles=wiring["roles"],
+            pool=list(parse_pool(wiring["pool"])),
+            review_cfg=wiring["review_cfg"],
             objectives_cfg=objectives_cfg,
-            planner_cfg=dict(
-                project_config.get("objective_planner", {}) or {}),
+            planner_cfg=wiring["planner_cfg"],
             erp=(erp_for_task_service(self._task_service)
                  if self._task_service is not None else None),
-            timeouts=dict(tier_s.get("timeouts_minutes", {}) or {}),
-            fix_tiers=dict(tier_s.get("fix_ticket_tiers", {}) or {}),
-            inbox_rule=dict((tier_s.get("inbox", {}) or {}).get(
-                "promotion", {}) or {}),
+            timeouts=wiring["timeouts"],
+            fix_tiers=wiring["fix_tiers"],
+            inbox_rule=wiring["inbox_rule"],
             auto_merge=bool(dev_cfg.get("auto_merge", True)),
             base_branch=base,
             vault=dict(dev_cfg.get("vault_project") or {})

@@ -24,7 +24,8 @@ CORE = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE) not in sys.path:
     sys.path.insert(0, str(CORE))
 
-from agents.dev.tier_s.cycle import ExecResult, TierSCycle
+from agents.dev.tier_s.cycle import TierSCycle
+from orchestration.live import ExecResult
 from agents.dev.tier_s.gates import GateSpec
 from agents.dev.tier_s.models import (
     BUDGETS_DEFAULTS,

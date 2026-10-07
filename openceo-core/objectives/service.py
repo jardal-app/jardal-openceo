@@ -14,10 +14,9 @@ import logging
 from pathlib import Path
 from typing import Any, Mapping
 
-from agents.dev.tier_s.cycle import AllowAllQuota
-from agents.dev.tier_s.inbox import InMemoryInboxStore, MongoInboxStore
-from agents.dev.tier_s.live import ProcessExecutor, RateMonitorQuota
-from agents.dev.tier_s.review import (
+from orchestration.inbox import InMemoryInboxStore, MongoInboxStore
+from orchestration.live import AllowAllQuota, ProcessExecutor, RateMonitorQuota
+from orchestration.review import (
     InMemoryReviewStore,
     InMemorySlotStore,
     MongoReviewStore,
@@ -108,6 +107,52 @@ async def create_internal_ticket(
         return None
 
 
+def objectives_wiring_config(
+    project_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Review/executor wiring the objectives engine needs (TASK-2026-00141).
+
+    Reads only the global ``objective_planner``, ``objectives`` and shared
+    ``review`` blocks: the engine never looks at ``dev.tier_s`` (the
+    ``dev.tier_s.objectives`` legacy fallback is retired). Shared by the
+    company-level :class:`ObjectiveService` and the dev flows
+    (``DevSessionManager._objective_env_for``), so both resolve the planner
+    role and the review machinery from one place.
+    """
+    planner_cfg = dict(project_config.get("objective_planner", {}) or {})
+    objectives_cfg = dict(project_config.get("objectives", {}) or {})
+    review = project_config.get("review", {}) or {}
+    review_roles = review.get("roles", {}) or {}
+    roles: dict[str, Any] = {}
+    planner_role = planner_cfg.get("role")
+    if isinstance(planner_role, dict) \
+            and planner_role.get("active", True):
+        roles["objective_planner"] = planner_role
+    for key in ("closer", "arbiter"):
+        role = review_roles.get(key)
+        if isinstance(role, dict):
+            roles[key] = role
+    return {
+        "roles": roles,
+        "pool": list(review.get("reviewers", []) or []),
+        "review_cfg": dict(review.get("review", {}) or {}),
+        "objectives_cfg": objectives_cfg,
+        "planner_cfg": planner_cfg,
+        "timeouts": dict(review.get("timeouts_minutes", {}) or {}),
+        "fix_tiers": dict(review.get("fix_ticket_tiers", {}) or {}),
+        "inbox_rule": dict((review.get("inbox", {}) or {}).get(
+            "promotion", {}) or {}),
+    }
+
+
+def objectives_process_executor(
+    project_config: Mapping[str, Any],
+) -> ProcessExecutor:
+    """One-shot executor for objective flows over the global wiring."""
+    wiring = objectives_wiring_config(project_config)
+    return ProcessExecutor(roles=wiring["roles"], pool=wiring["pool"])
+
+
 class ObjectiveService:
     """Company-level objective entries over the shared engine."""
 
@@ -135,19 +180,11 @@ class ObjectiveService:
         """Bind the engine to production for one project (no I/O)."""
         project_config = self._config.load_project(project)
         dev_cfg = project_config.get("dev", {}) or {}
-        tier_s = dev_cfg.get("tier_s", {}) or {}
         repos = project_config.get("project", {}).get("repos", []) or []
         base = str((repos[0].get("branch_base") if repos else None) or "main")
         repo_path = self._workdir(repos)
-        roles = dict(tier_s.get("roles", {}) or {})
-        planner_role = (project_config.get("objective_planner", {}) or {}
-                        ).get("role")
-        if isinstance(planner_role, dict) \
-                and planner_role.get("active", True):
-            roles["objective_planner"] = planner_role
-        # Global block wins; dev.tier_s.objectives stays as legacy fallback.
-        objectives_cfg = {**(tier_s.get("objectives", {}) or {}),
-                          **(project_config.get("objectives", {}) or {})}
+        wiring = objectives_wiring_config(project_config)
+        objectives_cfg = dict(wiring["objectives_cfg"])
         objectives_cfg["child_autorun"] = bool(
             getattr(self._settings, "TIER_S_OBJECTIVE_CHILD_AUTORUN", True))
         task_service = self._task_service
@@ -177,9 +214,7 @@ class ObjectiveService:
                    else InMemoryTaskLister()),
             create_ticket=create_ticket,
             patch_task=patch_task,
-            executor=ProcessExecutor(
-                roles=roles,
-                pool=tier_s.get("reviewers", []) or []),
+            executor=objectives_process_executor(project_config),
             quota=self._quota(),
             slots=(MongoSlotStore(repo) if repo is not None
                    else InMemorySlotStore()),
@@ -189,18 +224,16 @@ class ObjectiveService:
                    else InMemoryInboxStore()),
             notify=notify,
             repo=repo_path,
-            roles=roles,
-            pool=list(parse_pool(tier_s.get("reviewers", []) or [])),
-            review_cfg=dict(tier_s.get("review", {}) or {}),
+            roles=wiring["roles"],
+            pool=list(parse_pool(wiring["pool"])),
+            review_cfg=wiring["review_cfg"],
             objectives_cfg=objectives_cfg,
-            planner_cfg=dict(
-                project_config.get("objective_planner", {}) or {}),
+            planner_cfg=wiring["planner_cfg"],
             erp=(erp_for_task_service(task_service)
                  if task_service is not None else None),
-            timeouts=dict(tier_s.get("timeouts_minutes", {}) or {}),
-            fix_tiers=dict(tier_s.get("fix_ticket_tiers", {}) or {}),
-            inbox_rule=dict((tier_s.get("inbox", {}) or {}).get(
-                "promotion", {}) or {}),
+            timeouts=wiring["timeouts"],
+            fix_tiers=wiring["fix_tiers"],
+            inbox_rule=wiring["inbox_rule"],
             auto_merge=bool(dev_cfg.get("auto_merge", True)),
             base_branch=base,
             vault=dict(dev_cfg.get("vault_project") or {})

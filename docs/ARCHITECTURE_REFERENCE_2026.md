@@ -952,7 +952,7 @@ An Objetivo closes on its delivery criteria, after the final review (`complete_c
 
 Tier C closes only on a qualifying independent oracle the orchestrator froze before the build (refs + content hash + type); the orchestrator — never the builder — verifies it, and a builder touching a protected ref fails the ticket instead of closing it as C (`builder_tests` never qualify). A material simple-tier failure resets the candidate, preserves evidence, updates the objective and invokes the planner exactly once; there is no automatic C→B→A→S staircase and no unchanged same-tier retry. Promoted findings record deterministic SHA→ticket→objective attribution when git allows it; without attribution the Tier C late-failure rate stays unknown, never invented.
 
-> Implemented by TASK-2026-00116 (`agents/dev/tier_oracle.py`: freeze/verify; `session.py`: oracle gate + `_material_simple_failure`; `objectives/engine.py`: `record_material_failure`, Tier C telemetry, planner prompt section; `tier_s/inbox.py` + `cycle.py`: §31 attribution + late failures).
+> Implemented by TASK-2026-00116 (`agents/dev/tier_oracle.py`: freeze/verify; `session.py`: oracle gate + `_material_simple_failure`; `objectives/engine.py`: `record_material_failure`, Tier C telemetry, planner prompt section; `orchestration/inbox.py` + `cycle.py`: §31 attribution + late failures).
 
 ### Flow
 
@@ -1036,7 +1036,7 @@ Scope and ownership must be explicit. `project: null` can mean company-level wor
 
 High-stakes tickets (real money, critical infrastructure, security boundaries, durable architecture) go through Tier S: independent planning, plan challenge, one builder session, pool review with family quorum and arbitration of disputed CRITICAL findings. The previous flow (persistent tmux reviewers, OpenCode compiler, `consensus.py`, per-project `coding_tool`/`tier_s` keys, `critical_consensus`) was removed with the v2 merge `2be8e4f` (2026-10-05) and lives only in Git history.
 
-- **Engine:** `openceo-core/agents/dev/tier_s/` (v2). Roles and reviewer slots live in the global config (`config_loader.py`); checked-in projects carry no routing or Tier S overrides.
+- **Engine:** `openceo-core/agents/dev/tier_s/` (v2, single-ticket cycle). Shared executors, review pool/rounds, findings, inbox and knowledge live in `openceo-core/orchestration/` (TASK-2026-00141). Cycle roles and reviewer slots live in the global config (`config_loader.py`); checked-in projects carry no routing or Tier S overrides.
 - **Design:** `docs/work/TIER_S_DESIGN_FINAL.md` v2 (TASK-2026-00085): one ticket = one cycle = one builder session; tiers `tier_s/a/b/c`; non-blocking plan review.
 - **Routing:** `coding_tool` per ticket (root or `params`). DEV tier semantics and the Tier C oracle rule are normative in `docs/objective-planner-routing-policy.md`.
 - **Large work:** decomposition belongs to the single objective planner (§Proactive CEO; TASK-2026-00112/00117), not to Tier S.
@@ -1181,7 +1181,7 @@ RATE_STATUS_STALE_SECONDS=300
 - `openceo-core/task_service.py` — Pre-launch gating + post-completion hook
 - `openceo-core/scheduler.py` — Periodic retry of queued tickets
 - `openceo-core/agents/dev/tmux_runtime.py` — Mid-task detection + wait-and-resume in polling loop
-- `openceo-core/agents/dev/tier_s/live.py` — Pre-launch check for Tier S (v2)
+- `openceo-core/orchestration/live.py` — Pre-launch check for Tier S (v2)
 
 ---
 
@@ -1682,7 +1682,7 @@ openceo/
 │   │   │   ├── requirements.txt
 │   │   │   ├── .env.example
 │   │   │   ├── session.py
-│   │   │   ├── tier_s/                   # Tier S v2 engine
+│   │   │   ├── tier_s/                   # Tier S v2 single-ticket cycle
 │   │   │   ├── tmux_runtime.py
 │   │   │   └── opencode_run.py
 │   │   ├── pm/

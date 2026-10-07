@@ -34,15 +34,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
-from agents.dev.tier_s import findings as findings_mod
-from agents.dev.tier_s import inbox as inbox_mod
-from agents.dev.tier_s import knowledge as knowledge_mod
-from agents.dev.tier_s import review as review_mod
+from orchestration import findings as findings_mod
+from orchestration import inbox as inbox_mod
+from orchestration import knowledge as knowledge_mod
+from orchestration import review as review_mod
 from objectives import planner_models as planner_mod
 
 
 class Runner(Protocol):
-    """Structural executor (see :class:`tier_s.cycle.Executor`)."""
+    """Structural executor (see :class:`orchestration.live.Executor`)."""
 
     async def run(self, role: str, prompt: str, workdir: Path,
                   timeout_s: int) -> Any: ...
@@ -1911,7 +1911,7 @@ async def _finish_objective(
     group — a 417 parks as ``pending_status`` and the startup reconcile
     retries it. No group push is done directly.
     """
-    from agents.dev.tier_s import knowledge as knowledge_mod
+    from orchestration import knowledge as knowledge_mod
 
     objective_id = str(objective.get("objective_id"))
     children = await env.tasks.list_by_objective(objective_id)

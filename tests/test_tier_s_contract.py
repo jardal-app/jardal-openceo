@@ -117,13 +117,17 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         from settings import Settings
         repo = Path(__file__).resolve().parents[1]
         loader = ConfigLoader(Settings(_env_file=None, PROJECTS_DIR=str(repo / "projects")))
-        # Tier S roles and pool are global: identical for every project.
+        # Cycle roles and the shared review machinery are global:
+        # identical for every project.
         for name in ("jardal-openceo", "jardal-trading"):
-            roles = loader.load_project(name)["dev"]["tier_s"]["roles"]
+            cfg = loader.load_project(name)
+            roles = cfg["dev"]["tier_s"]["roles"]
             builder = roles["builder"]
             self.assertEqual(builder["provider"], "muse", name)
             self.assertEqual(builder["command"][0], "musej", name)
-            self.assertEqual(roles["closer"]["command"][0], "musej", name)
+            self.assertEqual(
+                cfg["review"]["roles"]["closer"]["command"][0],
+                "musej", name)
             command = " ".join(str(part) for part in builder["command"])
             self.assertIn("--model muse-spark-1.3-contributor", command, name)
             self.assertIn("--reasoning-effort max", command, name)
@@ -133,12 +137,13 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
                 any("codexj" in str(part) for part in reviewer["command"]),
                 f"{name}: plan-reviewer must run codexj",
             )
-        tier_s = loader.load_project("jardal-openceo")["dev"]["tier_s"]
+        cfg = loader.load_project("jardal-openceo")
+        tier_s = cfg["dev"]["tier_s"]
         self.assertEqual(tier_s["min_available_families"], 3)
         self.assertEqual(tier_s["roles"]["planner"]["account"], "claudej")
         self.assertEqual(tier_s["roles"]["plan-reviewer"]["account"], "codexj")
         self.assertEqual(tier_s["roles"]["builder"]["account"], "muse")
-        reviewers = tier_s["reviewers"]
+        reviewers = cfg["review"]["reviewers"]
         by_label = {item["label"]: item for item in reviewers}
         # Pool §7.1: qwen + glm + deepseek (dsh) active, claudep reserve,
         # muse-review extra.
@@ -165,6 +170,7 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
             dev = (data.get("dev") or {}) if isinstance(data, dict) else {}
             self.assertNotIn("coding_tool", dev, name)
             self.assertTrue(not dev.get("tier_s"), name)
+            self.assertTrue(not (data.get("review") or {}), name)
             self.assertEqual(loader.validate_project(name), [], name)
 
 

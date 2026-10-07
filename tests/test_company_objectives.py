@@ -10,6 +10,7 @@ network, no CLI, no LLM.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -751,8 +752,8 @@ class ObjectiveServiceTests(unittest.IsolatedAsyncioTestCase):
     def _project(self, policy: str) -> dict[str, Any]:
         return {
             "project": {"repos": []},
-            "dev": {"tier_s": {"objectives": {"max_tickets": 20}}},
-            "objectives": {"max_active_objectives_global": 3},
+            "objectives": {"max_tickets": 20,
+                           "max_active_objectives_global": 3},
             "objective_planner": {
                 "timeout_minutes": 15, "policy_path": policy,
                 "agents": {"dev": {"enabled": True}}},
@@ -780,7 +781,9 @@ class ObjectiveServiceTests(unittest.IsolatedAsyncioTestCase):
                          objective["objective_id"])
         self.assertEqual(objective["status"], "waiting")
 
-    async def test_env_merges_global_config_over_legacy(self) -> None:
+    async def test_env_ignores_legacy_tier_s_objectives(self) -> None:
+        # TASK-2026-00141 retired the dev.tier_s.objectives fallback: the
+        # engine reads the global objectives block only.
         from objectives.service import ObjectiveService
 
         config = _FakeConfig({"proj": {
@@ -796,7 +799,7 @@ class ObjectiveServiceTests(unittest.IsolatedAsyncioTestCase):
             rate_monitor=None)
         env = service.env_for("proj")
         self.assertEqual(env.objectives_cfg["max_tickets"], 7)
-        self.assertEqual(env.objectives_cfg["legacy_only"], 1)
+        self.assertNotIn("legacy_only", env.objectives_cfg)
         self.assertEqual(env.objectives_cfg["max_active_objectives_global"], 9)
         self.assertFalse(env.objectives_cfg["child_autorun"])
         self.assertIsNone(env.erp)
@@ -1209,6 +1212,24 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("depends_on", dumped)
 
 
+_TIER_S_PACKAGE_RE = re.compile(r"agents\.dev\.tier_s(?![\w])")
+
+
+def _tier_s_package_hits(package: Path) -> list[str]:
+    """``file:line`` hits importing the Tier S engine package.
+
+    The sibling ``agents.dev.tier_s_contract`` module is explicitly allowed
+    (shared git/env helpers, not the engine); the negative lookahead keeps
+    it out of the hits.
+    """
+    hits: list[str] = []
+    for path in sorted(package.glob("*.py")):
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            if _TIER_S_PACKAGE_RE.search(line):
+                hits.append(f"{path.name}:{lineno}: {line.strip()}")
+    return hits
+
+
 class PackageLocationTests(unittest.TestCase):
     def test_engine_lives_outside_tier_s(self) -> None:
         import objectives.engine
@@ -1218,6 +1239,54 @@ class PackageLocationTests(unittest.TestCase):
         tier_s = CORE / "agents" / "dev" / "tier_s"
         self.assertFalse((tier_s / "objectives.py").exists())
         self.assertFalse((tier_s / "objective_planner_models.py").exists())
+
+    def test_objectives_never_imports_tier_s(self) -> None:
+        """Acceptance of TASK-2026-00141: the grep stays empty."""
+        self.assertEqual([], _tier_s_package_hits(CORE / "objectives"))
+
+    def test_orchestration_never_imports_tier_s(self) -> None:
+        """The shared package must not reach back into the engine."""
+        self.assertEqual([], _tier_s_package_hits(CORE / "orchestration"))
+
+    def test_planner_role_resolves_without_tier_s(self) -> None:
+        from objectives.service import objectives_wiring_config
+
+        wiring = objectives_wiring_config({
+            # No "dev" key at all: global blocks only.
+            "objective_planner": {
+                "role": {"command": ["musej"], "active": True}},
+            "objectives": {"max_tickets": 20},
+            "review": {
+                "roles": {"closer": {"command": ["musej"]},
+                          "arbiter": {"command": ["claudej"]}},
+                "reviewers": [{"label": "r1"}],
+                "review": {"quorum": 2},
+                "timeouts_minutes": {"closer": 15},
+                "fix_ticket_tiers": {"default": "tier_c"},
+                "inbox": {"promotion": {"severity": "CRITICAL"}},
+            },
+        })
+        self.assertEqual(wiring["roles"]["objective_planner"]["command"],
+                         ["musej"])
+        self.assertIn("closer", wiring["roles"])
+        self.assertIn("arbiter", wiring["roles"])
+        self.assertEqual(wiring["pool"], [{"label": "r1"}])
+        self.assertEqual(wiring["review_cfg"], {"quorum": 2})
+        self.assertEqual(wiring["objectives_cfg"], {"max_tickets": 20})
+        self.assertEqual(wiring["timeouts"], {"closer": 15})
+        self.assertEqual(wiring["fix_tiers"], {"default": "tier_c"})
+        self.assertEqual(wiring["inbox_rule"], {"severity": "CRITICAL"})
+
+    def test_inactive_planner_role_is_skipped(self) -> None:
+        from objectives.service import objectives_wiring_config
+
+        wiring = objectives_wiring_config({
+            "objective_planner": {"role": {"active": False}},
+            "objectives": {},
+            "review": {},
+        })
+        self.assertNotIn("objective_planner", wiring["roles"])
+        self.assertEqual(wiring["roles"], {})
 
 
 class SharedScratchRootTests(unittest.TestCase):
