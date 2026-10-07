@@ -37,7 +37,7 @@ del JSONL y no del stderr.
 
 Se reproduce de forma determinista cuando el perfil del agente cierra el worker
 (deny por defecto `{"action":"*","resource":"*","effect":"deny"}`, o denegar `read` o
-`shell`). Ver `docs/work/TASK-2026-00056-investigator-elite.md`.
+`shell`). Ver `TASK-2026-00056` (documento original adjunto al ticket).
 
 ### `opencode_run_2_0_20_agent_not_found.jsonl`
 

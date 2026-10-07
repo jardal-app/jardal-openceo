@@ -21,7 +21,7 @@ Continuar el roadmap de autonomía: el dueño escribe **`sigue`** y la sesión a
 - **Voz en Tiempo Real**: LiveKit + Silero VAD + Groq Whisper STT + OpenAI TTS (`openceo-voice/`)
 - **App Móvil**: Android Jetpack Compose + LiveKit SDK (`openceo-voice-android/`)
 - **Dashboard**: React 19 + Vite 6 + Tailwind CSS v4 (`openceo-react/`)
-- **Coding Providers**: Codex CLI (GPT-5.4), Claude Code (Opus 4.6), Antigravity CLI (`agyd`), OpenCode CLI, Kimi CLI
+- **Coding Providers**: `musej`/`muse` (muse-spark-1.3-contributor), `codexj` (gpt-6.1-sol), `claudej` (opus/opusplan), `qwen` (qwen3.8-max, glm-5.3), `dsh` (deepseek-v4.1-flash); reservas `claudep`, `agyd`, `opencode`; QA con Kimi CLI y OpenCode (roster vigente en `openceo-core/config_loader.py`)
 
 ---
 
@@ -123,12 +123,12 @@ cd openceo-voice-android
 ### Planner único de objetivos (global)
 - El único que decide qué tickets deben existir para un Objetivo: Muse Code headless, un run fresco por ciclo, salida `PlannerResult` validada (Pydantic + validación determinista).
 - Normativos: `docs/objective-planner-routing-policy.md` (el planner lo lee) y `docs/decision-2026-10-05-planner-objetivos-muse.md` (ADR).
-- Sustituye a `claudej`/`TICKETS.yaml` (pendiente: TASK-2026-00112; el código aún usa `agents/dev/tier_s/objectives.py`).
+- Sustituye a `claudej`/`TICKETS.yaml` (TASK-2026-00112; motor en `openceo-core/objectives/`, TASK-2026-00117).
 - El plan Claude/Codex de un ticket Tier S planifica cómo implementar ese ticket, no es un segundo planner; tampoco lo es el orden determinista del día en Horizon.
 
 ### Dev Tier S (Consenso Crítico Multi-IA)
 - Se activa enviando `"coding_tool": "tier_s"` en la raíz del ticket o dentro de `params` (routing per-task; `dev.coding_tool` en `project.yaml` está obsoleto).
-- Orquesta: Planner (`claudej`), Plan Reviewer (`codexj` no bloqueante), Builder y Closer (`musej` en tmux), árbitro (`claudej`), y pool de revisores con quorum por familias en 2 rondas (slots vigentes en `config_loader.py`).
+- Orquesta: Planner (`claudej`), Plan Reviewer (`codexj` no bloqueante), Builder y Closer (procesos one-shot `musej`), árbitro (`claudej`), y pool de revisores con quorum por familias en 2 rondas (slots vigentes en `config_loader.py`).
 
 ---
 
@@ -242,8 +242,8 @@ del mismo trabajo. Al cerrar, en orden:
 
 1. **Merge a `main` + push** de la rama del ticket (`git checkout main && git merge --no-ff <rama> && git push origin main`).
 2. **Servicio reiniciado con el código nuevo** (`scripts/openceo-core-host.sh restart` + `status` + smoke del endpoint).
-3. **Ticket en ERPNext en su estado final** con `openceo_transition_ticket` (criterio global en el servidor; relee, verifica y deja el espejo coherente sin eco): `Completed` con `evidence` de la verificación si el agente terminó y verificó; `Pending Review` con `human_action` nombrable solo si queda una credencial o aprobación humana concreta; `Working` con `reason` si sigue abierto el trabajo o una dependencia. Cancelar trabajo del dueño exige citar su orden (`owner_instruction`); sin ella la herramienta escala en vez de cancelar. Borrar la rama local (`-d`) y remota si existe una vez mergeada.
-4. **Docs temporales eliminados**: `docs/work/TASK-2026-000NN-tema.md` se borra con aprobación del dueño una vez verificado que lo durable quedó en el vault y el resultado en el ticket.
+3. **Ticket en ERPNext en su estado final** con `openceo_transition_ticket` (criterio global en el servidor; relee, verifica y deja el espejo coherente sin eco): `Completed` con `evidence` de la verificación si el agente terminó y verificó; `Pending Review` con `human_action` nombrable solo si queda una aprobación o decisión que únicamente el dueño puede tomar; `Working` con `reason` si sigue abierto el trabajo o una dependencia. Cancelar trabajo del dueño exige citar su orden (`owner_instruction`); sin ella la herramienta escala en vez de cancelar. Borrar la rama local (`-d`) y remota si existe una vez mergeada.
+4. **Docs temporales eliminados**: `docs/work/TASK-2026-000NN-tema.md` se borra al pasar el checklist (resultado en el ticket + vault actualizado o innecesario + original adjunto como privado si tiene valor futuro); informar en una línea.
 5. **Registro durable**: `STATUS.md` (traspaso), ticket ERPNext (resultado) y vault (solo hechos, decisiones, flujos y conclusiones reutilizables, con el número de ticket como evidencia).
 
 ---
@@ -258,7 +258,10 @@ directly; prompts never paste it. This section is also served as
 
 - `openceo-core/` — orchestrator (Python, FastAPI, LangGraph), tests in `tests/`
 - `openceo-core/agents/dev/tier_s/` — Tier S engine (F1–F7): cycle, review
-  rounds, findings inbox, objectives, knowledge
+  rounds, findings inbox, knowledge
+- `openceo-core/objectives/` — company objective engine (execution state, planner models)
+- `openceo-core/company_mandate.py` — company mandate + owner escalation policy
+- `openceo-core/ops/` — deterministic Tier-0 ops tools (e.g. create_project)
 - `openceo-react/` — dashboard (React 19 + Vite + Tailwind v4)
 - `openceo-voice/`, `openceo-voice-android/` — realtime voice + Android app
 - `workflows/` — deterministic Tier-0 YAML workflows
@@ -344,7 +347,7 @@ Cuando el dueño escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el ti
    - Vault solo si hay una decisión o un hecho durable nuevo.
 7. **Seguir.** Si queda margen, volver al paso 2. Al terminar, una línea: qué se cerró y qué sigue.
 
-Al dueño solo se le pregunta por la política de escalado del épico: gasto nuevo, credencial, acción irreversible, replanificación estratégica, cambio de mandato o revisión humana exigida por política. Lo demás se decide y se hace.
+Al dueño solo se le pregunta por la política de escalado del épico: gasto nuevo, acción irreversible, replanificación estratégica, cambio de mandato o revisión humana exigida por política. Lo demás se decide y se hace.
 
 **Consigna del dueño (2026-10-06): ninguna prueba que gaste tokens hasta completar la arquitectura.** Mientras F0–F6 del épico no estén `Completed`, queda prohibido:
 
@@ -354,3 +357,5 @@ Al dueño solo se le pregunta por la política de escalado del épico: gasto nue
 - usar `chat.sh` contra modelos.
 
 Se valida con tests unitarios y de contrato, ejecutores o modelos simulados y `py_compile`. La única prueba real completa es **TASK-2026-00122** (F7), al final.
+
+**Palabra clave `audita` (sesiones del dueño).** Cuando el dueño escriba **`audita`**, no preguntes: audita que `main` cumpla el rumbo del épico TASK-2026-00110. Fuentes de verdad, en este orden: la decisión del vault `decisions/2026-10-06-objetivo-unico-ceo-autonomo`, el contrato `docs/ARCHITECTURE_REFERENCE_2026.md` §Proactive CEO (más `docs/objective-planner-routing-policy.md` y su ADR `docs/decision-2026-10-05-planner-objetivos-muse.md`) y el comentario ROADMAP del épico. Buscar fugas: código en carpetas que no le corresponden, referencias a archivos inexistentes, docs que afirman lo que el código no hace, reglas que contradicen el contrato o las reglas globales del dueño, y tickets viejos que chocan con el rumbo. No arreglar nada: buscar duplicados y crear tickets hijos del épico (batch con `parent_task`) con evidencia `archivo:línea`, y actualizar el comentario ROADMAP. Sin pruebas que gasten tokens; la suite unitaria sí vale.
