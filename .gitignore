@@ -52,6 +52,9 @@ tmp/
 docs/work/
 docs/reviews/
 
+# Salidas de revisiones del CLI Qwen (locales, no versionar)
+.qwen/reviews/
+
 # Misc local artifacts
 0.112.0
 MelanyRyR.md
