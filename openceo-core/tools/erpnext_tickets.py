@@ -183,6 +183,34 @@ def map_status(status: str | None) -> str | None:
     return _STATUS_MAP.get(str(status or "").strip().lower())
 
 
+#: Destinos que acepta la transicion explicita (TASK-2026-00132). Vocabulario de
+#: ERPNext, no de OpenCEO: quien llama nombra el estado de negocio exacto.
+TRANSITION_STATUSES: tuple[str, ...] = (
+    "Open",
+    "Working",
+    "Pending Review",
+    "Completed",
+    "Cancelled",
+)
+
+
+def normalize_transition_status(value: str | None) -> str:
+    """Canoniza un destino de transicion o rechaza con error de datos.
+
+    Insensible a mayusculas y a `_`/`-` (el MCP declara un Literal exacto; esto
+    es defensa en profundidad para llamadas directas al servicio). Un destino
+    fuera de la lista es un 400, nunca un silencio.
+    """
+    collapsed = re.sub(r"[\s_-]+", " ", str(value or "")).strip().lower()
+    for target in TRANSITION_STATUSES:
+        if collapsed == target.lower():
+            return target
+    raise ERPNextValidationError(
+        f"Estado invalido: {value}. Usa {' / '.join(TRANSITION_STATUSES)}.",
+        status_code=400,
+    )
+
+
 def task_needs_human_review(task: dict[str, Any] | None) -> bool:
     """Senal establecida de "necesita ojo humano": QA requerida y sin aprobar.
 
@@ -831,6 +859,28 @@ class ERPNextTicketAdapter:
         if target is None or not (name or "").strip():
             return None
         return await self._client.update_doc("Task", name.strip(), {"status": target})
+
+    async def transition_status(
+        self,
+        identifier: str,
+        to_status: str,
+    ) -> dict[str, Any]:
+        """Fija el estado de negocio exacto. Operacion cerrada (TASK-2026-00132).
+
+        A diferencia de `update_status` (que traduce vocabulario OpenCEO con
+        resolucion condicional por ticket), aqui el llamador ya decidio el
+        destino en vocabulario ERPNext y el criterio global se valido en
+        `TaskService.transition_ticket`. Resuelve el identificador antes de
+        escribir y escribe solo `status` por `update_doc`: nunca un
+        `create_document` generico. El 417 por dependientes abiertos sube
+        clasificado (`ERPNextDependencyBlockedError`) para que el servicio lo
+        reporte con detalle.
+        """
+        target = normalize_transition_status(to_status)
+        task = await self.resolve_task(identifier)
+        name = str(task.get("name") or "").strip()
+        updated = await self._client.update_doc("Task", name, {"status": target})
+        return {"ok": True, "ticket": self._ticket_view({**task, **(updated or {})})}
 
     async def update_tier_s_progress(self, name: str, summary: dict[str, Any]) -> None:
         """Project execution detail in the existing ticket without changing business status."""

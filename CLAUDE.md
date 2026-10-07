@@ -242,7 +242,7 @@ del mismo trabajo. Al cerrar, en orden:
 
 1. **Merge a `main` + push** de la rama del ticket (`git checkout main && git merge --no-ff <rama> && git push origin main`).
 2. **Servicio reiniciado con el código nuevo** (`scripts/openceo-core-host.sh restart` + `status` + smoke del endpoint).
-3. **Ticket en ERPNext en su estado final** según AGENTS.md: `Completed` si el agente terminó y verificó; `Pending Review` solo si queda una credencial o aprobación humana concreta; `Working` si sigue abierto el trabajo o una dependencia. Pasar el contexto de QA al adaptador y releer el estado de negocio. Borrar la rama local (`-d`) y remota si existe una vez mergeada.
+3. **Ticket en ERPNext en su estado final** con `openceo_transition_ticket` (criterio global en el servidor; relee, verifica y deja el espejo coherente sin eco): `Completed` con `evidence` de la verificación si el agente terminó y verificó; `Pending Review` con `human_action` nombrable solo si queda una credencial o aprobación humana concreta; `Working` con `reason` si sigue abierto el trabajo o una dependencia. Cancelar trabajo del dueño exige citar su orden (`owner_instruction`); sin ella la herramienta escala en vez de cancelar. Borrar la rama local (`-d`) y remota si existe una vez mergeada.
 4. **Docs temporales eliminados**: `docs/work/TASK-2026-000NN-tema.md` se borra con aprobación del dueño una vez verificado que lo durable quedó en el vault y el resultado en el ticket.
 5. **Registro durable**: `STATUS.md` (traspaso), ticket ERPNext (resultado) y vault (solo hechos, decisiones, flujos y conclusiones reutilizables, con el número de ticket como evidencia).
 
@@ -338,7 +338,7 @@ Cuando el dueño escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el ti
 6. **Cerrar según §9.**
    - Merge `--no-ff` a `main` + push.
    - Restart + status + smoke si cambió el servicio.
-   - Ticket en su estado final, con un comentario de resultado.
+   - Ticket en su estado final con `openceo_transition_ticket` (`reason` siempre, `evidence` para cerrar, `human_action` para revisión), con un comentario de resultado.
    - Rama borrada.
    - Un párrafo corto al inicio de «Continuar aquí»: qué se cerró y cuál es el siguiente ticket.
    - Vault solo si hay una decisión o un hecho durable nuevo.

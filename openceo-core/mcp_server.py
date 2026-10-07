@@ -357,6 +357,79 @@ def _register_openceo_tools(
         except Exception as exc:  # noqa: BLE001 - mismo contrato que create_ticket
             return {"ok": False, "status": "error", "message": str(exc)}
 
+    async def openceo_transition_ticket(
+        ticket: str,
+        to_status: Literal["Open", "Working", "Pending Review", "Completed", "Cancelled"],
+        reason: str,
+        human_action: str | None = None,
+        evidence: str | None = None,
+        owner_instruction: str | None = None,
+    ) -> dict[str, Any]:
+        """Explicit business-state move under the global policy (F4)."""
+        if task_service is None:
+            return {"ok": False, "status": "not_configured", "message": "Sin TaskService."}
+        try:
+            return await task_service.transition_ticket(
+                ticket,
+                to_status,
+                reason,
+                human_action=human_action,
+                evidence=evidence,
+                owner_instruction=owner_instruction,
+            )
+        except Exception as exc:  # noqa: BLE001 - el servicio ya clasifica lo esperado
+            return {"ok": False, "status": "error", "message": str(exc)}
+
+    async def openceo_transition_tickets_batch(transitions: str) -> dict[str, Any]:
+        """Sequential transitions, each applied and verified by reread (F4)."""
+        if task_service is None:
+            return {"ok": False, "status": "not_configured", "message": "Sin TaskService."}
+        try:
+            parsed = json.loads(transitions)
+        except json.JSONDecodeError as exc:
+            return {"ok": False, "status": "invalid_input", "message": f"transitions no es JSON valido: {exc}"}
+        if not isinstance(parsed, list):
+            return {"ok": False, "status": "invalid_input", "message": "Se espera JSON array."}
+        if len(parsed) > 50:
+            return {"ok": False, "status": "invalid_input", "message": "Maximo 50 transiciones por lote."}
+
+        results: list[dict[str, Any]] = []
+        applied = 0
+        escalated = 0
+        failed = 0
+        for item in parsed:
+            if not isinstance(item, dict) or not str(item.get("ticket") or "").strip():
+                failed += 1
+                results.append({"ok": False, "status": "invalid", "message": "Falta ticket"})
+                continue
+            try:
+                result = await task_service.transition_ticket(
+                    str(item.get("ticket")),
+                    str(item.get("to_status") or ""),
+                    str(item.get("reason") or ""),
+                    human_action=item.get("human_action"),
+                    evidence=item.get("evidence"),
+                    owner_instruction=item.get("owner_instruction"),
+                )
+            except Exception as exc:  # noqa: BLE001 - un item no aborta el lote
+                failed += 1
+                results.append({"ok": False, "status": "error", "message": str(exc)})
+                continue
+            results.append(result)
+            if not result.get("ok"):
+                failed += 1
+            elif result.get("outcome") == "escalated":
+                escalated += 1
+            else:
+                applied += 1
+        return {
+            "ok": True,
+            "applied_count": applied,
+            "escalated_count": escalated,
+            "failed_count": failed,
+            "results": results,
+        }
+
     def _map_priority(priority: str | None) -> TaskPriority:
         try:
             return TaskPriority(priority.strip().lower()) if priority else TaskPriority.MEDIUM
@@ -571,6 +644,16 @@ def _register_openceo_tools(
         name="openceo_create_objective",
         description="Create a top-down company objective: one ERPNext group Task (business identity) whose children the planner creates. Required: project, goal. Optional: acceptance (delivery criteria), source_id. Refuses duplicates and admission limits deterministically.",
     )
+    server.tool(
+        openceo_transition_ticket,
+        name="openceo_transition_ticket",
+        description="Move a ticket's business status (Open/Working/Pending Review/Completed/Cancelled) under the global policy: reason always, human_action for review, evidence for close, owner quote to cancel owner-set work.",
+    )
+    server.tool(
+        openceo_transition_tickets_batch,
+        name="openceo_transition_tickets_batch",
+        description="Apply several status transitions one by one, each verified by reread. Input: JSON array of {ticket, to_status, reason, ...}. Reports applied/escalated/failed counts.",
+    )
     # --- hilo del ticket: edicion, comentarios y adjuntos (TASK-2026-00079) ----
     #
     # Descripciones cortas a proposito: cada palabra viaja en **cada** peticion de la
@@ -685,6 +768,8 @@ def _register_openceo_tools(
         "openceo_search_tickets",
         "openceo_get_ticket",
         "openceo_create_objective",
+        "openceo_transition_ticket",
+        "openceo_transition_tickets_batch",
         "openceo_update_ticket",
         "openceo_add_ticket_comment",
         "openceo_update_ticket_comment",

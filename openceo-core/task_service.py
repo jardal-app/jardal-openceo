@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
 
 from agents.dev.routing import normalize_document_routing
 from company_mandate import (
     ESCALATION_PHASE,
+    ESCALATION_TAG,
     EscalationDecision,
     OwnerAction,
     build_escalation_ticket,
     project_requires_human_review,
+    requires_owner,
 )
 from db.mongo import MongoRepository
 from events import RealtimeHub
@@ -48,11 +51,18 @@ from state import (
 )
 from tools.erpnext_client import (
     ERPNextDependencyBlockedError,
+    ERPNextDuplicateError,
     ERPNextError,
+    ERPNextPermissionError,
     ERPNextUnavailable,
     ERPNextValidationError,
 )
-from tools.erpnext_tickets import resolve_erpnext_status
+from tools.erpnext_tickets import (
+    depends_on_names,
+    normalize_transition_status,
+    resolve_erpnext_status,
+    task_needs_human_review,
+)
 
 if TYPE_CHECKING:
     from tools.erpnext_tickets import ERPNextTicketAdapter
@@ -86,6 +96,79 @@ _ERPNEXT_BUSINESS_TO_TASK_STATUS: dict[str, str] = {
     "Completed": TaskStatus.COMPLETED.value,
     "Cancelled": TaskStatus.CANCELLED.value,
 }
+
+#: Destino de transicion explicita (vocabulario ERPNext) -> estado de ejecucion
+#: (vocabulario OpenCEO). Es el espejo el que se alinea: `status_pushed` guarda
+#: SIEMPRE este lado, nunca el de ERPNext (TASK-2026-00132).
+_ERPNEXT_TO_TASK_STATUS: dict[str, str] = {
+    "Open": TaskStatus.QUEUED.value,
+    "Working": TaskStatus.IN_PROGRESS.value,
+    "Pending Review": TaskStatus.WAITING.value,
+    "Completed": TaskStatus.COMPLETED.value,
+    "Cancelled": TaskStatus.CANCELLED.value,
+}
+
+#: Nombres de negocio dentro de un mensaje de Frappe (el 417 por dependientes
+#: nombra al bloqueado y a un dependiente entre etiquetas HTML).
+_TASK_NAME_PATTERN = re.compile(r"TASK-\d+-\d+")
+
+#: Tope de la auditoria de transicion en el espejo: una cita, no un volcado.
+_TRANSITION_AUDIT_MAX = 500
+
+
+def _transition_audit_text(value: Any, limit: int = _TRANSITION_AUDIT_MAX) -> str:
+    return " ".join(str(value or "").split())[:limit]
+
+
+def _classify_transition_error(exc: Exception) -> dict[str, Any]:
+    """Fallo del adapter -> resultado clasificado (mismo vocabulario que el MCP)."""
+    if isinstance(exc, ERPNextPermissionError):
+        status = "forbidden"
+    elif isinstance(exc, ERPNextUnavailable):
+        status = "unavailable"
+    elif isinstance(exc, ERPNextDuplicateError):
+        status = "duplicate"
+    elif isinstance(exc, ERPNextValidationError):
+        status = {404: "not_found", 413: "too_large", 400: "invalid_input"}.get(
+            exc.status_code, "invalid_input"
+        )
+    else:
+        status = "error"
+    return {"ok": False, "status": status, "message": str(exc)}
+
+
+def _transition_cancel_needs_owner(
+    business: dict[str, Any] | None, task: dict[str, Any] | None
+) -> tuple[bool, str]:
+    """True cuando cancelar exige citar la orden del dueno. Fail-closed.
+
+    Automatico solo lo probadamente creado por agentes (hijo de objetivo,
+    spillover, `created_by` de agente) que no sea un grupo ni un escalado:
+    abandonar un objetivo es replanificacion estrategica, y retirar una
+    pregunta al dueno sin su orden rompe el bucle de decision. Todo lo demas
+    (suelto, voz/desk, sin registro de ejecucion, origen desconocido) pregunta.
+    """
+    if bool((business or {}).get("is_group")):
+        return True, "es un grupo (objetivo): abandonarlo es replanificacion estrategica"
+    record = task or {}
+    tags = [str(tag) for tag in (record.get("tags") or [])]
+    if (
+        str(record.get("phase") or "") == ESCALATION_PHASE
+        or str(record.get("waiting_reason") or "").startswith(f"{ESCALATION_PHASE}:")
+        or ESCALATION_TAG in tags
+    ):
+        return True, "es un escalado al dueno: retirarlo exige su orden"
+    source = record.get("source")
+    source_value = getattr(source, "value", source)
+    agent_marks = (
+        bool(str(record.get("objective_id") or "").strip())
+        or str(source_value or "") == TaskSource.SPILLOVER.value
+        or any(tag.startswith("spillover_from:") for tag in tags)
+        or str(record.get("created_by") or "") == "ceo"
+    )
+    if agent_marks:
+        return False, "trabajo creado por agentes"
+    return True, "trabajo fijado por el dueno o de origen desconocido"
 
 
 class TaskService:
@@ -1206,6 +1289,448 @@ class TaskService:
                         task.get("task_id"), exc_info=True)
                     result["objective"] = {"ok": False, "reason": str(exc)[:200]}
         return result
+
+    # --- Transicion explicita de estado (TASK-2026-00132) --------------------
+    #
+    # `openceo_transition_ticket` (MCP) es la via por la que un agente mueve el
+    # estado de NEGOCIO con el criterio global: antes solo existia por dentro
+    # (`update_status`/`_push_status`) y las cancelaciones y devoluciones se
+    # hacian a mano en el desk. El criterio vive aqui, en el servidor, no en el
+    # prompt del llamador.
+
+    def _company_mandate(self) -> Any | None:
+        """Mandato de empresa validado, o None si falta o es ilegible.
+
+        None no bloquea la transicion: `requires_owner` escala todo sin
+        mandato valido (fail-closed hacia preguntar, no hacia actuar).
+        """
+        loader = getattr(self, "_config_loader", None)
+        if loader is None:
+            return None
+        try:
+            return loader.load_company_mandate()
+        except Exception:
+            logger.warning(
+                "Company mandate unreadable; transition escalates fail-closed",
+                exc_info=True,
+            )
+            return None
+
+    async def _record_transition_mirror(
+        self,
+        task: dict[str, Any],
+        *,
+        name: str,
+        target: str,
+        equivalent: str,
+        reason: str,
+        human_action: str = "",
+        evidence: str = "",
+        owner_instruction: str = "",
+        previous: str = "",
+    ) -> dict[str, Any] | None:
+        """Parche unico: estado de ejecucion + espejo coherente + auditoria.
+
+        El guardia anti-eco es estructural: el parche escribe `status_pushed`
+        con el mismo valor que el estado nuevo, asi que el observador no lo
+        reenvia, y el webhook inverso vera `already_applied`/`ignored`.
+        """
+        task_id = str(task.get("task_id") or "")
+        if not task_id:
+            return None
+        now = datetime.now(timezone.utc).isoformat()
+        audit: dict[str, Any] = {
+            "at": now,
+            "from": previous,
+            "to": target,
+            "reason": _transition_audit_text(reason),
+        }
+        if human_action:
+            audit["human_action"] = _transition_audit_text(human_action)
+        if evidence:
+            audit["evidence"] = _transition_audit_text(evidence)
+        if owner_instruction:
+            audit["owner_instruction"] = _transition_audit_text(owner_instruction)
+        mirror = {
+            "status_pushed": equivalent,
+            "pending_status": None,
+            "business_status": target,
+            "business_synced_at": now,
+            "transition": audit,
+        }
+        updates: dict[str, Any] = {
+            "status": equivalent,
+            "params": self._merge_erpnext_mirror_params(self._task_params(task), mirror),
+        }
+        if target == "Cancelled":
+            # Terminal como la del camino inverso: sin despertador y con motivo.
+            updates["resume_at"] = None
+            updates["waiting_reason"] = None
+            updates["error"] = (
+                f"Cancelado por transicion de {name}: "
+                f"{_transition_audit_text(reason, 300)}"
+            )
+        elif target == "Pending Review":
+            # La accion humana nombrable viaja como aprobacion pendiente: es la
+            # senal que la bandeja Requiere humano y Horizon ya consumen.
+            updates["approval_required"] = True
+            updates["approval_state"] = ApprovalState.PENDING.value
+            updates["waiting_reason"] = _transition_audit_text(human_action)
+        return await self.patch_task(task_id, updates)
+
+    async def _escalate_transition_cancel(
+        self,
+        *,
+        name: str,
+        business: dict[str, Any],
+        task: dict[str, Any] | None,
+        reason: str,
+        why: str,
+    ) -> dict[str, Any]:
+        """Crea el escalado en vez de cancelar (falta la orden del dueno).
+
+        Idempotente por `source_id` determinista: un segundo intento devuelve
+        el escalado existente SIN re-aparcarlo (un escalado ya respondido no se
+        reabre) y SIN cancelar. La aprobacion no cancela sola: el llamador
+        reintenta citando la orden en `owner_instruction`.
+        """
+        current = str(business.get("status") or "").strip()
+        subject = str(business.get("subject") or name).strip()
+        source_id = f"transition-cancel:{name}"
+        repo = getattr(self, "_repo", None)
+        if repo is not None:
+            try:
+                existing = await repo.find_task_by_source(TaskSource.API.value, source_id)
+            except Exception:
+                logger.warning("No se pudo buscar el escalado %s", source_id, exc_info=True)
+                existing = None
+            if existing is not None:
+                return {
+                    "ok": True,
+                    "outcome": "escalated",
+                    "duplicate": True,
+                    "ticket": name,
+                    "business_status": current,
+                    "reason": f"Cancelar {name} exige la orden del dueno ({why}); "
+                    "ya existe un escalado y sigue sin cancelarse.",
+                    "escalation": {
+                        "task_id": existing.get("task_id"),
+                        "ticket": self._escalation_business_name(existing),
+                        "status": existing.get("status"),
+                    },
+                }
+        action = OwnerAction(
+            kind="ticket_cancel",
+            summary=f"Cancelar {name}: {subject}",
+            project=str((task or {}).get("project") or "") or None,
+            irreversible=True,
+            strategic_replan=bool(business.get("is_group")),
+            human_action_hint=(
+                f"Autoriza la cancelacion de {name} ({subject}): {reason}"
+            ),
+            details={"ticket": name, "reason": reason, "cancel_rule": why},
+        )
+        try:
+            created = await self.create_owner_escalation(
+                action=action,
+                decision=requires_owner(action, self._company_mandate()),
+                source_id=source_id,
+            )
+        except ERPNextError as exc:
+            return _classify_transition_error(exc)
+        return {
+            "ok": True,
+            "outcome": "escalated",
+            "duplicate": False,
+            "ticket": name,
+            "business_status": current,
+            "reason": f"Cancelar {name} exige la orden del dueno ({why}); "
+            "se creo el escalado y no se cancelo nada.",
+            "escalation": {
+                "task_id": created.get("task_id"),
+                "ticket": self._escalation_business_name(created),
+                "status": created.get("status"),
+            },
+        }
+
+    @staticmethod
+    def _escalation_business_name(task: dict[str, Any] | None) -> str | None:
+        params = (task or {}).get("params") or {}
+        mirrors = params.get("_mirrors") or {}
+        business = mirrors.get("erpnext") or {}
+        name = str(business.get("name") or "").strip()
+        return name or None
+
+    async def transition_ticket(
+        self,
+        ticket: str,
+        to_status: str,
+        reason: str,
+        *,
+        human_action: str | None = None,
+        evidence: str | None = None,
+        owner_instruction: str | None = None,
+    ) -> dict[str, Any]:
+        """Mueve el estado de NEGOCIO con el criterio global (TASK-2026-00132).
+
+        `to_status` nombra el estado ERPNext exacto (Open, Working,
+        Pending Review, Completed, Cancelled); `reason` es obligatoria siempre.
+        Pending Review exige `human_action` nombrable y nunca es el defecto;
+        Completed exige `evidence` de verificacion y respeta el gate de QA;
+        cancelar trabajo del dueno exige citar su orden en `owner_instruction`
+        (sin ella se crea el escalado y no se cancela nada).
+
+        Devuelve `outcome` (`applied` | `already_applied` | `escalated`) con el
+        estado de negocio RELEIDO, o `ok: False` con `status` clasificado. El
+        espejo Mongo queda coherente en el mismo parche (anti-eco
+        estructural); sin registro de ejecucion (ticket de desk) solo se mueve
+        el negocio. No disponible: sin cambios, error `unavailable` (registrar
+        `pending_status` sin cambiar la ejecucion falsearia la reconciliacion).
+        """
+        adapter = getattr(self, "_erpnext", None)
+        if adapter is None or not getattr(adapter, "is_enabled", False):
+            return {
+                "ok": False,
+                "status": "not_configured",
+                "message": "ERPNext no esta configurado.",
+            }
+        try:
+            target = normalize_transition_status(to_status)
+        except ERPNextValidationError as exc:
+            return {"ok": False, "status": "invalid_input", "message": str(exc)}
+        clean_reason = _transition_audit_text(reason)
+        if not clean_reason:
+            return {
+                "ok": False,
+                "status": "invalid_input",
+                "message": "reason es obligatoria: di por que cambia el estado.",
+            }
+        try:
+            business = await adapter.resolve_task(ticket)
+        except ERPNextError as exc:
+            return _classify_transition_error(exc)
+
+        name = str(business.get("name") or "").strip()
+        current = str(business.get("status") or "").strip()
+        repo = getattr(self, "_repo", None)
+        task: dict[str, Any] | None = None
+        if repo is not None:
+            try:
+                task = await self.find_task_for_business_ref(
+                    task_id=str(business.get("openceo_task_id") or "").strip() or None,
+                    ref=str(business.get("openceo_ref") or "").strip() or None,
+                )
+            except Exception:
+                logger.warning(
+                    "No se pudo resolver la ejecucion de %s", name, exc_info=True
+                )
+                task = None
+
+        equivalent = _ERPNEXT_TO_TASK_STATUS[target]
+        if current == target:
+            # Idempotente: relee y devuelve. Si la ejecucion (no terminal)
+            # discrepa del negocio, la alinea: es la reparacion del webhook
+            # perdido, no una resurreccion (un terminal no se toca).
+            healed = False
+            exec_status = str((task or {}).get("status") or "")
+            mirror = self._task_params(task or {}).get("_mirrors", {})
+            pushed = mirror.get("erpnext", {}) if isinstance(mirror, dict) else {}
+            if (
+                task is not None
+                and exec_status not in _TERMINAL_TASK_STATUSES
+                and (
+                    exec_status != equivalent
+                    or str(pushed.get("status_pushed") or "") != equivalent
+                )
+            ):
+                updated = await self._record_transition_mirror(
+                    task,
+                    name=name,
+                    target=target,
+                    equivalent=equivalent,
+                    reason=clean_reason,
+                    human_action=_transition_audit_text(human_action),
+                    evidence=_transition_audit_text(evidence),
+                    owner_instruction=_transition_audit_text(owner_instruction),
+                    previous=current,
+                )
+                healed = updated is not None
+                if healed:
+                    exec_status = equivalent
+            return {
+                "ok": True,
+                "outcome": "already_applied",
+                "ticket": name,
+                "business_status": current,
+                "task_status": exec_status or None,
+                "mirror_healed": healed,
+            }
+
+        if current == "Cancelled":
+            return {
+                "ok": False,
+                "status": "terminal",
+                "ticket": name,
+                "business_status": current,
+                "message": f"{name} esta Cancelled: es terminal, crea un ticket nuevo.",
+            }
+        exec_status = str((task or {}).get("status") or "")
+        if exec_status == TaskStatus.CANCELLED.value:
+            return {
+                "ok": False,
+                "status": "terminal",
+                "ticket": name,
+                "business_status": current,
+                "message": f"La ejecucion de {name} esta cancelled: es terminal, "
+                "crea un ticket nuevo.",
+            }
+        if exec_status == TaskStatus.CONVERTED.value:
+            return {
+                "ok": False,
+                "status": "converted",
+                "ticket": name,
+                "business_status": current,
+                "message": f"{name} es el padre convertido de un objetivo: cierra por "
+                "el objetivo (§9.7), no por transicion directa.",
+            }
+
+        clean_human_action = _transition_audit_text(human_action)
+        clean_evidence = _transition_audit_text(evidence)
+        clean_instruction = _transition_audit_text(owner_instruction)
+        if target == "Pending Review" and not clean_human_action:
+            return {
+                "ok": False,
+                "status": "invalid_input",
+                "ticket": name,
+                "business_status": current,
+                "message": "Pending Review exige human_action: nombra la accion "
+                "humana exacta. Nunca es el estado por defecto.",
+            }
+        if target == "Completed":
+            if not clean_evidence:
+                return {
+                    "ok": False,
+                    "status": "invalid_input",
+                    "ticket": name,
+                    "business_status": current,
+                    "message": "Completed exige evidence: que verificacion acredita "
+                    "el cierre.",
+                }
+            if task is not None and task_needs_human_review(task):
+                return {
+                    "ok": False,
+                    "status": "qa_required",
+                    "ticket": name,
+                    "business_status": current,
+                    "message": f"{name} tiene QA requerida sin aprobar: pasa a "
+                    "Pending Review con human_action o aprueba la QA; la "
+                    "evidencia no salta el gate.",
+                }
+        if target == "Cancelled":
+            needs_owner, why = _transition_cancel_needs_owner(business, task)
+            if needs_owner and not clean_instruction:
+                return await self._escalate_transition_cancel(
+                    name=name,
+                    business=business,
+                    task=task,
+                    reason=clean_reason,
+                    why=why,
+                )
+
+        delay = 1.0
+        for attempt in range(3):
+            try:
+                await adapter.transition_status(name, target)
+                break
+            except ERPNextUnavailable as exc:
+                if attempt == 2:
+                    logger.warning(
+                        "ERPNext no respondio a la transicion %s -> %s: %s",
+                        name,
+                        target,
+                        exc,
+                    )
+                    return {
+                        "ok": False,
+                        "status": "unavailable",
+                        "ticket": name,
+                        "business_status": current,
+                        "message": f"ERPNext no respondio; {name} sigue en {current}.",
+                    }
+                await asyncio.sleep(delay)
+                delay *= 2
+            except ERPNextDependencyBlockedError as exc:
+                blocked = sorted(
+                    {hit for hit in _TASK_NAME_PATTERN.findall(str(exc)) if hit != name}
+                )
+                result: dict[str, Any] = {
+                    "ok": False,
+                    "status": "blocked",
+                    "ticket": name,
+                    "business_status": current,
+                    "to_status": target,
+                    "message": f"{name} no pasa a {target}: {exc}",
+                    "blocked_by": blocked,
+                }
+                known = depends_on_names(business)
+                if known is not None:
+                    result["depends_on"] = known
+                return result
+            except ERPNextError as exc:
+                return _classify_transition_error(exc)
+
+        try:
+            reread = await adapter.resolve_task(name)
+        except ERPNextError as exc:
+            return {
+                "ok": False,
+                "status": "unverified",
+                "ticket": name,
+                "to_status": target,
+                "message": f"El PUT de {name} -> {target} llego pero no se pudo "
+                f"releer: {exc}",
+            }
+        actual = str(reread.get("status") or "").strip()
+        if actual != target:
+            return {
+                "ok": False,
+                "status": "mismatch",
+                "ticket": name,
+                "business_status": actual,
+                "to_status": target,
+                "message": f"{name} quedo en {actual}, no en {target}; "
+                "la ejecucion no se toco.",
+            }
+
+        task_status: str | None = None
+        mirror_state = "no_execution_record"
+        if task is not None:
+            updated = await self._record_transition_mirror(
+                task,
+                name=name,
+                target=target,
+                equivalent=equivalent,
+                reason=clean_reason,
+                human_action=clean_human_action,
+                evidence=clean_evidence,
+                owner_instruction=clean_instruction,
+                previous=current,
+            )
+            if updated is not None:
+                task_status = equivalent
+                mirror_state = "aligned"
+            else:
+                task_status = str(task.get("status") or "") or None
+                mirror_state = "execution_gone"
+        return {
+            "ok": True,
+            "outcome": "applied",
+            "ticket": name,
+            "business_status": actual,
+            "previous_status": current,
+            "task_status": task_status,
+            "mirror": mirror_state,
+        }
 
     async def startup_reconcile_erpnext(self) -> int:
         """Repara al arrancar los enlaces de negocio que quedaron a medias.
