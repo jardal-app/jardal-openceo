@@ -18,16 +18,19 @@ the decision) is English. Money is Decimal/decimal-string, never float.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 __all__ = [
     "MANDATE_VERSION",
+    "SECRET_BLOCK_BUSINESS_STATUS",
+    "SECRET_BLOCK_PARAM",
     "EscalationCategory",
     "EscalationDecision",
     "MandateError",
@@ -35,6 +38,7 @@ __all__ = [
     "MandatoEmpresa",
     "apply_mandate_change",
     "build_escalation_ticket",
+    "build_secret_block",
     "load_mandate_file",
     "parse_mandate",
     "project_requires_human_review",
@@ -57,10 +61,9 @@ class MandateError(Exception):
 
 
 class EscalationCategory(str, Enum):
-    """The six contract categories, plus the internal fail-closed one."""
+    """The five contract categories, plus the internal fail-closed one."""
 
     NEW_SPEND = "gasto_nuevo"
-    CREDENTIAL = "credencial"
     IRREVERSIBLE = "accion_irreversible"
     STRATEGIC_REPLAN = "replanificacion_estrategica"
     MANDATE_CHANGE = "cambio_de_mandato"
@@ -76,7 +79,6 @@ class EscalationCategory(str, Enum):
 CONTRACT_CATEGORIES = frozenset(
     {
         EscalationCategory.NEW_SPEND.value,
-        EscalationCategory.CREDENTIAL.value,
         EscalationCategory.IRREVERSIBLE.value,
         EscalationCategory.STRATEGIC_REPLAN.value,
         EscalationCategory.MANDATE_CHANGE.value,
@@ -88,7 +90,6 @@ CONTRACT_CATEGORIES = frozenset(
 #: fire on the same action: the first one wins and is reported.
 _CATEGORY_ORDER = (
     EscalationCategory.NEW_SPEND,
-    EscalationCategory.CREDENTIAL,
     EscalationCategory.IRREVERSIBLE,
     EscalationCategory.STRATEGIC_REPLAN,
     EscalationCategory.MANDATE_CHANGE,
@@ -176,7 +177,7 @@ class MandatoEmpresa(BaseModel):
     presupuesto: PresupuestoMandato
     limites: LimitesMandato
     revision_ceo: RevisionCEOMandato
-    escalar_al_dueno: list[str] = Field(min_length=6, max_length=6)
+    escalar_al_dueno: list[str] = Field(min_length=5, max_length=5)
 
     @field_validator("version")
     @classmethod
@@ -195,7 +196,7 @@ class MandatoEmpresa(BaseModel):
             missing = sorted(CONTRACT_CATEGORIES - declared)
             unknown = sorted(declared - CONTRACT_CATEGORIES)
             raise ValueError(
-                "escalar_al_dueno must declare exactly the six contract "
+                "escalar_al_dueno must declare exactly the five contract "
                 f"categories (missing: {missing or 'none'}; "
                 f"unknown: {unknown or 'none'})"
             )
@@ -254,7 +255,6 @@ class OwnerAction:
     project: str | None = None
     amount: Decimal | str | int | None = None
     uses_paid_quota: bool = False
-    needs_owner_credential: bool = False
     irreversible: bool = False
     strategic_replan: bool = False
     mandate_change: bool = False
@@ -306,8 +306,6 @@ def _human_action_for(
             f"(monto declarado {amount} {currency}, "
             f"umbral sin preguntar {threshold} {currency})."
         )
-    if category == EscalationCategory.CREDENTIAL:
-        return f"Aporta la credencial o acceso que solo tu tienes: {summary}."
     if category == EscalationCategory.IRREVERSIBLE:
         return f"Autoriza o ejecuta tu la accion irreversible: {summary}."
     if category == EscalationCategory.STRATEGIC_REPLAN:
@@ -331,7 +329,7 @@ def requires_owner(
 ) -> EscalationDecision:
     """The single deterministic escalation policy. No tokens, no I/O.
 
-    Asks the owner ONLY for the six contract categories; everything else
+    Asks the owner ONLY for the five contract categories; everything else
     (routine replans, ticket creation, development, agent reviews, merges,
     restarts, retries, paid-quota consumption) is automatic. Without a valid
     mandate there is no autonomy: everything escalates (fail-closed).
@@ -364,8 +362,6 @@ def requires_owner(
             f"new spend {amount} {mandate.presupuesto.moneda} over the "
             f"{mandate.presupuesto.gasto_nuevo_sin_preguntar} threshold"
         )
-    if action.needs_owner_credential:
-        signals[EscalationCategory.CREDENTIAL] = "needs a credential only the owner holds"
     if action.irreversible:
         signals[EscalationCategory.IRREVERSIBLE] = "external irreversible action"
     if action.strategic_replan:
@@ -393,7 +389,7 @@ def requires_owner(
 
 
 def project_requires_human_review(project_config: Mapping[str, Any] | None) -> bool:
-    """Sixth category signal, read from merged project config.
+    """Fifth category signal, read from merged project config.
 
     A project whose policy mandates human review (e.g. a client demanding
     human QA) sets ``dev.qa.require_human_review: true`` in its project.yaml.
@@ -465,6 +461,64 @@ def build_escalation_ticket(
                 "human_action": human_action,
                 "ceo_action_kind": action.kind,
             }
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Missing-secret block (pure; TaskService persists it Working-first)
+# ---------------------------------------------------------------------------
+
+#: Params key carrying the missing-secret marker on the execution document.
+#: The cockpit reads it as a business block; the business side only sees
+#: Working plus the reason naming the secret.
+SECRET_BLOCK_PARAM = "secret_block"
+
+#: Business state a missing secret parks in. Never Pending Review: no human
+#: decision exists, the agent resumes once the secret is available.
+SECRET_BLOCK_BUSINESS_STATUS = "Working"
+
+
+def build_secret_block(
+    secret: str, sources_checked: Sequence[str] | None
+) -> dict[str, Any]:
+    """Spec for a missing-secret block. Pure: no I/O, no tokens.
+
+    Owner rule 2026-10-07 (TASK-2026-00142): credentials, sessions and
+    connection strings reachable from the session are ordinary inputs. The
+    caller looks the secret up in every accessible source first
+    (environment, .env, project config, saved browser profiles, local
+    services); only a secret found in none of them blocks. The ticket parks
+    in Working with the exact secret named, and the marker below surfaces
+    it in the Horizon cockpit as blocked — never as a decision.
+
+    Raises MandateError when the secret is blank or no source was checked.
+    """
+    name = str(secret or "").strip()
+    if not name:
+        raise MandateError("missing-secret block needs the exact secret name")
+    sources = [
+        str(source or "").strip()
+        for source in (sources_checked or [])
+        if str(source or "").strip()
+    ]
+    if not sources:
+        raise MandateError(
+            f"missing-secret block for {name!r} needs at least one checked source"
+        )
+    reason = (
+        f"Bloqueado por secreto ausente: {name} no esta en ninguna fuente "
+        f"accesible (revisadas: {', '.join(sources)}). El trabajo sigue en "
+        "Working; no requiere decision del dueno."
+    )
+    return {
+        "business_status": SECRET_BLOCK_BUSINESS_STATUS,
+        "reason": reason,
+        "marker": {
+            "secret": name,
+            "sources_checked": sources,
+            "reason": reason,
+            "reported_at": datetime.now(timezone.utc).isoformat(),
         },
     }
 

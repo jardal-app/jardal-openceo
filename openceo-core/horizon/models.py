@@ -566,7 +566,6 @@ class HorizonPromoteRequest(BaseModel):
     dedupe_key: str | None = None
     # Dinero nuevo en cadena decimal; nunca float (company_mandate lo rechaza).
     amount: str | None = None
-    needs_owner_credential: bool = False
     irreversible: bool = False
     strategic_replan: bool = False
     human_action_hint: str | None = None

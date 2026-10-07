@@ -16,7 +16,6 @@ revision_ceo:
   cadencia: semanal
 escalar_al_dueno:
   - gasto_nuevo
-  - credencial
   - accion_irreversible
   - replanificacion_estrategica
   - cambio_de_mandato

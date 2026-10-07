@@ -30,6 +30,7 @@ for path in (CORE_DIR, TESTS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
+from company_mandate import SECRET_BLOCK_PARAM  # noqa: E402
 from horizon import classify, cockpit, privacy  # noqa: E402
 from horizon.service import HorizonService  # noqa: E402
 from horizon_support import FakeHorizonRepo  # noqa: E402
@@ -151,7 +152,20 @@ class CockpitRepo(FakeHorizonRepo):
             deepcopy(t)
             for t in self.company_tasks.values()
             if not privacy.is_personal_scope(t)
-            and str(t.get("status")) in ("failed", "escalated")
+            and (
+                str(t.get("status")) in ("failed", "escalated")
+                or (
+                    str(t.get("status"))
+                    not in ("completed", "cancelled", "converted")
+                    and bool(
+                        str(
+                            ((t.get("params") or {}).get(SECRET_BLOCK_PARAM)
+                            or {}).get("secret")
+                            or ""
+                        ).strip()
+                    )
+                )
+            )
         ]
         rows.sort(key=lambda t: str(t.get("updated_at") or ""), reverse=True)
         return rows[:limit]
@@ -304,8 +318,8 @@ class CockpitPureTests(unittest.TestCase):
         self.assertIsNone(cockpit.urgency_reason(bad_due, now=now))
         other_category = _escalation_task(
             "g",
-            category="credencial",
-            params={"due_date": due_soon, "escalation": {"category": "credencial"}},
+            category="accion_irreversible",
+            params={"due_date": due_soon, "escalation": {"category": "accion_irreversible"}},
         )
         self.assertIsNone(cockpit.urgency_reason(other_category, now=now))
         plain = _task("h", waiting_reason="phase:qa_review")
@@ -427,6 +441,69 @@ class CompanyStatusTests(CockpitBase):
         self.assertFalse(company["objectives_unknown"])
         self.assertFalse(company["blocked_unknown"])
         self.assertEqual(len(company["objectives"]), 1)
+
+
+def _secret_task(task_id: str, secret: str = "X_API_KEY", **overrides: Any) -> dict[str, Any]:
+    params = {
+        SECRET_BLOCK_PARAM: {
+            "secret": secret,
+            "sources_checked": ["entorno", ".env"],
+            "reason": f"Bloqueado por secreto ausente: {secret}.",
+            "reported_at": "2026-10-07T00:00:00+00:00",
+        }
+    }
+    doc = _task(task_id, status="in_progress", params=params)
+    doc.update(overrides)
+    return doc
+
+
+class SecretBlockCockpitTests(CockpitBase):
+    """Secreto ausente (TASK-2026-00142): bloqueo, no decision."""
+
+    async def test_secret_blocked_working_lists_as_blocked(self) -> None:
+        self.repo.company_tasks["s1"] = _secret_task("s1")
+        self.repo.company_tasks["ok"] = _task("ok", status="in_progress")
+
+        company = await self.service.company_status()
+
+        blocked = {t["task_id"]: t for t in company["blocked"]}
+        self.assertIn("s1", blocked)
+        self.assertNotIn("ok", blocked)
+        self.assertIn("X_API_KEY", blocked["s1"]["reason"])
+
+    async def test_secret_blocked_counts_in_rollup_not_open(self) -> None:
+        self.repo.company_objectives.append(
+            {"objective_id": "OBJ-1", "project": "p", "status": "active",
+             "anchor": {"goal": "Vender"}},
+        )
+        self.repo.company_tasks["s1"] = _secret_task("s1", objective_id="OBJ-1")
+        self.repo.company_tasks["t1"] = _task(
+            "t1", status="in_progress", objective_id="OBJ-1")
+
+        company = await self.service.company_status()
+
+        objective = company["objectives"][0]
+        self.assertEqual(objective["open_children"], 1)
+        self.assertEqual(objective["blocked_children"], 1)
+        self.assertEqual(objective["closed_children"], 0)
+
+    async def test_terminal_with_stale_marker_is_not_blocked(self) -> None:
+        self.repo.company_tasks["done"] = _secret_task("done", status="completed")
+
+        company = await self.service.company_status()
+
+        self.assertEqual(
+            [t["task_id"] for t in company["blocked"]], [])
+
+    async def test_secret_blocked_absent_from_decisions(self) -> None:
+        self.repo.company_tasks["s1"] = _secret_task("s1")
+
+        tray = await self.service.pending_decisions(OWNER)
+
+        ids = [i["task_id"] for i in tray["grouped"]] + [
+            i["task_id"] for i in tray["urgent"]]
+        self.assertNotIn("s1", ids)
+        self.assertEqual(tray["count"], 0)
 
 
 class PendingDecisionsTests(CockpitBase):
@@ -978,8 +1055,17 @@ class CockpitQueryPrivacyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             capture.last_query["params.horizon_scope"], {"$ne": "personal"}
         )
-        self.assertEqual(
-            capture.last_query["status"], {"$in": ["failed", "escalated"]}
+        ors = capture.last_query["$or"]
+        self.assertIn({"status": {"$in": ["failed", "escalated"]}}, ors)
+        self.assertIn(
+            {
+                "status": {"$nin": ["completed", "cancelled", "converted"]},
+                f"params.{SECRET_BLOCK_PARAM}.secret": {
+                    "$exists": True,
+                    "$ne": "",
+                },
+            },
+            ors,
         )
 
 

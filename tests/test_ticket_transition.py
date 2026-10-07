@@ -74,7 +74,6 @@ def _valid_mandate_dict() -> dict:
         "revision_ceo": {"cadencia": "semanal"},
         "escalar_al_dueno": [
             "gasto_nuevo",
-            "credencial",
             "accion_irreversible",
             "replanificacion_estrategica",
             "cambio_de_mandato",
@@ -890,6 +889,183 @@ class McpSurfaceTests(unittest.TestCase):
             )
         )
         self.assertEqual(big["status"], "invalid_input")
+
+
+SECRET_MARKER_A = {
+    "secret": "X_API_KEY",
+    "sources_checked": ["env", ".env"],
+    "reason": "Bloqueado por secreto ausente: X_API_KEY.",
+    "reported_at": "2026-10-07T00:00:00+00:00",
+}
+
+SECRET_MARKER_B = {
+    "secret": "Y_TOKEN",
+    "sources_checked": ["env"],
+    "reason": "Bloqueado por secreto ausente: Y_TOKEN.",
+    "reported_at": "2026-10-07T01:00:00+00:00",
+}
+
+
+def exec_doc_with_marker(marker, status="in_progress", pushed="in_progress"):
+    return exec_doc(
+        status=status,
+        params={
+            "secret_block": dict(marker),
+            "_mirrors": {
+                "erpnext": {
+                    "name": "TASK-2026-00010",
+                    "status_pushed": pushed,
+                }
+            },
+        },
+    )
+
+
+class SecretBlockTransitionTests(unittest.TestCase):
+    """Marcador de secreto ausente (TASK-2026-00142): solo aparca en Working,
+    se escribe con la transicion y se limpia al salir de Working."""
+
+    def test_marcador_solo_aparca_en_working(self):
+        adapter = FakeBusinessAdapter([business_doc(status="Open")])
+        repo = FakeRepo([exec_doc(status="queued")])
+        service = make_service(adapter, repo)
+        result = run(
+            service.transition_ticket(
+                "TASK-2026-00010", "Open", "x",
+                secret_block=dict(SECRET_MARKER_A),
+            )
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "invalid_input")
+        self.assertEqual(adapter.puts, [])
+        self.assertEqual(repo.patches, [])
+
+    def test_marcador_sin_secreto_se_rechaza(self):
+        adapter = FakeBusinessAdapter([business_doc(status="Open")])
+        repo = FakeRepo([exec_doc(status="queued")])
+        service = make_service(adapter, repo)
+        for bad in ({"sources_checked": ["env"]}, {"secret": "  "}, "X_API_KEY"):
+            with self.subTest(bad=bad):
+                result = run(
+                    service.transition_ticket(
+                        "TASK-2026-00010", "Working", "x", secret_block=bad
+                    )
+                )
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["status"], "invalid_input")
+        self.assertEqual(adapter.puts, [])
+        self.assertEqual(repo.patches, [])
+
+    def test_marcador_se_escribe_en_working(self):
+        adapter = FakeBusinessAdapter([business_doc(status="Open")])
+        repo = FakeRepo([exec_doc(status="queued")])
+        service = make_service(adapter, repo)
+        result = run(
+            service.transition_ticket(
+                "TASK-2026-00010", "Working", "falta la clave",
+                secret_block=dict(SECRET_MARKER_A),
+            )
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["outcome"], "applied")
+        self.assertEqual(result["business_status"], "Working")
+        stored = repo.tasks["exec-1"]
+        self.assertEqual(stored["params"]["secret_block"], SECRET_MARKER_A)
+        self.assertEqual(mirror_of(stored)["business_status"], "Working")
+        self.assertEqual(mirror_of(stored)["status_pushed"], "in_progress")
+
+    def test_transicion_normal_limpia_el_marcador(self):
+        adapter = FakeBusinessAdapter([business_doc(status="Working")])
+        repo = FakeRepo([exec_doc_with_marker(SECRET_MARKER_A)])
+        service = make_service(adapter, repo)
+        result = run(
+            service.transition_ticket("TASK-2026-00010", "Open", "retomado")
+        )
+        self.assertEqual(result["outcome"], "applied")
+        stored = repo.tasks["exec-1"]
+        self.assertNotIn("secret_block", stored["params"])
+
+    def test_noop_conserva_el_marcador(self):
+        adapter = FakeBusinessAdapter([business_doc(status="Working")])
+        repo = FakeRepo([exec_doc_with_marker(SECRET_MARKER_A)])
+        service = make_service(adapter, repo)
+        result = run(
+            service.transition_ticket("TASK-2026-00010", "Working", "sigue")
+        )
+        self.assertEqual(result["outcome"], "already_applied")
+        self.assertFalse(result["mirror_healed"])
+        self.assertEqual(repo.patches, [])
+        self.assertEqual(
+            repo.tasks["exec-1"]["params"]["secret_block"], SECRET_MARKER_A
+        )
+
+    def test_reporte_actualiza_el_marcador(self):
+        adapter = FakeBusinessAdapter([business_doc(status="Working")])
+        repo = FakeRepo([exec_doc_with_marker(SECRET_MARKER_A)])
+        service = make_service(adapter, repo)
+        result = run(
+            service.transition_ticket(
+                "TASK-2026-00010", "Working", "otra clave",
+                secret_block=dict(SECRET_MARKER_B),
+            )
+        )
+        self.assertEqual(result["outcome"], "already_applied")
+        self.assertTrue(result["mirror_healed"])
+        self.assertEqual(
+            repo.tasks["exec-1"]["params"]["secret_block"], SECRET_MARKER_B
+        )
+
+
+class McpSecretReportTests(unittest.TestCase):
+    def _register(self, task_service):
+        server = FakeMCPServer()
+        names = mcp_server._register_openceo_tools(
+            server, SimpleNamespace(), task_service, None
+        )
+        return server, names
+
+    def test_secret_enruta_a_report_missing_secret(self):
+        svc = FakeTaskService()
+        reports = []
+
+        async def report(ticket, secret, sources_checked, *, note=None):
+            reports.append(
+                (ticket, secret, list(sources_checked or []), note)
+            )
+            return {"ok": True, "outcome": "applied", "ticket": ticket}
+
+        svc.report_missing_secret = report
+        server, _ = self._register(svc)
+        result = run(
+            server.tools["openceo_transition_ticket"][0](
+                ticket="TASK-1",
+                to_status="Working",
+                reason="falta clave",
+                secret="X_API_KEY",
+                sources_checked=["env", ".env"],
+            )
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            reports, [("TASK-1", "X_API_KEY", ["env", ".env"], "falta clave")]
+        )
+        self.assertEqual(svc.calls, [])
+
+    def test_secret_con_otro_estado_es_invalid_input(self):
+        svc = FakeTaskService()
+        server, _ = self._register(svc)
+        result = run(
+            server.tools["openceo_transition_ticket"][0](
+                ticket="TASK-1",
+                to_status="Completed",
+                reason="x",
+                evidence="e",
+                secret="X_API_KEY",
+            )
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "invalid_input")
+        self.assertEqual(svc.calls, [])
 
 
 if __name__ == "__main__":

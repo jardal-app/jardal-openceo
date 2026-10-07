@@ -107,7 +107,7 @@ class WaitingResolveTests(unittest.TestCase):
             {"phase": "owner_escalation",
              "waiting_reason": "owner_escalation:gasto_nuevo"},
             {"phase": None,
-             "waiting_reason": "owner_escalation:credencial"},
+             "waiting_reason": "owner_escalation:accion_irreversible"},
             {"phase": "owner_escalation", "waiting_reason": None},
             # Phase wait even if the approval flags were cleared.
             {"approval_required": False, "approval_state": "not_required",

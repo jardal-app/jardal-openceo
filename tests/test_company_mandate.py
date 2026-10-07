@@ -1,10 +1,11 @@
 """Company mandate and owner escalation (TASK-2026-00114, F4).
 
 Acceptance with zero tokens: the versioned YAML loads validated and fails
-closed; requires_owner escalates exactly the six contract categories and
+closed; requires_owner escalates exactly the five contract categories and
 automates everything else; the CEO cannot edit its own mandate; an
 escalation persists ERPNext-first and parks in waiting/Pending Review with
-the exact human action. No network, no CLI, no LLM.
+the exact human action; a missing secret (TASK-2026-00142) parks in Working
+naming the secret, never as a decision. No network, no CLI, no LLM.
 """
 
 from __future__ import annotations
@@ -23,13 +24,17 @@ if str(CORE) not in sys.path:
 REPO = Path(__file__).resolve().parents[1]
 
 from company_mandate import (  # noqa: E402
+    CONTRACT_CATEGORIES,
     ESCALATION_PHASE,
+    SECRET_BLOCK_BUSINESS_STATUS,
+    SECRET_BLOCK_PARAM,
     EscalationCategory,
     EscalationDecision,
     MandateError,
     OwnerAction,
     apply_mandate_change,
     build_escalation_ticket,
+    build_secret_block,
     load_mandate_file,
     parse_mandate,
     project_requires_human_review,
@@ -39,11 +44,14 @@ from config_loader import ConfigLoader  # noqa: E402
 from settings import Settings  # noqa: E402
 from state import TaskPriority  # noqa: E402
 from task_service import TaskService  # noqa: E402
+from tools.erpnext_client import (  # noqa: E402
+    ERPNextUnavailable,
+    ERPNextValidationError,
+)
 from tools.erpnext_tickets import resolve_erpnext_status  # noqa: E402
 
-SIX = [
+FIVE = [
     "gasto_nuevo",
-    "credencial",
     "accion_irreversible",
     "replanificacion_estrategica",
     "cambio_de_mandato",
@@ -72,7 +80,7 @@ def _valid_mandate_dict() -> dict[str, Any]:
             "tickets_activos_por_objetivo": 6,
         },
         "revision_ceo": {"cadencia": "semanal"},
-        "escalar_al_dueno": list(SIX),
+        "escalar_al_dueno": list(FIVE),
     }
 
 
@@ -111,9 +119,13 @@ class MandateLoadTest(unittest.TestCase):
     def test_invalid_dicts_rejected(self) -> None:
         cases: list[tuple[str, Any]] = [
             ("bad version", {"version": 2}),
-            ("unknown category", {"escalar_al_dueno": [*SIX[:5], "propina"]}),
-            ("missing category", {"escalar_al_dueno": SIX[:5]}),
-            ("extra category", {"escalar_al_dueno": [*SIX, "propina"]}),
+            ("unknown category", {"escalar_al_dueno": [*FIVE[:4], "propina"]}),
+            ("missing category", {"escalar_al_dueno": FIVE[:4]}),
+            ("extra category", {"escalar_al_dueno": [*FIVE, "propina"]}),
+            ("legacy credential category",
+             {"escalar_al_dueno": [*FIVE, "credencial"]}),
+            ("credential instead of a contract category",
+             {"escalar_al_dueno": [*FIVE[:4], "credencial"]}),
             ("zero objectives", {"limites": {"objetivos_activos": 0}}),
             ("negative tickets", {"limites": {"tickets_activos_por_objetivo": -1}}),
             ("negative threshold", {"presupuesto": {"gasto_nuevo_sin_preguntar": "-1"}}),
@@ -165,8 +177,6 @@ class RequiresOwnerTest(unittest.TestCase):
         cases = [
             (OwnerAction(kind="gasto", summary="comprar dominio", amount="150.00"),
              EscalationCategory.NEW_SPEND),
-            (OwnerAction(kind="alta", summary="crear cuenta", needs_owner_credential=True),
-             EscalationCategory.CREDENTIAL),
             (OwnerAction(kind="borrado", summary="borrar prod", irreversible=True),
              EscalationCategory.IRREVERSIBLE),
             (OwnerAction(kind="replan", summary="mover fecha", strategic_replan=True),
@@ -234,10 +244,10 @@ class RequiresOwnerTest(unittest.TestCase):
     def test_first_contract_signal_wins(self) -> None:
         decision = requires_owner(
             OwnerAction(kind="x", summary="s", mandate_change=True,
-                        needs_owner_credential=True),
+                        irreversible=True),
             self.mandate,
         )
-        self.assertEqual(decision.category, EscalationCategory.CREDENTIAL)
+        self.assertEqual(decision.category, EscalationCategory.IRREVERSIBLE)
         decision = requires_owner(
             OwnerAction(kind="x", summary="s", strategic_replan=True,
                         policy_requires_human_review=True),
@@ -296,7 +306,7 @@ class ConfigLoaderMandateTest(unittest.TestCase):
         mandate = loader.load_company_mandate()
         self.assertEqual(mandate.limites.objetivos_activos, 3)
         self.assertEqual(
-            {str(entry) for entry in mandate.escalar_al_dueno}, set(SIX))
+            {str(entry) for entry in mandate.escalar_al_dueno}, set(FIVE))
 
 
 class MandateWriterTest(unittest.TestCase):
@@ -388,7 +398,7 @@ class EscalationSpecTest(unittest.TestCase):
 
     def test_missing_human_action_rejected(self) -> None:
         decision = EscalationDecision(
-            escalate=True, category=EscalationCategory.CREDENTIAL,
+            escalate=True, category=EscalationCategory.NEW_SPEND,
             reason="r", human_action="  ")
         with self.assertRaises(MandateError):
             build_escalation_ticket(
@@ -561,6 +571,225 @@ class CreateOwnerEscalationTest(unittest.IsolatedAsyncioTestCase):
                 action=action, decision=decision)
         self.assertEqual(self.erp.calls, [])
         self.assertEqual(self.repo.tasks, {})
+
+
+class ContractCategoriesTest(unittest.TestCase):
+    """Five escalation categories; credentials are not one (TASK-2026-00142)."""
+
+    def test_exactly_five_contract_categories(self) -> None:
+        self.assertEqual(set(CONTRACT_CATEGORIES), set(FIVE))
+        self.assertEqual(len(CONTRACT_CATEGORIES), 5)
+
+    def test_no_credential_category(self) -> None:
+        values = {member.value for member in EscalationCategory}
+        self.assertNotIn("credencial", values)
+        with self.assertRaises(AttributeError):
+            EscalationCategory.CREDENTIAL  # noqa: B018
+
+    def test_owner_action_has_no_credential_signal(self) -> None:
+        action = OwnerAction(kind="alta", summary="crear cuenta")
+        self.assertFalse(hasattr(action, "needs_owner_credential"))
+        with self.assertRaises(TypeError):
+            OwnerAction(kind="alta", summary="x", needs_owner_credential=True)
+
+    def test_credential_need_never_escalates(self) -> None:
+        mandate = parse_mandate(_valid_mandate_dict())
+        decision = requires_owner(
+            OwnerAction(kind="alta", summary="crear cuenta"), mandate)
+        self.assertFalse(decision.escalate)
+        self.assertIsNone(decision.category)
+
+
+class SecretBlockSpecTest(unittest.TestCase):
+    """Missing-secret spec: Working with the secret named (TASK-2026-00142)."""
+
+    def test_parks_working_naming_the_secret(self) -> None:
+        spec = build_secret_block("X_API_KEY", ["entorno", ".env"])
+        self.assertEqual(spec["business_status"], SECRET_BLOCK_BUSINESS_STATUS)
+        self.assertEqual(spec["business_status"], "Working")
+        self.assertIn("X_API_KEY", spec["reason"])
+        self.assertIn("entorno", spec["reason"])
+        marker = spec["marker"]
+        self.assertEqual(marker["secret"], "X_API_KEY")
+        self.assertEqual(marker["sources_checked"], ["entorno", ".env"])
+        self.assertIn("X_API_KEY", marker["reason"])
+        self.assertTrue(str(marker["reported_at"] or "").strip())
+
+    def test_never_pending_review(self) -> None:
+        spec = build_secret_block("K", ["env"])
+        self.assertNotIn("human_action", spec)
+        self.assertNotEqual(spec["business_status"], "Pending Review")
+
+    def test_blank_secret_rejected(self) -> None:
+        for bad in ("", "  ", None):
+            with self.subTest(bad=bad):
+                with self.assertRaises(MandateError):
+                    build_secret_block(bad, ["env"])  # type: ignore[arg-type]
+
+    def test_no_sources_rejected(self) -> None:
+        for bad in (None, [], ["  "], ["", None]):
+            with self.subTest(bad=bad):
+                with self.assertRaises(MandateError):
+                    build_secret_block("K", bad)  # type: ignore[arg-type]
+
+    def test_sources_trimmed(self) -> None:
+        spec = build_secret_block("  K  ", [" env ", "", "  "])
+        self.assertEqual(spec["marker"]["secret"], "K")
+        self.assertEqual(spec["marker"]["sources_checked"], ["env"])
+
+
+class _FakeBusiness:
+    is_enabled = True
+
+    def __init__(self, docs: list[dict[str, Any]], failures: Any = None) -> None:
+        self.docs = {doc["name"]: dict(doc) for doc in docs}
+        self.puts: list[tuple[str, str]] = []
+        self.failures = list(failures or [])
+
+    async def resolve_task(self, identifier: str) -> dict[str, Any]:
+        key = str(identifier or "").strip()
+        if key in self.docs:
+            return dict(self.docs[key])
+        raise ERPNextValidationError(f"No existe {identifier}", status_code=404)
+
+    async def transition_status(
+        self, identifier: str, to_status: str
+    ) -> dict[str, Any]:
+        if self.failures:
+            raise self.failures.pop(0)
+        doc = await self.resolve_task(identifier)
+        self.puts.append((doc["name"], to_status))
+        self.docs[doc["name"]] = {**doc, "status": to_status}
+        return {"ok": True}
+
+
+class ReportMissingSecretTest(unittest.IsolatedAsyncioTestCase):
+    def _service(
+        self,
+        business_status: str = "Open",
+        exec_status: str = "queued",
+        failures: Any = None,
+        business_over: dict[str, Any] | None = None,
+    ) -> tuple[TaskService, _FakeRepo, _FakeBusiness]:
+        repo = _FakeRepo()
+        repo.tasks["exec-1"] = {
+            "task_id": "exec-1",
+            "status": exec_status,
+            "params": {
+                "_mirrors": {
+                    "erpnext": {
+                        "name": "TASK-2026-09999",
+                        "status_pushed": exec_status,
+                    }
+                }
+            },
+        }
+        business_doc: dict[str, Any] = {
+            "name": "TASK-2026-09999",
+            "subject": "trabajo",
+            "status": business_status,
+            "openceo_task_id": "exec-1",
+            "openceo_ref": "",
+            "is_group": False,
+        }
+        business_doc.update(business_over or {})
+        business = _FakeBusiness([business_doc], failures=failures)
+        service = TaskService(
+            settings=Settings(),
+            repo=repo,  # type: ignore[arg-type]
+            graph=MagicMock(),
+            realtime_hub=_FakeHub(),  # type: ignore[arg-type]
+        )
+        service._erpnext = business  # noqa: SLF001
+        return service, repo, business
+
+    async def test_parks_working_with_marker(self) -> None:
+        service, repo, business = self._service()
+        result = await service.report_missing_secret(
+            "TASK-2026-09999", "X_API_KEY", ["entorno", ".env"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["outcome"], "applied")
+        self.assertEqual(result["business_status"], "Working")
+        self.assertEqual(business.docs["TASK-2026-09999"]["status"], "Working")
+        self.assertEqual(business.puts, [("TASK-2026-09999", "Working")])
+        stored = await repo.get_task("exec-1")
+        assert stored is not None
+        marker = (stored.get("params") or {}).get(SECRET_BLOCK_PARAM) or {}
+        self.assertEqual(marker.get("secret"), "X_API_KEY")
+        self.assertEqual(marker.get("sources_checked"), ["entorno", ".env"])
+        self.assertIn("X_API_KEY", marker.get("reason") or "")
+        mirror = ((stored.get("params") or {}).get("_mirrors") or {}).get(
+            "erpnext") or {}
+        self.assertEqual(mirror.get("business_status"), "Working")
+        self.assertEqual(mirror.get("status_pushed"), "in_progress")
+        self.assertIn("X_API_KEY", str((mirror.get("transition") or {}).get(
+            "reason") or ""))
+        self.assertEqual(
+            result["secret_block"],
+            {"secret": "X_API_KEY", "sources_checked": ["entorno", ".env"]},
+        )
+
+    async def test_already_working_gets_marker(self) -> None:
+        service, repo, _ = self._service(
+            business_status="Working", exec_status="in_progress")
+        result = await service.report_missing_secret(
+            "TASK-2026-09999", "K", ["env"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["outcome"], "already_applied")
+        stored = await repo.get_task("exec-1")
+        assert stored is not None
+        marker = (stored.get("params") or {}).get(SECRET_BLOCK_PARAM) or {}
+        self.assertEqual(marker.get("secret"), "K")
+
+    async def test_note_is_appended(self) -> None:
+        service, repo, _ = self._service()
+        result = await service.report_missing_secret(
+            "TASK-2026-09999", "K", ["env"], note="la pidio el cliente")
+        self.assertTrue(result["ok"])
+        stored = await repo.get_task("exec-1")
+        assert stored is not None
+        mirror = ((stored.get("params") or {}).get("_mirrors") or {}).get(
+            "erpnext") or {}
+        reason = str((mirror.get("transition") or {}).get("reason") or "")
+        self.assertIn("K", reason)
+        self.assertIn("la pidio el cliente", reason)
+
+    async def test_invalid_report_writes_nothing(self) -> None:
+        service, repo, business = self._service()
+        for secret, sources in (("  ", ["env"]), ("K", []), ("K", None)):
+            with self.subTest(secret=secret, sources=sources):
+                result = await service.report_missing_secret(
+                    "TASK-2026-09999", secret, sources)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["status"], "invalid_input")
+        self.assertEqual(business.puts, [])
+        self.assertEqual(repo.events, [])
+        self.assertEqual(
+            business.docs["TASK-2026-09999"]["status"], "Open")
+
+    async def test_erpnext_failure_writes_no_marker(self) -> None:
+        service, repo, business = self._service(
+            failures=[ERPNextUnavailable("caido", status_code=503)] * 3)
+        result = await service.report_missing_secret(
+            "TASK-2026-09999", "K", ["env"])
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "unavailable")
+        stored = await repo.get_task("exec-1")
+        assert stored is not None
+        self.assertNotIn(SECRET_BLOCK_PARAM, stored.get("params") or {})
+        self.assertEqual(
+            business.docs["TASK-2026-09999"]["status"], "Open")
+
+    async def test_desk_only_moves_business(self) -> None:
+        service, _, business = self._service(
+            business_over={"openceo_task_id": "", "openceo_ref": ""})
+        result = await service.report_missing_secret(
+            "TASK-2026-09999", "K", ["env"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["business_status"], "Working")
+        self.assertEqual(result["mirror"], "no_execution_record")
+        self.assertEqual(
+            business.docs["TASK-2026-09999"]["status"], "Working")
 
 
 if __name__ == "__main__":
