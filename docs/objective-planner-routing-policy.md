@@ -424,7 +424,7 @@ The planner must emit JSON conforming to the authoritative Pydantic schema.
 
 Do not use free-form YAML or Markdown as the persistence contract.
 
-The schema is defined outside this runtime prompt in `objective_planner_models.py`.
+The schema is defined outside this runtime prompt in `openceo-core/objectives/planner_models.py`.
 
 There is no `planner_confidence`, `dev_mode`, `execution_runtime`, account, or model field.
 

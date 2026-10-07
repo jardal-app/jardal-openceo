@@ -40,16 +40,16 @@ Si vas a usar el agente de finanzas localmente:
 python -m playwright install chromium
 ```
 
-## 3) Ejecutar API
+## 3) Ejecutar API (host mode, instancia única)
 
 ```bash
-cd openceo-core
-python main.py
+scripts/openceo-core-host.sh start    # o restart; nunca `python main.py` directo (CLAUDE.md §4)
+scripts/openceo-core-host.sh status
 ```
 
 ## 4) Smoke manual
 
 ```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/api/projects
+curl http://localhost:18765/health
+curl http://localhost:18765/api/projects
 ```
