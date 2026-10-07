@@ -13,7 +13,6 @@ services:
       - WORKFLOWS_DIR=/app/workflows
       - KIMI_SHARE_DIR=/home/ceouser/.kimi
       - CODEX_HOME=/home/ceouser/.codex
-      - PROJECT_CONTEXTS_DIR=/app/.runtime/project-context
     working_dir: /app
     command: python main.py
     expose:

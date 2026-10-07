@@ -31,7 +31,7 @@ La [referencia completa](docs/ARCHITECTURE_REFERENCE_2026.md) conserva las 2.064
 - `openceo-core/dev_session_service.py` y `agents/dev/` gobiernan sesiones tmux, providers y revision Tier S. Los planes, briefs y feedback de esas sesiones son artefactos de ejecucion.
 - `openceo-core/horizon/` implementa el contexto personal del CEO, clasificacion, planificacion y delegacion; `scheduler.py` y `rate_monitor.py` coordinan trabajo programado y cuotas.
 - `openceo-core/mcp_server.py` publica herramientas seleccionadas; `openceo-core/tools/` contiene funciones compartidas y `agents/` los paquetes propios de cada agente.
-- `openceo-core/db/` y MongoDB guardan estado de ejecucion. `projects/*/project.yaml` configura repositorios, providers, routing y presets; `CONTEXT.md` persiste por compatibilidad con sesiones existentes.
+- `openceo-core/db/` y MongoDB guardan estado de ejecucion. `projects/*/project.yaml` configura repositorios, providers, routing y presets. Los cierres de sesion quedan en MongoDB (`dev_sessions`); el `CONTEXT.md` heredado se retiro en TASK-2026-00143.
 - `openceo-react/` es el dashboard; `openceo-voice/` y `openceo-voice-android/` son el puente de voz y el cliente movil.
 
 La [referencia completa](docs/ARCHITECTURE_REFERENCE_2026.md) desarrolla discovery, Tier S, limites de cuota, MCP, colecciones Mongo, ciclo de tareas y estructura del proyecto. Este mapa solo indica donde empezar a leer y que modulo inspeccionar para una tarea concreta.
@@ -43,7 +43,7 @@ La [referencia completa](docs/ARCHITECTURE_REFERENCE_2026.md) desarrolla discove
 3. **Ejecutar recetas conocidas de forma determinista.** YAML define pasos y mapeo de datos; discovery con LLM propone flujos nuevos y requiere aprobacion para cristalizarlos. La aprobacion de una receta no autoriza por si misma cada escritura empresarial posterior.
 4. **Mantener identidad y aprobaciones.** Los reintentos conservan la misma identidad para evitar efectos duplicados. Una ejecucion tecnica completada no sustituye una aprobacion humana de negocio. Finance no ejecuta movimientos externos mientras `execute_money_movements=false`.
 5. **Hacer el runtime reactivo.** Los cambios nacen de eventos, operaciones CRUD o timers con proximo vencimiento; no introducir barridos periodicos de Mongo o APIs. Los turnos dev responden enseguida y continuan en segundo plano.
-6. **Proteger contexto y privacidad.** El contexto personal de Horizon no se refleja a Notion; desconocido (`null`) no es cero medido. Credenciales quedan fuera de Git y del vault. Los `CONTEXT.md` usados por el runtime no se eliminan por tener notas en Obsidian.
+6. **Proteger contexto y privacidad.** El contexto personal de Horizon no se refleja a Notion; desconocido (`null`) no es cero medido. Credenciales quedan fuera de Git y del vault. La memoria de ingenieria vive en ERPNext (tickets), el vault (decisiones), `STATUS.md` (traspaso) y `HANDOFF.md` por ticket; ningun Markdown creciente sustituye esas fuentes.
 7. **Registrar herramientas con alcance.** Un agente nuevo necesita registro explicito en el runtime. Los tools locales viven con su agente, los compartidos en `openceo-core/tools/`, y MCP expone solo capacidades autorizadas. El codigo se consulta con busqueda/LSP; el vault guarda el motivo de las decisiones.
 
 ## Trabajo en este repositorio

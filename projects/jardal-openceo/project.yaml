@@ -97,8 +97,8 @@ presets:
     description: "Refactorizar y optimizar código reciente"
   sync_context:
     number: 4
-    prompt: "Revisa el estado del proyecto y actualiza STATUS.md y CONTEXT.md con un resumen claro del trabajo realizado y estado vigente."
-    description: "Sincronizar STATUS.md y contexto"
+    prompt: "Revisa el estado del proyecto y actualiza STATUS.md y el ticket ERPNext correspondiente con un resumen claro del trabajo realizado y estado vigente."
+    description: "Sincronizar STATUS.md y ticket"
   security_audit:
     number: 5
     prompt: "Audita el código en busca de posibles vulnerabilidades, endpoints expuestos sin autenticación o fugas de configuración."

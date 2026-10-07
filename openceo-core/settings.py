@@ -58,7 +58,6 @@ class Settings(BaseSettings):
     DEV_TURN_TIMEOUT_SECONDS: int = 1800
     DEV_IDLE_TIMEOUT_SECONDS: int = 45
     DEV_MAX_CONTEXT_MESSAGES: int = 60
-    DEV_CONTEXT_MAX_CHARS: int = 20000
 
     # tmux runtime
     TMUX_POLL_INTERVAL_MS: int = 300
@@ -204,7 +203,6 @@ class Settings(BaseSettings):
     # as siblings of the OpenCEO checkout; the vault lives in jardal-knowledge.
     PROJECT_REPOS_ROOT: str = str(CORE_DIR.parent.parent)
     VAULT_ROOT: str = str(CORE_DIR.parent.parent / "jardal-knowledge" / "vault")
-    PROJECT_CONTEXTS_DIR: str = str(CORE_DIR.parent / ".runtime" / "project-context")
     DEFAULT_PROJECT: str = "example-project"
     WORKFLOWS_DIR: str = str(CORE_DIR.parent / "workflows")
 
