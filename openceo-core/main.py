@@ -92,6 +92,8 @@ from horizon.models import (
     CaptureChannel,
     CaptureKind as HorizonCaptureKind,
     HorizonCaptureRequest,
+    HorizonDecisionAnswerRequest,
+    HorizonDecisionsDeliverRequest,
     HorizonDelegateRequest,
     HorizonImportRequest,
     HorizonMetricsRequest,
@@ -199,6 +201,7 @@ horizon_scheduler = HorizonScheduler(
 workflow_service.set_horizon_service(horizon_service)
 task_service.set_horizon_hooks(on_task_terminal=horizon_service.acknowledge_task_result)
 horizon_service.set_task_service(task_service)
+horizon_service.set_company_reader(erpnext_adapter)
 first_layer_gateway = FirstLayerGateway(
     settings=settings,
     repo=repo,
@@ -679,7 +682,7 @@ async def get_horizon_plan(
 async def get_horizon_next_action(
     current_user: UserDocument = Depends(get_current_user),
 ) -> dict:
-    return await horizon_service.next_action(current_user.user_id)
+    return await horizon_service.next_action(current_user.user_id, include_company=True)
 
 
 @app.post("/api/horizon/capture")
@@ -849,6 +852,68 @@ async def get_horizon_delegation_summary(
 ) -> dict:
     """Resumen de delegacion efectiva e indicadores humanos (§10.3)."""
     return await horizon_service.get_delegation_summary(current_user.user_id)
+
+
+@app.get("/api/horizon/cockpit")
+async def get_horizon_cockpit(
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Cockpit del dueno (F5): plan + empresa + decisiones."""
+    result = await horizon_service.cockpit(current_user.user_id)
+    result["plan"] = await horizon_service.deliver_plan(
+        current_user.user_id, result.get("plan") or {}, channel="api"
+    )
+    return result
+
+
+@app.get("/api/horizon/decisions")
+async def list_horizon_decisions(
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Bandeja de decisiones (misma fuente que Requiere humano)."""
+    return await horizon_service.pending_decisions(current_user.user_id)
+
+
+@app.post("/api/horizon/decisions/deliver")
+async def deliver_horizon_decisions(
+    payload: HorizonDecisionsDeliverRequest | None = None,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Marca decisiones agrupadas como entregadas (entrega unica)."""
+    tray = await horizon_service.pending_decisions(current_user.user_id)
+    wanted = {(t or "").strip() for t in ((payload and payload.task_ids) or []) if (t or "").strip()}
+    fresh = [
+        item
+        for item in tray.get("grouped") or []
+        if not item.get("delivered") and (not wanted or str(item.get("task_id")) in wanted)
+    ]
+    return await horizon_service.mark_decisions_delivered(
+        current_user.user_id, fresh, channel="api"
+    )
+
+
+@app.post("/api/horizon/decisions/{task_id}/answer")
+async def answer_horizon_decision(
+    task_id: str,
+    payload: HorizonDecisionAnswerRequest,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Aplica la respuesta del dueno a una decision pendiente."""
+    verdict = str(payload.decision or "").strip().lower()
+    if verdict not in ("approve", "deny"):
+        raise HTTPException(status_code=400, detail="decision must be approve or deny")
+    result = await horizon_service.answer_decision(
+        current_user.user_id,
+        task_id=task_id,
+        approve=(verdict == "approve"),
+        comment=payload.comment or "",
+        channel="api",
+    )
+    if not result.get("applied"):
+        reason = str(result.get("reason") or "not_applied")
+        status_code = 404 if reason in ("task_not_found", "ticket_not_found") else 409
+        raise HTTPException(status_code=status_code, detail=reason)
+    return result
 
 
 # ------------------------- tasks (legacy compatible) -------------------------

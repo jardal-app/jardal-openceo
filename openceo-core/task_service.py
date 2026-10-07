@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 from agents.dev.routing import normalize_document_routing
 from company_mandate import (
+    ESCALATION_PHASE,
     EscalationDecision,
     OwnerAction,
     build_escalation_ticket,
@@ -1616,6 +1617,202 @@ class TaskService:
             },
         )
         return parked or created
+
+    async def apply_owner_decision(
+        self,
+        task_id: str,
+        *,
+        approve: bool,
+        actor_id: str,
+        comment: str = "",
+    ) -> dict[str, Any]:
+        """Apply the owner's answer to a pending decision (cockpit F5, TASK-2026-00120).
+
+        Routes, in order: a YAML run blocked on a human resumes (approve) or
+        fails (deny); an active human phase workflow goes through
+        :meth:`create_phase_action`; a standalone owner-escalation ticket
+        records the decision and completes, so the status observer pushes
+        Completed to ERPNext. Anything else (personal scope, no human wait,
+        QA without phases, discovery) is rejected fail-closed with a reason.
+        """
+        task = await self._repo.get_task(task_id)
+        if task is None:
+            return {"applied": False, "reason": "task_not_found"}
+        if is_personal_scope(task):
+            return {"applied": False, "reason": "personal_scope"}
+        note = " ".join(str(comment or "").split())[:2000]
+
+        blocked_run: dict[str, Any] | None = None
+        if self._workflow_service is not None:
+            run = await self._repo.latest_workflow_run_for_task(task_id)
+            if run and str(run.get("status") or "") == WorkflowRunStatus.BLOCKED_HUMAN.value:
+                blocked_run = run
+        if blocked_run is not None:
+            return await self._apply_decision_to_blocked_run(
+                task, blocked_run, approve=approve, actor_id=actor_id, comment=note
+            )
+
+        _phases, _index, current = self._current_phase(task)
+        if current and str(current.get("type") or "") == WorkflowPhaseType.HUMAN.value:
+            action = TaskReviewAction.APPROVE if approve else TaskReviewAction.REJECT
+            try:
+                result = await self.create_phase_action(
+                    task_id,
+                    actor_id=actor_id,
+                    actor_type=TaskReviewActorType.INTERNAL,
+                    action=action,
+                    comment=note,
+                )
+            except ValueError as exc:
+                return {"applied": False, "reason": "phase_action_rejected", "detail": str(exc)}
+            return {"applied": True, "route": "phase_action", "task": result.get("task")}
+
+        if (
+            str(task.get("phase") or "") == ESCALATION_PHASE
+            and str(task.get("status") or "") == TaskStatus.WAITING.value
+        ):
+            return await self._apply_decision_to_escalation(
+                task, approve=approve, actor_id=actor_id, comment=note
+            )
+
+        return {
+            "applied": False,
+            "reason": "not_answerable",
+            "hint": "Se responde desde la bandeja Requiere humano del dashboard.",
+        }
+
+    async def _apply_decision_to_blocked_run(
+        self,
+        task: dict[str, Any],
+        run: dict[str, Any],
+        *,
+        approve: bool,
+        actor_id: str,
+        comment: str,
+    ) -> dict[str, Any]:
+        task_id = str(task.get("task_id") or "")
+        waiting = run.get("waiting") if isinstance(run.get("waiting"), dict) else {}
+        current_key = (
+            str(task.get("phase") or "").strip()
+            or str(waiting.get("permission") or "").strip()
+            or "human_in_the_loop"
+        )
+        if approve:
+            resumed = await self._workflow_service.resume_blocked_run_for_task(
+                task_id, action="approve", actor_id=actor_id
+            )
+            if resumed is None:
+                return {"applied": False, "reason": "resume_failed"}
+            payload = TaskReviewCreateRequest(
+                actor_type=TaskReviewActorType.INTERNAL,
+                actor_id=actor_id,
+                action=TaskReviewAction.APPROVE,
+                comment=comment,
+                metadata={"phase": current_key, "event": "owner_decision"},
+            )
+            review_doc = make_task_review_document(
+                task_id=task_id,
+                project=str(task.get("project") or ""),
+                payload=payload,
+                approval_state_after=ApprovalState.APPROVED,
+            )
+            review = await self._repo.create_task_review(review_doc.model_dump(mode="python"))
+            await self._hub.broadcast("task_review_created", review)
+            updated_task = await self._repo.get_task(task_id) or task
+            return {"applied": True, "route": "workflow_resume", "task": updated_task}
+
+        await self._repo.patch_workflow_run(
+            str(run["run_id"]),
+            {
+                "status": WorkflowRunStatus.FAILED.value,
+                "error": f"Rejected by {actor_id}: {comment}",
+                "completed_at": datetime.now(timezone.utc),
+            },
+        )
+        summary = f"Rechazado por el dueño: {comment}" if comment else "Rechazado por el dueño."
+        patched = await self.patch_task(
+            task_id,
+            {
+                "status": TaskStatus.FAILED.value,
+                "approval_state": ApprovalState.REJECTED.value,
+                "waiting_reason": None,
+                "error": summary,
+                "last_response_summary": summary,
+                "completed_at": None,
+                "updated_by": actor_id,
+            },
+        )
+        payload = TaskReviewCreateRequest(
+            actor_type=TaskReviewActorType.INTERNAL,
+            actor_id=actor_id,
+            action=TaskReviewAction.REJECT,
+            comment=comment,
+            metadata={"phase": current_key, "event": "owner_decision"},
+        )
+        review_doc = make_task_review_document(
+            task_id=task_id,
+            project=str(task.get("project") or ""),
+            payload=payload,
+            approval_state_after=ApprovalState.REJECTED,
+        )
+        review = await self._repo.create_task_review(review_doc.model_dump(mode="python"))
+        await self._hub.broadcast("task_review_created", review)
+        return {"applied": True, "route": "workflow_reject", "task": patched or task}
+
+    async def _apply_decision_to_escalation(
+        self,
+        task: dict[str, Any],
+        *,
+        approve: bool,
+        actor_id: str,
+        comment: str,
+    ) -> dict[str, Any]:
+        task_id = str(task.get("task_id") or "")
+        params = dict(task.get("params") or {})
+        escalation = dict(params.get("escalation") or {})
+        escalation["decision"] = {
+            "decision": "approved" if approve else "denied",
+            "by": actor_id,
+            "at": datetime.now(timezone.utc).isoformat(),
+            "comment": comment,
+        }
+        params["escalation"] = escalation
+        verdict = "aprobada" if approve else "denegada"
+        summary = f"Decisión del dueño: {verdict}."
+        if comment:
+            summary += f" {comment}"
+        patched = await self.patch_task(
+            task_id,
+            {
+                "status": TaskStatus.COMPLETED.value,
+                "approval_state": (
+                    ApprovalState.APPROVED.value if approve else ApprovalState.REJECTED.value
+                ),
+                "waiting_reason": None,
+                "last_response_summary": summary,
+                "completed_at": datetime.now(timezone.utc),
+                "params": params,
+                "updated_by": actor_id,
+            },
+        )
+        payload = TaskReviewCreateRequest(
+            actor_type=TaskReviewActorType.INTERNAL,
+            actor_id=actor_id,
+            action=TaskReviewAction.APPROVE if approve else TaskReviewAction.REJECT,
+            comment=comment,
+            metadata={"phase": ESCALATION_PHASE, "event": "owner_decision"},
+        )
+        review_doc = make_task_review_document(
+            task_id=task_id,
+            project=str(task.get("project") or ""),
+            payload=payload,
+            approval_state_after=(
+                ApprovalState.APPROVED if approve else ApprovalState.REJECTED
+            ),
+        )
+        review = await self._repo.create_task_review(review_doc.model_dump(mode="python"))
+        await self._hub.broadcast("task_review_created", review)
+        return {"applied": True, "route": "escalation_close", "task": patched or task}
 
     async def blockers_open(self, task: Mapping[str, Any]) -> bool:
         """True when any ``blocked_by`` dependency is not terminal (§9.5).
