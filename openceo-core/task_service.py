@@ -2122,11 +2122,23 @@ class TaskService:
             if not name:
                 return
             if key == "routing_missing":
-                text = (
-                    "OpenCEO no puede ejecutar este ticket: falta el campo coding_tool, "
-                    "que se fija al crear la tarea (tier_s, tier_a, tier_b o tier_c; "
-                    "tier_c es la opción por defecto). Asigna el tier para continuar."
-                )
+                # Loose tickets self-classify at dispatch (TASK-2026-00137), so
+                # this wait now means an objective child arrived without the
+                # planner tier: a planner/validation gap, not an owner action.
+                if task.get("objective_id"):
+                    text = (
+                        "OpenCEO no puede ejecutar este ticket: pertenece a un "
+                        "objetivo pero llegó sin tier (coding_tool). La "
+                        "clasificación automática solo cubre tickets sueltos; "
+                        "hay que regenerar el hijo con tier o fijar coding_tool "
+                        "(tier_s, tier_a, tier_b o tier_c) por API."
+                    )
+                else:
+                    text = (
+                        "OpenCEO no puede ejecutar este ticket: falta el campo coding_tool, "
+                        "que se fija al crear la tarea (tier_s, tier_a, tier_b o tier_c; "
+                        "tier_c es la opción por defecto). Asigna el tier para continuar."
+                    )
             else:
                 text = f"OpenCEO no puede ejecutar este ticket: configuración inválida ({reason})."
             await adapter.add_comment(name, text)

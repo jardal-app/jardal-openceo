@@ -596,6 +596,7 @@ class GraphState(TypedDict, total=False):
     resume_at: datetime | None
     coding_tier: str | None
     coding_tool: str | None
+    objective_id: str | None
     coding_session_id: str | None
     coding_session_title: str | None
     modified_files: list[str]

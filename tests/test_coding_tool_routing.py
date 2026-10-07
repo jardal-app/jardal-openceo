@@ -213,15 +213,30 @@ class DispatcherRoutingTests(unittest.IsolatedAsyncioTestCase):
         loader.validate_project = MagicMock(return_value=config_errors or [])
         return DevSessionManager(settings, loader, repo=repo)
 
-    async def test_routing_missing_waits_without_tier_selection(self) -> None:
+    async def test_objective_child_without_tier_waits_without_tier_selection(self) -> None:
+        # Deliberate contract change (TASK-2026-00137): loose tickets without
+        # a tier self-classify at dispatch instead of parking; only objective
+        # children (which must arrive with the planner tier) still wait.
         manager = self._manager()
         manager._tier_selector.select = AsyncMock(
             side_effect=AssertionError("selector must not run without routing"))
-        output = await manager.run(_task(), {})
+        output = await manager.run(_task(objective_id="OBJ-1"), {})
         self.assertEqual(output.status, TaskStatus.WAITING)
         assert output.waiting_reason is not None
         self.assertTrue(output.waiting_reason.startswith(ROUTING_MISSING_REASON))
         manager._tier_selector.select.assert_not_called()
+
+    async def test_loose_ticket_without_tier_is_classified(self) -> None:
+        manager = self._manager()
+        manager._tier_selector.select = AsyncMock(return_value=CodingTier.TIER1)
+        manager._step_code = AsyncMock(return_value=CodingStepResult(
+            step={"step": "code", "status": "ok"}, prompt="p", summary="s"))
+        output = await manager.run(_task(), {})
+        self.assertEqual(output.status, TaskStatus.COMPLETED)
+        self.assertEqual(output.coding_tool, CodingTool.TIER_B)
+        assert output.params is not None
+        self.assertIn("tier_reason", output.params)
+        manager._step_code.assert_awaited_once()
 
     async def test_root_tier_reaches_code_step(self) -> None:
         manager = self._manager()
