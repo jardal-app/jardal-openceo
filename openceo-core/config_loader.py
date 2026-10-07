@@ -89,7 +89,9 @@ class ConfigLoader:
         ``dev.coding_tool`` is obsolete (routing is per-task). The single
         global Objective Planner is likewise global: top-level
         ``objective_planner`` content is invalid (TASK-2026-00112), and so
-        is top-level ``objectives`` (TASK-2026-00117).
+        is top-level ``objectives`` (TASK-2026-00117). The shared review
+        machinery is global too: top-level ``review`` content is invalid
+        (TASK-2026-00141).
         Callers park the project's tickets in ``waiting(config)`` when
         this is non-empty; other projects are unaffected.
         """
@@ -134,6 +136,20 @@ class ConfigLoader:
                     f"objectives in {project}/project.yaml must be "
                     "a mapping or absent."
                 )
+        review = data.get("review")
+        if review is not None and review != {}:
+            if isinstance(review, dict):
+                found = ", ".join(sorted(str(key) for key in review))
+                errors.append(
+                    "review must not be set in project.yaml: "
+                    "the shared review machinery is global. Remove it from "
+                    f"{project}/project.yaml (found: {found})."
+                )
+            else:
+                errors.append(
+                    f"review in {project}/project.yaml must be "
+                    "a mapping or absent."
+                )
         dev = data.get("dev")
         if dev is None:
             return errors
@@ -152,8 +168,8 @@ class ConfigLoader:
             if isinstance(tier_s, dict):
                 found = ", ".join(sorted(str(key) for key in tier_s))
                 errors.append(
-                    "dev.tier_s must not be set in project.yaml: Tier S roles "
-                    f"and pool are global. Remove it from {project}/project.yaml "
+                    "dev.tier_s must not be set in project.yaml: Tier S cycle "
+                    f"config is global. Remove it from {project}/project.yaml "
                     f"(found: {found})."
                 )
             else:
@@ -278,7 +294,10 @@ class ConfigLoader:
                 # Tier S gates (design §11, F1): run by the orchestrator on every
                 # tier. Empty = none configured (telemetry note, not a block).
                 "gates": [],
-                # Global Tier S config: the single source of roles and pool.
+                # Global Tier S cycle config: only what the single-ticket
+                # cycle owns. The review machinery (pool, rounds, inbox, fix
+                # tiers, closer/arbiter roles and timeouts) lives in the
+                # shared top-level `review` block (TASK-2026-00141).
                 # Projects must not set dev.tier_s (see validate_project).
                 # Accounts are interchangeable: swapping e.g. claudej -> clauded
                 # only changes `account:` (+ its command) here, never tickets,
@@ -308,8 +327,6 @@ class ConfigLoader:
                         "plan_review": 15,
                         "build": 60,
                         "fix": 30,
-                        "arbiter": 10,
-                        "closer": 15,
                     },
                     # Roles run one-shot (live executor): `command` + `headless_args`
                     # form the base argv, the prompt travels per `prompt_via`.
@@ -319,49 +336,10 @@ class ConfigLoader:
                         "planner": {"provider": "claude", "account": "claudej", "label": "claudej", "model": "opus", "effort": "max", "active": True, "command": ["claudej"], "headless_args": ["--print"], "prompt_via": "argv"},
                         "plan-reviewer": {"provider": "codex", "account": "codexj", "label": "codexj", "model": "gpt-6.1-sol", "effort": "xhigh", "active": True, "command": ["codexj"], "headless_args": ["exec", "--ephemeral", "-"], "prompt_via": "stdin"},
                         "builder": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "effort": "max", "active": True, "command": ["musej", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"], "prompt_via": "argv"},
-                        "closer": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "effort": "max", "active": True, "command": ["musej", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"], "prompt_via": "argv"},
-                        "arbiter": {"provider": "claude", "account": "claudej", "label": "claudej", "model": "opus", "effort": "max", "active": True, "command": ["claudej"], "headless_args": ["--print"], "prompt_via": "argv"},
                     },
-                    # Review pool (design §7.1, F3). Verified 2026-10-05 via
-                    # --help probes (zero spend): qwen positional prompt is
-                    # one-shot by default; codex exec takes -m/-c; claude
-                    # takes --print/--model/--effort; opencode run takes -m.
-                    # limit/expired patterns still need runtime capture (§20-4):
-                    # until then reactive slots only mark invalid reports.
-                    "review": {
-                        "round1_parallel": 3,
-                        "round2_parallel": 2,
-                        "quorum": 2,
-                        "distinct_by": "family",
-                        "min_available_families": 3,
-                        "max_rounds": 2,
-                        "reviewer_timeout_minutes": 15,
-                    },
-                    "reviewers": [
-                        {"label": "qwen-max", "provider": "qwen", "model": "qwen3.8-max", "family": "qwen", "priority": 1, "active": True, "quota": "reactive", "expires_on": "2026-10-19", "prompt_via": "argv", "command": ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"], "limit_patterns": [], "expired_patterns": []},
-                        # owner 2026-10-03: GLM via Qwen plan (claudeg retired). Qwen Code
-                        # exposes no effort flag (verified --help 2026-10-04): model via -m only.
-                        {"label": "qwen-glm", "provider": "qwen", "model": "glm-5.3", "family": "glm", "priority": 2, "active": True, "quota": "reactive", "prompt_via": "argv", "command": ["qwen", "-m", "glm-5.3", "--approval-mode", "plan"], "limit_patterns": [], "expired_patterns": []},
-                        {"label": "dsh", "provider": "dsh", "model": "deepseek-v4.1-flash", "family": "deepseek", "priority": 3, "active": True, "quota": "reactive", "prompt_via": "stdin", "command": ["node", "/home/develop/development/Jardal/jardal-deepseek-harness/apps/cli/lib/bin.js", "--profile", "headless", "-"], "env": {"DSH_HOME": "/home/develop/.dsh"}, "limit_patterns": [], "expired_patterns": []},
-                        {"label": "claudep", "provider": "claude", "model": "deepseek-flash", "family": "deepseek", "priority": 9, "active": False, "quota": "reactive", "prompt_via": "argv", "command": ["claudep"], "headless_args": ["--print"]},  # deepseek reserve while dsh serves
-                        {"label": "muse-review", "provider": "muse", "model": "muse-spark-1.3-contributor", "family": "muse", "priority": 99, "active": True, "extra": True, "quota": "reactive", "prompt_via": "argv", "command": ["muse", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max"]},  # extra: never counts for quorum (§7.3). Plain muse on purpose: isolated reviewer (sandbox+approvals ON, no --trust-workspace); musej appends its flags last so they cannot be overridden.
-                        {"label": "agyd", "provider": "gemini", "model": "gemini", "family": "gemini", "priority": 60, "active": False, "prompt_via": "argv", "command": ["agyd"]},
-                        {"label": "mimo", "provider": "opencode", "model": "opencode-go/mimo-v2.6-pro", "family": "mimo", "priority": 4, "active": False, "quota": "reactive", "prompt_via": "argv", "command": ["opencode", "run", "-m", "opencode-go/mimo-v2.6-pro"]},
-                    ],
-                    # Findings inbox promotion (design §8.3, F4) and fixed
-                    # fix-ticket tiers (design §3.3).
-                    "inbox": {
-                        "promotion": {"severity": "CRITICAL", "anchor": "strong", "min_families": 2, "or_category": "security"},
-                    },
-                    "fix_ticket_tiers": {"security": "tier_s", "critical": "tier_a", "default": "tier_c"},
-                    # Objectives (design §9, F6). The planner horizon lives
-                    # in the global objective_planner block (TASK-2026-00112).
-                    "objectives": {
-                        "max_tickets": 20,
-                        "max_planning_runs_without_progress": 2,
-                        "max_final_reviews": 2,
-                        "inbox_items_for_planner": 15,
-                    },
+                    # Review machinery (pool, rounds, inbox, fix tiers) and the
+                    # legacy objectives flow keys moved to the shared
+                    # top-level `review` / `objectives` blocks (TASK-2026-00141).
                 },
                 # Global simple-tier executors (design v2 §3.1, §17.1, F0.1/F5).
                 # Projects must not set dev.tiers (see validate_project).
@@ -429,6 +407,57 @@ class ConfigLoader:
                     "require_human_review": False,
                 },
             },
+            # Shared review machinery (autonomy epic TASK-2026-00110, F2
+            # TASK-2026-00141): the single source both engines read — the
+            # Tier S ticket cycle and the company-level objectives engine
+            # (final review, inbox, arbitration). Moved out of dev.tier_s.
+            # Projects must not set review (see validate_project).
+            "review": {
+                # One-shot roles shared by both engines (live executor):
+                # `command` + `headless_args` form the base argv, the prompt
+                # travels per `prompt_via`. The closer runs only in the
+                # objectives final review; the arbiter in both engines.
+                "roles": {
+                    "closer": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "effort": "max", "active": True, "command": ["musej", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"], "prompt_via": "argv"},
+                    "arbiter": {"provider": "claude", "account": "claudej", "label": "claudej", "model": "opus", "effort": "max", "active": True, "command": ["claudej"], "headless_args": ["--print"], "prompt_via": "argv"},
+                },
+                "timeouts_minutes": {
+                    "arbiter": 10,
+                    "closer": 15,
+                },
+                # Review pool (design §7.1, F3). Verified 2026-10-05 via
+                # --help probes (zero spend): qwen positional prompt is
+                # one-shot by default; codex exec takes -m/-c; claude
+                # takes --print/--model/--effort; opencode run takes -m.
+                # limit/expired patterns still need runtime capture (§20-4):
+                # until then reactive slots only mark invalid reports.
+                "review": {
+                    "round1_parallel": 3,
+                    "round2_parallel": 2,
+                    "quorum": 2,
+                    "distinct_by": "family",
+                    "min_available_families": 3,
+                    "max_rounds": 2,
+                    "reviewer_timeout_minutes": 15,
+                },
+                "reviewers": [
+                    {"label": "qwen-max", "provider": "qwen", "model": "qwen3.8-max", "family": "qwen", "priority": 1, "active": True, "quota": "reactive", "expires_on": "2026-10-19", "prompt_via": "argv", "command": ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"], "limit_patterns": [], "expired_patterns": []},
+                    # owner 2026-10-03: GLM via Qwen plan (claudeg retired). Qwen Code
+                    # exposes no effort flag (verified --help 2026-10-04): model via -m only.
+                    {"label": "qwen-glm", "provider": "qwen", "model": "glm-5.3", "family": "glm", "priority": 2, "active": True, "quota": "reactive", "prompt_via": "argv", "command": ["qwen", "-m", "glm-5.3", "--approval-mode", "plan"], "limit_patterns": [], "expired_patterns": []},
+                    {"label": "dsh", "provider": "dsh", "model": "deepseek-v4.1-flash", "family": "deepseek", "priority": 3, "active": True, "quota": "reactive", "prompt_via": "stdin", "command": ["node", "/home/develop/development/Jardal/jardal-deepseek-harness/apps/cli/lib/bin.js", "--profile", "headless", "-"], "env": {"DSH_HOME": "/home/develop/.dsh"}, "limit_patterns": [], "expired_patterns": []},
+                    {"label": "claudep", "provider": "claude", "model": "deepseek-flash", "family": "deepseek", "priority": 9, "active": False, "quota": "reactive", "prompt_via": "argv", "command": ["claudep"], "headless_args": ["--print"]},  # deepseek reserve while dsh serves
+                    {"label": "muse-review", "provider": "muse", "model": "muse-spark-1.3-contributor", "family": "muse", "priority": 99, "active": True, "extra": True, "quota": "reactive", "prompt_via": "argv", "command": ["muse", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max"]},  # extra: never counts for quorum (§7.3). Plain muse on purpose: isolated reviewer (sandbox+approvals ON, no --trust-workspace); musej appends its flags last so they cannot be overridden.
+                    {"label": "agyd", "provider": "gemini", "model": "gemini", "family": "gemini", "priority": 60, "active": False, "prompt_via": "argv", "command": ["agyd"]},
+                    {"label": "mimo", "provider": "opencode", "model": "opencode-go/mimo-v2.6-pro", "family": "mimo", "priority": 4, "active": False, "quota": "reactive", "prompt_via": "argv", "command": ["opencode", "run", "-m", "opencode-go/mimo-v2.6-pro"]},
+                ],
+                # Findings inbox promotion (design §8.3, F4) and fixed
+                # fix-ticket tiers (design §3.3).
+                "inbox": {
+                    "promotion": {"severity": "CRITICAL", "anchor": "strong", "min_families": 2, "or_category": "security"},
+                },
+                "fix_ticket_tiers": {"security": "tier_s", "critical": "tier_a", "default": "tier_c"},
+            },
             # Single global Objective Planner (autonomy epic TASK-2026-00110,
             # TASK-2026-00112; normative policy + ADR in docs/). It lives
             # outside dev.tier_s on purpose: Tier S ticket planning
@@ -470,9 +499,9 @@ class ConfigLoader:
             },
             # Company-level objectives (autonomy epic TASK-2026-00110, F2
             # TASK-2026-00117). The engine lives outside dev.tier_s, and so
-            # does its config; dev.tier_s.objectives stays as a legacy
-            # fallback for the flow keys. Projects must not set objectives
-            # (see validate_project). The company mandate (F4
+            # does its config (TASK-2026-00141 retired the
+            # dev.tier_s.objectives legacy fallback). Projects must not set
+            # objectives (see validate_project). The company mandate (F4
             # TASK-2026-00114) owns the real capacity numbers; these are
             # safe deterministic defaults.
             "objectives": {

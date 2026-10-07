@@ -73,7 +73,8 @@ class ValidateProjectTests(unittest.TestCase):
 
     def test_global_defaults_carry_no_project_routing(self) -> None:
         loader = _loader_for(self.root)
-        dev = loader.load_project("anything")["dev"]
+        cfg = loader.load_project("anything")
+        dev = cfg["dev"]
         self.assertNotIn("coding_tool", dev)
         self.assertNotIn("review_rounds", dev["tier_s"])
         self.assertNotIn("max_plans", dev["tier_s"])
@@ -81,11 +82,23 @@ class ValidateProjectTests(unittest.TestCase):
         self.assertEqual(roles["planner"]["account"], "claudej")
         self.assertTrue(roles["planner"]["active"])
         self.assertEqual(roles["plan-reviewer"]["model"], "gpt-6.1-sol")
-        reviewers = dev["tier_s"]["reviewers"]
+        # TASK-2026-00141: the review machinery moved out of dev.tier_s
+        # into the shared global `review` block both engines read.
+        for key in ("reviewers", "review", "inbox", "fix_ticket_tiers",
+                    "objectives"):
+            self.assertNotIn(key, dev["tier_s"])
+        self.assertNotIn("closer", roles)
+        self.assertNotIn("arbiter", roles)
+        self.assertNotIn("closer", dev["tier_s"]["timeouts_minutes"])
+        self.assertNotIn("arbiter", dev["tier_s"]["timeouts_minutes"])
+        reviewers = cfg["review"]["reviewers"]
         self.assertTrue(all(item.get("family") for item in reviewers))
         active_families = {item["family"] for item in reviewers
                            if item["active"] and not item.get("extra")}
         self.assertGreaterEqual(len(active_families), 3)
+        self.assertEqual(cfg["review"]["roles"]["closer"]["account"], "muse")
+        self.assertEqual(cfg["review"]["roles"]["arbiter"]["account"],
+                         "claudej")
         tiers = dev["tiers"]
         self.assertEqual(tiers["tier_a"]["account"], "claudej")
         self.assertEqual(tiers["tier_b"]["account"], "codexj")
@@ -103,6 +116,13 @@ class ValidateProjectTests(unittest.TestCase):
         errors = _loader_for(self.root).validate_project("proj")
         self.assertEqual(len(errors), 1)
         self.assertIn("objective_planner", errors[0])
+        self.assertIn("global", errors[0])
+
+    def test_review_section_is_rejected(self) -> None:
+        self._write("proj", "review:\n  reviewers: []\n")
+        errors = _loader_for(self.root).validate_project("proj")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("review", errors[0])
         self.assertIn("global", errors[0])
 
     def test_global_defaults_carry_single_planner(self) -> None:

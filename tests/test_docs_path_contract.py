@@ -17,7 +17,7 @@ Deliberately narrow so it stays cheap and stable:
 - ``decisions/``, ``vault/``, ``jardal-knowledge/`` and ``projects/jardal/``
   live in the engineering-memory vault, outside this repo.
 - Docs use rooted shorthands (``horizon/cockpit.py``, ``ceo/x.yaml``,
-  ``tier_s/inbox.py``); each span is tried against the repo root plus the
+  ``orchestration/inbox.py``); each span is tried against the repo root plus the
   known shorthand roots before it is reported missing.
 """
 
@@ -154,7 +154,9 @@ class ShorthandRootsTest(unittest.TestCase):
             "tools/erpnext_tickets.py": "openceo-core/tools/erpnext_tickets.py",
             "db/mongo.py": "openceo-core/db/mongo.py",
             "ceo": "workflows/ceo",
-            "tier_s/inbox.py": "openceo-core/agents/dev/tier_s/inbox.py",
+            # TASK-2026-00141 moved the review machinery out of tier_s.
+            "tier_s/cycle.py": "openceo-core/agents/dev/tier_s/cycle.py",
+            "orchestration/inbox.py": "openceo-core/orchestration/inbox.py",
         }
         for span, expected in cases.items():
             with self.subTest(span=span):

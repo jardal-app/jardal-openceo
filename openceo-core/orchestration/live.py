@@ -1,4 +1,4 @@
-"""Live CLI executors for the Tier S engine (dispatch wiring, F3–F6).
+"""Live CLI executors shared by the engines (dispatch wiring, F3–F6).
 
 :class:`ProcessExecutor` runs every engine role as a one-shot OS process:
 role and pool commands come from the global config (``command`` +
@@ -9,6 +9,9 @@ sessions: each call starts and reaps exactly one process.
 :class:`RateMonitorQuota` adapts the service :class:`RateMonitor` to the
 engine :class:`QuotaChecker` protocol, mapping accounts to monitored
 providers. Unknown/reactive accounts fail open (tried until they fail).
+
+Home of the executor result/quota types (TASK-2026-00141): both the Tier S
+cycle and the objectives engine import them from here.
 """
 
 from __future__ import annotations
@@ -17,14 +20,62 @@ import asyncio
 import logging
 import os
 import time
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
-from agents.dev.tier_s.cycle import ExecResult, QuotaVerdict
 from agents.dev.tier_s_contract import child_env
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ExecResult:
+    """What an executor reports for one role run."""
+
+    returncode: int
+    elapsed_s: float
+    signal: str | None = None  # last signal read from .tier-s/status
+    usage: dict[str, Any] | None = None
+    output_tail: str = ""
+    model: str = ""
+    slot: str = ""
+
+
+@dataclass(frozen=True)
+class QuotaVerdict:
+    ok: bool
+    resume_at: str | None = None  # ISO-8601 UTC when quota returns
+    detail: str = ""
+
+
+class Executor(Protocol):
+    """Runs one role. Implementations own the CLI session lifecycle."""
+
+    async def run(
+        self,
+        role: str,
+        prompt: str,
+        workdir: Path,
+        timeout_s: int,
+    ) -> ExecResult: ...
+
+    async def cleanup(self, role: str) -> None:
+        """Kill the role session. Nothing stays alive between cycles."""
+
+
+class QuotaChecker(Protocol):
+    async def check(
+        self, accounts: Sequence[str]) -> dict[str, QuotaVerdict]: ...
+
+
+class AllowAllQuota:
+    """Quota checker for tests and quota-less accounts."""
+
+    async def check(
+        self, accounts: Sequence[str]) -> dict[str, QuotaVerdict]:
+        return {account: QuotaVerdict(ok=True) for account in accounts}
 
 #: stdout kept per role call: full reviewer reports fit; huge dumps are cut.
 OUTPUT_CAP_CHARS = 40000

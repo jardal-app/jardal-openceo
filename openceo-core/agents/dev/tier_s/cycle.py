@@ -24,7 +24,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from agents.dev.routing import resolve_coding_tool
 from agents.dev.tier_s_contract import (
@@ -34,11 +34,17 @@ from agents.dev.tier_s_contract import (
     verify_plan_anchor,
 )
 from agents.dev.tier_s import gates as gate_mod
-from agents.dev.tier_s import findings as findings_mod
-from agents.dev.tier_s import inbox as inbox_mod
-from agents.dev.tier_s import knowledge as knowledge_mod
 from objectives import engine as objectives_mod
-from agents.dev.tier_s import review as review_mod
+from orchestration import findings as findings_mod
+from orchestration import inbox as inbox_mod
+from orchestration import knowledge as knowledge_mod
+from orchestration import review as review_mod
+from orchestration.live import (
+    AllowAllQuota,
+    ExecResult,
+    Executor,
+    QuotaChecker,
+)
 from agents.dev.tier_s.models import (
     BUDGETS_DEFAULTS,
     REVIEW_DEFAULTS,
@@ -74,54 +80,6 @@ TERMINAL_BLOCKER_STATUS = frozenset({"completed", "converted", "cancelled"})
 _ROLE_KEYS = ("planner", "plan_reviewer", "plan-reviewer", "builder")
 
 _ORCHESTRATOR_USER = ("OpenCEO", "openceo@jardal.app")
-
-
-@dataclass(frozen=True)
-class ExecResult:
-    """What an executor reports for one role run."""
-
-    returncode: int
-    elapsed_s: float
-    signal: str | None = None  # last signal read from .tier-s/status
-    usage: dict[str, Any] | None = None
-    output_tail: str = ""
-    model: str = ""
-    slot: str = ""
-
-
-@dataclass(frozen=True)
-class QuotaVerdict:
-    ok: bool
-    resume_at: str | None = None  # ISO-8601 UTC when quota returns
-    detail: str = ""
-
-
-class Executor(Protocol):
-    """Runs one role. Implementations own the CLI session lifecycle."""
-
-    async def run(
-        self,
-        role: str,
-        prompt: str,
-        workdir: Path,
-        timeout_s: int,
-    ) -> ExecResult: ...
-
-    async def cleanup(self, role: str) -> None:
-        """Kill the role session. Nothing stays alive between cycles."""
-
-
-class QuotaChecker(Protocol):
-    async def check(
-        self, accounts: Sequence[str]) -> dict[str, QuotaVerdict]: ...
-
-
-class AllowAllQuota:
-    """Quota checker for tests and quota-less accounts."""
-
-    async def check(
-        self, accounts: Sequence[str]) -> dict[str, QuotaVerdict]:
-        return {account: QuotaVerdict(ok=True) for account in accounts}
 
 
 @dataclass(frozen=True)
@@ -387,32 +345,41 @@ class TierSCycle:
 
     @staticmethod
     def config_from_project(cfg: Mapping[str, Any]) -> dict[str, Any]:
-        """Build the cycle config from a loaded project config + defaults."""
+        """Build the cycle config from a loaded project config + defaults.
+
+        Cycle-only keys (budgets, waiting, its roles and timeouts) come from
+        ``dev.tier_s``; the review machinery (pool, rounds, inbox, fix tiers,
+        closer/arbiter roles and timeouts) comes from the shared global
+        ``review`` block both engines read (TASK-2026-00141).
+        """
         dev = dict(cfg.get("dev", {}) or {})
         tier_s = dict(dev.get("tier_s", {}) or {})
+        review = dict(cfg.get("review", {}) or {})
         budgets = dict(BUDGETS_DEFAULTS)
         budgets.update(tier_s.get("budgets", {}) or {})
         timeouts = dict(TIMEOUTS_DEFAULTS)
         timeouts.update(tier_s.get("timeouts_minutes", {}) or {})
+        timeouts.update(review.get("timeouts_minutes", {}) or {})
         waiting_cfg = dict(WAITING_DEFAULTS)
         waiting_cfg.update(tier_s.get("waiting", {}) or {})
         review_cfg = dict(REVIEW_DEFAULTS)
-        review_cfg.update(tier_s.get("review", {}) or {})
-        inbox_cfg = tier_s.get("inbox", {}) or {}
+        review_cfg.update(review.get("review", {}) or {})
+        inbox_cfg = review.get("inbox", {}) or {}
         repos = cfg.get("project", {}).get("repos", []) if isinstance(
             cfg.get("project"), Mapping) else []
         base_branch = "main"
         if repos and isinstance(repos[0], Mapping):
             base_branch = str(repos[0].get("branch_base", "main") or "main")
         return {
-            "roles": dict(tier_s.get("roles", {}) or {}),
-            "reviewers": list(tier_s.get("reviewers", []) or []),
+            "roles": {**dict(tier_s.get("roles", {}) or {}),
+                      **dict(review.get("roles", {}) or {})},
+            "reviewers": list(review.get("reviewers", []) or []),
             "budgets": budgets,
             "timeouts": timeouts,
             "waiting": waiting_cfg,
             "review": review_cfg,
             "inbox_rule": dict(inbox_cfg.get("promotion", {}) or {}),
-            "fix_tiers": dict(tier_s.get("fix_ticket_tiers", {}) or {}),
+            "fix_tiers": dict(review.get("fix_ticket_tiers", {}) or {}),
             "auto_merge": bool(dev.get("auto_merge", True)),
             "base_branch": base_branch,
             "budget_exclude": list(dev.get("budget_exclude", []) or []),

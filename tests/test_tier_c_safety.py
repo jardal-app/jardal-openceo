@@ -36,7 +36,7 @@ from agents.dev.tier_oracle import (
     resolve_oracle_ref,
     verify_oracle,
 )
-from agents.dev.tier_s import inbox as inbox_mod
+from orchestration import inbox as inbox_mod
 from agents.dev.tier_s.cycle import TierSCycle, _Ctx
 from objectives import engine as objectives_mod
 from objectives.engine import (

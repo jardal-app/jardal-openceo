@@ -257,8 +257,10 @@ directly; prompts never paste it. This section is also served as
 ### Layout
 
 - `openceo-core/` — orchestrator (Python, FastAPI, LangGraph), tests in `tests/`
-- `openceo-core/agents/dev/tier_s/` — Tier S engine (F1–F7): cycle, review
-  rounds, findings inbox, knowledge
+- `openceo-core/agents/dev/tier_s/` — Tier S engine (F1–F7): single-ticket
+  cycle, plan, gates, models, stores, telemetry
+- `openceo-core/orchestration/` — shared orchestration both engines import:
+  one-shot executors, review pool/rounds, findings, inbox, knowledge
 - `openceo-core/objectives/` — company objective engine (execution state, planner models)
 - `openceo-core/company_mandate.py` — company mandate + owner escalation policy
 - `openceo-core/ops/` — deterministic Tier-0 ops tools (e.g. create_project)

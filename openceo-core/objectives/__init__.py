@@ -6,10 +6,11 @@ with real children); this package owns execution only: the engine
 (:mod:`objectives.planner_models`) and the company-level wiring
 (:mod:`objectives.service`).
 
-Moved out of ``agents.dev.tier_s`` (TASK-2026-00117): dev flows (Tier S
+Moved out of the Tier S engine package (TASK-2026-00117): dev flows (Tier S
 cycles, simple tiers) consume the engine, they no longer contain it. The dev
-final review still uses the Tier S reviewer pool; non-dev objectives close
-through deterministic delivery verification.
+final review still uses the shared reviewer pool; non-dev objectives close
+through deterministic delivery verification. The review machinery both
+engines share moved to :mod:`orchestration` (TASK-2026-00141).
 """
 
 from __future__ import annotations

@@ -8,7 +8,7 @@ from typing import Any
 
 from agents.dev.kimi_session_manager import KimiSessionManager
 from agents.dev.opencode_session_manager import OpenCodeSessionManager
-from agents.dev.tier_s.knowledge import with_preamble
+from orchestration.knowledge import with_preamble
 from config_loader import ConfigLoader
 from db.mongo import MongoRepository
 from settings import Settings

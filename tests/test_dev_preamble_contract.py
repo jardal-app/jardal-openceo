@@ -27,11 +27,11 @@ if str(CORE) not in sys.path:
 
 from agents.dev.session import DevSessionManager  # noqa: E402
 from agents.dev.tier_s import cycle as cycle_mod  # noqa: E402
-from agents.dev.tier_s import knowledge as knowledge_mod  # noqa: E402
 from objectives import engine as objectives_mod  # noqa: E402
-from agents.dev.tier_s import review as review_mod  # noqa: E402
-from agents.dev.tier_s.findings import Anchor, Finding  # noqa: E402
-from agents.dev.tier_s.knowledge import (  # noqa: E402
+from orchestration import knowledge as knowledge_mod  # noqa: E402
+from orchestration import review as review_mod  # noqa: E402
+from orchestration.findings import Anchor, Finding  # noqa: E402
+from orchestration.knowledge import (  # noqa: E402
     detect_prompt_lang,
     repo_preamble,
     with_preamble,

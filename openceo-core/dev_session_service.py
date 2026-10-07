@@ -17,7 +17,7 @@ from agents.dev.opencode_run import (
     parse_run_output,
 )
 from agents.dev.tmux_runtime import TmuxRuntime
-from agents.dev.tier_s.knowledge import detect_prompt_lang, with_preamble
+from orchestration.knowledge import detect_prompt_lang, with_preamble
 from config_loader import ConfigLoader
 from db.mongo import MongoRepository
 from events import RealtimeHub
