@@ -17,6 +17,7 @@ from db.mongo import MongoRepository
 from events import RealtimeHub
 from graph import OpenCEOGraph
 from horizon.privacy import is_personal_scope
+from horizon.promotion import is_horizon_promoted
 from objectives.engine import ObjectiveRejected
 from phase_workflows import (
     find_phase_index,
@@ -138,14 +139,16 @@ class TaskService:
         self._horizon_terminal = on_task_terminal
 
     async def _notify_horizon_terminal(self, task: dict[str, Any]) -> None:
-        """Avisa a Horizon de una tarea personal terminada, sin poder romperla.
+        """Avisa a Horizon de una tarea personal o promovida terminada.
 
-        Solo el alcance personal: una tarea de empresa no pertenece al espacio
-        personal (seccion 9.3) y no debe replanificar la vida del usuario.
+        Sin poder romperla: un fallo del gancho nunca impide que un ticket se
+        cierre. Solo el alcance personal y el trabajo promovido desde Horizon:
+        una tarea de empresa ordinaria no pertenece al espacio personal
+        (seccion 9.3) y no debe replanificar la vida del usuario.
         """
         if self._horizon_terminal is None or task is None:
             return
-        if not is_personal_scope(task):
+        if not is_personal_scope(task) and not is_horizon_promoted(task):
             return
         try:
             await self._horizon_terminal(task)

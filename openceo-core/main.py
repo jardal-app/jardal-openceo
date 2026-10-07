@@ -99,6 +99,7 @@ from horizon.models import (
     HorizonMetricsRequest,
     HorizonPlanRequest,
     HorizonProgressRequest,
+    HorizonPromoteRequest,
     HorizonReviewRequest,
 )
 from horizon.triggers import HorizonScheduler, HorizonTriggerStore
@@ -202,6 +203,7 @@ workflow_service.set_horizon_service(horizon_service)
 task_service.set_horizon_hooks(on_task_terminal=horizon_service.acknowledge_task_result)
 horizon_service.set_task_service(task_service)
 horizon_service.set_company_reader(erpnext_adapter)
+horizon_service.set_company_config(config_loader)
 first_layer_gateway = FirstLayerGateway(
     settings=settings,
     repo=repo,
@@ -812,6 +814,52 @@ async def post_horizon_action_delegate(
         project=p.project,
         instruction=p.instruction,
         dedupe_key=p.dedupe_key,
+    )
+
+
+@app.post("/api/horizon/promote")
+async def post_horizon_promote(
+    payload: HorizonPromoteRequest,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Promueve una accion de empresa a Objetivo o ticket (F5)."""
+    return await horizon_service.promote_action(
+        current_user.user_id,
+        action_id=payload.action_id,
+        project=payload.project,
+        repo=payload.repo,
+        kind=payload.kind,
+        instruction=payload.instruction,
+        dedupe_key=payload.dedupe_key,
+        amount=payload.amount,
+        needs_owner_credential=payload.needs_owner_credential,
+        irreversible=payload.irreversible,
+        strategic_replan=payload.strategic_replan,
+        human_action_hint=payload.human_action_hint,
+    )
+
+
+@app.post("/api/horizon/actions/{action_id}/promote")
+async def post_horizon_action_promote(
+    action_id: str,
+    payload: HorizonPromoteRequest | None = None,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Promueve una accion concreta a trabajo de empresa (F5)."""
+    p = payload or HorizonPromoteRequest()
+    return await horizon_service.promote_action(
+        current_user.user_id,
+        action_id=action_id,
+        project=p.project,
+        repo=p.repo,
+        kind=p.kind,
+        instruction=p.instruction,
+        dedupe_key=p.dedupe_key,
+        amount=p.amount,
+        needs_owner_credential=p.needs_owner_credential,
+        irreversible=p.irreversible,
+        strategic_replan=p.strategic_replan,
+        human_action_hint=p.human_action_hint,
     )
 
 
