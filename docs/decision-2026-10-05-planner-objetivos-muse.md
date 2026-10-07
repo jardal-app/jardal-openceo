@@ -27,11 +27,13 @@ Use:
 Python / LangGraph / OpenCEO
     -> compiles durable Objective context
     -> launches a fresh Muse Code headless planning run
-    -> Muse Spark 1.3 Max reasons over bounded state/tools
+    -> Muse Spark 1.3 Contributor reasons over bounded state/tools
     -> returns PlannerResult JSON
     -> Pydantic + deterministic OpenCEO validation
     -> OpenCEO persists valid tickets
 ```
+
+Superseded (TASK-2026-00135): the diagram named `Muse Spark 1.3 Max` — that model does not exist. The planner runs on `muse-spark-1.3-contributor`, the only valid Muse model.
 
 Do not use a persistent tmux planner session.
 

@@ -436,7 +436,7 @@ class ConfigLoader:
             # Projects must not set objective_planner (see validate_project).
             "objective_planner": {
                 "engine": "muse_code",
-                "profile": "muse_spark_1_3_max",
+                "profile": "muse_spark_1_3_contributor",
                 "invocation": "headless",
                 "ticket_horizon": [1, 3],
                 "timeout_minutes": 15,
@@ -450,10 +450,10 @@ class ConfigLoader:
                 # an isolated reviewer.
                 "role": {
                     "provider": "muse", "account": "muse",
-                    "label": "muse", "model": "muse-spark-1.3-max",
+                    "label": "muse", "model": "muse-spark-1.3-contributor",
                     "effort": "max", "active": True,
                     "command": ["musej", "exec", "--model",
-                                "muse-spark-1.3-max", "--reasoning-effort",
+                                "muse-spark-1.3-contributor", "--reasoning-effort",
                                 "max", "--yolo"],
                     "prompt_via": "argv",
                 },
