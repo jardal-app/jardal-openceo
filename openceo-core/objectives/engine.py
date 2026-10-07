@@ -298,6 +298,7 @@ def _new_objective_doc(
             "cancelled_unnecessary": 0,
             "agent_reassignments": 0,
             "tier_reclassifications": 0,
+            "tier_c": blank_tier_c_telemetry(),
         },
         "final_reviews": 0,
         "last_final_review_sha": None,
@@ -615,8 +616,16 @@ def _planner_prompt(
             line += f" blocked_by={list(blockers)}"
         return line
 
+    def _failure_line(item: Any) -> str:
+        if not isinstance(item, Mapping):
+            return "- (unreadable failure entry)"
+        return (f"- {item.get('title')} [{item.get('tier')}]: "
+                f"{str(item.get('cause') or '')[:300]}")
+
     opened = [_ticket_line(item) for item in open_tickets] or ["- (none)"]
     blocked = [_ticket_line(item) for item in blocked_tickets] or ["- (none)"]
+    failures = [_failure_line(item)
+                for item in list(objective.get("material_failures") or [])[-3:]]
     lines = [
         "You are the global OpenCEO Objective Planner and Agent Router.",
         "This is one fresh headless planning cycle: reason from the durable",
@@ -642,6 +651,10 @@ def _planner_prompt(
         "",
         "ROADMAP_REMAINING:",
         *([f"- {item}" for item in roadmap] or ["- (none)"]),
+        "",
+        "MATERIAL FAILURES (latest last; never retry one unchanged "
+        "in the same tier):",
+        *(failures or ["- (none)"]),
         "",
         "INBOX (pre-existing findings touching objective files, "
         "claim via includes_findings):",
@@ -763,7 +776,8 @@ def _telemetry_after_run(
     """Planner telemetry: cycles so far (ADR: measured from day one).
 
     ``cancelled_unnecessary``/``agent_reassignments``/``tier_reclassifications``
-    start at zero: their signals arrive with TASK-2026-00116/00119.
+    start at zero: their signals arrive with TASK-2026-00119. The ``tier_c``
+    block is preserved (TASK-2026-00116 feeds it event by event).
     """
     tele = dict(objective.get("planner_telemetry") or {})
     tele["cycles"] = len(runs)
@@ -773,7 +787,178 @@ def _telemetry_after_run(
     tele.setdefault("cancelled_unnecessary", 0)
     tele.setdefault("agent_reassignments", 0)
     tele.setdefault("tier_reclassifications", 0)
+    tele.setdefault("tier_c", blank_tier_c_telemetry())
     return tele
+
+
+def blank_tier_c_telemetry() -> dict[str, Any]:
+    """Empty Tier C telemetry block (routing policy §32)."""
+    return {
+        "started": 0,
+        "closed": 0,
+        "closed_attributable": 0,
+        "cycle_failures": 0,
+        "material_replans": 0,
+        "late_failures": 0,
+        "late_failure_severity": {},
+        "by_oracle_type": {},
+        "c_ticket_records": [],
+        "late_failure_records": [],
+    }
+
+
+async def record_material_failure(
+    objectives: ObjectiveStore,
+    objective_id: str,
+    *,
+    task_id: str = "",
+    title: str = "",
+    tier: str = "",
+    cause: str = "",
+) -> dict[str, Any]:
+    """Record a material simple-tier failure (policy §29).
+
+    Appends ``{title, tier, cause, at}`` to ``material_failures``: that
+    list feeds the same-tier-retry rule in
+    :func:`planner_models.validate_planner_result`, so the planner can
+    never reassign the unchanged ticket to the same tier. A failed C
+    ticket also bumps the Tier C ``material_replans`` counter. Returns
+    the entry ({} when the objective does not exist).
+    """
+    objective = await objectives.get_objective(objective_id)
+    if objective is None:
+        return {}
+    entry = {
+        "title": str(title or "").strip()[:300],
+        "tier": str(tier or ""),
+        "cause": str(cause or "")[:500],
+        "at": _utcnow_iso(),
+    }
+    failures = list(objective.get("material_failures") or [])
+    failures.append(entry)
+    await objectives.patch_objective(objective_id, {"material_failures": failures})
+    if entry["tier"] == "tier_c":
+        await record_tier_c(objectives, objective_id, "material_replan",
+                            task_id=task_id)
+    return entry
+
+
+async def record_tier_c(
+    objectives: ObjectiveStore,
+    objective_id: str,
+    event: str,
+    *,
+    task_id: str = "",
+    oracle_type: str | None = None,
+    tier_reason: str = "",
+    work_type: str = "",
+    project: str = "",
+    severity: str = "",
+    detail: str = "",
+    attributable: bool = False,
+) -> None:
+    """Append one Tier C telemetry event (routing policy §32).
+
+    Events: ``started`` (C dispatch), ``closed`` (C close;
+    ``attributable`` when the close recorded a SHA in ``tickets_log``),
+    ``cycle_failure`` (one failed gate/oracle round during the candidate
+    cycle), ``material_replan`` (a C ticket failed materially),
+    ``late_failure`` (a defect later attributed to a closed C ticket;
+    only attributed origins are counted, never guesses).
+    Unknown objectives are ignored: telemetry never fails execution.
+    """
+    if event not in ("started", "closed", "cycle_failure",
+                     "material_replan", "late_failure"):
+        return
+    objective = await objectives.get_objective(objective_id)
+    if objective is None:
+        return
+    tele = dict(objective.get("planner_telemetry") or {})
+    tier_c = dict(tele.get("tier_c") or blank_tier_c_telemetry())
+    oracle_key = str(oracle_type or "none")
+    by_type = dict(tier_c.get("by_oracle_type") or {})
+    slot = dict(by_type.get(oracle_key) or {"started": 0, "closed": 0})
+    records = list(tier_c.get("c_ticket_records") or [])
+    if event == "started":
+        tier_c["started"] = int(tier_c.get("started", 0)) + 1
+        slot["started"] = int(slot.get("started", 0)) + 1
+        records.append({
+            "task_id": str(task_id or ""),
+            "oracle_type": oracle_key,
+            "tier_reason": str(tier_reason or "")[:500],
+            "work_type": str(work_type or "")[:200],
+            "project": str(project or "")[:200],
+            "outcome": "open",
+            "started_at": _utcnow_iso(),
+        })
+    elif event == "closed":
+        tier_c["closed"] = int(tier_c.get("closed", 0)) + 1
+        slot["closed"] = int(slot.get("closed", 0)) + 1
+        if attributable:
+            tier_c["closed_attributable"] = int(
+                tier_c.get("closed_attributable", 0)) + 1
+        _close_tier_c_record(records, str(task_id or ""), "closed")
+    elif event == "cycle_failure":
+        tier_c["cycle_failures"] = int(tier_c.get("cycle_failures", 0)) + 1
+    elif event == "material_replan":
+        tier_c["material_replans"] = int(
+            tier_c.get("material_replans", 0)) + 1
+        _close_tier_c_record(records, str(task_id or ""), "failed")
+    elif event == "late_failure":
+        tier_c["late_failures"] = int(tier_c.get("late_failures", 0)) + 1
+        severities = dict(tier_c.get("late_failure_severity") or {})
+        key = str(severity or "unknown")
+        severities[key] = int(severities.get(key, 0)) + 1
+        tier_c["late_failure_severity"] = severities
+        late = list(tier_c.get("late_failure_records") or [])
+        late.append({
+            "task_id": str(task_id or ""),
+            "severity": key,
+            "detail": str(detail or "")[:500],
+            "at": _utcnow_iso(),
+        })
+        tier_c["late_failure_records"] = late
+    if event in ("started", "closed"):
+        by_type[oracle_key] = slot
+        tier_c["by_oracle_type"] = by_type
+    tier_c["c_ticket_records"] = records
+    tele["tier_c"] = tier_c
+    await objectives.patch_objective(objective_id, {"planner_telemetry": tele})
+
+
+def _close_tier_c_record(
+    records: list[dict[str, Any]], task_id: str, outcome: str,
+) -> None:
+    """Mark the latest open record for a ticket (in place, newest first)."""
+    if not task_id:
+        return
+    for record in reversed(records):
+        if record.get("task_id") == task_id \
+                and record.get("outcome") == "open":
+            record["outcome"] = outcome
+            record["closed_at"] = _utcnow_iso()
+            return
+
+
+def tier_c_late_failure_rate(tier_c: Mapping[str, Any] | None) -> float | None:
+    """``late_failure_rate`` (§32): attributed C tickets proven wrong / attributable C closes.
+
+    Unique originating tickets over attributable closes. None (unknown)
+    when nothing attributable closed: a rate is never invented from
+    unattributable history.
+    """
+    tele = tier_c or {}
+    try:
+        denominator = int(tele.get("closed_attributable") or 0)
+    except (TypeError, ValueError):
+        return None
+    if denominator <= 0:
+        return None
+    offenders = {str(item.get("task_id") or "")
+                 for item in tele.get("late_failure_records") or []
+                 if isinstance(item, Mapping) and item.get("task_id")}
+    offenders.discard("")
+    return len(offenders) / denominator
 
 
 async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]:

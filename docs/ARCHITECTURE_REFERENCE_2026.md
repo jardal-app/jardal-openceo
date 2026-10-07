@@ -936,6 +936,12 @@ Deterministic, 0 tokens: wakes on ticket created/ready, ticket closed/failed/can
 
 An Objetivo closes on its delivery criteria, after the final review (`complete_candidate` never closes directly). The business outcome (KPI) is evaluated by the CEO afterwards; closing every ticket does not prove a metric moved. Final review by domain: dev = the current pool over the `objective/<id>` branch; non-dev = verification against criteria and artefacts.
 
+### Safe Tier C and material failure
+
+Tier C closes only on a qualifying independent oracle the orchestrator froze before the build (refs + content hash + type); the orchestrator — never the builder — verifies it, and a builder touching a protected ref fails the ticket instead of closing it as C (`builder_tests` never qualify). A material simple-tier failure resets the candidate, preserves evidence, updates the objective and invokes the planner exactly once; there is no automatic C→B→A→S staircase and no unchanged same-tier retry. Promoted findings record deterministic SHA→ticket→objective attribution when git allows it; without attribution the Tier C late-failure rate stays unknown, never invented.
+
+> Implemented by TASK-2026-00116 (`agents/dev/tier_oracle.py`: freeze/verify; `session.py`: oracle gate + `_material_simple_failure`; `objectives/engine.py`: `record_material_failure`, Tier C telemetry, planner prompt section; `tier_s/inbox.py` + `cycle.py`: §31 attribution + late failures).
+
 ### Flow
 
 ```

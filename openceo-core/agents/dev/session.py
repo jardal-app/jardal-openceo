@@ -15,6 +15,7 @@ from typing import Any
 
 from .review_links import ReviewLinksExtraction, apply_review_links_to_params, extract_review_links
 from .routing import ROUTING_MISSING_REASON, TIER_C_CHAIN, resolve_coding_tool, select_tier_c_link
+from .tier_oracle import freeze_oracle, verify_oracle
 from .tier_s.cycle import AllowAllQuota, TierSCycle
 from .tier_s.gates import baseline_blocked, gates_failed, handoff_gates_section, load_gates, run_gates
 from .tier_s.inbox import InMemoryInboxStore, MongoInboxStore
@@ -29,6 +30,9 @@ from objectives.engine import (
     TicketCloseContext,
     checkout_and_update_objective_branch,
     on_ticket_closed,
+    plan_objective,
+    record_material_failure,
+    record_tier_c,
 )
 from objectives.service import create_internal_ticket, erp_for_task_service
 from .tier_s.review import InMemoryReviewStore, InMemorySlotStore, MongoReviewStore, MongoSlotStore, parse_pool
@@ -135,6 +139,7 @@ class _SimpleBranch:
     base: str
     base_sha: str
     ref: str
+    oracle_frozen: dict[str, Any] | None = None
 
 
 class DevSessionManager:
@@ -257,11 +262,13 @@ class DevSessionManager:
     ) -> DevExecutionOutput:
         """Simple tiers (design §10, F5): one ticket, one session, gates.
 
-        With a resolvable repo the ticket runs the full flow — work branch,
-        baseline, one executor session, orchestrator gates with retries,
-        size brake with escalation to ``tier_s``, mandatory handoff, squash
-        and merge. Without a repo (synthetic configs, unit tests) it keeps
-        the single code step. ``dev.qa`` is retired here: gates replaced it.
+        With a resolvable repo the ticket runs the full flow — work branch
+        (+ frozen oracle for qualifying C, policy §24), baseline, one
+        executor session, orchestrator gates with retries, size brake with
+        material failure (policy §29, no automatic retier to ``tier_s``),
+        mandatory handoff, squash and merge. Without a repo (synthetic
+        configs, unit tests) it keeps the single code step. ``dev.qa`` is
+        retired here: gates replaced it.
         """
         del qa_cfg
         output = DevExecutionOutput(
@@ -279,6 +286,8 @@ class DevSessionManager:
                 return opened
             branch = opened
 
+        if tool == CodingTool.TIER_C:
+            await self._record_tier_c_event(task, "started")
         code_result = await self._step_code(task, project_config, tool)
         output.steps.append(code_result.step)
         output.coding_session_id = code_result.session_id
@@ -389,8 +398,15 @@ class DevSessionManager:
                 waiting_reason=f"needs_owner: baseline_red: {names}",
                 params=task.get("params") if isinstance(task.get("params"), dict) else None,
             )
+        oracle_frozen = None
+        if tool == CodingTool.TIER_C:
+            params = task.get("params") \
+                if isinstance(task.get("params"), dict) else {}
+            oracle_frozen = freeze_oracle(
+                repo, base_sha, (params or {}).get("oracle"), ref)
         return _SimpleBranch(repo=repo, branch=branch, base=base,
-                             base_sha=base_sha, ref=ref)
+                             base_sha=base_sha, ref=ref,
+                             oracle_frozen=oracle_frozen)
 
     def _drop_simple_branch(self, branch: _SimpleBranch) -> None:
         self._simple_git(branch.repo, "checkout", "-q", branch.base)
@@ -450,6 +466,10 @@ class DevSessionManager:
         budgets = (dev_cfg.get("tier_s", {}) or {}).get("budgets", {}) or {}
         exclude = list(dev_cfg.get("budget_exclude", []) or [])
         repo = branch.repo
+        if branch.oracle_frozen is not None:
+            params = dict(output.params or {})
+            params["oracle_frozen"] = branch.oracle_frozen
+            output.params = params
 
         current = self._simple_git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
         if current != branch.branch:
@@ -465,6 +485,27 @@ class DevSessionManager:
             output.status = TaskStatus.WAITING
             output.waiting_reason = "needs_owner: executor produced no changes"
             return output
+
+        if branch.oracle_frozen is not None:
+            tampered = verify_oracle(repo, branch.oracle_frozen)
+            if tampered:
+                names = ", ".join(tampered)
+                output.steps.append(self._step(
+                    "oracle", "failed",
+                    f"protected oracle refs modified by builder: {names}"))
+                if tool == CodingTool.TIER_C:
+                    await self._record_tier_c_event(task, "cycle_failure")
+                return await self._material_simple_failure(
+                    task, project_config, tool, branch,
+                    f"oracle modified: {names}",
+                    prior_steps=output.steps)
+            protected = sum(1 for item in
+                            branch.oracle_frozen.get("refs", [])
+                            if isinstance(item, dict) and item.get("resolved"))
+            output.steps.append(self._step(
+                "oracle", "ok",
+                f"{protected} protected oracle refs intact "
+                f"({branch.oracle_frozen.get('oracle_type')})"))
 
         try:
             specs = load_gates(dev_cfg)
@@ -484,10 +525,14 @@ class DevSessionManager:
                 or "no gates configured"))
             if not failed:
                 break
+            if tool == CodingTool.TIER_C:
+                await self._record_tier_c_event(task, "cycle_failure")
             if attempt >= retries:
                 names = ", ".join(item.name for item in failed)
-                return await self._escalate_simple_to_tier_s(
-                    task, branch, f"gates failed after {retries} retries: {names}")
+                return await self._material_simple_failure(
+                    task, project_config, tool, branch,
+                    f"gates failed after {retries} retries: {names}",
+                    prior_steps=output.steps)
             tail = "\n\n".join(
                 f"[{item.name}] {item.status}: {item.detail}\n{item.output_tail}"
                 for item in failed)
@@ -502,10 +547,11 @@ class DevSessionManager:
         lines_budget = int(budgets.get("lines_per_ticket", 400) or 400)
         brake = int(budgets.get("hard_brake_factor", 2) or 2) * lines_budget
         if files_n > files_budget or lines_n > brake:
-            return await self._escalate_simple_to_tier_s(
-                task, branch,
+            return await self._material_simple_failure(
+                task, project_config, tool, branch,
                 f"size {files_n} files/{lines_n} lines over budget "
-                f"({files_budget}/{brake})")
+                f"({files_budget}/{brake})",
+                prior_steps=output.steps)
 
         handoff_path = repo / ".tier-s" / "HANDOFF.md"
         handoff = ""
@@ -582,6 +628,10 @@ class DevSessionManager:
         if task.get("objective_id"):
             trigger_note = await self._simple_objective_trigger(
                 task, project_config, branch, files, sha, completed_handoff)
+        if tool == CodingTool.TIER_C:
+            # Attributable when the close absorbed its SHA into tickets_log.
+            await self._record_tier_c_event(
+                task, "closed", attributable="failed" not in trigger_note)
         output.status = TaskStatus.COMPLETED
         output.modified_files = files
         output.last_response_summary = (
@@ -634,45 +684,154 @@ class DevSessionManager:
             command, stdin_payload=stdin_payload, timeout=1800,
             cwd=str(repo), env=executor.env or None)
 
-    async def _escalate_simple_to_tier_s(
+    async def _material_simple_failure(
         self,
         task: dict[str, Any],
+        project_config: dict[str, Any],
+        tool: CodingTool,
         branch: _SimpleBranch,
         cause: str,
+        prior_steps: list[dict[str, Any]] | None = None,
     ) -> DevExecutionOutput:
-        """Escalate an oversized simple ticket (§3.4): reset, retier, requeue.
+        """Material simple-tier failure (policy §29, replaces F5 escalation).
 
-        Never converts in place: the branch is reset and dropped,
-        ``coding_tool`` becomes ``tier_s``, and the ticket requeues so the
-        Tier S cycle picks it up fresh.
+        Reset the candidate, preserve deterministic evidence, update the
+        objective and invoke the planner exactly once. The failed ticket
+        stays failed with its tier as history: no automatic staircase to
+        another tier and no same-tier requeue of the unchanged ticket.
+        Without an objective there is no planner to invoke: the ticket
+        fails terminally with evidence, like a code-step error.
+        ``prior_steps`` (oracle/gates rounds) lead the returned trail.
         """
         self._simple_git(branch.repo, "reset", "--hard", "-q", branch.base_sha)
         self._simple_git(branch.repo, "clean", "-fdq")
         self._drop_simple_branch(branch)
         task_id = str(task.get("task_id") or "")
+        tier_label = tool.value if isinstance(tool, CodingTool) else str(tool)
+        evidence = (
+            f"Material {tier_label} failure on {self._simple_ref(task)}: "
+            f"{cause}. Candidate reset to {branch.base_sha[:12]}; "
+            "no automatic retier.")
+        # Terminal first: the planner then sees a failed ticket rather than
+        # an open duplicate, while the same-tier rule still blocks an
+        # unchanged retry (record_material_failure feeds it).
         if self._repo is not None and task_id:
             try:
-                await self._repo.patch_task(task_id, {"coding_tool": "tier_s"})
+                await self._repo.patch_task(task_id, {"status": "failed"})
             except Exception:
-                logger.warning("escalation retier failed for %s", task_id,
-                               exc_info=True)
-        notice = (f"Escalated {self._simple_ref(task)} to tier_s ({cause}). "
-                  "Simple-tier work was reset; the Tier S cycle starts fresh.")
+                logger.warning("material-failure patch failed for %s",
+                               task_id, exc_info=True)
+        objective_id = str(task.get("objective_id") or "")
+        if objective_id:
+            evidence += await self._material_failure_replan(
+                task, project_config, branch.repo, objective_id,
+                tier_label, cause)
         if self._task_service is not None and task_id:
             try:
-                await self._task_service.comment_on_ticket(task_id, notice)
+                await self._task_service.comment_on_ticket(task_id, evidence)
             except Exception:
-                logger.warning("escalation comment failed for %s", task_id,
-                               exc_info=True)
+                logger.warning("material-failure comment failed for %s",
+                               task_id, exc_info=True)
+        params = dict(task.get("params") or {}) \
+            if isinstance(task.get("params"), dict) else {}
+        if branch.oracle_frozen is not None:
+            params["oracle_frozen"] = branch.oracle_frozen
+        params["material_failure"] = {
+            "tier": tier_label,
+            "cause": cause[:500],
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
         return DevExecutionOutput(
-            status=TaskStatus.WAITING,
-            coding_tool=CodingTool.TIER_S,
-            waiting_reason=f"escalated:tier_s:{cause}",
-            resume_at=datetime.now(timezone.utc) + timedelta(minutes=1),
-            last_response_summary=notice,
-            steps=[self._step("escalate", "ok", notice)],
-            params=task.get("params") if isinstance(task.get("params"), dict) else None,
+            status=TaskStatus.FAILED,
+            coding_tool=tool if isinstance(tool, CodingTool) else None,
+            error=evidence[:1500],
+            last_response_summary=evidence,
+            steps=[*(prior_steps or []),
+                   self._step("material_failure", "failed", evidence)],
+            params=params,
         )
+
+    async def _material_failure_replan(
+        self,
+        task: dict[str, Any],
+        project_config: dict[str, Any],
+        repo: Path,
+        objective_id: str,
+        tier_label: str,
+        cause: str,
+    ) -> str:
+        """Record the failure and invoke the planner exactly once (§29).
+
+        Never raises: a replan breakdown is evidence on the failed ticket,
+        not a second failure. The planning run counts against the
+        objective anti-loop limits like any other run.
+        """
+        try:
+            task_id = str(task.get("task_id", ""))
+
+            async def notify(ref: str, text: str) -> None:
+                del ref
+                if self._task_service is not None and task_id:
+                    try:
+                        await self._task_service.comment_on_ticket(
+                            task_id, text)
+                    except Exception:
+                        logger.warning(
+                            "material-failure notify failed for %s",
+                            task_id, exc_info=True)
+
+            tier_s = (project_config.get("dev", {}) or {}).get(
+                "tier_s", {}) or {}
+            env = self._objective_env_for(
+                project_config, repo,
+                ProcessExecutor(
+                    roles=self._executor_roles_with_planner(project_config),
+                    pool=tier_s.get("reviewers", []) or []),
+                self._objective_quota(), notify)
+            await record_material_failure(
+                env.objectives, objective_id, task_id=task_id,
+                title=str(task.get("title", "")), tier=tier_label,
+                cause=cause)
+            result = await plan_objective(env, objective_id)
+            if result.get("ok"):
+                return (f" Planner replan: "
+                        f"{result.get('tickets_created', 0)} ticket(s).")
+            detail = str(result.get("detail") or "").strip()
+            return (f" Planner replan parked "
+                    f"({result.get('reason')}"
+                    f"{': ' + detail[:200] if detail else ''}).")
+        except Exception as exc:
+            return f" Planner replan failed: {exc}"
+
+    async def _record_tier_c_event(
+        self, task: dict[str, Any], event: str, **kwargs: Any,
+    ) -> None:
+        """Best-effort Tier C telemetry (policy §32).
+
+        Objective-bound C tickets only; never fails the execution.
+        """
+        if self._repo is None:
+            return
+        objective_id = str(task.get("objective_id") or "")
+        if not objective_id:
+            return
+        try:
+            params = task.get("params") \
+                if isinstance(task.get("params"), dict) else {}
+            oracle = (params or {}).get("oracle")
+            oracle = oracle if isinstance(oracle, dict) else {}
+            await record_tier_c(
+                MongoObjectiveStore(self._repo), objective_id, event,
+                task_id=str(task.get("task_id") or ""),
+                oracle_type=str(oracle.get("type"))
+                if oracle.get("type") else None,
+                tier_reason=str((params or {}).get("tier_reason") or ""),
+                work_type=str((params or {}).get("work_type") or ""),
+                project=str(task.get("project") or ""),
+                **kwargs)
+        except Exception:
+            logger.warning("tier_c telemetry failed for %s",
+                           task.get("task_id"), exc_info=True)
 
     @staticmethod
     def _executor_roles_with_planner(

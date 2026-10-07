@@ -56,6 +56,86 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _pickaxe_shas(repo: Path, file: str, line: str) -> list[str] | None:
+    """Commit SHAs that changed the occurrences of a line (git pickaxe).
+
+    None when git cannot answer (no repo, timeout, error): attribution
+    then stays unknown instead of guessing.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "log", "--format=%H", "-S", line, "--", file],
+            cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, errors="replace", timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return [part for part in proc.stdout.split() if part]
+
+
+def attribute_finding(
+    repo: Path,
+    file: str,
+    quote: str,
+    candidates: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Attribute a finding to originating tickets (policy §31).
+
+    Deterministic Git backbone: the pickaxe (``git log -S`` over the
+    quote's longest significant line) lists the commits that introduced
+    the quoted code, intersected with the known ticket SHAs from the
+    objective ``tickets_log``. Each candidate carries ``sha``,
+    ``task_id`` and, when known, ``objective_id``, ``coding_tool``,
+    ``tier_reason``, ``oracle_type`` and ``oracle_refs``.
+
+    Returns the §31 record or ``{"status": "unknown", "reason": ...}``
+    when git cannot resolve it: without SHA → ticket attribution the
+    late-failure rate stays unknown, never invented.
+    """
+    unknown = lambda reason: {"status": "unknown", "reason": reason}
+    if not str(file or "").strip() or not str(quote or "").strip():
+        return unknown("empty-finding")
+    candidates_lines = [part.strip() for part in str(quote).splitlines()
+                        if part.strip()]
+    line = max(candidates_lines, key=len) if candidates_lines else ""
+    if len(line) < 8:
+        return unknown("quote-too-short")
+    shas = _pickaxe_shas(repo, str(file).strip(), line)
+    if shas is None:
+        return unknown("git-unavailable")
+    if not shas:
+        return unknown("no-matching-commit")
+    known = [dict(item) for item in candidates
+             if isinstance(item, Mapping) and item.get("sha")
+             and item.get("task_id")]
+    matched: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for sha in shas:
+        for item in known:
+            cand = str(item.get("sha") or "")
+            if not cand or str(item.get("task_id")) in seen:
+                continue
+            if sha == cand or sha.startswith(cand) or cand.startswith(sha):
+                seen.add(str(item.get("task_id")))
+                matched.append({"sha": sha, "ticket": item})
+    if not matched:
+        return unknown("no-known-ticket")
+    first = matched[0]["ticket"]
+    oracle_refs = [str(ref) for ref in first.get("oracle_refs") or []]
+    return {
+        "status": "attributed",
+        "shas": [item["sha"] for item in matched],
+        "ticket_ids": [str(item["ticket"].get("task_id"))
+                       for item in matched],
+        "objective_id": str(first.get("objective_id") or ""),
+        "coding_tool": str(first.get("coding_tool") or ""),
+        "tier_reason": str(first.get("tier_reason") or ""),
+        "oracle_type": str(first.get("oracle_type") or "") or None,
+        "oracle_refs": oracle_refs,
+    }
+
+
 class InboxStore(Protocol):
     """Persistence for ``findings_inbox`` (§15.4)."""
 
@@ -201,13 +281,22 @@ async def mark_assigned(
 
 
 async def mark_promoted(
-    store: InboxStore, fp: str, task_id: str) -> None:
-    """The same finding is never promoted twice (§8.3)."""
+    store: InboxStore, fp: str, task_id: str,
+    attribution: Mapping[str, Any] | None = None,
+) -> None:
+    """The same finding is never promoted twice (§8.3).
+
+    A successful §31 attribution travels on the entry for the Tier C
+    late-failure telemetry; unknown origins record nothing.
+    """
     entry = await store.get_entry(fp)
     if entry is None:
         return
     entry["status"] = "promoted"
     entry["promoted_to"] = task_id
+    if isinstance(attribution, Mapping) \
+            and attribution.get("status") == "attributed":
+        entry["attribution"] = dict(attribution)
     await store.upsert_entry(fp, entry)
 
 
@@ -223,11 +312,14 @@ async def mark_resolved(store: InboxStore, fp: str, stale: bool = False) -> None
 def promotion_ticket(
     entry: Mapping[str, Any],
     fix_tiers: Mapping[str, str] | None = None,
+    attribution: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the deterministic fix-ticket payload (§8.3).
 
     The caller creates it through the internal ticket API (ERPNext first);
-    the fingerprint travels on the ticket so re-sightings converge.
+    the fingerprint travels on the ticket so re-sightings converge. A
+    successful §31 attribution travels on ``params`` plus a description
+    block; unknown origins leave the payload unchanged.
     """
     tiers = dict(FIX_TICKET_TIERS_DEFAULTS)
     tiers.update(fix_tiers or {})
@@ -245,7 +337,7 @@ def promotion_ticket(
     quote = str(entry.get("quote") or "")
     anchor = str(entry.get("anchor") or entry.get("file") or "")
     priority = "high" if (severity == "CRITICAL" or category == "security") else "medium"
-    return {
+    payload: dict[str, Any] = {
         "priority": priority,
         "title": f"[{severity}] {category} en {entry.get('file')}: "
                  f"{quote[:80]}".strip(),
@@ -264,6 +356,21 @@ def promotion_ticket(
         "origin": "inbox_promotion",
         "finding_fingerprint": entry.get("_id"),
     }
+    if isinstance(attribution, Mapping) \
+            and attribution.get("status") == "attributed":
+        payload["params"] = {"attribution": dict(attribution)}
+        tickets = ", ".join(str(item) for item in
+                            attribution.get("ticket_ids") or [])
+        shas = ", ".join(str(item)[:12] for item in
+                         attribution.get("shas") or [])
+        payload["description"] += (
+            f"\nAtribución (§31): {tickets} "
+            f"({attribution.get('coding_tool') or '?'}, oráculo "
+            f"{attribution.get('oracle_type') or 'ninguno'})"
+            f"\nSHA(s): {shas}"
+            f"\nObjetivo: {attribution.get('objective_id') or '?'}"
+        )
+    return payload
 
 
 def _head_lines(repo: Path, ref: str, file: str) -> list[str] | None:
