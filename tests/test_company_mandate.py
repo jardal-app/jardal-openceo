@@ -653,13 +653,14 @@ class _FakeBusiness:
         raise ERPNextValidationError(f"No existe {identifier}", status_code=404)
 
     async def transition_status(
-        self, identifier: str, to_status: str
+        self, identifier: str, to_status: str, *, work_dates: Any = None
     ) -> dict[str, Any]:
         if self.failures:
             raise self.failures.pop(0)
         doc = await self.resolve_task(identifier)
         self.puts.append((doc["name"], to_status))
-        self.docs[doc["name"]] = {**doc, "status": to_status}
+        self.docs[doc["name"]] = {**doc, "status": to_status,
+                                  **dict(work_dates or {})}
         return {"ok": True}
 
 

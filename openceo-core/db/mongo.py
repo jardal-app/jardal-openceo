@@ -858,6 +858,25 @@ class MongoRepository:
         rows = self.tasks.find(query).limit(limit)
         return [self._clean(row) async for row in rows]
 
+    async def list_tasks_pending_visibility(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Tickets con visibilidad derivada pendiente (00146 + 00147).
+
+        El flag lo deja el worker cuando ERPNext está caído; la
+        reconciliación de arranque los reencola. `$exists` + `$nin` para que
+        solo casen valores presentes y no vacíos (los `$ne`/`$nin` solos
+        también casarían la clave ausente). Con el filtro de privacidad de
+        Horizon como la consulta vecina. Acotada: arranque, no barrido.
+        """
+        query: dict[str, Any] = {
+            "params._mirrors.erpnext.pending_visibility": {
+                "$exists": True,
+                "$nin": [None, ""],
+            },
+            **mirror_exclusion_filter(),
+        }
+        rows = self.tasks.find(query).limit(limit)
+        return [self._clean(row) async for row in rows]
+
     async def mark_interrupted_tasks(self) -> int:
         tier_result = await self.tasks.update_many(
             {"status": TaskStatus.IN_PROGRESS.value, "coding_tool": "tier_s"},

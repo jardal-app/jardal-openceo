@@ -107,6 +107,9 @@ class Settings(BaseSettings):
     ERPNEXT_TICKETS_PROJECT_COMPANY: str = "Jardal"
     # Secreto compartido que ERPNext debe enviar en sus webhooks de vuelta (camino inverso).
     ERPNEXT_WEBHOOK_SECRET: str = ""
+    # Zona IANA del sitio ERPNext (`exp_*` son naive en hora local). Defecto
+    # verificado en vivo (00147): UTC-4 fijo en toda la ventana observada.
+    ERPNEXT_SITE_TIMEZONE: str = "America/Caracas"
     # Adjuntos de tickets (TASK-2026-00079). Dos limites, uno por lado:
     # los bytes que aceptamos subir y las raices locales de las que se puede leer un
     # archivo. La raiz es el "alcance autorizado" del ticket: fuera de ella, se rechaza.

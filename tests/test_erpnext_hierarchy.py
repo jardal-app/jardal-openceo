@@ -314,7 +314,7 @@ class FakeBusinessAdapter:
         self.calls.append(kwargs)
         return {"ok": True, "task": {"name": "TASK-2026-00042", "status": "Open"}, "ref": kwargs.get("ref")}
 
-    async def update_status(self, name, status, *, task=None):
+    async def update_status(self, name, status, *, task=None, work_dates=None):
         if self.push_error is not None:
             raise self.push_error
         return {"name": name, "status": status}
