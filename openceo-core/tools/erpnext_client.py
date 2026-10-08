@@ -119,6 +119,18 @@ class ERPNextDependencyBlockedError(ERPNextValidationError):
     """
 
 
+class ERPNextDateBoundError(ERPNextValidationError):
+    """Frappe rechazo fechas que pasan el limite del padre (HTTP 417).
+
+    Es un fallo ACCIONABLE, no de datos: `Expected End Date should be less
+    than or equal to parent task's Expected End Date`. Quien escribe fechas
+    extiende los ancestros y reintenta una vez (el padre corto SI se acepta,
+    asi que extender nunca rebota). Verificado contra el sitio vivo
+    (TASK-2026-00147). Sigue siendo `ValidationError`: los llamadores que
+    solo distinguen duro/transitorio lo ven como duro.
+    """
+
+
 def _payload_texts(payload: Any) -> str:
     """Todo el texto comparable de un cuerpo de error de Frappe, en minusculas."""
     parts: list[str] = []
@@ -147,6 +159,8 @@ def classify_417(payload: Any) -> type[ERPNextError]:
       key '...'` o `must be unique` -> `ERPNextDuplicateError`;
     - bloqueo por dependientes abiertos: `dependant task ... not completed /
       cancelled` -> `ERPNextDependencyBlockedError` (transitorio);
+    - limite de fechas padre/hijo: `InvalidDates` + `parent task` ->
+      `ERPNextDateBoundError` (accionable: extender y reintentar);
     - resto (datos invalidos, padre no-grupo, enlaces, ...) ->
       `ERPNextValidationError` (duro).
     """
@@ -160,6 +174,8 @@ def classify_417(payload: Any) -> type[ERPNextError]:
         return ERPNextDuplicateError
     if "dependant task" in text and "not completed" in text:
         return ERPNextDependencyBlockedError
+    if exc_type == "InvalidDates" and "parent task" in text:
+        return ERPNextDateBoundError
     return ERPNextValidationError
 
 

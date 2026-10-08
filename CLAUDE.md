@@ -232,6 +232,7 @@ ignoran, para no crear un bucle.
 4. **`openceo_ref` es la clave de idempotencia** (nullable, única). Un reintento usa el mismo valor.
 5. **La consola de `bench` decodifica stdin como latin-1**: usar escapes `é` en scripts ASCII.
 6. **`Working` solo con ejecución real**: `Open` = registrado/backlog, sin ejecución. El scheduler solo lanza tickets con `autorun` explícito `True` o legacy sin campo (equivale a `True`); registrar con `autorun=false` persiste el campo y nunca ejecuta ni toca `Working` (TASK-2026-00043: `TaskDocument` no tenía el campo, el `False` se perdía y el ticket aparecía `Working` sin nadie trabajando).
+7. **Visibilidad derivada por evento, nunca a mano**: el % de un grupo, sus fechas y las estimaciones de los abiertos los recalcula su worker propio (`visibility.py` + `_refresh_visibility`); las fechas reales viajan en el mismo PUT del estado. No editar `progress`/`exp_*` a mano para "arreglar" el Gantt: el siguiente evento lo recalcula (TASK-2026-00146 + 00147).
 
 ---
 

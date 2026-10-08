@@ -24,6 +24,12 @@ Notas de esquema verificadas contra el sitio vivo (2026-09-24):
   `list` NO devuelve child tables (solo el GET completo). Al enlazar un hijo, Frappe
   anade solo una fila `depends_on` en el padre, asi que completar exige hijos y
   dependencias cerrados (417 `... dependant task ... not completed / cancelled`).
+- Visibilidad (TASK-2026-00146 + 00147): Frappe NO calcula el % del grupo; SI
+  pone 100 al cerrar una hoja y lo deja al reabrir (leer `status`, no el
+  progress). El fin del hijo no pasa el fin del padre (417 `InvalidDates`;
+  extender ancestros primero); el padre corto si entra. Frappe NO reprograma
+  dependientes al mover fechas. `exp_*` aceptan `YYYY-MM-DD HH:MM:SS` en hora
+  del sitio; `completed_on` es Date y no se pone solo.
 """
 
 from __future__ import annotations
@@ -100,6 +106,33 @@ _TASK_FIELDS = [
     "is_group",
     "parent_task",
 ]
+
+#: Vista de visibilidad (TASK-2026-00146 + 00147): lo que el rollup de un
+#: grupo y el Gantt necesitan de cada hijo. Separada de `_TASK_FIELDS` para
+#: no engordar la superficie MCP de búsqueda.
+_VISIBILITY_CHILD_FIELDS = [
+    "name",
+    "status",
+    "is_group",
+    "progress",
+    "parent_task",
+    "exp_start_date",
+    "exp_end_date",
+    "openceo_coding_tool",
+]
+
+#: Historial para las medianas de duración por tier (00147).
+_VISIBILITY_CLOSED_FIELDS = [
+    "name",
+    "openceo_coding_tool",
+    "exp_start_date",
+    "exp_end_date",
+]
+
+#: Claves cerradas que aceptan los PUTs de visibilidad. Todo lo demás se
+#: rechaza sin escribir (operación cerrada, nunca update genérico).
+_WORK_DATE_FIELDS = frozenset({"exp_start_date", "exp_end_date", "completed_on", "progress"})
+_ROLLUP_FIELDS = frozenset({"progress", "exp_start_date", "exp_end_date"})
 
 
 def depends_on_rows(depends_on: list[str] | None) -> list[dict[str, str]] | None:
@@ -838,12 +871,17 @@ class ERPNextTicketAdapter:
         opencero_status: str | None,
         *,
         task: dict[str, Any] | None = None,
+        work_dates: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Empuja una transicion de estado. Devuelve None si ese estado no se empuja.
 
         Para `completed` (QA condicional) y `waiting` (accion humana nombrable,
         TASK-2026-00118) el destino depende del ticket; sin contexto rige el
         defecto seguro (`Pending Review`).
+
+        `work_dates` (TASK-2026-00147) viaja EN EL MISMO PUT: las fechas reales
+        que fija esa transicion (inicio al pasar a Working, fin al cerrar).
+        Por defecto None y el PUT queda como hasta ahora.
         """
         status = str(opencero_status or "").strip().lower()
         if status in ("completed", "waiting"):
@@ -858,12 +896,29 @@ class ERPNextTicketAdapter:
             target = map_status(status)
         if target is None or not (name or "").strip():
             return None
-        return await self._client.update_doc("Task", name.strip(), {"status": target})
+        body: dict[str, Any] = {"status": target}
+        body.update(self._checked_work_dates(work_dates))
+        return await self._client.update_doc("Task", name.strip(), body)
+
+    @staticmethod
+    def _checked_work_dates(work_dates: dict[str, Any] | None) -> dict[str, Any]:
+        """Valida fechas de un PUT conjunto. Claves cerradas, fail-closed."""
+        if not work_dates:
+            return {}
+        unknown = sorted(set(work_dates) - _WORK_DATE_FIELDS)
+        if unknown:
+            raise ERPNextValidationError(
+                f"Campos de fecha invalidos: {', '.join(unknown)}.",
+                status_code=400,
+            )
+        return dict(work_dates)
 
     async def transition_status(
         self,
         identifier: str,
         to_status: str,
+        *,
+        work_dates: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Fija el estado de negocio exacto. Operacion cerrada (TASK-2026-00132).
 
@@ -875,6 +930,10 @@ class ERPNextTicketAdapter:
         `create_document` generico. El 417 por dependientes abiertos sube
         clasificado (`ERPNextDependencyBlockedError`) para que el servicio lo
         reporte con detalle.
+
+        `work_dates` (TASK-2026-00147) viaja EN EL MISMO PUT: las fechas que
+        fija esa transicion (inicio real, fin real, reapertura). Por defecto
+        None y el PUT escribe solo el estado.
 
         Excepcion (TASK-2026-00043): si el valor guardado de
         `openceo_coding_tool` no es vacio ni una letra v2 vigente, el Select
@@ -888,9 +947,8 @@ class ERPNextTicketAdapter:
         task = await self.resolve_task(identifier)
         name = str(task.get("name") or "").strip()
         body: dict[str, Any] = {"status": target}
-        stored_tool = str(task.get("openceo_coding_tool") or "").strip()
-        if stored_tool and stored_tool not in _CODING_TOOLS:
-            body["openceo_coding_tool"] = None
+        body.update(self._checked_work_dates(work_dates))
+        self._unfreeze_coding_tool(task, body)
         updated = await self._client.update_doc("Task", name, body)
         return {"ok": True, "ticket": self._ticket_view({**task, **(updated or {})})}
 
@@ -1070,6 +1128,111 @@ class ERPNextTicketAdapter:
         # Se devuelve la vista corta, no el documento entero: cada campo de la respuesta
         # viaja al contexto del agente. `changed` dice que se toco.
         return {"ok": True, "changed": sorted(body), "ticket": self._ticket_view({**task, **(updated or {})})}
+
+    # --- visibilidad: progreso de grupos y fechas Gantt (00146 + 00147) ----
+    #
+    # Operaciones cerradas: cada una resuelve identificadores antes de escribir
+    # y escribe un conjunto fijo de campos. El cálculo (reglas, medianas,
+    # estimaciones) vive en `visibility.py` + `TaskService._refresh_visibility`;
+    # aquí solo lectura acotada y PUT exacto.
+
+    async def list_children(
+        self, parent_name: str, *, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """Hijos directos de un grupo con la vista de visibilidad."""
+        name = str(parent_name or "").strip()
+        if not name:
+            return []
+        return await self._client.list_docs(
+            "Task",
+            filters=[["parent_task", "=", name]],
+            fields=_VISIBILITY_CHILD_FIELDS,
+            limit=max(1, min(int(limit or 200), 500)),
+        )
+
+    async def list_closed_with_dates(
+        self, project_name: str, *, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """Cerrados del proyecto para las medianas de duración por tier."""
+        name = str(project_name or "").strip()
+        if not name:
+            return []
+        return await self._client.list_docs(
+            "Task",
+            filters=[["project", "=", name], ["status", "=", "Completed"]],
+            fields=_VISIBILITY_CLOSED_FIELDS,
+            limit=max(1, min(int(limit or 200), 500)),
+        )
+
+    async def update_work_dates(
+        self, identifier: str, dates: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Fija fechas/progreso de trabajo de una hoja. PUT exacto.
+
+        Escribe EXACTAMENTE las claves presentes (None escribe null, para
+        limpiar al reabrir). Vacío o con claves fuera del conjunto cerrado
+        se rechaza sin escribir nada.
+        """
+        body = self._checked_rollup_body(dates, _WORK_DATE_FIELDS, "fechas de trabajo")
+        task = await self.resolve_task(identifier)
+        name = str(task.get("name") or "").strip()
+        self._unfreeze_coding_tool(task, body)
+        updated = await self._client.update_doc("Task", name, body)
+        return {
+            "ok": True,
+            "changed": sorted(body),
+            "ticket": self._ticket_view({**task, **(updated or {})}),
+        }
+
+    async def update_group_rollup(
+        self, identifier: str, rollup: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Fija el % y el span derivados de un grupo. Un solo PUT.
+
+        Igual que `update_work_dates` pero para el padre: claves cerradas
+        (progress/exp_start_date/exp_end_date), presente = se escribe.
+        """
+        body = self._checked_rollup_body(rollup, _ROLLUP_FIELDS, "rollup de grupo")
+        task = await self.resolve_task(identifier)
+        name = str(task.get("name") or "").strip()
+        self._unfreeze_coding_tool(task, body)
+        updated = await self._client.update_doc("Task", name, body)
+        return {
+            "ok": True,
+            "changed": sorted(body),
+            "ticket": self._ticket_view({**task, **(updated or {})}),
+        }
+
+    @staticmethod
+    def _unfreeze_coding_tool(
+        task: dict[str, Any], body: dict[str, Any]
+    ) -> None:
+        """Vacía en el mismo PUT un `openceo_coding_tool` v1 congelado.
+
+        Misma excepción que en `transition_status` (TASK-2026-00043): el
+        Select v2 rechaza CUALQUIER escritura del documento y el ticket queda
+        congelado también para la visibilidad. Cazado por el backfill 00147.
+        """
+        stored_tool = str(task.get("openceo_coding_tool") or "").strip()
+        if stored_tool and stored_tool not in _CODING_TOOLS:
+            body["openceo_coding_tool"] = None
+
+    @staticmethod
+    def _checked_rollup_body(
+        values: dict[str, Any] | None, allowed: frozenset[str], what: str
+    ) -> dict[str, Any]:
+        if not values:
+            raise ERPNextValidationError(
+                f"Nada que escribir: el {what} viene vacío.",
+                status_code=400,
+            )
+        unknown = sorted(set(values) - allowed)
+        if unknown:
+            raise ERPNextValidationError(
+                f"Campos inválidos en {what}: {', '.join(unknown)}.",
+                status_code=400,
+            )
+        return dict(values)
 
     # --- hilo del ticket: comentarios -------------------------------------
 

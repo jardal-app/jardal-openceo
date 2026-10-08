@@ -581,6 +581,14 @@ Business hierarchy is separate and lives in ERPNext: group Tasks (`is_group`), r
 
 > Implemented by TASK-2026-00013 (2026-10-06): `create_group_task`, `convert_to_group`, `link_child`, `set_dependencies` in `tools/erpnext_tickets.py`; content-based 417 classification (`classify_417`); `pending_status` retry for dependency-blocked pushes. Linking a child auto-adds a `depends_on` row on the parent (Frappe-side), so a group cannot complete with open children.
 
+#### Group Progress and Gantt Dates (Derived Visibility)
+
+Group `%`, real start/end dates, deterministic estimates for open tickets, and the group span are DERIVED from business state — never backlog. Frappe computes none of this (verified live): it leaves group progress at 0, keeps leaf progress at 100 after a reopen, never sets `completed_on`, and never reschedules dependents — but it does enforce child-end ≤ parent-end (417 `InvalidDates`), so date writers extend ancestors first and retry once.
+
+Rules live in `openceo-core/visibility.py` (pure, zero LLM); I/O in closed adapter operations (`list_children`, `update_work_dates`, `update_group_rollup`, `list_closed_with_dates`) plus `work_dates` riding the same PUT as the status transition. Recalculation is event-driven through a dedicated visibility queue and worker (push, explicit transition, inverse webhook, creation), always compare-before-write so echoes never write; ERPNext down parks a `pending_visibility` mirror flag for the startup reconcile. Real dates overwrite estimates, estimates never overwrite explicit due dates (externally set dues are adopted into the mirror), and `exp_*` convert through `ERPNEXT_SITE_TIMEZONE` (site-local naive datetimes).
+
+> Implemented by TASK-2026-00146 + TASK-2026-00147 (2026-10-08): `visibility.py`, `ERPNextDateBoundError`, `_refresh_visibility` in `TaskService`, one-shot backfill verified by reread.
+
 #### External References and Notion Compatibility
 
 ERPNext holds the business hierarchy; OpenCEO holds execution dependencies and evidence. A Notion compatibility view may represent parent/child links with a Relation property, but it is not the authority for either hierarchy. Do not assume the conceptual parent relation is implemented by every adapter or duplicate one technical step as a business ticket in each external system.

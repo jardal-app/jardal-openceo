@@ -53,6 +53,7 @@ from state import (
     make_task_review_document,
 )
 from tools.erpnext_client import (
+    ERPNextDateBoundError,
     ERPNextDependencyBlockedError,
     ERPNextDuplicateError,
     ERPNextError,
@@ -66,6 +67,7 @@ from tools.erpnext_tickets import (
     resolve_erpnext_status,
     task_needs_human_review,
 )
+import visibility
 
 if TYPE_CHECKING:
     from tools.erpnext_tickets import ERPNextTicketAdapter
@@ -117,6 +119,10 @@ _TASK_NAME_PATTERN = re.compile(r"TASK-\d+-\d+")
 
 #: Tope de la auditoria de transicion en el espejo: una cita, no un volcado.
 _TRANSITION_AUDIT_MAX = 500
+
+#: `apply_business_status(parent_task=...)`: distingue "el webhook dice sin
+#: padre" (None) de "el llamador no lo pasa" (llamadas viejas/tests).
+_WEBHOOK_PARENT_UNSET: Any = object()
 
 
 def _transition_audit_text(value: Any, limit: int = _TRANSITION_AUDIT_MAX) -> str:
@@ -213,6 +219,10 @@ class TaskService:
         self._notion_worker: asyncio.Task[None] | None = None
         self._erpnext_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._erpnext_worker: asyncio.Task[None] | None = None
+        # Visibilidad derivada (00146 + 00147): cola y worker propios para que
+        # un rollup lento nunca retrase los pushes de estado.
+        self._visibility_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._visibility_worker: asyncio.Task[None] | None = None
         self._horizon_terminal: Any | None = None
         # Dispatcher wake callback (F3 TASK-2026-00113): main.py injects
         # Dispatcher.wake. Read via getattr: tests build TaskService with
@@ -641,6 +651,52 @@ class TaskService:
             finally:
                 self._erpnext_queue.task_done()
 
+    def start_visibility_worker(self) -> None:
+        if self._visibility_worker is not None and not self._visibility_worker.done():
+            return
+        self._visibility_worker = asyncio.create_task(self._visibility_queue_loop())
+
+    async def stop_visibility_worker(self) -> None:
+        if self._visibility_worker is not None:
+            self._visibility_worker.cancel()
+            try:
+                await self._visibility_worker
+            except asyncio.CancelledError:
+                pass
+            self._visibility_worker = None
+
+    async def _visibility_queue_loop(self) -> None:
+        while True:
+            item = await self._visibility_queue.get()
+            try:
+                await self._refresh_visibility(item)
+            except Exception:
+                logger.warning("Fallo recalculando visibilidad", exc_info=True)
+            finally:
+                self._visibility_queue.task_done()
+
+    def _enqueue_visibility(self, task_id: str | None, name: str, reason: str) -> None:
+        """Encola un refresco de visibilidad (00146 + 00147). Nunca lanza.
+
+        El % del grupo, las fechas reales/estimadas y el span del padre son
+        valores DERIVADOS del estado de negocio: se recalculan por evento en
+        su propio worker, fuera del camino crítico, y un fallo aquí no rompe
+        la transición que los originó.
+        """
+        queue = getattr(self, "_visibility_queue", None)
+        if queue is None or not str(name or "").strip():
+            return
+        try:
+            queue.put_nowait(
+                {
+                    "task_id": str(task_id or "") or None,
+                    "name": str(name).strip(),
+                    "reason": str(reason or ""),
+                }
+            )
+        except Exception:
+            logger.warning("No se pudo encolar la visibilidad de %s", name, exc_info=True)
+
     async def _push_status(self, item: dict[str, Any]) -> None:
         """Empuja una transicion con reintento real, no un sleep fijo."""
         adapter = getattr(self, "_erpnext", None)
@@ -651,10 +707,13 @@ class TaskService:
         # (TASK-2026-00118): el destino de `completed`/`waiting` se decide con
         # el ticket fresco, no con el estado encolado. Si QA aprobo o la espera
         # se resolvio entre el encolado y el push, el ticket no va a revision.
+        # `in_progress` también necesita el ticket: sus fechas reales
+        # (started_at) viajan en el mismo PUT (TASK-2026-00147).
         task = None
         if str(item.get("status") or "").strip().lower() in {
             TaskStatus.COMPLETED.value,
             TaskStatus.WAITING.value,
+            TaskStatus.IN_PROGRESS.value,
         }:
             try:
                 repo = getattr(self, "_repo", None)
@@ -664,10 +723,34 @@ class TaskService:
                 logger.warning("No se pudo leer el ticket para QA condicional", exc_info=True)
                 task = None
 
+        work_dates = self._work_dates_for_push(item.get("status"), task)
+        span_extended = False
         delay = 1.0
         for attempt in range(3):
             try:
-                await adapter.update_status(item["name"], item["status"], task=task)
+                try:
+                    await adapter.update_status(
+                        item["name"], item["status"], task=task,
+                        work_dates=work_dates,
+                    )
+                except ERPNextDateBoundError:
+                    # El hijo pasa el fin del padre: se extienden los ancestros
+                    # y se reintenta UNA vez (el padre corto sí entra, así que
+                    # extender no rebota). Si vuelve a fallar, cae al `except
+                    # ERPNextError` exterior como error duro.
+                    if span_extended or not work_dates:
+                        raise
+                    await self._ensure_span_for_child(
+                        adapter,
+                        str(item["name"] or ""),
+                        start=work_dates.get("exp_start_date"),
+                        end=work_dates.get("exp_end_date"),
+                    )
+                    span_extended = True
+                    await adapter.update_status(
+                        item["name"], item["status"], task=task,
+                        work_dates=work_dates,
+                    )
             except ERPNextUnavailable as exc:
                 if attempt == 2:
                     logger.warning(
@@ -697,7 +780,32 @@ class TaskService:
                 return
             else:
                 await self._record_status_outcome(item, pushed=True)
+                self._enqueue_visibility(
+                    str(item.get("task_id") or "") or None,
+                    str(item.get("name") or ""),
+                    f"push:{item.get('status')}",
+                )
                 return
+
+    def _work_dates_for_push(
+        self, openceo_status: Any, task: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        """Fechas del PUT de estado, o None si no aportan nada (00147)."""
+        if not isinstance(task, dict):
+            return None
+        zone = self._site_zone_name()
+        try:
+            dates = visibility.work_dates_for_push(
+                openceo_status=str(openceo_status or ""),
+                started_at=visibility.as_utc_datetime(task.get("started_at")),
+                completed_at=visibility.as_utc_datetime(task.get("completed_at")),
+                zone=zone,
+                now=datetime.now(timezone.utc),
+            )
+        except Exception:
+            logger.warning("No se pudieron calcular las fechas del push", exc_info=True)
+            return None
+        return dates or None
 
     async def _record_status_outcome(self, item: dict[str, Any], *, pushed: bool) -> None:
         """Deja constancia del resultado en `params._mirrors.erpnext`.
@@ -783,6 +891,17 @@ class TaskService:
         # ticket through a single path.
         if self._settings.TASK_AUTORUN and payload.autorun:
             self._wake_dispatcher()
+
+        # Visibilidad (00146 + 00147): estima la hoja nueva y refresca al
+        # padre si lo tiene. Job en cola, fuera del camino crítico.
+        business_name = ""
+        mirrors = self._task_params(created).get("_mirrors")
+        if isinstance(mirrors, dict) and isinstance(mirrors.get("erpnext"), dict):
+            business_name = str(mirrors["erpnext"].get("name") or "").strip()
+        if business_name:
+            self._enqueue_visibility(
+                str(created.get("task_id") or "") or None, business_name, "create"
+            )
 
         return created
 
@@ -1256,6 +1375,8 @@ class TaskService:
         ref: str | None = None,
         business_status: str | None = None,
         deleted: bool = False,
+        parent_task: Any = _WEBHOOK_PARENT_UNSET,
+        business_name: str | None = None,
     ) -> dict[str, Any]:
         """Aplica al runtime una decision tomada por un humano en ERPNext.
 
@@ -1266,6 +1387,11 @@ class TaskService:
         El guardia anti-eco es estructural, no casual: el parche escribe `status_pushed`
         con el mismo valor que el estado nuevo, asi que aunque el observador vea el
         cambio, no lo reenvia a ERPNext.
+
+        Visibilidad (00146 + 00147): el webhook también trae trabajo manual
+        (inicio/cierre/reapertura/relink en desk). Lo derivado se recalcula
+        con un job `kind=visibility`; el eco de nuestros propios PUTs no
+        encola nada (se decide con ejecución + espejo, sin lecturas extra).
         """
         adapter = getattr(self, "_erpnext", None)
         if adapter is None:
@@ -1273,14 +1399,30 @@ class TaskService:
 
         task = await self.find_task_for_business_ref(task_id=task_id, ref=ref)
         if task is None:
+            if str(business_name or "").strip():
+                # Ticket de desk sin ejecución: igualmente deriva (el worker
+                # aplica las reglas sin espejo: solo rellena huecos).
+                self._enqueue_visibility(None, str(business_name).strip(), "webhook:untracked")
             return {"ok": False, "status": "not_found"}
 
         target = _ERPNEXT_BUSINESS_TO_TASK_STATUS.get(str(business_status or "").strip())
         if deleted:
             target = TaskStatus.CANCELLED.value
+        exec_id = str(task.get("task_id") or "")
         if target is None:
+            # El relink se decide con el retorno del sync: la fusión del
+            # espejo muta el dict anidado, así que tras sincronizar ya no se
+            # puede comparar contra el valor previo.
+            if await self._sync_webhook_parent(task, parent_task):
+                self._enqueue_visibility(
+                    exec_id or None, self._webhook_name(task), "webhook:relink"
+                )
+            else:
+                self._enqueue_webhook_ignored(task, business_status)
             return {"ok": True, "status": "ignored", "task_id": task.get("task_id")}
         if str(task.get("status") or "") == target:
+            if await self._sync_webhook_parent(task, parent_task):
+                self._enqueue_visibility(exec_id or None, self._webhook_name(task), "webhook:relink")
             return {"ok": True, "status": "already_applied", "task_id": task.get("task_id")}
 
         params = self._task_params(task)
@@ -1290,6 +1432,10 @@ class TaskService:
             # Guardia anti-eco: el observador compara contra este campo.
             "status_pushed": target,
         }
+        if parent_task is not _WEBHOOK_PARENT_UNSET:
+            live_parent = str(parent_task or "").strip() or None
+            if live_parent != self._visibility_mirror(task).get("parent_task"):
+                mirror["parent_task"] = live_parent
         updates: dict[str, Any] = {
             "status": target,
             "params": self._merge_erpnext_mirror_params(params, mirror),
@@ -1312,6 +1458,7 @@ class TaskService:
         )
         # A business close/cancel frees a slot: dispatch event.
         self._wake_dispatcher()
+        self._enqueue_visibility(exec_id or None, self._webhook_name(task), "webhook:applied")
         result: dict[str, Any] = {
             "ok": True,
             "status": "applied",
@@ -1338,6 +1485,54 @@ class TaskService:
                         task.get("task_id"), exc_info=True)
                     result["objective"] = {"ok": False, "reason": str(exc)[:200]}
         return result
+
+    @staticmethod
+    def _webhook_name(task: dict[str, Any]) -> str:
+        mirror: dict[str, Any] = {}
+        params = task.get("params")
+        if isinstance(params, dict):
+            mirrors = params.get("_mirrors")
+            if isinstance(mirrors, dict) and isinstance(mirrors.get("erpnext"), dict):
+                mirror = mirrors["erpnext"]
+        return str(mirror.get("name") or "").strip()
+
+    async def _sync_webhook_parent(self, task: dict[str, Any], parent_task: Any) -> bool:
+        """Sincroniza el padre del espejo con el doc del webhook. True si cambió."""
+        if parent_task is _WEBHOOK_PARENT_UNSET:
+            return False
+        live_parent = str(parent_task or "").strip() or None
+        if live_parent == self._visibility_mirror(task).get("parent_task"):
+            return False
+        merged = self._merge_erpnext_mirror_params(
+            self._task_params(task), {"parent_task": live_parent}
+        )
+        await self.patch_task(str(task.get("task_id") or ""), {"params": merged})
+        return True
+
+    def _enqueue_webhook_ignored(
+        self, task: dict[str, Any], business_status: str | None
+    ) -> None:
+        """Decide si un webhook `ignored` merece job de visibilidad (00147).
+
+        Sin lecturas extra: Working manual (la ejecución no lo empezó) o
+        reapertura manual a Open (la ejecución sigue cerrada). El eco de
+        nuestros PUTs no cumple ninguna. El relink lo decide quien llama con
+        el retorno de `_sync_webhook_parent` (ver comentario allí).
+        """
+        exec_id = str(task.get("task_id") or "") or None
+        name = self._webhook_name(task)
+        if not name:
+            return
+        status = str(business_status or "").strip()
+        exec_status = str(task.get("status") or "")
+        if status == "Working" and (
+            exec_status != TaskStatus.IN_PROGRESS.value or task.get("started_at") is None
+        ):
+            self._enqueue_visibility(exec_id, name, "webhook:manual")
+        elif status == "Open" and exec_status in (
+            TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value,
+        ):
+            self._enqueue_visibility(exec_id, name, "webhook:manual")
 
     # --- Transicion explicita de estado (TASK-2026-00132) --------------------
     #
@@ -1426,6 +1621,19 @@ class TaskService:
             "status": equivalent,
             "params": merged_params,
         }
+        # Huella temporal real de la sesión (00147): los tickets que cierran
+        # las sesiones por transición no pasaban por el runtime y Mongo se
+        # quedaba sin inicio ni fin. El inicio se fija una vez; la reapertura
+        # limpia el fin.
+        moment = datetime.now(timezone.utc)
+        if target == "Working" and task.get("started_at") is None:
+            updates["started_at"] = moment
+        elif target == "Completed":
+            updates["completed_at"] = moment
+        elif target == "Open":
+            updates["completed_at"] = None
+        elif target == "Cancelled" and task.get("completed_at") is None:
+            updates["completed_at"] = moment
         if target == "Cancelled":
             # Terminal como la del camino inverso: sin despertador y con motivo.
             updates["resume_at"] = None
@@ -1737,10 +1945,42 @@ class TaskService:
                     why=why,
                 )
 
+        try:
+            transition_dates = visibility.work_dates_for_transition(
+                target=target,
+                zone=self._site_zone_name(),
+                now=datetime.now(timezone.utc),
+                explicit_due=self._visibility_mirror(task).get("due_date_explicit"),
+            ) or None
+        except Exception:
+            logger.warning(
+                "No se pudieron calcular las fechas de la transición %s", name,
+                exc_info=True,
+            )
+            transition_dates = None
+        span_extended = False
         delay = 1.0
         for attempt in range(3):
             try:
-                await adapter.transition_status(name, target)
+                try:
+                    await adapter.transition_status(
+                        name, target, work_dates=transition_dates
+                    )
+                except ERPNextDateBoundError:
+                    # Como en `_push_status`: extender ancestros y reintentar
+                    # una vez; si vuelve a fallar es error duro.
+                    if span_extended or not transition_dates:
+                        raise
+                    await self._ensure_span_for_child(
+                        adapter,
+                        name,
+                        start=transition_dates.get("exp_start_date"),
+                        end=transition_dates.get("exp_end_date"),
+                    )
+                    span_extended = True
+                    await adapter.transition_status(
+                        name, target, work_dates=transition_dates
+                    )
                 break
             except ERPNextUnavailable as exc:
                 if attempt == 2:
@@ -1823,6 +2063,9 @@ class TaskService:
             else:
                 task_status = str(task.get("status") or "") or None
                 mirror_state = "execution_gone"
+        self._enqueue_visibility(
+            str((task or {}).get("task_id") or "") or None, name, f"transition:{target}"
+        )
         return {
             "ok": True,
             "outcome": "applied",
@@ -1894,44 +2137,719 @@ class TaskService:
             return 0
 
         pending = await self._repo.list_tasks_needing_erpnext_sync(limit=200)
-        if not pending:
-            return 0
-        logger.info("Startup reconcile ERPNext: %d tickets con enlace roto", len(pending))
-
         queue = getattr(self, "_erpnext_queue", None)
         repaired = 0
-        for task in pending:
-            params = self._task_params(task)
-            mirrors = params.get("_mirrors")
-            mirror = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
-            if not isinstance(mirror, dict):
-                continue
+        if pending:
+            logger.info("Startup reconcile ERPNext: %d tickets con enlace roto", len(pending))
+            for task in pending:
+                params = self._task_params(task)
+                mirrors = params.get("_mirrors")
+                mirror = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
+                if not isinstance(mirror, dict):
+                    continue
 
-            if not str(mirror.get("name") or "").strip():
-                # El ticket de negocio nunca llego a crearse (o no se supo): reintentar.
-                await self._enqueue_erpnext_registration(task)
-                repaired += 1
-                continue
+                if not str(mirror.get("name") or "").strip():
+                    # El ticket de negocio nunca llego a crearse (o no se supo): reintentar.
+                    await self._enqueue_erpnext_registration(task)
+                    repaired += 1
+                    continue
 
-            # El ticket existe pero una transicion no se pudo empujar.
-            status = str(task.get("status") or "")
-            pending_status = str(mirror.get("pending_status") or "").strip()
-            if queue is not None and pending_status:
-                item = {
-                    "task_id": task.get("task_id"),
-                    "name": mirror["name"],
-                    "status": status,
-                }
-                if resolve_erpnext_status(task) is None:
-                    # Ya no hay nada que empujar (p. ej. espera operativa sin
-                    # accion humana): se limpia el pendiente sin HTTP.
-                    await self._record_status_outcome(item, pushed=True)
+                # El ticket existe pero una transicion no se pudo empujar.
+                status = str(task.get("status") or "")
+                pending_status = str(mirror.get("pending_status") or "").strip()
+                if queue is not None and pending_status:
+                    item = {
+                        "task_id": task.get("task_id"),
+                        "name": mirror["name"],
+                        "status": status,
+                    }
+                    if resolve_erpnext_status(task) is None:
+                        # Ya no hay nada que empujar (p. ej. espera operativa sin
+                        # accion humana): se limpia el pendiente sin HTTP.
+                        await self._record_status_outcome(item, pushed=True)
+                    else:
+                        queue.put_nowait(item)
+                    repaired += 1
+
+            logger.info("Startup reconcile ERPNext: %d reparados de %d", repaired, len(pending))
+
+        # Visibilidad pendiente (00146 + 00147): valores derivados que quedaron
+        # sin recalcular con ERPNext caído. Consulta separada para no tocar el
+        # pin de `list_tasks_needing_erpnext_sync`.
+        try:
+            list_pending = getattr(self._repo, "list_tasks_pending_visibility", None)
+            vis_pending = await list_pending(limit=200) if list_pending else []
+        except Exception:
+            logger.warning("No se pudo listar la visibilidad pendiente", exc_info=True)
+            vis_pending = []
+        vis_repaired = 0
+        for task in vis_pending or []:
+            mirror = self._visibility_mirror(task if isinstance(task, dict) else None)
+            flagged = str(mirror.get("pending_visibility") or "").strip()
+            name = str(mirror.get("name") or "").strip() or flagged
+            if not name:
+                continue
+            self._enqueue_visibility(
+                str((task or {}).get("task_id") or "") or None, name, "reconcile"
+            )
+            vis_repaired += 1
+        if vis_repaired:
+            logger.info("Startup reconcile visibilidad: %d reencolados", vis_repaired)
+        return repaired + vis_repaired
+
+    # --- Visibilidad: % de grupos y fechas Gantt (00146 + 00147) -----------
+    #
+    # Valores DERIVADOS del estado de negocio (nunca backlog): % del grupo
+    # desde sus hijos, fechas reales al empezar/cerrar, estimaciones
+    # deterministas para lo abierto y span del grupo. Se recalculan por
+    # evento vía jobs `kind=visibility` de la cola ERPNext; todo es
+    # compare-before-write (sin cambios no hay PUT: el eco no escribe).
+    # ERPNext caído → `pending_visibility` en el espejo (reconciliación o
+    # siguiente evento). Cero LLM, cero polling, cero barridos.
+
+    def _site_zone_name(self) -> str | None:
+        settings = getattr(self, "_settings", None)
+        return getattr(settings, "ERPNEXT_SITE_TIMEZONE", None)
+
+    @staticmethod
+    def _visibility_mirror(execution: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(execution, dict):
+            return {}
+        params = execution.get("params")
+        mirrors = params.get("_mirrors") if isinstance(params, dict) else None
+        mirror = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
+        return dict(mirror) if isinstance(mirror, dict) else {}
+
+    async def _patch_visibility_state(
+        self,
+        task_id: str | None,
+        execution: dict[str, Any] | None,
+        *,
+        mirror: dict[str, Any] | None = None,
+        top: dict[str, Any] | None = None,
+    ) -> None:
+        """Parche de ejecución para visibilidad. Nunca lanza."""
+        repo = getattr(self, "_repo", None)
+        if repo is None or not task_id:
+            return
+        task = execution
+        if not isinstance(task, dict):
+            try:
+                task = await repo.get_task(str(task_id))
+            except Exception:
+                logger.warning(
+                    "No se pudo leer %s para visibilidad", task_id, exc_info=True
+                )
+                return
+        if not isinstance(task, dict):
+            return
+        updates: dict[str, Any] = {}
+        if top:
+            updates.update(top)
+        if mirror:
+            updates["params"] = self._merge_erpnext_mirror_params(
+                self._task_params(task), dict(mirror)
+            )
+        if not updates:
+            return
+        try:
+            # Sin `status`: no dispara al observador (solo espejo/fechas).
+            await repo.patch_task(str(task_id), updates)
+        except Exception:
+            logger.warning(
+                "No se pudo guardar la visibilidad de %s", task_id, exc_info=True
+            )
+
+    async def _refresh_visibility(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Worker `kind=visibility`: recalcula lo derivado de un ticket."""
+        adapter = getattr(self, "_erpnext", None)
+        if adapter is None or not getattr(adapter, "is_enabled", False):
+            return {"ok": False, "status": "no_adapter"}
+        name = str(item.get("name") or "").strip()
+        if not name:
+            return {"ok": False, "status": "no_name"}
+        task_id = str(item.get("task_id") or "").strip() or None
+        reason = str(item.get("reason") or "")
+        try:
+            try:
+                business = await adapter.resolve_task(name)
+            except ERPNextValidationError as exc:
+                if exc.status_code == 404 and task_id:
+                    return await self._rollup_orphan_parent(task_id)
+                raise
+            execution: dict[str, Any] | None = None
+            repo = getattr(self, "_repo", None)
+            if repo is not None and task_id:
+                try:
+                    execution = await repo.get_task(task_id)
+                except Exception:
+                    logger.warning(
+                        "No se pudo leer %s para visibilidad", task_id, exc_info=True
+                    )
+                    execution = None
+            zone = self._site_zone_name()
+            now = datetime.now(timezone.utc)
+            wrote_own = await self._ensure_own_dates(
+                adapter, business, execution, zone, now, reason
+            )
+            rolled = await self._rollup_chain_for(adapter, business)
+            dependents = 0
+            if str(business.get("status") or "").strip() == "Completed":
+                dependents = await self._reestimate_dependents(
+                    adapter, business, execution, zone, now
+                )
+            if task_id:
+                await self._patch_visibility_state(
+                    task_id, execution, mirror={"pending_visibility": None}
+                )
+            return {
+                "ok": True,
+                "own_dates": wrote_own,
+                "rolled": rolled,
+                "dependents": dependents,
+            }
+        except ERPNextUnavailable as exc:
+            logger.warning(
+                "Visibilidad de %s pendiente: ERPNext caído (%s)", name, exc
+            )
+            if task_id:
+                await self._patch_visibility_state(
+                    task_id, None, mirror={"pending_visibility": name}
+                )
+            return {"ok": False, "status": "unavailable"}
+        except ERPNextError as exc:
+            logger.warning("Visibilidad de %s sin recalcular: %s", name, exc)
+            return {"ok": False, "status": "business_error"}
+
+    async def _rollup_orphan_parent(self, task_id: str) -> dict[str, Any]:
+        """El hijo ya no existe (borrado en desk): rollup del padre que
+        recuerda el espejo. Sin padre conocido no hay nada que derivar."""
+        adapter = getattr(self, "_erpnext", None)
+        repo = getattr(self, "_repo", None)
+        if adapter is None or repo is None:
+            return {"ok": False, "status": "no_adapter"}
+        try:
+            execution = await repo.get_task(task_id)
+        except Exception:
+            return {"ok": False, "status": "no_execution"}
+        parent = str(self._visibility_mirror(execution).get("parent_task") or "")
+        parent = parent.strip()
+        if not parent:
+            return {"ok": False, "status": "no_parent"}
+        rolled = await self._rollup_chain(adapter, parent)
+        return {"ok": True, "orphan_parent": parent, "rolled": rolled}
+
+    async def _ensure_own_dates(
+        self,
+        adapter: Any,
+        business: dict[str, Any],
+        execution: dict[str, Any] | None,
+        zone: str | None,
+        now: datetime,
+        reason: str,
+    ) -> bool:
+        """Fechas propias de una hoja. True si escribió. Grupos: no (derivan).
+
+        Completed sin fin/done → sello tardío real. Working sin inicio →
+        sello tardío real. Open y Pending Review (trabajo abierto) →
+        estimación (ver `_estimate_open_ticket`). Cancelled/otros → solo
+        adopción de explícita en el espejo. Las transiciones manuales del
+        desk también dejan su huella temporal en la ejecución
+        (started_at/completed_at) cuando falta.
+        """
+        if business.get("is_group"):
+            return False
+        status = str(business.get("status") or "").strip()
+        if status not in ("Open", "Working", "Completed", "Pending Review"):
+            await self._adopt_due_only(adapter, business, execution)
+            return False
+        name = str(business.get("name") or "").strip()
+        mirror = self._visibility_mirror(execution)
+        live_start = business.get("exp_start_date")
+        live_end = business.get("exp_end_date")
+        task_id = str((execution or {}).get("task_id") or "") or None
+
+        if status in ("Open", "Pending Review"):
+            return await self._estimate_open_ticket(
+                adapter, business, execution, zone, now, reason
+            )
+
+        dates: dict[str, Any] = {}
+        top: dict[str, Any] = {}
+        # Mejor inicio conocido: started_at, creation del negocio (Frappe
+        # siempre la pone) y, en última instancia, now.
+        created_site = visibility.parse_site_datetime(business.get("creation"))
+        created_str = (
+            created_site.strftime(visibility.SITE_DATETIME_FORMAT)
+            if created_site is not None else None
+        )
+        started = visibility.as_utc_datetime((execution or {}).get("started_at"))
+        start_value = (
+            visibility.to_site_datetime(started, zone) if started is not None
+            else created_str if created_str is not None
+            else visibility.to_site_datetime(now, zone)
+        )
+        if status == "Working" and visibility.parse_site_datetime(live_start) is None:
+            dates["exp_start_date"] = start_value
+            if task_id and started is None:
+                top["started_at"] = (
+                    visibility.site_datetime_to_utc(created_str, zone) or now
+                    if created_str is not None else now
+                )
+            if business.get("progress") not in (None, 0, 0.0):
+                # Normaliza el 100 pegado de una reapertura; entre
+                # transiciones el % manual se respeta (aquí no se toca).
+                dates["progress"] = 0
+        if status == "Completed":
+            if visibility.parse_site_datetime(live_start) is None:
+                dates["exp_start_date"] = start_value
+                if task_id and started is None and "started_at" not in top:
+                    top["started_at"] = (
+                        visibility.site_datetime_to_utc(created_str, zone) or now
+                        if created_str is not None else now
+                    )
+            if visibility.parse_site_datetime(live_end) is None:
+                done = visibility.as_utc_datetime((execution or {}).get("completed_at"))
+                dates["exp_end_date"] = visibility.to_site_datetime(done or now, zone)
+                if task_id and done is None:
+                    top["completed_at"] = now
+            if visibility.parse_site_day(business.get("completed_on")) is None:
+                done_day = visibility.as_utc_datetime((execution or {}).get("completed_at"))
+                dates["completed_on"] = visibility.to_site_date(done_day or now, zone)
+
+        # La ejecución adopta las fechas manuales del desk cuando le faltan.
+        if task_id and isinstance(execution, dict):
+            if status == "Working" and execution.get("started_at") is None:
+                adopted = visibility.site_datetime_to_utc(live_start, zone)
+                if adopted is not None:
+                    top["started_at"] = adopted
+            if status == "Completed" and execution.get("completed_at") is None:
+                adopted = visibility.site_datetime_to_utc(live_end, zone)
+                if adopted is not None:
+                    top["completed_at"] = adopted
+
+        mirror_updates: dict[str, Any] = {}
+        if status == "Completed":
+            if mirror.get("exp_end_estimated") is not None:
+                # Consumida: el fin ya es real, no estimado.
+                mirror_updates["exp_end_estimated"] = None
+            # El fin real queda registrado: si el ticket se reabre, el vivo
+            # coincide con él y se trata como obsoleto. Aquí NO se adopta
+            # explícita (el vivo es real por definición; la explícita se
+            # adoptó mientras estaba abierto).
+            real_end = visibility.parse_site_datetime(
+                dates.get("exp_end_date", live_end)
+            )
+            if real_end is not None:
+                real_str = real_end.strftime(visibility.SITE_DATETIME_FORMAT)
+                if real_str != mirror.get("exp_end_real"):
+                    mirror_updates["exp_end_real"] = real_str
+        else:
+            explicit = visibility.adopt_explicit_due(
+                live_end,
+                mirror.get("exp_end_estimated"),
+                mirror.get("due_date_explicit"),
+            )
+            if explicit != mirror.get("due_date_explicit"):
+                mirror_updates["due_date_explicit"] = explicit
+
+        if dates:
+            await self._put_work_dates(adapter, name, dates)
+        if task_id and (mirror_updates or top):
+            await self._patch_visibility_state(
+                task_id, execution,
+                mirror=mirror_updates or None, top=top or None,
+            )
+        return bool(dates)
+
+    async def _adopt_due_only(
+        self,
+        adapter: Any,
+        business: dict[str, Any],
+        execution: dict[str, Any] | None,
+    ) -> None:
+        """Solo registra una explícita adoptada (estados sin semántica de fecha)."""
+        del adapter
+        if not isinstance(execution, dict):
+            return
+        task_id = str(execution.get("task_id") or "") or None
+        if not task_id:
+            return
+        mirror = self._visibility_mirror(execution)
+        explicit = visibility.adopt_explicit_due(
+            business.get("exp_end_date"),
+            mirror.get("exp_end_estimated"),
+            mirror.get("due_date_explicit"),
+        )
+        if explicit != mirror.get("due_date_explicit"):
+            await self._patch_visibility_state(
+                task_id, execution, mirror={"due_date_explicit": explicit}
+            )
+
+    async def _put_work_dates(
+        self, adapter: Any, name: str, dates: dict[str, Any]
+    ) -> None:
+        """PUT de fechas con extender-primero ante DateBound (un reintento)."""
+        try:
+            await adapter.update_work_dates(name, dates)
+        except ERPNextDateBoundError:
+            await self._ensure_span_for_child(
+                adapter,
+                name,
+                start=dates.get("exp_start_date"),
+                end=dates.get("exp_end_date"),
+            )
+            await adapter.update_work_dates(name, dates)
+
+    async def _estimate_open_ticket(
+        self,
+        adapter: Any,
+        business: dict[str, Any],
+        execution: dict[str, Any] | None,
+        zone: str | None,
+        now: datetime,
+        reason: str,
+    ) -> bool:
+        """Estima una hoja Open. True si escribió. Nunca pisa reales,
+        manuales ni explícitas; sin ejecución solo rellena huecos."""
+        name = str(business.get("name") or "").strip()
+        mirror = self._visibility_mirror(execution)
+        live_start = business.get("exp_start_date")
+        live_end = business.get("exp_end_date")
+        rec_start = mirror.get("exp_start_estimated")
+        rec_end = mirror.get("exp_end_estimated")
+
+        # Fin real obsoleto (reapertura): el vivo coincide con el fin que se
+        # registró al cerrar. Se trata como hueco, no como explícita.
+        if visibility.parse_site_datetime(
+            live_end
+        ) is not None and self._same_site_stamp(live_end, mirror.get("exp_end_real")):
+            live_end = None
+        explicit = visibility.adopt_explicit_due(
+            live_end, rec_end, mirror.get("due_date_explicit")
+        )
+
+        start_set = visibility.parse_site_datetime(live_start) is not None
+        end_set = visibility.parse_site_datetime(live_end) is not None
+        start_is_ours = start_set and self._same_site_stamp(live_start, rec_start)
+        end_is_ours = end_set and self._same_site_stamp(live_end, rec_end)
+        end_is_explicit = end_set and self._same_site_stamp(live_end, explicit)
+        stale_done = visibility.parse_site_day(business.get("completed_on")) is not None
+
+        recompute = reason in (
+            "create", "transition:Open", "webhook:manual", "reconcile", "dep_closed",
+        )
+        if start_set and not start_is_ours and rec_start is not None:
+            # Manual: los marcadores propios quedaron viejos.
+            rec_start = None
+        if end_set and not end_is_ours and not end_is_explicit and rec_end is not None:
+            rec_end = None
+        needs_start = not start_set or (start_is_ours and recompute)
+        needs_end = (not end_set or (end_is_ours and recompute)) and not end_is_explicit
+        if not needs_start and not needs_end and not stale_done:
+            if explicit != mirror.get("due_date_explicit") and execution is not None:
+                task_id = str(execution.get("task_id") or "") or None
+                if task_id:
+                    await self._patch_visibility_state(
+                        task_id, execution, mirror={"due_date_explicit": explicit}
+                    )
+            return False
+
+        dates: dict[str, Any] = {}
+        if stale_done:
+            dates["completed_on"] = None
+        end_is_restore = False
+        if needs_start or needs_end:
+            tier = (execution or {}).get("coding_tool") or business.get(
+                "openceo_coding_tool"
+            )
+            dep_ends = await self._dependency_ends(adapter, business)
+            medians: dict[str | None, int] = {}
+            try:
+                rows = await adapter.list_closed_with_dates(
+                    str(business.get("project") or ""),
+                    limit=visibility.MAX_HISTORY_ROWS,
+                )
+                medians = visibility.median_durations(rows or [])
+            except ERPNextUnavailable:
+                raise
+            except ERPNextError as exc:
+                logger.warning("Sin historial para estimar %s: %s", name, exc)
+                medians = {}
+            today = now.astimezone(visibility.site_zone(zone)).date()
+            want_start, want_end = visibility.estimate_window(
+                today=today, tier=tier, dep_ends=dep_ends, medians=medians
+            )
+            if needs_start:
+                dates["exp_start_date"] = want_start
+            if needs_end:
+                # Con compromiso registrado y fin vacío se restaura la
+                # explícita (no es estimación: no se registra como tal);
+                # si no, la estimación fresca.
+                if explicit is not None:
+                    dates["exp_end_date"] = explicit
+                    end_is_restore = True
                 else:
-                    queue.put_nowait(item)
-                repaired += 1
+                    dates["exp_end_date"] = want_end
+            if explicit is not None and "exp_start_date" in dates:
+                # El inicio estimado nunca pasa la explícita (el formato
+                # canónico ordena lexicográficamente igual que cronológico).
+                if dates["exp_start_date"] > explicit:
+                    dates["exp_start_date"] = explicit
+            if business.get("progress") not in (None, 0, 0.0):
+                dates["progress"] = 0
 
-        logger.info("Startup reconcile ERPNext: %d reparados de %d", repaired, len(pending))
-        return repaired
+        await self._put_work_dates(adapter, name, dates)
+        if isinstance(execution, dict):
+            task_id = str(execution.get("task_id") or "") or None
+            if task_id:
+                updates: dict[str, Any] = {"due_date_explicit": explicit}
+                if "exp_start_date" in dates:
+                    updates["exp_start_estimated"] = dates["exp_start_date"]
+                elif rec_start is None and mirror.get("exp_start_estimated") is not None:
+                    updates["exp_start_estimated"] = None
+                if "exp_end_date" in dates:
+                    updates["exp_end_estimated"] = (
+                        None if end_is_restore else dates["exp_end_date"]
+                    )
+                elif rec_end is None and mirror.get("exp_end_estimated") is not None:
+                    updates["exp_end_estimated"] = None
+                await self._patch_visibility_state(task_id, execution, mirror=updates)
+        return True
+
+    @staticmethod
+    def _same_site_stamp(live: Any, recorded: Any) -> bool:
+        live_dt = visibility.parse_site_datetime(live)
+        rec_dt = visibility.parse_site_datetime(recorded)
+        return live_dt is not None and rec_dt is not None and live_dt == rec_dt
+
+    async def _dependency_ends(
+        self, adapter: Any, business: dict[str, Any]
+    ) -> list[Any]:
+        """Fines de los depends_on (GET acotado por dependencia)."""
+        names = depends_on_names(business) or []
+        ends: list[Any] = []
+        for dep in names[: visibility.MAX_DEPENDENT_RESOLVE]:
+            try:
+                doc = await adapter.resolve_task(dep)
+            except ERPNextUnavailable:
+                raise
+            except ERPNextError:
+                continue
+            if isinstance(doc, dict) and doc.get("exp_end_date"):
+                ends.append(doc.get("exp_end_date"))
+        if len(names) > visibility.MAX_DEPENDENT_RESOLVE:
+            logger.warning(
+                "Estimación de %s con depends truncados (%d)",
+                business.get("name"), len(names),
+            )
+        return ends
+
+    async def _rollup_chain_for(
+        self, adapter: Any, business: dict[str, Any]
+    ) -> list[str]:
+        """Rollup desde el sujeto (si es grupo) o desde su padre."""
+        if business.get("is_group"):
+            start = str(business.get("name") or "").strip()
+        else:
+            start = str(business.get("parent_task") or "").strip()
+        if not start:
+            return []
+        return await self._rollup_chain(adapter, start)
+
+    async def _rollup_chain(self, adapter: Any, start_name: str) -> list[str]:
+        """Propaga % + span hacia arriba, un PUT por padre. Tope de fondo."""
+        touched: list[str] = []
+        current = str(start_name or "").strip()
+        depth = 0
+        while current and depth < visibility.MAX_ROLLUP_DEPTH:
+            try:
+                changed, parent = await self._rollup_single(adapter, current)
+            except ERPNextValidationError as exc:
+                if exc.status_code == 404:
+                    break
+                raise
+            if changed:
+                touched.append(current)
+            current = str(parent or "").strip()
+            depth += 1
+        if current:
+            logger.warning("Rollup truncado por fondo en %s", current)
+        return touched
+
+    async def _rollup_single(self, adapter: Any, name: str) -> tuple[bool, str | None]:
+        """Recalcula un grupo. Devuelve (escribió, padre)."""
+        business = await adapter.resolve_task(name)
+        parent = str(business.get("parent_task") or "").strip() or None
+        children = await adapter.list_children(
+            name, limit=visibility.MAX_CHILDREN_ROLLUP
+        )
+        explicit: str | None = None
+        try:
+            execution = await self.find_task_for_business_ref(
+                task_id=str(business.get("openceo_task_id") or "").strip() or None,
+                ref=str(business.get("openceo_ref") or "").strip() or None,
+            )
+        except Exception:
+            execution = None
+        if isinstance(execution, dict):
+            raw = self._visibility_mirror(execution).get("due_date_explicit")
+            parsed = visibility.parse_site_datetime(raw)
+            explicit = parsed.strftime(visibility.SITE_DATETIME_FORMAT) if parsed else None
+        progress = visibility.group_progress(children or [])
+        start, end = visibility.group_span(children or [], explicit)
+        desired: dict[str, Any] = {}
+        try:
+            live_progress = round(float(business.get("progress") or 0.0), 2)
+        except (TypeError, ValueError):
+            live_progress = 0.0
+        if live_progress != progress:
+            desired["progress"] = progress
+        live_start = visibility.parse_site_datetime(business.get("exp_start_date"))
+        live_start_str = (
+            live_start.strftime(visibility.SITE_DATETIME_FORMAT) if live_start else None
+        )
+        if live_start_str != start:
+            desired["exp_start_date"] = start
+        live_end = visibility.parse_site_datetime(business.get("exp_end_date"))
+        live_end_str = (
+            live_end.strftime(visibility.SITE_DATETIME_FORMAT) if live_end else None
+        )
+        if live_end_str != end:
+            desired["exp_end_date"] = end
+        if not desired:
+            return False, parent
+        try:
+            await adapter.update_group_rollup(name, desired)
+        except ERPNextDateBoundError:
+            # El grupo pasa a SU padre: extender arriba y reintentar una vez.
+            await self._ensure_span_for_child(
+                adapter, name,
+                start=desired.get("exp_start_date"),
+                end=desired.get("exp_end_date"),
+            )
+            await adapter.update_group_rollup(name, desired)
+        return True, parent
+
+    async def _ensure_span_for_child(
+        self, adapter: Any, name: str, *, start: Any, end: Any
+    ) -> None:
+        """Extiende los ancestros para abarcar [start, end]. Nunca estrecha.
+
+        Dos pasadas: primero sube leyendo la cadena, luego aplica de arriba
+        abajo para que cada PUT respete a su (ya extendido) padre. El padre
+        corto entra siempre, así que extender no rebota.
+        """
+        want_start = visibility.parse_site_datetime(start)
+        want_end = visibility.parse_site_datetime(end)
+        if want_start is None and want_end is None:
+            return
+        try:
+            child = await adapter.resolve_task(name)
+        except ERPNextError:
+            return
+        chain: list[tuple[str, Any, Any]] = []
+        current = str(child.get("parent_task") or "").strip()
+        while current and len(chain) < visibility.MAX_ROLLUP_DEPTH:
+            try:
+                doc = await adapter.resolve_task(current)
+            except ERPNextError:
+                break
+            chain.append((
+                current,
+                visibility.parse_site_datetime(doc.get("exp_start_date")),
+                visibility.parse_site_datetime(doc.get("exp_end_date")),
+            ))
+            current = str(doc.get("parent_task") or "").strip()
+        # Wants de abajo arriba, aplicación de arriba abajo.
+        levels: list[tuple[str, Any, Any, Any, Any]] = []
+        for level_name, live_start, live_end in chain:
+            want_start = min(
+                [w for w in (want_start, live_start) if w is not None],
+                default=None,
+            )
+            want_end = max(
+                [w for w in (want_end, live_end) if w is not None],
+                default=None,
+            )
+            levels.append((level_name, live_start, live_end, want_start, want_end))
+        for level_name, live_start, live_end, want_s, want_e in reversed(levels):
+            need: dict[str, Any] = {}
+            # Solo se extienden límites PRESENTES: contra un None Frappe no
+            # acota (los hijos con fechas bajo padres sin fechas lo prueban
+            # en vivo) y escribirlo podría invertir un span parcial. El
+            # rollup posterior fija los spans exactos.
+            if want_s is not None and live_start is not None and want_s < live_start:
+                need["exp_start_date"] = want_s.strftime(visibility.SITE_DATETIME_FORMAT)
+            if want_e is not None and live_end is not None and want_e > live_end:
+                need["exp_end_date"] = want_e.strftime(visibility.SITE_DATETIME_FORMAT)
+            if need:
+                await adapter.update_group_rollup(level_name, need)
+
+    async def _reestimate_dependents(
+        self,
+        adapter: Any,
+        business: dict[str, Any],
+        execution: dict[str, Any] | None,
+        zone: str | None,
+        now: datetime,
+    ) -> int:
+        """Al cerrar, re-estima los abiertos que dependen del sujeto.
+
+        El `list` no devuelve child tables (`depends_on` solo viaja en el
+        GET completo), así que es una lista de abiertos + GET acotado por
+        candidato. Sin ejecución (sin project_key) no hay por dónde
+        listar: se omite.
+        """
+        project_key = str((execution or {}).get("project") or "").strip()
+        if not project_key:
+            return 0
+        subject = str(business.get("name") or "").strip()
+        try:
+            rows = await adapter.search_tickets(
+                status="Open", project_key=project_key,
+                limit=visibility.MAX_DEPENDENT_RESOLVE,
+            )
+        except ERPNextUnavailable:
+            raise
+        except ERPNextError as exc:
+            logger.warning("Sin re-estimación tras %s: %s", subject, exc)
+            return 0
+        count = 0
+        for row in (rows or [])[: visibility.MAX_DEPENDENT_RESOLVE]:
+            candidate = str(row.get("name") or "").strip()
+            if not candidate or candidate == subject:
+                continue
+            try:
+                doc = await adapter.resolve_task(candidate)
+            except ERPNextUnavailable:
+                raise
+            except ERPNextError:
+                continue
+            if not isinstance(doc, dict):
+                continue
+            if str(doc.get("status") or "").strip() != "Open":
+                continue
+            if subject not in (depends_on_names(doc) or []):
+                continue
+            try:
+                dep_execution = await self.find_task_for_business_ref(
+                    task_id=str(doc.get("openceo_task_id") or "").strip() or None,
+                    ref=str(doc.get("openceo_ref") or "").strip() or None,
+                )
+            except Exception:
+                dep_execution = None
+            try:
+                if await self._estimate_open_ticket(
+                    adapter, doc, dep_execution, zone, now, "dep_closed"
+                ):
+                    count += 1
+            except ERPNextUnavailable:
+                raise
+            except ERPNextError as exc:
+                logger.warning("Sin re-estimar %s: %s", candidate, exc)
+                continue
+        return count
 
     async def _ensure_notion_mirror(self, task: dict[str, Any]) -> dict[str, Any]:
         """Create a Notion mirror page for a task. Called reactively from CRUD operations only."""

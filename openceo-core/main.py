@@ -363,6 +363,7 @@ async def lifespan(_: FastAPI):
         # Mirror workers + startup repairs (ex-WaitingTaskScheduler.start).
         task_service.start_notion_worker()
         task_service.start_erpnext_worker()
+        task_service.start_visibility_worker()
         await task_service.startup_reconcile_notion_mirrors()
         await task_service.startup_reconcile_erpnext()
         await dispatcher.start()
@@ -465,6 +466,7 @@ async def lifespan(_: FastAPI):
         await dispatcher.stop()
         await task_service.stop_notion_worker()
         await task_service.stop_erpnext_worker()
+        await task_service.stop_visibility_worker()
         await dev_session_service.shutdown()
         if erpnext_adapter is not None:
             await erpnext_adapter.aclose()
@@ -1109,6 +1111,9 @@ async def erpnext_task_webhook(
         ref=doc.get("openceo_ref"),
         business_status=doc.get("status"),
         deleted=deleted,
+        # Visibilidad (00146 + 00147): relink manual y tickets de desk.
+        parent_task=doc.get("parent_task"),
+        business_name=doc.get("name"),
     )
 
 

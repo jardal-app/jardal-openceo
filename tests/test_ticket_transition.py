@@ -106,15 +106,15 @@ class FakeBusinessAdapter:
             f"No existe el ticket {identifier}.", status_code=404
         )
 
-    async def transition_status(self, identifier, to_status):
+    async def transition_status(self, identifier, to_status, *, work_dates=None):
         self.ops.append("put")
         if self.failures:
             raise self.failures.pop(0)
         doc = await self.resolve_task(identifier)
         name = str(doc.get("name"))
-        self.puts.append((name, to_status))
+        self.puts.append((name, to_status, dict(work_dates or {})))
         if not self.ignore_puts:
-            self.docs[name] = {**doc, "status": to_status}
+            self.docs[name] = {**doc, "status": to_status, **dict(work_dates or {})}
         return {"ok": True, "ticket": {"name": name, "status": to_status}}
 
 
