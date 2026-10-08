@@ -290,8 +290,14 @@ class DevSessionManager:
             assert repo is not None
             if output.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.ESCALATED):
                 await self._repo.release_repo_lock(repo, holder)
-            elif output.status == TaskStatus.WAITING:
+            elif output.status == TaskStatus.WAITING and output.resume_at is not None:
+                # Resumable wait (transient/quota): the session comes back.
                 await self._repo.touch_repo_lock(repo, holder)
+            elif output.status == TaskStatus.WAITING:
+                # Human wait (needs_owner, no resume): the session never comes
+                # back by itself (TASK-2026-00122); holding the lock would wedge
+                # the repo for 24h (live: E1 diagnostic blocked E2 review).
+                await self._repo.release_repo_lock(repo, holder)
         if classified is not None:
             # The simple-tier path drops input params when no review links
             # change; reattach the classification so it persists.

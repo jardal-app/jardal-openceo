@@ -135,7 +135,10 @@ class ValidateProjectTests(unittest.TestCase):
         role = planner["role"]
         self.assertEqual(role["model"], "muse-spark-1.3-contributor")
         self.assertEqual(role["command"][0], "musej")
-        self.assertIn("--reasoning-effort", role["command"])
+        # musej owns access/effort flags (TASK-2026-00122): the command
+        # carries subcommand+model only, never wrapper flags.
+        self.assertNotIn("--reasoning-effort", role["command"])
+        self.assertNotIn("--yolo", role["command"])
         self.assertTrue(planner["agents"]["dev"]["enabled"])
         self.assertFalse(planner["agents"]["research"]["enabled"])
         # Moved out of Tier S: no planner role or timeout under dev.tier_s.
@@ -308,6 +311,79 @@ class LooseSessionDefaultsTests(unittest.TestCase):
             self.assertTrue(codex_cmd and str(codex_cmd[0]).endswith("codexf"), name)
             claude_cmd = (providers.get("claude") or {}).get("command") or []
             self.assertTrue(claude_cmd and str(claude_cmd[0]).endswith("claudej"), name)
+
+
+class MusejWrapperFlagGuardTests(unittest.TestCase):
+    """musej-based commands never repeat wrapper-owned flags (TASK-2026-00122).
+
+    The ``musej`` wrapper appends ``--yolo --disable-sandbox
+    --disable-approval --approval-mode never --trust-workspace
+    --reasoning-effort max`` after the config argv. Repeating a
+    non-repeatable flag (``--reasoning-effort``) makes clap exit 2, which
+    broke every live headless run (planner, CEO, builder, closer, tier_c)
+    until the F7 pilot caught it. Bare-``muse`` commands (isolated
+    reviewers) keep their own flags: no wrapper appends for them.
+    """
+
+    WRAPPER_OWNED = frozenset({
+        "--yolo", "--disable-sandbox", "--disable-approval",
+        "--approval-mode", "--trust-workspace", "--reasoning-effort",
+    })
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _commands(self, node, where="cfg"):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "command" and isinstance(value, list):
+                    yield where, [str(token) for token in value]
+                else:
+                    yield from self._commands(value, f"{where}.{key}")
+        elif isinstance(node, (list, tuple)):
+            for index, value in enumerate(node):
+                yield from self._commands(value, f"{where}[{index}]")
+
+    def test_no_musej_command_repeats_wrapper_flags(self) -> None:
+        cfg = _loader_for(self.root).load_project("anything")
+        bad = []
+        seen = 0
+        for where, argv in self._commands(cfg):
+            if not argv or argv[0] != "musej":
+                continue
+            seen += 1
+            dupes = [token for token in argv if token in self.WRAPPER_OWNED]
+            if dupes:
+                bad.append(f"{where}: {dupes}")
+        self.assertGreater(seen, 0, "expected musej commands in defaults")
+        self.assertEqual([], bad)
+
+    def test_bare_muse_commands_keep_their_own_flags(self) -> None:
+        cfg = _loader_for(self.root).load_project("anything")
+        bare = [(where, argv) for where, argv in self._commands(cfg)
+                if argv and argv[0] == "muse"]
+        self.assertGreater(len(bare), 0, "expected bare-muse commands")
+        for where, argv in bare:
+            self.assertIn("--reasoning-effort", argv, where)
+
+    def test_project_yamls_repeat_no_wrapper_flags(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        checked = 0
+        for path in sorted((repo / "projects").glob("*/project.yaml")):
+            with path.open(encoding="utf-8") as handle:
+                data = yaml.safe_load(handle) or {}
+            for where, argv in self._commands(data, path.parent.name):
+                if not argv or not str(argv[0]).endswith("musej"):
+                    continue
+                checked += 1
+                dupes = [token for token in argv
+                         if token in self.WRAPPER_OWNED]
+                self.assertEqual([], dupes, f"{where}: {argv}")
+        self.assertGreater(checked, 0, "expected musej provider commands")
 
 
 if __name__ == "__main__":

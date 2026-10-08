@@ -472,6 +472,116 @@ def _child(task_id: str, status: str, *, dev: bool,
     return task
 
 
+class ConvertedShellNeverReadyTests(unittest.IsolatedAsyncioTestCase):
+    """Converted tickets are terminal, never ready (TASK-2026-00122).
+
+    F7 proved it live: with only a converted shell and a completed child,
+    ``on_ticket_closed`` answered ``enqueuer-continues``, so no objective
+    could replan past its first batch (OBJ-BD88AAFA). Converted tickets
+    never execute: the shell carries the children and superseded tickets
+    decompose inside.
+    """
+
+    async def test_close_last_child_replans_past_converted_shell(self) -> None:
+        repo = _scratch_repo(self)
+        tasks = {
+            "shell-1": {**_child("shell-1", "converted", dev=True),
+                        "title": "shell"},
+            "kid-1": {**_child("kid-1", "completed", dev=True),
+                      "title": "kid"},
+        }
+        env, planner, created, _patches, _notices = _env_for(
+            self, repo, [_plan_result(_dev_ticket())], tasks=tasks)
+        await env.objectives.create_objective({
+            "objective_id": "OBJ-1", "project": "proj", "status": "active",
+            "anchor": {"goal": "g", "acceptance": []},
+            "conversion_source_task_id": "shell-1",
+        })
+        result = await engine_mod.on_ticket_closed(env, tasks["kid-1"], None)
+        self.assertNotEqual(result.get("action"), "enqueuer-continues")
+        self.assertEqual(planner.runs, 1)
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["objective_id"], "OBJ-1")
+
+    async def test_converted_dependency_does_not_block(self) -> None:
+        repo = _scratch_repo(self)
+        tasks = {
+            "shell-1": {**_child("shell-1", "converted", dev=True)},
+            "kid-1": {**_child("kid-1", "queued", dev=True),
+                      "blocked_by": ["shell-1"]},
+        }
+        env, _planner, _created, _patches, _notices = _env_for(
+            self, repo, [_plan_result(_dev_ticket())], tasks=tasks)
+        self.assertFalse(await engine_mod._blocked(env, tasks["kid-1"]))
+
+
+class FailedChildrenAreHistoryTests(unittest.IsolatedAsyncioTestCase):
+    """Failed tickets are history, not work (TASK-2026-00122).
+
+    F7 proved it live: with a failed probe (bc913cf7) beside completed
+    children, ``on_ticket_closed`` answered ``enqueuer-continues`` and
+    ``verify_delivery`` reported ``still failed`` open gaps, so E1
+    (OBJ-BD88AAFA) could neither replan nor reach final review. The
+    dispatcher never launches failed tickets: they are evidence for the
+    planner, never dispatchable or close-blocking work. Failed stays out
+    of TERMINAL_TICKET_STATUS so the planner prompt keeps showing
+    failures and the stall brake keeps tripping without terminal closes.
+    """
+
+    async def test_close_last_child_replans_past_failed_sibling(self) -> None:
+        repo = _scratch_repo(self)
+        tasks = {
+            "shell-1": {**_child("shell-1", "converted", dev=True),
+                        "title": "shell"},
+            "kid-fail": {**_child("kid-fail", "failed", dev=True),
+                         "title": "probe"},
+            "kid-1": {**_child("kid-1", "completed", dev=True),
+                      "title": "kid"},
+        }
+        env, planner, created, _patches, _notices = _env_for(
+            self, repo, [_plan_result(_dev_ticket())], tasks=tasks)
+        await env.objectives.create_objective({
+            "objective_id": "OBJ-1", "project": "proj", "status": "active",
+            "anchor": {"goal": "g", "acceptance": []},
+            "conversion_source_task_id": "shell-1",
+        })
+        result = await engine_mod.on_ticket_closed(env, tasks["kid-1"], None)
+        self.assertNotEqual(result.get("action"), "enqueuer-continues")
+        self.assertEqual(planner.runs, 1)
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["objective_id"], "OBJ-1")
+
+    async def test_verify_delivery_excludes_failed_from_open_gaps(self) -> None:
+        objective = {"objective_id": "OBJ-1",
+                     "conversion_source_task_id": "shell-1"}
+        children = [
+            _child("shell-1", "converted", dev=True),
+            _child("kid-fail", "failed", dev=True),
+            _child("kid-1", "completed", dev=True),
+        ]
+        verdict = verify_delivery(objective, children)
+        self.assertEqual(verdict["open_gaps"], [])
+        self.assertEqual(verdict["data_gaps"], [])
+        self.assertTrue(verdict["ok"])
+        self.assertEqual(verdict["failed_children"], ["kid-fail"])
+        self.assertEqual(verdict["work_children"], 2)
+        self.assertEqual(verdict["terminal_children"], 1)
+
+    async def test_failed_child_without_contract_is_data_gap(self) -> None:
+        objective = {"objective_id": "OBJ-1",
+                     "conversion_source_task_id": "shell-1"}
+        children = [
+            _child("shell-1", "converted", dev=True),
+            _child("kid-fail", "failed", dev=True,
+                   acceptance=[], artefacts=[]),
+        ]
+        verdict = verify_delivery(objective, children)
+        self.assertEqual(verdict["open_gaps"], [])
+        self.assertFalse(verdict["ok"])
+        self.assertEqual(len(verdict["data_gaps"]), 2)
+        self.assertEqual(verdict["failed_children"], ["kid-fail"])
+
+
 class FinalReviewTests(unittest.IsolatedAsyncioTestCase):
     async def _objective(self, env: ObjectiveEnv) -> None:
         await env.objectives.create_objective({

@@ -1,12 +1,15 @@
-# Mandato de empresa (TASK-2026-00110, F4 TASK-2026-00114).
-# Reglas que el dueño da al CEO una sola vez. El CEO nunca lo modifica:
-# solo por instruccion del dueno (voz, Horizon o ticket). Esquema en
-# openceo-core/company_mandate.py; contrato en ARCHITECTURE_REFERENCE §Proactive CEO.
 version: 1
-ejes: []
+ejes:
+- id: piloto_f7
+  meta: 'Piloto F7 (temporal): verificar el ciclo CEO-objetivo-encolador-cierre con
+    un unico objetivo operativo acotado sobre un proyecto existente; retirar el eje
+    al cerrar TASK-2026-00122.'
+  kpis:
+  - id: objetivos_activos
+    fuente: objectives.active
 presupuesto:
   moneda: USD
-  gasto_nuevo_sin_preguntar: "0.00"
+  gasto_nuevo_sin_preguntar: '0.00'
   cuota: suscripciones_ya_pagadas
 limites:
   objetivos_activos: 3
@@ -15,8 +18,8 @@ limites:
 revision_ceo:
   cadencia: semanal
 escalar_al_dueno:
-  - gasto_nuevo
-  - accion_irreversible
-  - replanificacion_estrategica
-  - cambio_de_mandato
-  - revision_exigida_por_politica
+- gasto_nuevo
+- accion_irreversible
+- replanificacion_estrategica
+- cambio_de_mandato
+- revision_exigida_por_politica
