@@ -60,6 +60,25 @@ class TaskStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+#: Typed dispatcher wait reasons (``waiting_reason`` values, F3
+#: TASK-2026-00113). Shared vocabulary: the dispatcher writes them,
+#: ``RateMonitor.admission_for_ticket`` returns them, the dashboard and
+#: Horizon read them through the existing queries. All classify as
+#: operational (``waiting_needs_human_review`` allowlists human patterns
+#: only), so parked tickets never queue the owner.
+WAIT_LIMIT_GLOBAL = "limit_global"
+WAIT_LIMIT_PROJECT = "limit_project"
+WAIT_LIMIT_OBJECTIVE = "limit_objective"
+WAIT_QUOTA_RESERVED = "quota_reserved"
+#: Quota-full wait. Reuses the legacy ``rate_limit_queued`` string pinned by
+#: ``test_autonomy_gates`` and ``test_coding_tool_routing``.
+WAIT_QUOTA = "rate_limit_queued"
+WAIT_BLOCKED_BY = "blocked_by"
+#: Same value as ``REPO_BUSY_REASON`` in ``agents.dev.session`` (the
+#: build-time enforcement) so filters keep working.
+WAIT_REPO_BUSY = "repo_busy"
+
+
 class WorkflowRunStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"

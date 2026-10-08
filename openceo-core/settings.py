@@ -197,7 +197,11 @@ class Settings(BaseSettings):
     # queued (autorun=false) so conversion can be verified first; release
     # them later via POST /api/tasks/{task_id}/run.
     TIER_S_OBJECTIVE_CHILD_AUTORUN: bool = True
-    WAITING_POLL_SECONDS: int = 60
+    # F3 dispatcher (TASK-2026-00113): events + one conditional backup
+    # trigger. No polling: WAITING_POLL_SECONDS is retired.
+    DISPATCHER_BACKUP_SECONDS: int = 300
+    DISPATCHER_MAX_ACTIVE_PER_PROJECT: int = 1
+    DISPATCHER_MAX_ACTIVE_PER_OBJECTIVE: int = 6
     PROJECTS_DIR: str = "projects"
     # F6 (TASK-2026-00115): roots for end-to-end project creation. Repos live
     # as siblings of the OpenCEO checkout; the vault lives in jardal-knowledge.
