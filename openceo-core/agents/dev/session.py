@@ -1201,9 +1201,9 @@ class DevSessionManager:
             account = str(tier_cfg.get("account") or "codexj")
             provider_cfg = providers.get("codex", {}) or {}
             return TierExecutor(
-                argv=self._with_model_args(
+                argv=self._ensure_codex_exec(self._with_model_args(
                     [account, "exec", "--ephemeral", "-"],
-                    self._model_args(tier_cfg)),
+                    self._model_args(tier_cfg))),
                 prompt_via="stdin",
                 cwd=self._provider_cwd(provider_cfg, repo_cwd),
                 env=self._provider_env(provider_cfg),
@@ -1305,6 +1305,22 @@ class DevSessionManager:
         if any(token in ("-p", "--print") for token in argv):
             return list(argv)
         return [*argv, "--print"]
+
+    @staticmethod
+    def _ensure_codex_exec(argv: list[str]) -> list[str]:
+        """Headless guard for codex one-shot (TASK-2026-00157).
+
+        The codex TUI refuses a piped stdin with rc=1
+        ("Error: stdin is not a terminal"); the non-interactive form is
+        ``codex exec`` (root cause TASK-2026-00153). Insert ``exec``
+        after the binary when the argv names a codex* binary without
+        it. Idempotent; non-codex argv pass through unchanged.
+        """
+        if not argv or "exec" in argv[1:]:
+            return list(argv)
+        if not Path(argv[0]).name.lower().startswith("codex"):
+            return list(argv)
+        return [argv[0], "exec", *argv[1:]]
 
     @staticmethod
     def _provider_cwd(provider_cfg: dict[str, Any], repo_cwd: str | None) -> str | None:

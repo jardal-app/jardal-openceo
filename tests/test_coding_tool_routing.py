@@ -359,6 +359,54 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
         assert calls[0]["stdin"] is not None
         self.assertTrue(calls[0]["stdin"].startswith("Lee CLAUDE.md y "))
 
+    def test_ensure_codex_exec_converts_interactive_argv(self) -> None:
+        # TASK-2026-00157 regression (root cause TASK-2026-00153): the
+        # legacy interactive codex argv (project.yaml@3128146, no `exec`)
+        # trips the TUI TTY gate on a piped stdin (rc=1). The guard
+        # inserts `exec` after the binary, mirroring _ensure_print_flag.
+        legacy = ["/home/develop/.local/bin/codex", "--sandbox",
+                  "workspace-write", "-a", "never", "--no-alt-screen"]
+        self.assertEqual(
+            DevSessionManager._ensure_codex_exec(legacy),
+            ["/home/develop/.local/bin/codex", "exec", "--sandbox",
+             "workspace-write", "-a", "never", "--no-alt-screen"])
+        # Idempotent on the headless form; non-codex argv pass through.
+        headless = ["codexj", "exec", "--ephemeral", "-"]
+        self.assertEqual(
+            DevSessionManager._ensure_codex_exec(headless), headless)
+        other = ["claudej", "--print"]
+        self.assertEqual(
+            DevSessionManager._ensure_codex_exec(other), other)
+
+    async def test_codex_exec_guard_eliminates_tty_gate(self) -> None:
+        # End-to-end with a stub modeling the codex TTY gate only (no
+        # tokens, no real CLI): interactive argv via pipe reproduces the
+        # signature; the same argv through the guard runs headless.
+        stub = ('#!/bin/sh\nfor a in "$@"; do case "$a" in exec)'
+                ' cat >/dev/null; echo OK; exit 0;; esac; done\n'
+                'if [ ! -t 0 ]; then echo "Error: stdin is not a terminal"'
+                ' >&2; exit 1; fi\necho TUI; exit 0\n')
+        with tempfile.TemporaryDirectory(prefix="codex-guard-") as tmp:
+            exe = Path(tmp) / "codex"
+            exe.write_text(stub, encoding="utf-8")
+            exe.chmod(0o755)
+            manager = self._manager()
+            buggy = await manager._run_process_detailed(
+                [str(exe), "--sandbox", "workspace-write", "-a", "never",
+                 "--no-alt-screen"],
+                stdin_payload="prompt", timeout=30, cwd=tmp, env={})
+            self.assertFalse(buggy.ok)
+            self.assertIn("stdin is not a terminal", buggy.stderr)
+            guarded = DevSessionManager._ensure_codex_exec(
+                [str(exe), "--sandbox", "workspace-write", "-a", "never",
+                 "--no-alt-screen"])
+            self.assertIn("exec", guarded)
+            fixed = await manager._run_process_detailed(
+                guarded, stdin_payload="prompt",
+                timeout=30, cwd=tmp, env={})
+            self.assertTrue(fixed.ok, fixed.stderr)
+            self.assertNotIn("stdin is not a terminal", fixed.stderr)
+
     async def test_step_code_without_repo_files_has_no_preamble(self) -> None:
         manager = self._manager()
         calls = []
