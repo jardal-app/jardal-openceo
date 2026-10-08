@@ -56,6 +56,26 @@ const statusColors = {
   cancelled: 'badge-danger',
 }
 
+const waitReasonLabels = {
+  limit_global: 'Sin hueco global',
+  limit_project: 'Sin hueco en el proyecto',
+  limit_objective: 'Sin hueco en el objetivo',
+  quota_reserved: 'Cuota reservada a Tier S',
+  rate_limit_queued: 'Esperando cuota',
+  repo_busy: 'Repo ocupado',
+  blocked_by: 'Bloqueado por dependencia',
+  routing_missing: 'Sin tier asignado',
+  erpnext_pending: 'Sin enlace con negocio',
+}
+
+function waitReasonLabel(reason) {
+  const key = String(reason || '').split(':')[0].trim()
+  const label = waitReasonLabels[key]
+  if (!label) return reason
+  const detail = String(reason || '').slice(key.length).trim()
+  return detail ? `${label} ${detail}` : label
+}
+
 const tierLabels = {
   tier_s: 'Tier S · Consensus',
   tier_a: 'Tier A',
@@ -928,6 +948,12 @@ export default function TicketDetail() {
                 <div className="info-row">
                   <dt className="info-label">Reanudar en</dt>
                   <dd className="info-value">{formatDate(ticket.resume_at)}</dd>
+                </div>
+              )}
+              {ticket.waiting_reason && (
+                <div className="info-row">
+                  <dt className="info-label">En espera</dt>
+                  <dd className="info-value" title={ticket.waiting_reason}>{waitReasonLabel(ticket.waiting_reason)}</dd>
                 </div>
               )}
             </dl>

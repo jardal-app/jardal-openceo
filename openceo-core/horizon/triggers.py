@@ -1,8 +1,10 @@
 """Trabajo intencional persistido y el unico timer que despierta a Horizon.
 
-Por que esto no reutiliza ``WaitingTaskScheduler`` (``openceo-core/scheduler.py``):
+Por que esto no reutilizo ``WaitingTaskScheduler`` (retirado en
+TASK-2026-00113; el despacho de tickets vive ahora en
+``openceo-core/dispatcher.py``, con este mismo patron reactivo):
 
-1. **Ese scheduler hace un barrido.** Su bucle es
+1. **Ese scheduler hacia un barrido.** Su bucle era
    ``resume_waiting_tasks(); resume_queued_tickets(); sleep(60)`` — dos consultas
    sin alcance cada minuto, para siempre. AGENTS.md §5.1 lo prohibe y la
    seccion 9.2 punto 4 lo prohibe expresamente para esta capacidad.

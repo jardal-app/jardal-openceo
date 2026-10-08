@@ -17,7 +17,13 @@ from research.contracts import (
     can_transition,
 )
 from settings import Settings
-from state import DevSessionStatus, TaskStatus, WorkflowRunStatus
+from state import (
+    WAIT_QUOTA,
+    WAIT_QUOTA_RESERVED,
+    DevSessionStatus,
+    TaskStatus,
+    WorkflowRunStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +93,10 @@ class MongoRepository:
     @property
     def repo_locks(self):
         return self.db["repo_locks"]
+
+    @property
+    def dispatcher_backup(self):
+        return self.db["dispatcher_backup"]
 
     @property
     def discovery_runs(self):
@@ -639,6 +649,89 @@ class MongoRepository:
             sort=[("resume_at", ASCENDING)],
         )
         return [self._clean(row) async for row in rows]
+
+    # ------------------------- Dispatcher (F3, TASK-2026-00113) -------------------------
+
+    #: The backup collection holds at most one document: while ready tickets
+    #: wait for a slot it carries the next due time; with an empty queue the
+    #: dispatcher deletes it, so no timer exists. No index beyond ``_id``.
+    DISPATCHER_BACKUP_DOC_ID = "backup"
+
+    async def claim_queued_ticket(self, task_id: str) -> dict[str, Any] | None:
+        """Atomically take a queued ticket for execution (conditional update).
+
+        Only one claimant wins: concurrent dispatch cycles get ``None`` when
+        the ticket is no longer queued. This is a single atomic update, not a
+        fencing token with expiry: crash recovery is the startup
+        ``mark_interrupted_tasks`` plus the dispatcher's bounded reconcile,
+        and an explicit manual ``POST /run`` (force) stays outside the claim
+        by design, serializing on the per-task lock instead. The win
+        notifies the status observer like ``patch_task`` so ERPNext still
+        sees the Working transition.
+        """
+        if not task_id:
+            return None
+        now = datetime.now(timezone.utc)
+        row = await self.tasks.find_one_and_update(
+            {"task_id": task_id, "status": TaskStatus.QUEUED.value},
+            {"$set": {
+                "status": TaskStatus.IN_PROGRESS.value,
+                "started_at": now,
+                "waiting_reason": None,
+                "resume_at": None,
+                "updated_at": now,
+            }},
+            return_document=ReturnDocument.AFTER,
+        )
+        task = self._clean(row)
+        await self._notify_status_observer(task, {"status": TaskStatus.IN_PROGRESS.value})
+        return task
+
+    async def get_dispatcher_backup(self) -> dict[str, Any] | None:
+        return self._clean(await self.dispatcher_backup.find_one(
+            {"_id": self.DISPATCHER_BACKUP_DOC_ID}))
+
+    async def ensure_dispatcher_backup(
+        self, next_run_at: datetime, reason: str = ""
+    ) -> dict[str, Any]:
+        """Create or refresh the single backup trigger. Returns the document."""
+        now = datetime.now(timezone.utc)
+        await self.dispatcher_backup.update_one(
+            {"_id": self.DISPATCHER_BACKUP_DOC_ID},
+            {"$set": {
+                "next_run_at": next_run_at,
+                "reason": str(reason or ""),
+                "updated_at": now,
+            }},
+            upsert=True,
+        )
+        row = await self.get_dispatcher_backup()
+        return row or {"_id": self.DISPATCHER_BACKUP_DOC_ID,
+                       "next_run_at": next_run_at}
+
+    async def clear_dispatcher_backup(self) -> bool:
+        """Delete the backup trigger. True when one existed."""
+        result = await self.dispatcher_backup.delete_one(
+            {"_id": self.DISPATCHER_BACKUP_DOC_ID})
+        return result.deleted_count == 1
+
+    async def clear_quota_park_resumes(self) -> int:
+        """Drop ``resume_at`` on quota-parked queued tickets (fresh quota).
+
+        Called after ``RateMonitor.on_ticket_completed`` refreshes quota: a
+        park written from the stale cache must not resume-hold the ticket
+        until a stale reset instant. Keeps the reason; the dispatcher
+        re-evaluates on the following wake. Returns the cleared count.
+        """
+        result = await self.tasks.update_many(
+            {
+                "status": TaskStatus.QUEUED.value,
+                "waiting_reason": {"$in": [WAIT_QUOTA, WAIT_QUOTA_RESERVED]},
+                "resume_at": {"$ne": None},
+            },
+            {"$set": {"resume_at": None, "updated_at": datetime.now(timezone.utc)}},
+        )
+        return result.modified_count
 
     async def list_tasks_needing_erpnext_sync(self, limit: int = 200) -> list[dict[str, Any]]:
         """Tickets con el enlace de negocio roto, para reconciliar al arrancar.

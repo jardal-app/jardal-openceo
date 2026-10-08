@@ -56,7 +56,7 @@ from project_service import ProjectService
 from qa_review_service import QAReviewService
 from rate_monitor import RateMonitor
 from router import CEORouter
-from scheduler import WaitingTaskScheduler
+from dispatcher import Dispatcher, execution_repo_for_project_config
 from settings import get_settings
 from storage_r2 import delete_files_sync, delete_file_sync, upload_file_sync
 from state import (
@@ -182,11 +182,25 @@ task_service.set_objective_service(objective_service)
 # El repositorio avisa de CADA transicion de estado; el servicio decide cuales se
 # propagan a ERPNext. Se instala aqui porque el repositorio es anterior al servicio.
 repo.set_status_observer(task_service.observe_task_status)
-scheduler = WaitingTaskScheduler(
+def _dispatcher_repo_for(project: str) -> str | None:
+    """Execution repo for the dispatcher lock peek (advisory only)."""
+    try:
+        project_config = config_loader.load_project(project)
+    except Exception:
+        return None
+    return execution_repo_for_project_config(project_config)
+
+
+# F3 dispatcher (TASK-2026-00113): event-driven dispatch + one conditional
+# backup trigger. Replaces the retired WaitingTaskScheduler poll loop.
+dispatcher = Dispatcher(
+    repo=repo,
     settings=settings,
-    task_service=task_service,
-    dev_session_service=dev_session_service,
+    service=task_service,
+    rate_monitor=rate_monitor,
+    repo_for_project=_dispatcher_repo_for,
 )
+task_service.set_dispatcher_wake(dispatcher.wake)
 internal_mcp = build_internal_mcp_mount(settings, task_service, erpnext_adapter)
 global_mcp = build_global_mcp_mount(settings, task_service, erpnext_adapter)
 horizon_service = HorizonService(settings=settings, repo=repo)
@@ -317,7 +331,12 @@ async def lifespan(_: FastAPI):
         await repo.mark_interrupted_tasks()
         await repo.mark_interrupted_dev_sessions()
         await dev_session_service.startup_reconcile()
-        await scheduler.start()
+        # Mirror workers + startup repairs (ex-WaitingTaskScheduler.start).
+        task_service.start_notion_worker()
+        task_service.start_erpnext_worker()
+        await task_service.startup_reconcile_notion_mirrors()
+        await task_service.startup_reconcile_erpnext()
+        await dispatcher.start()
         # Ojo: dentro de ``lifespan`` hay un ``settings = get_settings()`` mas
         # abajo (bloque de auth) que vuelve ``settings`` local a toda la funcion.
         # Leerlo aqui antes de esa asignacion lanzaria UnboundLocalError, asi que
@@ -412,7 +431,9 @@ async def lifespan(_: FastAPI):
         # Horizon se para antes que el resto para que ninguna escritura suya
         # caiga despues de cerrar el repositorio.
         await horizon_scheduler.stop()
-        await scheduler.stop()
+        await dispatcher.stop()
+        await task_service.stop_notion_worker()
+        await task_service.stop_erpnext_worker()
         await dev_session_service.shutdown()
         if erpnext_adapter is not None:
             await erpnext_adapter.aclose()

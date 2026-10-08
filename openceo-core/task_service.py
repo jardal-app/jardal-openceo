@@ -214,6 +214,29 @@ class TaskService:
         self._erpnext_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._erpnext_worker: asyncio.Task[None] | None = None
         self._horizon_terminal: Any | None = None
+        # Dispatcher wake callback (F3 TASK-2026-00113): main.py injects
+        # Dispatcher.wake. Read via getattr: tests build TaskService with
+        # __new__ and without __init__, so the attribute may not exist.
+        self._dispatcher_wake: Any | None = None
+
+    def set_dispatcher_wake(self, wake: Any | None) -> None:
+        """Inject the dispatcher wake-up (called on every queue event).
+
+        The dependency points outward on purpose: TaskService never imports
+        the dispatcher, it just signals. Without a wake the queue events
+        are silent (tests, standalone use).
+        """
+        self._dispatcher_wake = wake
+
+    def _wake_dispatcher(self) -> None:
+        """Signal the dispatcher, never breaking the caller."""
+        wake = getattr(self, "_dispatcher_wake", None)
+        if wake is None:
+            return
+        try:
+            wake()
+        except Exception:
+            logger.warning("Dispatcher wake failed", exc_info=True)
 
     def set_horizon_hooks(self, *, on_task_terminal: Any | None = None) -> None:
         """Inyecta la reaccion de Horizon a un resultado de tarea.
@@ -502,6 +525,8 @@ class TaskService:
                         "waiting_reason": None,
                     },
                 )
+                # The business link healed: a held ticket may be dispatchable.
+                self._wake_dispatcher()
                 logger.info("Enlace ERPNext reparado para el ticket %s -> %s", task["task_id"], mirror["name"])
         except Exception:
             logger.warning("No se pudo reparar el enlace ERPNext del ticket %s", task.get("task_id"), exc_info=True)
@@ -716,29 +741,12 @@ class TaskService:
             )
             return created
 
+        # The dispatcher (F3) owns admission: creation persists queued and
+        # wakes it. No direct launch and no pre-gate here, so priority order,
+        # per-project/per-objective limits and Tier S reserves apply to every
+        # ticket through a single path.
         if self._settings.TASK_AUTORUN and payload.autorun:
-            try:
-                if self._rate_monitor is not None:
-                    can, resume_at = await self._maybe_gate_launch(created)
-                    if not can:
-                        logger.info(
-                            "Rate limit gate: ticket %s queued until %s",
-                            created["task_id"],
-                            resume_at,
-                        )
-                        await self._repo.patch_task(
-                            created["task_id"],
-                            {
-                                "status": TaskStatus.QUEUED.value,
-                                "waiting_reason": "rate_limit_queued",
-                                "resume_at": resume_at,
-                            },
-                        )
-                        return created
-                asyncio.create_task(self.run_task(created["task_id"]))
-            except Exception:
-                logger.exception("Rate monitor gate failed for ticket %s — launching anyway", created["task_id"])
-                asyncio.create_task(self.run_task(created["task_id"]))
+            self._wake_dispatcher()
 
         return created
 
@@ -923,7 +931,11 @@ class TaskService:
             phase = phases[index]
             updates.update(self._phase_entry_updates(task, phases, index, phase, actor_id=actor_id))
 
-        return await self.patch_task(task_id, updates)
+        patched = await self.patch_task(task_id, updates)
+        if patched is not None and updates.get("status") == TaskStatus.QUEUED.value:
+            # A reset landing on an agent phase re-queues: dispatch event.
+            self._wake_dispatcher()
+        return patched
 
     async def bulk_apply_phase_workflow(
         self,
@@ -1262,6 +1274,8 @@ class TaskService:
             task.get("task_id"),
             "eliminado" if deleted else business_status,
         )
+        # A business close/cancel frees a slot: dispatch event.
+        self._wake_dispatcher()
         result: dict[str, Any] = {
             "ok": True,
             "status": "applied",
@@ -2012,6 +2026,8 @@ class TaskService:
                     if failed is not None:
                         await self._hub.broadcast("task_updated", failed)
                         asyncio.create_task(self._fire_notion_sync_back(failed, "failed"))
+                    # A freed slot is a dispatch event even on crash.
+                    self._wake_dispatcher()
                     return failed
 
             final_status = graph_out.get("status", TaskStatus.FAILED.value)
@@ -2091,6 +2107,8 @@ class TaskService:
                     reason = str(updated.get("waiting_reason") or "")
                     if reason.startswith(("routing_missing", "config")):
                         asyncio.create_task(self._comment_wait_on_erp(updated, reason))
+                # Any finished run frees its slot: dispatch event.
+                self._wake_dispatcher()
             return updated
 
     async def _comment_wait_on_erp(self, task: dict[str, Any], reason: str) -> None:
@@ -2533,6 +2551,15 @@ class TaskService:
         updated = await self._repo.patch_task(task_id, updates)
         if updated is not None:
             await self._hub.broadcast("task_updated", updated)
+            if (
+                task.get("autorun") is False
+                and "autorun" in updates
+                and bool(updates["autorun"]) is True
+            ):
+                # An operator unpaused the ticket: dispatch event. The
+                # dispatcher never writes `autorun`, so this cannot
+                # self-wake; no other field wakes here for the same reason.
+                self._wake_dispatcher()
             if any(key in updates for key in {"approval_required", "approval_state"}):
                 asyncio.create_task(self._fire_notion_approval_sync_back(updated))
             # Solo en la transicion a un estado terminal, no en cada parche
@@ -2695,6 +2722,9 @@ class TaskService:
             patched = await self.patch_task(task_id, updates)
             if patched is not None:
                 updated_task = patched
+                if updates.get("status") == TaskStatus.QUEUED.value:
+                    # Rejection/approve-to-agent re-queues: dispatch event.
+                    self._wake_dispatcher()
 
         await self._hub.broadcast("task_review_created", review)
         return {"review": review, "task": updated_task}
@@ -2766,6 +2796,10 @@ class TaskService:
 
         patched = await self.patch_task(task_id, updates)
         updated_task = patched or task
+        if patched is not None and updates.get("status") == TaskStatus.QUEUED.value:
+            # A revert lands on a human phase (waiting) today; if that ever
+            # re-queues, the dispatcher must hear about it.
+            self._wake_dispatcher()
 
         await self._hub.broadcast("task_review_created", review)
         return {"review": review, "task": updated_task}
@@ -2851,102 +2885,14 @@ class TaskService:
     async def get_task(self, task_id: str) -> dict[str, Any] | None:
         return await self._repo.get_task(task_id)
 
-    async def resume_waiting_tasks(self) -> int:
-        now_utc = datetime.now(timezone.utc)
-        due = await self._repo.due_waiting_tasks(now_utc)
-
-        resumed = 0
-        for task in due:
-            if not self._task_allows_autorun(task):
-                continue
-            if task.get("blocked_by") and await self.blockers_open(task):
-                continue
-            task_id = task["task_id"]
-            await self.patch_task(
-                task_id,
-                {
-                    "status": TaskStatus.QUEUED.value,
-                    "waiting_reason": None,
-                    "resume_at": None,
-                },
-            )
-            asyncio.create_task(self.run_task(task_id))
-            resumed += 1
-
-        return resumed
-
-    async def resume_queued_tickets(self) -> int:
-        """Resume queued tickets whose resume_at has passed AND rate limits allow."""
-        if self._rate_monitor is None:
-            return 0
-
-        now_utc = datetime.now(timezone.utc)
-        queued = await self._repo.list_tasks_by_status(TaskStatus.QUEUED)
-        active = await self._repo.list_tasks_by_status(TaskStatus.IN_PROGRESS)
-        active_projects = {str(ticket.get("project") or "default") for ticket in active}
-
-        resumed = 0
-        for ticket in queued:
-            if not self._task_allows_autorun(ticket):
-                continue
-            if ticket.get("blocked_by") and await self.blockers_open(ticket):
-                continue
-            project = str(ticket.get("project") or "default")
-            if project in active_projects:
-                continue
-            resume_at = ticket.get("resume_at")
-            if resume_at is not None:
-                # Motor devuelve naive (UTC) sin tz_aware: normalizar antes de
-                # comparar, o el TypeError mata el scheduler entero.
-                if isinstance(resume_at, datetime) and resume_at.tzinfo is None:
-                    resume_at = resume_at.replace(tzinfo=timezone.utc)
-                if resume_at > now_utc:
-                    continue
-
-            can, new_resume = await self._rate_monitor.can_launch_ticket(
-                ticket, active_tickets=active,
-            )
-            if can:
-                await self.patch_task(
-                    ticket["task_id"],
-                    {
-                        "status": TaskStatus.QUEUED.value,
-                        "waiting_reason": None,
-                        "resume_at": None,
-                    },
-                )
-                asyncio.create_task(self.run_task(ticket["task_id"]))
-                resumed += 1
-                active.append(
-                    {
-                        "task_id": ticket["task_id"],
-                        "project": project,
-                        "status": TaskStatus.IN_PROGRESS.value,
-                    }
-                )
-                active_projects.add(project)
-            elif new_resume:
-                await self._repo.patch_task(
-                    ticket["task_id"],
-                    {"resume_at": new_resume},
-                )
-
-        return resumed
-
-    async def _maybe_gate_launch(
-        self, ticket: dict[str, Any]
-    ) -> tuple[bool, datetime | None]:
-        """Check rate limits before autorunning a ticket."""
-        if self._rate_monitor is None:
-            return True, None
-
-        active = await self._repo.list_tasks_by_status(TaskStatus.IN_PROGRESS)
-        return await self._rate_monitor.can_launch_ticket(
-            ticket, active_tickets=active,
-        )
+    # NOTE (F3 TASK-2026-00113): the dispatch cycle (requeue due waiting +
+    # admit queued) lives in ``dispatcher.Dispatcher`` now; the retired
+    # ``resume_waiting_tasks``/``resume_queued_tickets``/``_maybe_gate_launch``
+    # called ``RateMonitor.can_launch_ticket``, retired in favour of
+    # ``RateMonitor.admission_for_ticket`` (tier-aware reserves + reason).
 
     async def _on_ticket_done(self, ticket: dict[str, Any]) -> None:
-        """Post-completion: QA gate, then refresh rate limits and launch queued tickets."""
+        """Post-completion: QA gate, then refresh rate limits and wake the dispatcher."""
         # Dependency wakeup (§9.5): tickets blocked by this one requeue when
         # it lands terminal-good. Event-driven, no sweeps.
         if str(ticket.get("status") or "") in {"completed", "cancelled"}:
@@ -2966,11 +2912,17 @@ class TaskService:
             return
         try:
             await self._rate_monitor.on_ticket_completed(ticket)
-            launched = await self.resume_queued_tickets()
-            if launched:
-                logger.info("Post-completion: launched %d queued ticket(s)", launched)
+            try:
+                # Fresh quota invalidates stale quota parks: drop their
+                # resume so the wake below re-evaluates instead of
+                # resume-holding them until a stale reset instant.
+                await self._repo.clear_quota_park_resumes()
+            except Exception:
+                logger.warning("Quota park clearing failed", exc_info=True)
         except Exception:
             logger.warning("_on_ticket_done error", exc_info=True)
+        # Quota refreshed after a finish: the dispatcher re-evaluates.
+        self._wake_dispatcher()
 
     async def _requeue_dependents(self, task_id: str) -> int:
         """Requeue tickets directly blocked by ``task_id`` (§9.5).
@@ -2991,6 +2943,8 @@ class TaskService:
                 "resume_at": None,
             })
             requeued += 1
+        if requeued:
+            self._wake_dispatcher()
         return requeued
 
     async def _fire_notion_approval_sync_back(self, task: dict[str, Any]) -> None:

@@ -934,7 +934,7 @@ Project creation is a Tier-0 deterministic workflow (`operations.create_project`
 
 Deterministic, 0 tokens: wakes on ticket created/ready, ticket closed/failed/cancelled (frees a slot), dependency resolved, quota reset (persisted trigger), and service start (bounded reconciliation). While ready tickets wait for a slot it keeps a single persisted backup trigger (e.g. every 5 min); with an empty queue there is no timer. Admission checks active limits (global, per project, per objective), Claude/Codex quota and reservations for Tier S (A/B tickets that would invade them wait as `waiting(quota_reserved)`, never silently drop to C), free resources, the per-repo lock, and lease/fencing against double dispatch.
 
-> pendiente: TASK-2026-00113 (encolador; requires 00043 — the scheduler honouring `autorun=false`).
+> Implemented by TASK-2026-00113 (`openceo-core/dispatcher.py`: `Dispatcher` with a coalesced wake event plus one conditional persisted backup trigger in `dispatcher_backup`; atomic conditional-update claim against concurrent dispatch cycles — crash recovery is startup `mark_interrupted_tasks` plus the bounded reconcile, and explicit manual `POST /run` stays outside the claim by design; typed `waiting_reason` taxonomy; `RateMonitor.admission_for_ticket` with Tier S reserves; limit/repo parks are event-held without `resume_at`, only quota parks carry the reset instant; "not cancelled in ERPNext" is structural via the inverse webhook, with no live ERPNext reads per ticket).
 
 Loose tickets (no `objective_id`) without a tier self-classify at dev dispatch (TASK-2026-00137): deterministic heuristic classifier (`agents/dev/loose_tier.py`, 0 tokens, S → A → C → B order mirroring the routing policy), persisted via the normal execution funnel with `tier_reason` + provenance. Safe default is `tier_b` (upward bias on doubt; C needs explicit freezable oracle evidence); `routing_missing` survives only for objective children without the planner tier (planner/validation gap, fail-closed). The dispatcher consumes the tier and may peek with the same pure function for admission without persisting.
 
@@ -1026,7 +1026,7 @@ If the CEO doesn't find a crystallized workflow, it enters the normal tiers. If 
 3. It claims a bounded set of due jobs, executes the registered workflow, records the result, and persists the next occurrence when appropriate.
 4. A bounded startup recovery handles interrupted work. No periodic full-collection scan, external API sweep, or second watcher repeats the originating side effect.
 
-The legacy `WaitingTaskScheduler` retry loop is an existing compatibility mechanism described under rate limits; it is not the pattern for new ERPNext, knowledge, or recurring-work integrations.
+The `WaitingTaskScheduler` retry loop was retired by TASK-2026-00113 (the F3 dispatcher in `openceo-core/dispatcher.py` follows this same reactive pattern); it is not the pattern for new ERPNext, knowledge, or recurring-work integrations.
 
 ### Personal vs Enterprise
 
@@ -1118,10 +1118,14 @@ When `TASK_AUTORUN=true` and a new ticket arrives:
 ```
 1. Check concurrency: are slots available?
 2. Check provider limits: remaining > reserve for the required provider(s)?
+   (Tier S consumes into the reserve down to zero; Tier A/B wait as
+   quota_reserved instead — TASK-2026-00113)
 3. If both pass → run immediately
-4. If either fails → status="queued", resume_at=earliest_reset_time
-5. Scheduler retries queued tickets every WAITING_POLL_SECONDS
-6. After every ticket completion → refresh limits → try launching queued tickets
+4. If either fails → status="queued" + typed waiting_reason; quota waits
+   carry resume_at=earliest_reset_time, limit waits are event-held
+5. The F3 dispatcher retries on events (created/closed/failed/cancelled/
+   dependency-resolved) plus one conditional backup trigger — no polling
+6. After every ticket completion → refresh limits → wake the dispatcher
 ```
 
 Tier S tickets check both Claude (lead) and Codex (reviewer) limits before launching. Both must pass.
@@ -1180,8 +1184,8 @@ RATE_STATUS_STALE_SECONDS=300
 ### Files
 
 - `openceo-core/rate_monitor.py` — All monitoring, parsing, gating, and detection logic
-- `openceo-core/task_service.py` — Pre-launch gating + post-completion hook
-- `openceo-core/scheduler.py` — Periodic retry of queued tickets
+- `openceo-core/task_service.py` — Queue events (create/finish/requeue/webhook) wake the dispatcher
+- `openceo-core/dispatcher.py` — Event-driven dispatch + conditional backup trigger (F3)
 - `openceo-core/agents/dev/tmux_runtime.py` — Mid-task detection + wait-and-resume in polling loop
 - `openceo-core/orchestration/live.py` — Pre-launch check for Tier S (v2)
 
@@ -1660,7 +1664,7 @@ openceo/
 │   ├── task_service.py
 │   ├── workflow_service.py           # Deterministic execution + discovery proposals
 │   ├── horizon/                      # Private CEO context, planning, and triggers
-│   ├── scheduler.py
+│   ├── dispatcher.py                 # Event-driven dispatch + backup trigger (F3)
 │   ├── rate_monitor.py               # Rate limit tracking, gating, and mid-task detection
 │   ├── events.py
 │   ├── mcp_server.py                 # Internal MCP endpoint for coding agents

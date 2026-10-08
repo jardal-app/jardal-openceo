@@ -19,7 +19,12 @@ import libtmux
 
 from agents.dev.routing import resolved_tool_name
 from settings import Settings
-from state import TaskStatus
+from state import (
+    WAIT_LIMIT_GLOBAL,
+    WAIT_QUOTA,
+    WAIT_QUOTA_RESERVED,
+    TaskStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -530,15 +535,18 @@ class RateMonitor:
             reserve_weekly = self._settings.RATE_CLAUDE_RESERVE_WEEKLY
         return status.remaining_5h > reserve_5h and status.remaining_weekly > reserve_weekly
 
-    async def can_launch_ticket(
+    async def admission_for_ticket(
         self,
         ticket: dict[str, Any],
         active_tickets: list[dict[str, Any]] | None = None,
-    ) -> tuple[bool, datetime | None]:
-        """Full pre-launch check: concurrency + provider limits.
+    ) -> tuple[bool, datetime | None, str | None]:
+        """Full pre-launch check: concurrency slots + provider quota.
 
-        Returns (True, None) if the ticket can launch now.
-        Returns (False, resume_at) if it should wait.
+        Returns (True, None, None) when the ticket may launch now, else
+        (False, resume_at, reason) with a typed dispatcher wait reason.
+        Reserves (``RATE_*_RESERVE_*``) are Tier S quota: Tier A/B tickets
+        that would invade them wait as ``quota_reserved`` and never
+        silently drop to C; Tier S consumes into the reserve down to zero.
         """
         # 1. Concurrency check
         if active_tickets is not None:
@@ -557,8 +565,9 @@ class RateMonitor:
                 else self._settings.RATE_NORMAL_WEIGHT
             )
             if used_slots + needed > self._settings.RATE_MAX_CONCURRENT_TICKETS:
-                # No slots → retry in 2 min (a ticket should finish soon)
-                return False, datetime.now(timezone.utc) + timedelta(minutes=2)
+                # No slots: event-held (a finish wakes the dispatcher), so no
+                # resume_at. Only quota waits carry one (the reset instant).
+                return False, None, WAIT_LIMIT_GLOBAL
 
         # 2. Quota limits per tier (design v2 §4.3, F0.1): Tier S needs the
         # scarce Claude + Codex accounts before the cycle starts; Tier A/B
@@ -574,22 +583,48 @@ class RateMonitor:
             providers_to_check = ["codex"]
         else:
             # tier_c / unknown – always OK
-            return True, None
+            return True, None, None
 
+        use_reserve = ticket_tool != "tier_s"
         earliest_reset: datetime | None = None
+        reserved_only = False
         for provider in providers_to_check:
-            if not await self.can_launch(provider):
-                status = self._cache.get(provider)
-                if status is not None:
-                    reset = min(status.resets_5h_at, status.resets_weekly_at)
-                    if earliest_reset is None or reset < earliest_reset:
-                        earliest_reset = reset
+            status = await self.get_status(provider)
+            if provider == "codex":
+                reserve_5h = self._settings.RATE_CODEX_RESERVE_5H
+                reserve_weekly = self._settings.RATE_CODEX_RESERVE_WEEKLY
+            elif provider == "muse":
+                reserve_5h = self._settings.RATE_MUSE_RESERVE_5H
+                reserve_weekly = self._settings.RATE_MUSE_RESERVE_WEEKLY
+            else:
+                reserve_5h = self._settings.RATE_CLAUDE_RESERVE_5H
+                reserve_weekly = self._settings.RATE_CLAUDE_RESERVE_WEEKLY
+            floor_5h = reserve_5h if use_reserve else 0.0
+            floor_weekly = reserve_weekly if use_reserve else 0.0
+            if (
+                status.remaining_5h <= floor_5h
+                or status.remaining_weekly <= floor_weekly
+            ):
+                if (
+                    use_reserve
+                    and status.remaining_5h > 0
+                    and status.remaining_weekly > 0
+                ):
+                    # Blocked purely by the Tier S reserve: quota exists but
+                    # belongs to S.
+                    reserved_only = True
+                reset = min(status.resets_5h_at, status.resets_weekly_at)
+                if earliest_reset is None or reset < earliest_reset:
+                    earliest_reset = reset
 
         if earliest_reset is not None:
-            # Add 2-min safety margin
-            return False, earliest_reset + timedelta(minutes=2)
+            # Add 2-min safety margin. A/B check a single provider each, so a
+            # reserve-only block is unambiguous; Tier S never sets the flag
+            # (it consumes into the reserve down to zero).
+            reason = WAIT_QUOTA_RESERVED if reserved_only else WAIT_QUOTA
+            return False, earliest_reset + timedelta(minutes=2), reason
 
-        return True, None
+        return True, None, None
 
     async def on_ticket_completed(self, ticket: dict[str, Any]) -> None:
         """Refresh limits after a ticket finishes. Called by task_service."""
