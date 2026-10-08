@@ -950,11 +950,11 @@ Loose tickets (no `objective_id`) without a tier self-classify at dev dispatch (
 
 An Objetivo closes on its delivery criteria, after the final review (`complete_candidate` never closes directly). The business outcome (KPI) is evaluated by the CEO afterwards; closing every ticket does not prove a metric moved. Final review by domain: dev = the current pool over the `objective/<id>` branch; non-dev = verification against criteria and artefacts.
 
-### Safe Tier C and material failure
+### Safe tiers and material failure
 
-Tier C closes only on a qualifying independent oracle the orchestrator froze before the build (refs + content hash + type); the orchestrator — never the builder — verifies it, and a builder touching a protected ref fails the ticket instead of closing it as C (`builder_tests` never qualify). A material simple-tier failure resets the candidate, preserves evidence, updates the objective and invokes the planner exactly once; there is no automatic C→B→A→S staircase and no unchanged same-tier retry. Promoted findings record deterministic SHA→ticket→objective attribution when git allows it; without attribution the Tier C late-failure rate stays unknown, never invented.
+Tier C is the default for specified work a single top-model session can own (TASK-2026-00148): no oracle required to select it. A/B leave the default only with `why_not_c` (what breaks in C); S keeps its consensus pair. All four executors are top-tier models — letters order the work, never the models, and no tier is cheap, free, or weaker. A declared qualifying oracle freezes before the build on any simple tier (refs + content hash + type); the orchestrator — never the builder — verifies it, and a builder touching a protected ref fails the ticket instead of closing it (`builder_tests` never trigger protection). A material simple-tier failure resets the candidate, preserves evidence, updates the objective and invokes the planner exactly once; there is no automatic C→B→A→S staircase and no unchanged same-tier retry. Promoted findings record deterministic SHA→ticket→objective attribution when git allows it; without attribution the Tier C late-failure rate stays unknown, never invented. The planner/objective telemetry keeps the tier mix (`tier_mix`) and the loose classifier records each assignment, as information only — no threshold derives from them.
 
-> Implemented by TASK-2026-00116 (`agents/dev/tier_oracle.py`: freeze/verify; `session.py`: oracle gate + `_material_simple_failure`; `objectives/engine.py`: `record_material_failure`, Tier C telemetry, planner prompt section; `orchestration/inbox.py` + `cycle.py`: §31 attribution + late failures).
+> Implemented by TASK-2026-00116 (`agents/dev/tier_oracle.py`: freeze/verify; `session.py`: oracle gate + `_material_simple_failure`; `objectives/engine.py`: `record_material_failure`, Tier C telemetry, planner prompt section; `orchestration/inbox.py` + `cycle.py`: §31 attribution + late failures) and recalibrated by TASK-2026-00148 (C default, `why_not_c`, uniform §24, `tier_mix` + classifier telemetry).
 
 ### Flow
 
@@ -1040,7 +1040,7 @@ High-stakes tickets (real money, critical infrastructure, security boundaries, d
 
 - **Engine:** `openceo-core/agents/dev/tier_s/` (v2, single-ticket cycle). Shared executors, review pool/rounds, findings, inbox and knowledge live in `openceo-core/orchestration/` (TASK-2026-00141). Cycle roles and reviewer slots live in the global config (`config_loader.py`); checked-in projects carry no routing or Tier S overrides.
 - **Design:** `docs/work/TIER_S_DESIGN_FINAL.md` v2 (TASK-2026-00085): one ticket = one cycle = one builder session; tiers `tier_s/a/b/c`; non-blocking plan review.
-- **Routing:** `coding_tool` per ticket (top-level only). DEV tier semantics and the Tier C oracle rule are normative in `docs/objective-planner-routing-policy.md`.
+- **Routing:** `coding_tool` per ticket (top-level only). DEV tier semantics (C default, `why_not_c` for A/B) and the uniform oracle rule are normative in `docs/objective-planner-routing-policy.md`.
 - **Large work:** decomposition belongs to the single objective planner (§Proactive CEO; TASK-2026-00112/00117), not to Tier S.
 
 Still-live settings from the retired section:

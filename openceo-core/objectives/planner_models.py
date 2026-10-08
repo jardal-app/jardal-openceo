@@ -84,8 +84,8 @@ class OracleRef(BaseModel):
     """Semantic reference emitted by the planner.
 
     Before execution, the orchestrator resolves file/artifact references to
-    their canonical IDs/paths and freezes hashes for qualifying Tier-C oracle
-    inputs.
+    their canonical IDs/paths and freezes hashes for qualifying oracle
+    inputs (any simple tier, policy §24).
     """
 
     ref: str = Field(min_length=1)
@@ -129,6 +129,11 @@ class PlannedTicket(BaseModel):
     why_consensus_is_needed: str | None = None
     why_single_session_is_insufficient: str | None = None
 
+    # Required when coding_tool is tier_a or tier_b (policy §§21/26):
+    # what breaks if the default tier executes this ticket. Accepted
+    # (not required) for tier_s and tier_c; rejected for non-dev.
+    why_not_c: str | None = None
+
     # Tier S v2 §8.4 carry-over (not in the §B schema): pre-existing inbox
     # findings this ticket claims. The orchestrator marks them assigned.
     includes_findings: list[str] = Field(default_factory=list)
@@ -142,7 +147,7 @@ class PlannedTicket(BaseModel):
         return value
 
     @field_validator("tier_reason", "why_consensus_is_needed",
-                     "why_single_session_is_insufficient")
+                     "why_single_session_is_insufficient", "why_not_c")
     @classmethod
     def _optional_fields_nonblank(cls, value: str | None) -> str | None:
         if value is not None and not value.strip():
@@ -175,6 +180,8 @@ class PlannedTicket(BaseModel):
             if self.why_single_session_is_insufficient is not None:
                 raise ValueError(
                     "Tier-S justification is only valid for DEV tickets")
+            if self.why_not_c is not None:
+                raise ValueError("why_not_c is only valid for DEV tickets")
             return self
 
         if self.coding_tool is None:
@@ -189,13 +196,16 @@ class PlannedTicket(BaseModel):
                 raise ValueError(
                     "Tier S requires why_single_session_is_insufficient")
 
-        if self.coding_tool == DevTier.TIER_C:
-            if self.oracle is None:
-                raise ValueError("Tier C requires a qualifying oracle")
-            if self.oracle.type == OracleType.BUILDER_TESTS:
+        if self.coding_tool in (DevTier.TIER_A, DevTier.TIER_B):
+            if not self.why_not_c:
                 raise ValueError(
-                    "builder_tests cannot be the qualifying independent "
-                    "oracle for Tier C")
+                    f"{self.coding_tool.value} requires why_not_c: name "
+                    "what breaks if the default tier executes it")
+
+        # Tier C is the default (policy §25): no oracle required. A
+        # declared oracle of any type is evidence; only qualifying
+        # types freeze (§24), which the orchestrator enforces, not this
+        # schema.
 
         return self
 

@@ -237,24 +237,44 @@ class _FailingPlannerHarness:
 
 
 class MaterialFailureTests(unittest.IsolatedAsyncioTestCase):
-    async def test_open_branch_freezes_c_oracle_only(self) -> None:
+    async def test_open_branch_freezes_declared_oracle_any_simple_tier(
+        self,
+    ) -> None:
+        # Recalibration (TASK-2026-00148): §24 protection is uniform —
+        # any simple tier with a declared qualifying oracle freezes.
         repo = _scratch_repo(self)
         manager = _manager()
         config = _dev_config()
-        opened = manager._open_simple_branch(
-            _c_task(), config, CodingTool.TIER_C, repo)
-        assert isinstance(opened, _SimpleBranch)
-        self.assertIsNotNone(opened.oracle_frozen)
-        assert opened.oracle_frozen is not None
-        self.assertEqual(opened.oracle_frozen["oracle_type"],
-                         "preexisting_tests")
-        self.assertTrue(opened.oracle_frozen["refs"][0]["resolved"])
-        _git(repo, "checkout", "-q", "main")
-        _git(repo, "branch", "-D", opened.branch)
-        opened_b = manager._open_simple_branch(
-            _c_task(), config, CodingTool.TIER_B, repo)
-        assert isinstance(opened_b, _SimpleBranch)
-        self.assertIsNone(opened_b.oracle_frozen)
+        for tier in (CodingTool.TIER_C, CodingTool.TIER_B,
+                     CodingTool.TIER_A):
+            with self.subTest(tier=tier.value):
+                opened = manager._open_simple_branch(
+                    _c_task(), config, tier, repo)
+                assert isinstance(opened, _SimpleBranch)
+                self.assertIsNotNone(opened.oracle_frozen)
+                assert opened.oracle_frozen is not None
+                self.assertEqual(opened.oracle_frozen["oracle_type"],
+                                 "preexisting_tests")
+                self.assertTrue(
+                    opened.oracle_frozen["refs"][0]["resolved"])
+                _git(repo, "checkout", "-q", "main")
+                _git(repo, "branch", "-D", opened.branch)
+
+    async def test_open_branch_without_oracle_freezes_nothing(self) -> None:
+        repo = _scratch_repo(self)
+        manager = _manager()
+        config = _dev_config()
+        for tier in (CodingTool.TIER_C, CodingTool.TIER_B,
+                     CodingTool.TIER_A):
+            with self.subTest(tier=tier.value):
+                task = _c_task()
+                task["params"] = {}
+                opened = manager._open_simple_branch(
+                    task, config, tier, repo)
+                assert isinstance(opened, _SimpleBranch)
+                self.assertIsNone(opened.oracle_frozen)
+                _git(repo, "checkout", "-q", "main")
+                _git(repo, "branch", "-D", opened.branch)
 
     async def test_tampered_oracle_fails_and_replans_once(self) -> None:
         repo = _scratch_repo(self)

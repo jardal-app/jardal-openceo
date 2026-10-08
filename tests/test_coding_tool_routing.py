@@ -153,7 +153,8 @@ class DispatcherRoutingTests(unittest.IsolatedAsyncioTestCase):
             step={"step": "code", "status": "ok"}, prompt="p", summary="s"))
         output = await manager.run(_task(), {})
         self.assertEqual(output.status, TaskStatus.COMPLETED)
-        self.assertEqual(output.coding_tool, CodingTool.TIER_B)
+        # Classifier default is tier_c since TASK-2026-00148.
+        self.assertEqual(output.coding_tool, CodingTool.TIER_C)
         assert output.params is not None
         self.assertIn("tier_reason", output.params)
         manager._step_code.assert_awaited_once()
@@ -177,7 +178,7 @@ class DispatcherRoutingTests(unittest.IsolatedAsyncioTestCase):
             step={"step": "code", "status": "ok"}, prompt="p", summary="s"))
         output = await manager.run(_task(coding_tool="opencode"), {})
         self.assertEqual(output.status, TaskStatus.COMPLETED)
-        self.assertEqual(output.coding_tool, CodingTool.TIER_B)
+        self.assertEqual(output.coding_tool, CodingTool.TIER_C)
         assert output.params is not None
         self.assertIn("tier_reason", output.params)
 

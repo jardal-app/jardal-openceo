@@ -797,6 +797,46 @@ class AdapterOpTests(unittest.TestCase):
                     [("Task", "TASK-2026-00010", {"status": "Completed"})],
                 )
 
+    def test_retier_ticket_escribe_solo_coding_tool(self):
+        """TASK-2026-00148: reclasificacion por PUT cerrado del campo."""
+        client = FakeClient(
+            [business_doc(status="Open", openceo_coding_tool="tier_b")]
+        )
+        adapter = make_adapter(client)
+        result = run(adapter.retier_ticket("TASK-2026-00010", "tier_c"))
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            client.updated,
+            [("Task", "TASK-2026-00010", {"openceo_coding_tool": "tier_c"})],
+        )
+        self.assertEqual(
+            client.docs["TASK-2026-00010"]["openceo_coding_tool"], "tier_c")
+
+    def test_retier_ticket_normaliza_mayusculas(self):
+        client = FakeClient(
+            [business_doc(status="Open", openceo_coding_tool="tier_b")]
+        )
+        adapter = make_adapter(client)
+        run(adapter.retier_ticket("TASK-2026-00010", "  TIER_C "))
+        self.assertEqual(
+            client.updated,
+            [("Task", "TASK-2026-00010", {"openceo_coding_tool": "tier_c"})],
+        )
+
+    def test_retier_ticket_rechaza_valor_no_vigente_sin_escribir(self):
+        """Un valor fuera del Select haria fallar el PUT entero: se
+        rechaza antes de escribir nada."""
+        for bad in ("codex", "tier9", "", "  ", "tier_cx"):
+            with self.subTest(bad=bad):
+                client = FakeClient(
+                    [business_doc(status="Open",
+                                  openceo_coding_tool="tier_b")]
+                )
+                adapter = make_adapter(client)
+                with self.assertRaises(ERPNextValidationError):
+                    run(adapter.retier_ticket("TASK-2026-00010", bad))
+                self.assertEqual(client.updated, [])
+
 
 class FakeMCPServer:
     """Servidor FastMCP minimo: guarda las funciones registradas por nombre."""

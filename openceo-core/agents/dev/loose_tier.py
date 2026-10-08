@@ -9,21 +9,28 @@ assigns it.
 The classifier is deterministic and spends zero tokens: ordered
 heuristic rules over title + description + attachment names (Spanish and
 English), mirroring the normative tier semantics of
-``docs/objective-planner-routing-policy.md`` §18-26 in S → A → C → B order.
+``docs/objective-planner-routing-policy.md`` §18-27 in S → A → B → C
+order (recalibrated by TASK-2026-00148: ``tier_c`` is the default).
 Every decision carries a ``tier_reason`` citing the fired signal, so a
-misclassification is auditable and tunable.
+misclassification is auditable and tunable. A/B decisions also carry
+``why_not_c``: what breaks if the default tier executes the ticket.
 
-Safety bias (explicit rule, scope §3 of the ticket): on doubt the
-classifier errs UPWARD. Assigning a stronger tier than needed wastes
-scarcity; assigning a weaker one accepts wrong work without independent
-detection (C) or under-solves high-stakes work (S/A). The safe default is
-``tier_b``, never ``tier_c``: policy §25 makes the C conjunction
-(qualifying oracle AND bounded/reversible) mandatory, and a keyword rule
-cannot verify an oracle — so C requires explicit, extractable oracle
-evidence (named ``tests/...`` refs) plus a coverage claim plus
-boundedness. ``priority`` alone never selects S (§19), and ``tier_*``
-tokens in the text are NOT honored: the ``coding_tool`` field is the
-explicit channel and this classifier only runs when it is empty.
+Selection bias (explicit rule): keyword signals fire on mere mention,
+so ambiguous high-stakes, discovery or complexity wording resolves
+UPWARD to S/A/B — over-assigning wastes scarcity, under-assigning
+ships complex work to the default tier. Silence resolves to the
+default ``tier_c``: policy §25 selects C for specified work with no
+S/A/B justification, and a keyword rule cannot prove complexity any
+more than it could prove an oracle. ``priority`` alone never selects
+S (§19), and ``tier_*`` tokens in the text are NOT honored: the
+``coding_tool`` field is the explicit channel and this classifier only
+runs when it is empty.
+
+A cited oracle (coverage claim plus ``tests/...`` refs) is attached as
+evidence to any tier and freezes at branch time (§24); it never
+decides the tier. Weak verification or a significant blast radius
+below S stakes (§26) needs judgment the keywords do not have, so the
+planner — not this classifier — owns those two B prongs.
 
 Quota never enters: the signature takes no quota input, so admission
 (00113) cannot be silently degraded by classification. The enqueuer may
@@ -34,14 +41,20 @@ existing ``DevExecutionOutput`` funnel.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
-from typing import Sequence
+from datetime import datetime, timezone
+from typing import Any, Sequence
 
 from state import CodingTool
 
+logger = logging.getLogger(__name__)
+
 #: Provenance marker recorded in ``params.tier_assigned_by``.
-ASSIGNED_BY = "loose_classifier/v1"
+#: v2 = recalibrated S → A → B → C order with ``tier_c`` default
+#: (TASK-2026-00148); v1 decisions were B-default and stay readable.
+ASSIGNED_BY = "loose_classifier/v2"
 
 
 @dataclass(frozen=True)
@@ -54,6 +67,7 @@ class LooseTierDecision:
     oracle: dict | None = None
     why_consensus_is_needed: str | None = None
     why_single_session_is_insufficient: str | None = None
+    why_not_c: str | None = None
 
 
 def _alt(*words: str) -> str:
@@ -202,6 +216,8 @@ _A_UNKNOWN = (
         _phrase("sin diagnosticar"),
     ),
     "dominant difficulty is discovering the true/unknown cause (policy §21)",
+    "executing before knowing the true cause ships the wrong fix; "
+    "discovery must come first (§21)",
 )
 _A_CONTRADICTORY = (
     "a_contradictory",
@@ -213,6 +229,8 @@ _A_CONTRADICTORY = (
         _phrase("evidencias contradictorias"),
     ),
     "dominant difficulty is reconciling contradictory evidence (policy §21)",
+    "executing on unresolved contradictory evidence bakes one reading "
+    "in; reconciliation must come first (§21)",
 )
 _A_LEGACY = (
     "a_legacy",
@@ -226,6 +244,8 @@ _A_LEGACY = (
         _phrase("codigo sin documentar"),
     ),
     "dominant difficulty is recovering undocumented legacy semantics (§21)",
+    "executing on unrecovered legacy semantics breaks hidden behavior; "
+    "recovery must come first (§21)",
 )
 _A_TOOLING = (
     "a_tooling",
@@ -247,6 +267,8 @@ _A_TOOLING = (
         _phrase("broken cd"),
     ),
     "dominant difficulty is recovering broken build/deploy/tooling (§21)",
+    "executing on a broken build/deploy pipeline cannot verify "
+    "anything; recovery must come first (§21)",
 )
 _A_CROSSSYSTEM = (
     "a_crosssystem",
@@ -257,6 +279,8 @@ _A_CROSSSYSTEM = (
         _phrase("cross service"),
     ),
     "dominant difficulty is a cross-system invariant (policy §21)",
+    "executing without mapping the cross-system invariant breaks the "
+    "other side; discovery must come first (§21)",
 )
 _A_SIGNALS = (_A_UNKNOWN, _A_CONTRADICTORY, _A_LEGACY, _A_TOOLING,
               _A_CROSSSYSTEM)
@@ -270,7 +294,109 @@ _A_ARCH_NOUNS = _compile((
          "mecanismo", "mecanismos", "mechanism", "mechanisms"),
 ))
 
-# -- Tier C: qualifying oracle + bounded/reversible (policy §25) --------------
+# -- Tier B: really complex single-session work (policy §26) ------------------
+# Each entry: (signal id, patterns, reason, why_not_c). Deliberately
+# narrow phrases: bare "migration", "refactor" or "backfill" (routine
+# data work, e.g. visibility tickets) must NOT fire — only the
+# complexity-bearing variants below justify leaving the C default.
+_B_REFACTOR = (
+    "b_refactor",
+    (
+        _phrase("semantic refactor"),
+        _phrase("refactorización semántica"),
+        _phrase("refactorizacion semantica"),
+        _phrase("refactor semántico"),
+        _phrase("refactor semantico"),
+        _phrase("refactor without behavior change"),
+        _phrase("refactor sin cambiar el comportamiento"),
+        _phrase("refactor sin cambiar comportamiento"),
+    ),
+    "semantic refactor: errors pass local tests, correctness needs "
+    "judgment (§26)",
+    "a misjudged semantic refactor passes local tests and ships "
+    "behavior drift only judgment-heavy review would catch (§26)",
+)
+_B_MIGRATION = (
+    "b_migration",
+    (
+        _phrase("data migration"),
+        _phrase("migración de datos"),
+        _phrase("migracion de datos"),
+        _phrase("schema migration"),
+        _phrase("migración de esquema"),
+        _phrase("migracion de esquema"),
+        _phrase("migración con compatibilidad"),
+        _phrase("migracion con compatibilidad"),
+    ),
+    "data/schema migration with compatibility constraints (§26)",
+    "a wrong migration step corrupts or strands data past the point "
+    "local tests cover (§26)",
+)
+_B_CONCURRENCY = (
+    "b_concurrency",
+    (
+        _phrase("race condition"),
+        _phrase("condición de carrera"),
+        _phrase("condicion de carrera"),
+        _phrase("data race"),
+        _alt("deadlock", "deadlocks", "interbloqueo", "interbloqueos"),
+        _phrase("concurrency bug"),
+        _phrase("bug de concurrencia"),
+    ),
+    "concurrency defect: timing-dependent, weak verification (§26)",
+    "a timing-dependent bug survives happy-path tests; only reasoning "
+    "about interleavings catches it (§26)",
+)
+_B_PERFORMANCE = (
+    "b_performance",
+    (
+        _phrase("performance optimization"),
+        _phrase("optimización de rendimiento"),
+        _phrase("optimizacion de rendimiento"),
+        _phrase("cuello de botella"),
+        _phrase("cuellos de botella"),
+        _alt("bottleneck", "bottlenecks"),
+        _phrase("performance regression"),
+        _phrase("regresión de rendimiento"),
+        _phrase("regresion de rendimiento"),
+    ),
+    "performance work: needs measurement-driven trade-offs (§26)",
+    "a wrong performance trade-off ships slowness or overload no "
+    "functional test measures (§26)",
+)
+_B_INTERPRETATION = (
+    "b_interpretation",
+    (
+        _phrase("requiere interpretación"),
+        _phrase("requiere interpretacion"),
+        _phrase("requires interpretation"),
+        _phrase("reglas difusas"),
+        _phrase("fuzzy rules"),
+        _phrase("juicio semántico"),
+        _phrase("juicio semantico"),
+        _phrase("semantic judgment"),
+    ),
+    "solution needs significant interpretation of fuzzy rules (§26)",
+    "a misread fuzzy rule ships wrong behavior the builder's own "
+    "tests cannot catch (§26)",
+)
+_B_COMPAT = (
+    "b_compat",
+    (
+        _phrase("restricciones de compatibilidad"),
+        _phrase("compatibility constraints"),
+        _phrase("matriz de compatibilidad"),
+        _phrase("compatibility matrix"),
+    ),
+    "compatibility-constrained change: trade-offs need judgment (§26)",
+    "a wrong compatibility trade-off breaks downstream consumers "
+    "outside the tested surface (§26)",
+)
+_B_SIGNALS = (_B_REFACTOR, _B_MIGRATION, _B_CONCURRENCY,
+              _B_PERFORMANCE, _B_INTERPRETATION, _B_COMPAT)
+
+# -- Oracle evidence: coverage claim + test refs (policy §24) -----------------
+# Attached to any tier as freeze material; it never decides the tier.
 _C_CLAIM = _compile((
     _phrase("covered by"),
     _phrase("cubierto por"),
@@ -286,20 +412,6 @@ _C_CLAIM = _compile((
     _phrase("ya cubierta"),
     _phrase("ya cubiertos"),
 ))
-_C_BOUNDED = _compile((
-    _alt("bounded", "acotado", "acotada", "acotados", "acotadas",
-         "reversible", "reversibles", "revertible", "revertibles",
-         "small", "pequeño", "pequeno", "pequeña", "pequena",
-         "pequeños", "pequenos", "typo", "typos", "trivial", "triviales",
-         "minor"),
-    _phrase("single file"),
-    _phrase("un solo archivo"),
-    _phrase("one file"),
-    _phrase("one-line"),
-    _phrase("one line"),
-    _phrase("una línea"),
-    _phrase("una linea"),
-))
 #: Repo test paths citable as a freezable ``preexisting_tests`` oracle
 #: (``path::node`` test ids accepted; ``freeze_oracle`` strips the node).
 _C_TEST_PATH = re.compile(
@@ -312,9 +424,13 @@ _COMPILED_S: tuple[tuple[str, "re.Pattern[str]", str, str], ...] = tuple(
     (signal_id, _compile(patterns), why_consensus, why_single)
     for signal_id, patterns, why_consensus, why_single in _S_SIGNALS
 )
-_COMPILED_A: tuple[tuple[str, "re.Pattern[str]", str], ...] = tuple(
-    (signal_id, _compile(patterns), reason)
-    for signal_id, patterns, reason in _A_SIGNALS
+_COMPILED_A: tuple[tuple[str, "re.Pattern[str]", str, str], ...] = tuple(
+    (signal_id, _compile(patterns), reason, why_not_c)
+    for signal_id, patterns, reason, why_not_c in _A_SIGNALS
+)
+_COMPILED_B: tuple[tuple[str, "re.Pattern[str]", str, str], ...] = tuple(
+    (signal_id, _compile(patterns), reason, why_not_c)
+    for signal_id, patterns, reason, why_not_c in _B_SIGNALS
 )
 
 
@@ -330,6 +446,26 @@ def _first_match(pattern: "re.Pattern[str]", text: str) -> str | None:
     return found.group(0) if found else None
 
 
+def _extract_oracle_evidence(text: str) -> dict[str, Any] | None:
+    """Declared oracle evidence (coverage claim + test refs), if cited.
+
+    Evidence only: it freezes at branch time (§24) and never decides
+    the tier. Paths without a coverage claim could be builder work, and
+    a claim without extractable paths is not freezable.
+    """
+    if _first_match(_C_CLAIM, text) is None:
+        return None
+    refs: list[str] = []
+    for found in _C_TEST_PATH.finditer(text):
+        ref = found.group(0)
+        if ref not in refs:
+            refs.append(ref)
+    if not refs:
+        return None
+    return {"type": "preexisting_tests",
+            "refs": [{"ref": ref} for ref in refs]}
+
+
 def classify_loose_tier(
     title: str,
     description: str,
@@ -338,11 +474,12 @@ def classify_loose_tier(
     """Assign a DEV tier to a loose ticket (no ``objective_id``).
 
     Pure and deterministic: same text always yields the same decision, with
-    zero token spend. Evaluation order is S → A → C → B (policy §18-26);
+    zero token spend. Evaluation order is S → A → B → C (policy §18-27);
     the first tier with a fired signal wins and the reason cites it. With
-    no signal anywhere the safe default is ``tier_b``.
+    no signal anywhere the default is ``tier_c`` (§25).
     """
     text = _scan_text(title, description, attachments or ())
+    oracle = _extract_oracle_evidence(text)
 
     for signal_id, pattern, why_consensus, why_single in _COMPILED_S:
         matched = _first_match(pattern, text)
@@ -353,6 +490,7 @@ def classify_loose_tier(
                         f"{matched.strip()!r}); independent "
                         f"challenge/review reduces residual risk (§19)"),
                 signals=(f"{signal_id}:{matched.strip()}",),
+                oracle=oracle,
                 why_consensus_is_needed=why_consensus,
                 why_single_session_is_insufficient=why_single,
             )
@@ -364,6 +502,7 @@ def classify_loose_tier(
             reason=("critical multi-system incident with unknown cause "
                     f"({incident.strip()!r} + {unknown.strip()!r}, §19)"),
             signals=(f"s_incident:{incident.strip()}+{unknown.strip()}",),
+            oracle=oracle,
             why_consensus_is_needed=(
                 "Independent triage/planning is expected to converge on "
                 "the true cause of a critical incident faster and with "
@@ -375,13 +514,15 @@ def classify_loose_tier(
                 "challenge converges."),
         )
 
-    for signal_id, pattern, reason in _COMPILED_A:
+    for signal_id, pattern, reason, why_not_c in _COMPILED_A:
         matched = _first_match(pattern, text)
         if matched is not None:
             return LooseTierDecision(
                 tier=CodingTool.TIER_A,
                 reason=f"{reason} ({signal_id}: {matched.strip()!r})",
                 signals=(f"{signal_id}:{matched.strip()}",),
+                oracle=oracle,
+                why_not_c=why_not_c,
             )
     verb = _first_match(_A_ARCH_VERBS, text)
     noun = _first_match(_A_ARCH_NOUNS, text)
@@ -392,31 +533,64 @@ def classify_loose_tier(
                     f"architecture/design ({verb.strip()!r} + "
                     f"{noun.strip()!r}, §21)"),
             signals=(f"a_architecture:{verb.strip()}+{noun.strip()}",),
+            oracle=oracle,
+            why_not_c=("executing before the architecture is decided "
+                       "locks the wrong design in (§21)"),
         )
 
-    claim = _first_match(_C_CLAIM, text)
-    bounded = _first_match(_C_BOUNDED, text)
-    refs: list[str] = []
-    for found in _C_TEST_PATH.finditer(text):
-        ref = found.group(0)
-        if ref not in refs:
-            refs.append(ref)
-    if claim is not None and bounded is not None and refs:
-        return LooseTierDecision(
-            tier=CodingTool.TIER_C,
-            reason=(f"qualifying oracle cited (preexisting_tests: "
-                    f"{len(refs)} ref(s), e.g. {refs[0]!r}) + "
-                    f"bounded/reversible change ({bounded.strip()!r}, "
-                    f"§25); refs frozen at branch time"),
-            signals=tuple(f"c_oracle:{ref}" for ref in refs),
-            oracle={"type": "preexisting_tests",
-                    "refs": [{"ref": ref} for ref in refs]},
-        )
+    for signal_id, pattern, reason, why_not_c in _COMPILED_B:
+        matched = _first_match(pattern, text)
+        if matched is not None:
+            return LooseTierDecision(
+                tier=CodingTool.TIER_B,
+                reason=f"{reason} ({signal_id}: {matched.strip()!r})",
+                signals=(f"{signal_id}:{matched.strip()}",),
+                oracle=oracle,
+                why_not_c=why_not_c,
+            )
 
+    reason = ("specified work with no S/A/B justification; default "
+              "tier_c (§25)")
+    signals: tuple[str, ...] = ()
+    if oracle is not None:
+        refs = [str(item.get("ref")) for item in oracle.get("refs", [])
+                if isinstance(item, dict)]
+        reason += (f"; declared oracle (preexisting_tests: {len(refs)} "
+                   f"ref(s), e.g. {refs[0]!r}) freezes at branch time")
+        signals = tuple(f"c_oracle:{ref}" for ref in refs)
     return LooseTierDecision(
-        tier=CodingTool.TIER_B,
-        reason=("no S/A high-stakes or discovery signals and no qualifying "
-                "oracle evidence; bounded work defaults to tier_b (safe "
-                "default, upward bias per TASK-2026-00137)"),
-        signals=(),
+        tier=CodingTool.TIER_C,
+        reason=reason,
+        signals=signals,
+        oracle=oracle,
     )
+
+
+async def record_loose_tier_decision(
+    repo: Any,
+    *,
+    task_id: str,
+    ticket_number: int | None,
+    decision: LooseTierDecision,
+) -> None:
+    """Persist one classifier assignment (policy §32, information only).
+
+    Called only for real assignments at dispatch, never for dispatcher
+    peeks. Fail-open: telemetry never breaks the dispatch.
+    """
+    if repo is None:
+        return
+    try:
+        await repo.record_loose_tier_decision({
+            "task_id": str(task_id or ""),
+            "ticket_number": ticket_number,
+            "tier": decision.tier.value,
+            "reason": decision.reason,
+            "why_not_c": decision.why_not_c,
+            "signals": list(decision.signals),
+            "by": ASSIGNED_BY,
+            "at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception:
+        logger.warning("loose-tier telemetry failed for %s", task_id,
+                       exc_info=True)

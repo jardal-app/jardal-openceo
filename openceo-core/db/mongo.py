@@ -130,6 +130,10 @@ class MongoRepository:
     def project_presets(self):
         return self.db["project_presets"]
 
+    @property
+    def loose_tier_decisions(self):
+        return self.db["loose_tier_decisions"]
+
     # ------------------------- Research (TASK-2026-00056) -------------------------
     # Colecciones propias del servicio research. Deliberadamente separadas de
     # ``tasks``: un job de research NO es un ticket de negocio y no pasa por el
@@ -659,6 +663,15 @@ class MongoRepository:
             sort=[("resume_at", ASCENDING)],
         )
         return [self._clean(row) async for row in rows]
+
+    async def record_loose_tier_decision(self, doc: dict[str, Any]) -> None:
+        """Append one loose-classifier assignment (policy §32).
+
+        Information only for the tier-mix telemetry: one document per
+        real assignment at dispatch, never for dispatcher peeks. No
+        index beyond ``_id``: reads are rare backtests, not hot paths.
+        """
+        await self.loose_tier_decisions.insert_one(dict(doc))
 
     # ------------------------- Dispatcher (F3, TASK-2026-00113) -------------------------
 
