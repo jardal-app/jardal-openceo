@@ -226,6 +226,15 @@ def new_objective_id() -> str:
 #: ready wedged every objective past its first batch (live: OBJ-BD88AAFA).
 TERMINAL_TICKET_STATUS = frozenset({"completed", "cancelled", "converted"})
 
+#: Failed tickets are history, not work (TASK-2026-00122): the dispatcher
+#: never launches them, so counting one as ready (``on_ticket_closed``) or
+#: as an open gap (``verify_delivery``) wedged every objective with a failed
+#: child in an enqueuer/plan loop (live: OBJ-BD88AAFA + bc913cf7). Failed
+#: stays OUT of TERMINAL_TICKET_STATUS on purpose: the planner prompt keeps
+#: showing failures (``open_tickets``) and the stall brake keeps tripping on
+#: runs without a terminal close (``closed_before``).
+FAILED_HISTORY_STATUS = "failed"
+
 #: Origin marker of the parent ticket minted for a top-down objective.
 SHELL_ORIGIN = "objective_shell"
 
@@ -1363,6 +1372,7 @@ async def on_ticket_closed(
         tickets = await env.tasks.list_by_objective(objective_id)
         ready = [item for item in tickets
                  if str(item.get("status")) not in TERMINAL_TICKET_STATUS
+                 and str(item.get("status")) != FAILED_HISTORY_STATUS
                  and not await _blocked(env, item)]
         if ready:
             if close is not None and _touches_objective(objective, close) \
@@ -1491,9 +1501,11 @@ def verify_delivery(
 
     The parent/shell ticket and superseded (``converted``) tickets are not
     work and are excluded. ``open_gaps`` (work still running) send the
-    objective back to planning; ``data_gaps`` (a terminal child without
-    acceptance criteria or expected artefacts) park it — no planner run
-    can fix a closed ticket. No LLM is involved, ever.
+    objective back to planning; ``data_gaps`` (a settled terminal or
+    failed child without acceptance criteria or expected artefacts)
+    park it — no planner run can fix a closed ticket. Failed children
+    are history (``failed_children``), never open gaps. No LLM is
+    involved, ever.
     """
     source_id = str(objective.get("conversion_source_task_id") or "")
     work = [item for item in children
@@ -1501,14 +1513,18 @@ def verify_delivery(
             and str(item.get("status") or "") != "converted"]
     open_gaps: list[str] = []
     data_gaps: list[str] = []
+    failed: list[str] = []
     terminal = 0
     for item in work:
         short = str(item.get("task_id") or "")[:8]
         status = str(item.get("status") or "")
-        if status not in TERMINAL_TICKET_STATUS:
+        if status == FAILED_HISTORY_STATUS:
+            failed.append(short)
+        elif status not in TERMINAL_TICKET_STATUS:
             open_gaps.append(f"{short}: still {status}")
             continue
-        terminal += 1
+        else:
+            terminal += 1
         if not item.get("acceptance"):
             data_gaps.append(f"{short}: no acceptance criteria")
         params = item.get("params")
@@ -1521,6 +1537,7 @@ def verify_delivery(
         "ok": not open_gaps and not data_gaps,
         "open_gaps": open_gaps,
         "data_gaps": data_gaps,
+        "failed_children": failed,
         "work_children": len(work),
         "terminal_children": terminal,
         "dev_children": dev,
@@ -1550,6 +1567,7 @@ def _delivery_record(
         or ("pool" if verdict["dev_children"] else "deterministic"),
         "work_children": verdict["work_children"],
         "terminal_children": verdict["terminal_children"],
+        "failed_children": len(verdict["failed_children"]),
         "dev_children": verdict["dev_children"],
         "outcome_kpi": None,
     }
