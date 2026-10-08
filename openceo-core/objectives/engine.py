@@ -221,7 +221,10 @@ def new_objective_id() -> str:
     return f"OBJ-{uuid.uuid4().hex[:8].upper()}"
 
 
-TERMINAL_TICKET_STATUS = frozenset({"completed", "cancelled"})
+#: Converted tickets never execute (TASK-2026-00122): the shell carries the
+#: children and superseded tickets decompose inside, so counting one as
+#: ready wedged every objective past its first batch (live: OBJ-BD88AAFA).
+TERMINAL_TICKET_STATUS = frozenset({"completed", "cancelled", "converted"})
 
 #: Origin marker of the parent ticket minted for a top-down objective.
 SHELL_ORIGIN = "objective_shell"

@@ -472,6 +472,49 @@ def _child(task_id: str, status: str, *, dev: bool,
     return task
 
 
+class ConvertedShellNeverReadyTests(unittest.IsolatedAsyncioTestCase):
+    """Converted tickets are terminal, never ready (TASK-2026-00122).
+
+    F7 proved it live: with only a converted shell and a completed child,
+    ``on_ticket_closed`` answered ``enqueuer-continues``, so no objective
+    could replan past its first batch (OBJ-BD88AAFA). Converted tickets
+    never execute: the shell carries the children and superseded tickets
+    decompose inside.
+    """
+
+    async def test_close_last_child_replans_past_converted_shell(self) -> None:
+        repo = _scratch_repo(self)
+        tasks = {
+            "shell-1": {**_child("shell-1", "converted", dev=True),
+                        "title": "shell"},
+            "kid-1": {**_child("kid-1", "completed", dev=True),
+                      "title": "kid"},
+        }
+        env, planner, created, _patches, _notices = _env_for(
+            self, repo, [_plan_result(_dev_ticket())], tasks=tasks)
+        await env.objectives.create_objective({
+            "objective_id": "OBJ-1", "project": "proj", "status": "active",
+            "anchor": {"goal": "g", "acceptance": []},
+            "conversion_source_task_id": "shell-1",
+        })
+        result = await engine_mod.on_ticket_closed(env, tasks["kid-1"], None)
+        self.assertNotEqual(result.get("action"), "enqueuer-continues")
+        self.assertEqual(planner.runs, 1)
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["objective_id"], "OBJ-1")
+
+    async def test_converted_dependency_does_not_block(self) -> None:
+        repo = _scratch_repo(self)
+        tasks = {
+            "shell-1": {**_child("shell-1", "converted", dev=True)},
+            "kid-1": {**_child("kid-1", "queued", dev=True),
+                      "blocked_by": ["shell-1"]},
+        }
+        env, _planner, _created, _patches, _notices = _env_for(
+            self, repo, [_plan_result(_dev_ticket())], tasks=tasks)
+        self.assertFalse(await engine_mod._blocked(env, tasks["kid-1"]))
+
+
 class FinalReviewTests(unittest.IsolatedAsyncioTestCase):
     async def _objective(self, env: ObjectiveEnv) -> None:
         await env.objectives.create_objective({
