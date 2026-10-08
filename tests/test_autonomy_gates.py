@@ -472,6 +472,7 @@ def _dev_ticket_planned(local_ref: str = "t1") -> dict[str, Any]:
         "expected_artifacts": ["code"],
         "coding_tool": "tier_b",
         "tier_reason": "bounded work",
+        "why_not_c": "a misjudged step ships wrong behavior",
     }
 
 

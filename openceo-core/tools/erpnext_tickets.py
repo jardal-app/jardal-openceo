@@ -894,6 +894,33 @@ class ERPNextTicketAdapter:
         updated = await self._client.update_doc("Task", name, body)
         return {"ok": True, "ticket": self._ticket_view({**task, **(updated or {})})}
 
+    async def retier_ticket(
+        self,
+        identifier: str,
+        coding_tool: str,
+    ) -> dict[str, Any]:
+        """Reclasifica el tier de ejecucion. Operacion cerrada (TASK-2026-00148).
+
+        Resuelve el identificador antes de escribir y escribe solo
+        `openceo_coding_tool` por `update_doc`: nunca un `create_document`
+        generico. Solo acepta letras v2 vigentes (`tier_s/a/b/c`); otro
+        valor se rechaza sin escribir nada, porque el Select del desk
+        rechazaria el PUT entero. No toca el estado ni el espejo de
+        ejecucion: el llamador actualiza Mongo y la descripcion por sus
+        propios caminos sancionados.
+        """
+        tier = map_coding_tool(coding_tool)
+        if tier is None:
+            raise ERPNextValidationError(
+                f"Tier invalido: {coding_tool}. Usa tier_s/tier_a/tier_b/tier_c.",
+                status_code=400,
+            )
+        task = await self.resolve_task(identifier)
+        name = str(task.get("name") or "").strip()
+        updated = await self._client.update_doc(
+            "Task", name, {"openceo_coding_tool": tier})
+        return {"ok": True, "ticket": self._ticket_view({**task, **(updated or {})})}
+
     async def update_tier_s_progress(self, name: str, summary: dict[str, Any]) -> None:
         """Project execution detail in the existing ticket without changing business status."""
         if not name.strip():

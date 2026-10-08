@@ -1,10 +1,12 @@
-"""Objective planner prompt: new tier semantics, never the old ladder.
+"""Objective planner prompt: recalibrated tier semantics (TASK-2026-00148).
 
-Supersedes the 2026-10-05 regression framing (TASK-2026-00096 S2) per the
-autonomy delta (TASK-2026-00112, routing policy §§18-27): letters no longer
-order quota scarcity with tier_c as default. The prompt must define S/A/C/B
-by technical meaning, gate C on a qualifying oracle plus reversible-or-bounded
-risk, choose target_agent first, and emit the PlannerResult JSON contract.
+Supersedes the oracle-gated framing (TASK-2026-00112, routing policy
+§§18-27): letters order the work by nature between four top-tier
+models, tier_c is the default, and A/B leave it only with why_not_c.
+The prompt must define S/A/B/C by technical meaning, require the S
+pair and why_not_c for A/B, treat a declared oracle as evidence (only
+qualifying types freeze, on any simple tier), choose target_agent
+first, and emit the PlannerResult JSON contract.
 """
 
 from __future__ import annotations
@@ -39,20 +41,35 @@ class ObjectiveTierPromptTests(unittest.TestCase):
         self.assertIn("target_agent", prompt)
         self.assertIn("only when target_agent == dev", prompt)
 
-    def test_prompt_gates_tier_c_on_oracle_and_bounded_risk(self) -> None:
+    def test_prompt_defaults_to_tier_c(self) -> None:
         prompt = _prompt()
-        self.assertIn("qualifying independent", prompt)
-        self.assertIn("reversible OR", prompt)
-        self.assertIn("bounded", prompt)
-        self.assertIn("builder_tests alone NEVER qualify", prompt)
+        self.assertIn("tier_c: THE DEFAULT", prompt)
+        self.assertIn("No oracle, reversibility proof, or", prompt)
+        self.assertNotIn("qualifying independent frozen oracle exists AND",
+                         prompt)
+
+    def test_prompt_requires_why_not_c_for_a_and_b(self) -> None:
+        prompt = _prompt()
+        self.assertIn("why_not_c", prompt)
+        self.assertIn("Never\n     select B for a missing oracle alone.",
+                      prompt)
+        self.assertIn(
+            '"why_not_c?": "<required for tier_a/tier_b: what breaks in C>"',
+            prompt)
+
+    def test_prompt_treats_oracle_as_evidence(self) -> None:
+        prompt = _prompt()
+        self.assertIn("Declared oracle is evidence, not protection", prompt)
+        self.assertIn("builder_tests", prompt)
+        self.assertIn("NEVER triggers protection", prompt)
 
     def test_prompt_keeps_quota_out_of_tier_definition(self) -> None:
         prompt = _prompt()
         self.assertIn("Quota never redefines the technical tier", prompt)
+        self.assertIn("letters order the work", prompt)
+        self.assertIn("Never describe a tier as cheap or weaker.", prompt)
         self.assertNotIn("order quota scarcity", prompt)
-        self.assertNotIn("Default to tier_c", prompt)
         self.assertNotIn("cheapest", prompt.lower())
-        self.assertNotIn("cheap ", prompt.lower())
 
     def test_prompt_requires_tier_s_justification(self) -> None:
         prompt = _prompt()

@@ -138,12 +138,13 @@ class CodingTool(str, Enum):
     """Execution tier of a task (routing policy §§18-27, TASK-2026-00112).
 
     S = independent high assurance; A = discovery / architecture /
-    recovery; C = safe high-availability execution guarded by a
-    qualifying independent oracle; B = bounded strong solving when C is
-    not sufficiently protected. Quota is admission control, not the
-    tier definition. No account names here: accounts live only in
-    configuration (``account:``). Explicit provider choice for loose chat
-    sessions still uses :class:`DevProvider` and is unaffected.
+    recovery; B = complex strong solving with a why_not_c; C = the
+    default safe execution for specified work (TASK-2026-00148). All
+    four executors are top-tier models; letters order the work, never
+    the models. Quota is admission control, not the tier definition.
+    No account names here: accounts live only in configuration
+    (``account:``). Explicit provider choice for loose chat sessions
+    still uses :class:`DevProvider` and is unaffected.
     """
 
     TIER_S = "tier_s"

@@ -1,9 +1,11 @@
 """Single planner contract: PlannerResult shape + deterministic rules.
 
 Acceptance for TASK-2026-00112 (routing policy §17): Pydantic owns the
-shape (dev-only coding_tool, Tier S justification, Tier C oracle,
-no-ticket outcomes, horizon, unique refs); deterministic validation owns
-agent registry, blocked_by, duplicates and the same-tier-retry rule.
+shape (dev-only coding_tool, Tier S justification, Tier A/B why_not_c,
+Tier C default without oracle, no-ticket outcomes, horizon, unique
+refs); deterministic validation owns agent registry, blocked_by,
+duplicates and the same-tier-retry rule.
+Recalibrated by TASK-2026-00148 (policy §§25-27).
 No network, no CLI, no LLM.
 """
 
@@ -43,7 +45,8 @@ def _ticket(**overrides: Any) -> dict[str, Any]:
         "acceptance_criteria": ["it works"],
         "expected_artifacts": ["code"],
         "coding_tool": "tier_b",
-        "tier_reason": "bounded logic without an independent oracle",
+        "tier_reason": "semantic refactor where errors pass local tests",
+        "why_not_c": "a misjudged refactor ships behavior drift",
     }
     base.update(overrides)
     return base
@@ -139,22 +142,61 @@ class ParseTests(unittest.TestCase):
         self.assertIn("why_single_session_is_insufficient",
                       str(raised.exception))
 
-    def test_tier_c_requires_oracle(self) -> None:
-        with self.assertRaises(ValueError) as raised:
-            parse_planner_result(json.dumps(
-                _result(tickets=[_ticket(coding_tool="tier_c")])))
-        self.assertIn("requires a qualifying oracle", str(raised.exception))
+    def test_tier_c_needs_no_oracle(self) -> None:
+        # Recalibration (TASK-2026-00148): C is the default (§25).
+        ticket = _ticket(coding_tool="tier_c", why_not_c=None)
+        result = parse_planner_result(json.dumps(
+            _result(tickets=[ticket])))
+        self.assertEqual(result.tickets[0].coding_tool.value, "tier_c")
+        self.assertIsNone(result.tickets[0].oracle)
 
-    def test_tier_c_rejects_builder_tests(self) -> None:
+    def test_tier_c_accepts_builder_tests_as_evidence(self) -> None:
+        # Declared oracle of any type is evidence; only qualifying
+        # types freeze, enforced by the orchestrator (§24), not here.
         ticket = _ticket(
             coding_tool="tier_c",
+            why_not_c=None,
             oracle={"type": "builder_tests",
                     "refs": [{"ref": "tests/new.py"}]},
         )
+        result = parse_planner_result(json.dumps(_result(tickets=[ticket])))
+        oracle = result.tickets[0].oracle
+        assert oracle is not None
+        self.assertEqual(oracle.type.value, "builder_tests")
+
+    def test_tier_a_and_b_require_why_not_c(self) -> None:
+        for tier in ("tier_a", "tier_b"):
+            with self.subTest(tier=tier):
+                with self.assertRaises(ValueError) as raised:
+                    parse_planner_result(json.dumps(
+                        _result(tickets=[_ticket(coding_tool=tier,
+                                                why_not_c=None)])))
+                self.assertIn("requires why_not_c", str(raised.exception))
+                with self.assertRaises(ValueError) as raised:
+                    parse_planner_result(json.dumps(
+                        _result(tickets=[_ticket(coding_tool=tier,
+                                                why_not_c="  ")])))
+                self.assertIn("must not be blank", str(raised.exception))
+
+    def test_tier_s_needs_no_why_not_c(self) -> None:
+        # The S pair already states why one session is not enough (§20).
+        ticket = _ticket(
+            coding_tool="tier_s",
+            tier_reason="auth boundary; independent review catches bypasses",
+            why_consensus_is_needed="a second family catches auth bypasses",
+            why_single_session_is_insufficient="one session wrote the flaw",
+            why_not_c=None,
+        )
+        result = parse_planner_result(json.dumps(_result(tickets=[ticket])))
+        self.assertEqual(result.tickets[0].coding_tool.value, "tier_s")
+
+    def test_why_not_c_only_for_dev(self) -> None:
+        ticket = _ticket(target_agent="research", coding_tool=None,
+                         tier_reason=None,
+                         why_not_c="discovery must come first")
         with self.assertRaises(ValueError) as raised:
             parse_planner_result(json.dumps(_result(tickets=[ticket])))
-        self.assertIn("builder_tests cannot be the qualifying",
-                      str(raised.exception))
+        self.assertIn("why_not_c is only valid", str(raised.exception))
 
     def test_complete_candidate_carries_no_tickets(self) -> None:
         with self.assertRaises(ValueError) as raised:
@@ -242,13 +284,15 @@ class DeterministicTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_agent_rejected(self) -> None:
         errors = await self._validate(
             _result(tickets=[_ticket(target_agent="payments",
-                                     coding_tool=None, tier_reason=None)]))
+                                     coding_tool=None, tier_reason=None,
+                                     why_not_c=None)]))
         self.assertTrue(any("unknown target_agent" in err for err in errors))
 
     async def test_disabled_agent_rejected_with_reason(self) -> None:
         errors = await self._validate(
             _result(tickets=[_ticket(target_agent="research",
-                                     coding_tool=None, tier_reason=None)]))
+                                     coding_tool=None, tier_reason=None,
+                                     why_not_c=None)]))
         self.assertEqual(len(errors), 1)
         self.assertIn("disabled", errors[0])
         self.assertIn("no ticket execution bridge", errors[0])

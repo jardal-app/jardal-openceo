@@ -695,23 +695,28 @@ def _planner_prompt(
         "",
         "ROUTING (summary; the normative policy below rules on conflicts):",
         "- Choose target_agent FIRST, only from enabled registered agents.",
-        "- DEV tiers apply only when target_agent == dev, in this order:",
+        "- DEV tiers apply only when target_agent == dev, in this order.",
+        "  All four executors are top-tier models; letters order the work,",
+        "  never the models. Never describe a tier as cheap or weaker.",
         "  1. tier_s: independent planning/challenge/review materially",
         "     reduces high-impact residual risk. Justify with",
         "     why_consensus_is_needed + why_single_session_is_insufficient,",
         "     naming the residual failure other stages would catch.",
         "  2. tier_a: discovering truth/root cause/architecture is the",
-        "     dominant difficulty.",
-        "  3. tier_c: a qualifying independent frozen oracle exists AND",
-        "     (the change is reversible OR its blast radius is bounded),",
-        "     and S/A are not required. builder_tests alone NEVER qualify.",
-        "     tier_reason must cite the oracle + reversibility/boundedness.",
-        "  4. tier_b: bounded non-trivial work not safely protected enough",
-        "     for C.",
-        "- Oracle types: preexisting_tests, contract_or_schema,",
-        "  bug_reproduction, separate_ticket_tests, planner_executable_spec",
-        "  (only when frozen before build), builder_tests (never qualifying",
-        "  alone).",
+        "     dominant difficulty. Justify with why_not_c: what breaks",
+        "     if the default tier executes it.",
+        "  3. tier_b: really complex single-session work (needs",
+        "     interpretation, weak verification, or significant blast",
+        "     radius below S stakes). Justify with why_not_c. Never",
+        "     select B for a missing oracle alone.",
+        "  4. tier_c: THE DEFAULT. Specified work with no S/A/B",
+        "     justification. No oracle, reversibility proof, or",
+        "     blast-radius analysis required.",
+        "- Declared oracle is evidence, not protection: only qualifying",
+        "  types declared before the build freeze on any simple tier",
+        "  (preexisting_tests, contract_or_schema, bug_reproduction,",
+        "  separate_ticket_tests, planner_executable_spec). builder_tests",
+        "  NEVER triggers protection.",
         "- Quota never redefines the technical tier. Never choose",
         "  runtime, CLI account, or model.",
         "",
@@ -738,6 +743,7 @@ def _planner_prompt(
         '      "description?": "..."}]},',
         '    "why_consensus_is_needed?": "<tier_s only>",',
         '    "why_single_session_is_insufficient?": "<tier_s only>",',
+        '    "why_not_c?": "<required for tier_a/tier_b: what breaks in C>",',
         '    "includes_findings?": ["<inbox fingerprints claimed>"]',
         "  } ],",
         '  "roadmap_remaining": ["<speculative future work>"],',
@@ -803,6 +809,7 @@ def _telemetry_after_run(
     block is preserved (TASK-2026-00116 feeds it event by event).
     """
     tele = dict(objective.get("planner_telemetry") or {})
+    tele.setdefault("tier_mix", {})
     tele["cycles"] = len(runs)
     tele["replans"] = max(0, len(runs) - 1)
     tele["no_progress_cycles"] = _trailing_stalled_runs(runs)
@@ -1149,6 +1156,12 @@ async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]
     tele = dict((await env.objectives.get_objective(objective_id) or {}
                  ).get("planner_telemetry") or {})
     tele["tickets_created"] = int(tele.get("tickets_created", 0)) + len(created)
+    mix = dict(tele.get("tier_mix") or {})
+    for planned in result.tickets:
+        if planned.coding_tool is not None:
+            key = planned.coding_tool.value
+            mix[key] = int(mix.get(key, 0)) + 1
+    tele["tier_mix"] = mix
     await env.objectives.patch_objective(objective_id, {
         "tickets": [*(objective.get("tickets") or []),
                     *(item["task_id"] for item in created)],
@@ -1231,6 +1244,8 @@ def _planned_params(ticket: planner_mod.PlannedTicket) -> dict[str, Any]:
     if ticket.why_single_session_is_insufficient:
         params["why_single_session_is_insufficient"] = (
             ticket.why_single_session_is_insufficient)
+    if ticket.why_not_c:
+        params["why_not_c"] = ticket.why_not_c
     return params
 
 

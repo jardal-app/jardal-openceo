@@ -695,6 +695,64 @@ class ReserveTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(can)
         self.assertEqual(reason, WAIT_QUOTA)
 
+    async def test_configured_codex_reserve_holds_tier_b(self) -> None:
+        # Configured values (TASK-2026-00148, policy §28): Codex 0.20/0.05.
+        monitor = self._monitor(
+            {"codex": (0.15, 0.9)},
+            RATE_CODEX_RESERVE_5H=0.20, RATE_CODEX_RESERVE_WEEKLY=0.05,
+        )
+        can, _, reason = await monitor.admission_for_ticket(
+            _ticket("t", coding_tool="tier_b"), active_tickets=[])
+        self.assertFalse(can)
+        self.assertEqual(reason, WAIT_QUOTA_RESERVED)
+
+    async def test_configured_claude_reserve_holds_tier_a(self) -> None:
+        # Configured values (TASK-2026-00148, policy §28): Claude 0.20/0.05.
+        monitor = self._monitor(
+            {"claude": (0.15, 0.9)},
+            RATE_CLAUDE_RESERVE_5H=0.20, RATE_CLAUDE_RESERVE_WEEKLY=0.05,
+        )
+        can, _, reason = await monitor.admission_for_ticket(
+            _ticket("t", coding_tool="tier_a"), active_tickets=[])
+        self.assertFalse(can)
+        self.assertEqual(reason, WAIT_QUOTA_RESERVED)
+
+    async def test_configured_reserves_let_tier_s_through(self) -> None:
+        monitor = self._monitor(
+            {"claude": (0.15, 0.9), "codex": (0.15, 0.9),
+             "muse": (0.15, 0.9)},
+            RATE_CODEX_RESERVE_5H=0.20, RATE_CODEX_RESERVE_WEEKLY=0.05,
+            RATE_CLAUDE_RESERVE_5H=0.20, RATE_CLAUDE_RESERVE_WEEKLY=0.05,
+        )
+        can, resume_at, reason = await monitor.admission_for_ticket(
+            _ticket("t", coding_tool="tier_s"), active_tickets=[])
+        self.assertTrue(can)
+        self.assertIsNone(resume_at)
+        self.assertIsNone(reason)
+
+    async def test_configured_weekly_reserve_binds(self) -> None:
+        monitor = self._monitor(
+            {"codex": (0.9, 0.04)},
+            RATE_CODEX_RESERVE_5H=0.20, RATE_CODEX_RESERVE_WEEKLY=0.05,
+        )
+        can, _, reason = await monitor.admission_for_ticket(
+            _ticket("t", coding_tool="tier_b"), active_tickets=[])
+        self.assertFalse(can)
+        self.assertEqual(reason, WAIT_QUOTA_RESERVED)
+
+    async def test_configured_reserves_never_bind_healthy_quota(self) -> None:
+        monitor = self._monitor(
+            {"claude": (0.9, 0.9), "codex": (0.9, 0.9)},
+            RATE_CODEX_RESERVE_5H=0.20, RATE_CODEX_RESERVE_WEEKLY=0.05,
+            RATE_CLAUDE_RESERVE_5H=0.20, RATE_CLAUDE_RESERVE_WEEKLY=0.05,
+        )
+        for tier in ("tier_a", "tier_b"):
+            with self.subTest(tier=tier):
+                can, _, reason = await monitor.admission_for_ticket(
+                    _ticket("t", coding_tool=tier), active_tickets=[])
+                self.assertTrue(can)
+                self.assertIsNone(reason)
+
     async def test_tier_c_always_launches(self) -> None:
         monitor = self._monitor({"codex": (0.0, 0.0), "claude": (0.0, 0.0)})
         can, resume_at, reason = await monitor.admission_for_ticket(
@@ -750,8 +808,8 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         await _drain()
         self.assertEqual(launched, ["loose-1"])
         self.assertEqual(out["parked"], 0)
-        # Peeked default tier for admission…
-        self.assertEqual(seen.get("coding_tool"), "tier_b")
+        # Peeked default tier for admission (C since TASK-2026-00148)…
+        self.assertEqual(seen.get("coding_tool"), "tier_c")
         # …without persisting it on the ticket.
         row = await repo.get_task("loose-1")
         assert row is not None

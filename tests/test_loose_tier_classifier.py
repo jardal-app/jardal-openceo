@@ -1,11 +1,12 @@
 """Automatic tier assignment for loose tickets (TASK-2026-00137).
 
-Contract for ``agents.dev.loose_tier``: S → A → C → B order over title +
+Contract for ``agents.dev.loose_tier``: S → A → B → C order over title +
 description + attachment names (Spanish and English), mandatory Tier S
-justification, C oracle extraction, safe ``tier_b`` default, the
-``session.run`` dispatch hook (loose classifies, objective child without
-tier still waits), ``objective_id`` passthrough in ``graph._dev_node``,
-and the ``routing_missing`` ERP comment split.
+justification, ``why_not_c`` on A/B, oracle evidence attached to any
+tier, ``tier_c`` default, the ``session.run`` dispatch hook (loose
+classifies, objective child without tier still waits), ``objective_id``
+passthrough in ``graph._dev_node``, and the ``routing_missing`` ERP
+comment split. Recalibrated by TASK-2026-00148 (classifier v2).
 No network, no CLI, no LLM.
 """
 
@@ -23,6 +24,7 @@ if str(CORE) not in sys.path:
 from agents.dev.loose_tier import (  # noqa: E402
     ASSIGNED_BY,
     classify_loose_tier,
+    record_loose_tier_decision,
 )
 from agents.dev.session import (  # noqa: E402
     CodingStepResult,
@@ -77,7 +79,7 @@ class TierSSignalsTests(unittest.TestCase):
 
     def test_incident_pair_needs_both_halves(self) -> None:
         incident_only = _decision("Incidente en producción por disco lleno", "")
-        self.assertEqual(incident_only.tier, CodingTool.TIER_B)
+        self.assertEqual(incident_only.tier, CodingTool.TIER_C)
         unknown_only = _decision("Error de causa desconocida en el pie", "")
         self.assertEqual(unknown_only.tier, CodingTool.TIER_A)
 
@@ -94,7 +96,7 @@ class TierSNegativeTests(unittest.TestCase):
         for title in cases:
             with self.subTest(title=title):
                 decision = _decision(title)
-                self.assertEqual(decision.tier, CodingTool.TIER_B, title)
+                self.assertEqual(decision.tier, CodingTool.TIER_C, title)
 
     def test_word_boundaries_do_not_misfire(self) -> None:
         cases = [
@@ -105,7 +107,7 @@ class TierSNegativeTests(unittest.TestCase):
         ]
         for title in cases:
             with self.subTest(title=title):
-                self.assertEqual(_decision(title).tier, CodingTool.TIER_B, title)
+                self.assertEqual(_decision(title).tier, CodingTool.TIER_C, title)
 
 
 class TierASignalsTests(unittest.TestCase):
@@ -137,18 +139,19 @@ class TierASignalsTests(unittest.TestCase):
                 decision = _decision(title, description)
                 self.assertEqual(decision.tier, CodingTool.TIER_A, title)
                 self.assertIn("21", decision.reason, title)
+                self.assertTrue((decision.why_not_c or "").strip(), title)
 
     def test_architecture_pair_needs_verb_and_noun(self) -> None:
         self.assertEqual(
             _decision("Implementar según el design doc adjunto").tier,
-            CodingTool.TIER_B)
+            CodingTool.TIER_C)
         self.assertEqual(
             _decision("Documentar la arquitectura actual").tier,
-            CodingTool.TIER_B)
+            CodingTool.TIER_C)
 
     def test_bare_investigar_is_not_discovery_dominant(self) -> None:
         decision = _decision("Investigar y corregir el bug del listado", "")
-        self.assertEqual(decision.tier, CodingTool.TIER_B)
+        self.assertEqual(decision.tier, CodingTool.TIER_C)
 
 
 class TierCTests(unittest.TestCase):
@@ -173,7 +176,7 @@ class TierCTests(unittest.TestCase):
         assert decision.oracle is not None
         self.assertEqual(decision.oracle["refs"], [{"ref": "tests/test_lista.py"}])
 
-    def test_builder_tests_alone_never_qualify(self) -> None:
+    def test_builder_tests_alone_never_trigger_protection(self) -> None:
         cases = [
             ("Add tests for the new checkout flow", "Write new tests; small change."),
             ("Escribir tests para el módulo", "Agregar tests nuevos, cambio acotado."),
@@ -181,23 +184,28 @@ class TierCTests(unittest.TestCase):
         ]
         for title, description in cases:
             with self.subTest(title=title):
-                self.assertEqual(
-                    _decision(title, description).tier, CodingTool.TIER_B, title)
+                decision = _decision(title, description)
+                self.assertEqual(decision.tier, CodingTool.TIER_C, title)
+                self.assertIsNone(decision.oracle, title)
 
-    def test_conjunction_requires_claim_paths_and_bounded(self) -> None:
+    def test_oracle_evidence_needs_claim_and_paths(self) -> None:
         # Paths without a coverage claim: could be builder work.
-        self.assertEqual(
-            _decision("Update tests", "Extend tests/test_x.py for the new flow.").tier,
-            CodingTool.TIER_B)
+        decision = _decision(
+            "Update tests", "Extend tests/test_x.py for the new flow.")
+        self.assertEqual(decision.tier, CodingTool.TIER_C)
+        self.assertIsNone(decision.oracle)
         # Claim without extractable paths: not freezable.
-        self.assertEqual(
-            _decision("Fix footer link", "Covered by existing tests; small fix.").tier,
-            CodingTool.TIER_B)
-        # Claim + paths without boundedness.
-        self.assertEqual(
-            _decision("Rework listing",
-                      "Covered by tests/test_list.py; large rework.").tier,
-            CodingTool.TIER_B)
+        decision = _decision(
+            "Fix footer link", "Covered by existing tests; small fix.")
+        self.assertEqual(decision.tier, CodingTool.TIER_C)
+        self.assertIsNone(decision.oracle)
+        # Claim + paths attach as evidence (boundedness no longer gates).
+        decision = _decision(
+            "Rework listing", "Covered by tests/test_list.py; large rework.")
+        self.assertEqual(decision.tier, CodingTool.TIER_C)
+        assert decision.oracle is not None
+        self.assertEqual(decision.oracle["refs"],
+                         [{"ref": "tests/test_list.py"}])
 
     def test_s_and_a_win_over_oracle_evidence(self) -> None:
         decision = _decision(
@@ -205,31 +213,108 @@ class TierCTests(unittest.TestCase):
             "Covered by tests/test_pay.py; small change.",
         )
         self.assertEqual(decision.tier, CodingTool.TIER_S)
+        self.assertIsNotNone(decision.oracle)
         decision = _decision(
             "Root cause unknown in export",
             "Covered by tests/test_export.py; small change.",
         )
         self.assertEqual(decision.tier, CodingTool.TIER_A)
+        self.assertIsNotNone(decision.oracle)
 
 
-class TierBDefaultTests(unittest.TestCase):
-    def test_safe_default(self) -> None:
-        self.assertEqual(_decision("", "").tier, CodingTool.TIER_B)
-        self.assertEqual(
-            _decision("Add dark mode toggle", "New setting with preview.").tier,
-            CodingTool.TIER_B)
-        self.assertEqual(
-            _decision("Refactor semántico del módulo de notificaciones",
-                      "Reordenar sin cambiar comportamiento.").tier,
-            CodingTool.TIER_B)
+class TierBSignalsTests(unittest.TestCase):
+    def test_complexity_signals_select_tier_b(self) -> None:
+        cases = [
+            # (expected signal prefix, title, description)
+            ("b_refactor", "Refactor semántico del módulo de listados",
+             "Reordenar sin cambiar comportamiento."),
+            ("b_refactor", "Semantic refactor of the listing module", ""),
+            ("b_migration", "Migración de datos de usuarios legacy", ""),
+            ("b_migration", "Schema migration with rollback plan", ""),
+            ("b_concurrency", "Race condition en el cierre de sesión", ""),
+            ("b_concurrency", "Deadlock between the import workers", ""),
+            ("b_performance", "Cuello de botella en el exportador", ""),
+            ("b_performance", "Performance regression on the dashboard", ""),
+            ("b_interpretation", "Tarificador con reglas difusas", ""),
+            ("b_interpretation", "Pricing requires interpretation of tiers", ""),
+            ("b_compat", "Soporte con restricciones de compatibilidad", ""),
+            ("b_compat", "Sync under compatibility constraints", ""),
+        ]
+        for signal, title, description in cases:
+            with self.subTest(title=title):
+                decision = _decision(title, description)
+                self.assertEqual(decision.tier, CodingTool.TIER_B, title)
+                self.assertIn("26", decision.reason, title)
+                self.assertTrue(decision.signals, title)
+                self.assertTrue(decision.signals[0].startswith(signal), title)
+                self.assertTrue((decision.why_not_c or "").strip(), title)
+
+    def test_bare_complexity_words_do_not_fire(self) -> None:
+        cases = [
+            "Use premium quota for this migration",
+            "Backfill único de los grupos existentes",
+            "Refactor the footer helpers",
+            "La estimación será aproximada",
+            "Matrix of supported browsers",
+        ]
+        for title in cases:
+            with self.subTest(title=title):
+                self.assertEqual(
+                    _decision(title).tier, CodingTool.TIER_C, title)
+
+
+class TierCDefaultTests(unittest.TestCase):
+    def test_default_is_tier_c(self) -> None:
+        self.assertEqual(_decision("", "").tier, CodingTool.TIER_C)
+        decision = _decision("Add dark mode toggle", "New setting with preview.")
+        self.assertEqual(decision.tier, CodingTool.TIER_C)
+        self.assertIn("25", decision.reason)
+        self.assertEqual(decision.signals, ())
+        self.assertIsNone(decision.oracle)
+        self.assertIsNone(decision.why_not_c)
 
     def test_critico_alone_is_not_tier_s(self) -> None:
         self.assertEqual(
             _decision("Cambio crítico en el pie de página", "").tier,
-            CodingTool.TIER_B)
+            CodingTool.TIER_C)
         self.assertEqual(
             _decision("Cambio crítico en el flujo de pago", "").tier,
             CodingTool.TIER_S)
+
+
+class RecalibrationAcceptanceTests(unittest.TestCase):
+    """Acceptance cases from TASK-2026-00148: bounded specified work
+    without prior tests routes to C in the classifier; discovery stays
+    A and high-risk stays S, each with its justification."""
+
+    def test_bounded_specified_work_without_tests_is_tier_c(self) -> None:
+        decision = _decision(
+            "% de avance de los Task grupo calculado desde sus hijos",
+            "Regla del % de un grupo: Completed cuenta 100, Cancelled sale "
+            "del denominador. Recalcular por evento, sin barridos. Backfill "
+            "único de los grupos existentes, verificado por relectura.",
+        )
+        self.assertEqual(decision.tier, CodingTool.TIER_C)
+        decision = _decision(
+            "Gantt en ERPNext: fechas reales y estimadas",
+            "Al pasar a Working, inicio real; al cerrar, fin real. "
+            "Estimación determinista para los abiertos: duración según el "
+            "tier, inicio cuando terminan sus dependencias. La estimación "
+            "será aproximada.",
+        )
+        self.assertEqual(decision.tier, CodingTool.TIER_C)
+
+    def test_discovery_is_tier_a_with_why_not_c(self) -> None:
+        decision = _decision("Error de causa desconocida al exportar", "")
+        self.assertEqual(decision.tier, CodingTool.TIER_A)
+        self.assertTrue((decision.why_not_c or "").strip())
+
+    def test_high_risk_is_tier_s_with_justification(self) -> None:
+        decision = _decision("Corregir el cálculo del pago con tarjeta", "")
+        self.assertEqual(decision.tier, CodingTool.TIER_S)
+        self.assertTrue((decision.why_consensus_is_needed or "").strip())
+        self.assertTrue(
+            (decision.why_single_session_is_insufficient or "").strip())
 
 
 class AdversarialTextsTests(unittest.TestCase):
@@ -241,13 +326,13 @@ class AdversarialTextsTests(unittest.TestCase):
             "Retirar enum, selector LLM, param MCP y default auto. "
             "Tiers tier_s/a/b/c quedan como único routing.",
         )
-        self.assertEqual(decision.tier, CodingTool.TIER_B)
+        self.assertEqual(decision.tier, CodingTool.TIER_C)
         decision = _decision(
             "Clasificación automática para no parkar en routing_missing",
             "Tiers solo per-task, sin cuenta/modelo en el ticket, "
             "sin degradaciones silenciosas por cuota.",
         )
-        self.assertEqual(decision.tier, CodingTool.TIER_B)
+        self.assertEqual(decision.tier, CodingTool.TIER_C)
 
     def test_determinism(self) -> None:
         first = _decision("Fix payment rounding", "Covered by tests/test_pay.py.")
@@ -297,10 +382,27 @@ class SessionDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output.status, TaskStatus.COMPLETED)
         self.assertEqual(output.coding_tool, CodingTool.TIER_B)
         assert output.params is not None
-        self.assertIn("tier_b", output.params["tier_reason"])
+        self.assertIn("26", output.params["tier_reason"])
+        self.assertEqual(output.params["tier_assigned_by"], ASSIGNED_BY)
+        self.assertTrue(output.params["tier_signals"][0].startswith(
+            "b_refactor"))
+        self.assertTrue(output.params["why_not_c"].strip())
+        manager._step_code.assert_awaited_once()
+
+    async def test_loose_default_is_tier_c_at_dispatch(self) -> None:
+        manager = self._manager()
+        manager._step_code = AsyncMock(return_value=CodingStepResult(
+            step={"step": "code", "status": "ok"}, prompt="p", summary="s"))
+        output = await manager.run(
+            self._task(title="Add dark mode toggle",
+                       description="New setting with preview."),
+            {},
+        )
+        self.assertEqual(output.coding_tool, CodingTool.TIER_C)
+        assert output.params is not None
+        self.assertIn("tier_c", output.params["tier_reason"])
         self.assertEqual(output.params["tier_assigned_by"], ASSIGNED_BY)
         self.assertEqual(output.params["tier_signals"], [])
-        manager._step_code.assert_awaited_once()
 
     async def test_loose_signal_selects_tier_at_dispatch(self) -> None:
         manager = self._manager()
@@ -313,6 +415,7 @@ class SessionDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output.coding_tool, CodingTool.TIER_A)
         assert output.params is not None
         self.assertIn("a_unknown", output.params["tier_signals"][0])
+        self.assertTrue(output.params["why_not_c"].strip())
 
     async def test_explicit_field_beats_classifier(self) -> None:
         manager = self._manager()
@@ -333,6 +436,55 @@ class SessionDispatchTests(unittest.IsolatedAsyncioTestCase):
         assert output.waiting_reason is not None
         self.assertTrue(output.waiting_reason.startswith("routing_missing"))
         manager._step_code.assert_not_called()
+
+
+class ClassifierTelemetryTests(unittest.IsolatedAsyncioTestCase):
+    def test_classifier_version_is_v2(self) -> None:
+        self.assertEqual(ASSIGNED_BY, "loose_classifier/v2")
+
+    async def test_assignment_is_recorded(self) -> None:
+        decisions: list[dict] = []
+
+        class StubRepo:
+            async def record_loose_tier_decision(self, doc: dict) -> None:
+                decisions.append(doc)
+
+        settings = MagicMock()
+        loader = MagicMock()
+        loader.validate_project = MagicMock(return_value=[])
+        manager = DevSessionManager(settings, loader, repo=StubRepo())
+        manager._step_code = AsyncMock(return_value=CodingStepResult(
+            step={"step": "code", "status": "ok"}, prompt="p", summary="s"))
+        output = await manager.run(
+            {"task_id": "task-9", "ticket_number": 188,
+             "title": "Add dark mode toggle",
+             "description": "New setting with preview."},
+            {},
+        )
+        self.assertEqual(output.coding_tool, CodingTool.TIER_C)
+        self.assertEqual(len(decisions), 1)
+        doc = decisions[0]
+        self.assertEqual(doc["task_id"], "task-9")
+        self.assertEqual(doc["ticket_number"], 188)
+        self.assertEqual(doc["tier"], "tier_c")
+        self.assertEqual(doc["by"], ASSIGNED_BY)
+        self.assertEqual(doc["signals"], [])
+        self.assertTrue(doc["at"])
+
+    async def test_none_repo_is_noop(self) -> None:
+        decision = _decision("Add dark mode toggle", "")
+        await record_loose_tier_decision(
+            None, task_id="task-1", ticket_number=None, decision=decision)
+
+    async def test_failing_repo_is_fail_open(self) -> None:
+        class RaisingRepo:
+            async def record_loose_tier_decision(self, doc: dict) -> None:
+                raise RuntimeError("mongo down")
+
+        decision = _decision("Add dark mode toggle", "")
+        await record_loose_tier_decision(
+            RaisingRepo(), task_id="task-1", ticket_number=None,
+            decision=decision)
 
 
 class GraphObjectiveIdTests(unittest.IsolatedAsyncioTestCase):

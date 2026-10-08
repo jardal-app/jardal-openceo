@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from .review_links import ReviewLinksExtraction, apply_review_links_to_params, extract_review_links
-from .loose_tier import ASSIGNED_BY, LooseTierDecision, classify_loose_tier
+from .loose_tier import (ASSIGNED_BY, LooseTierDecision, classify_loose_tier,
+                          record_loose_tier_decision)
 from .routing import (ROUTING_MISSING_REASON, TIER_C_CHAIN, RoutingDecision,
                       resolve_coding_tool, select_tier_c_link)
 from .tier_oracle import freeze_oracle, verify_oracle
@@ -166,6 +167,8 @@ def _task_with_loose_tier(
     if classified.why_single_session_is_insufficient is not None:
         params["why_single_session_is_insufficient"] = (
             classified.why_single_session_is_insufficient)
+    if classified.why_not_c is not None:
+        params["why_not_c"] = classified.why_not_c
     return {**task, "params": params}
 
 
@@ -238,6 +241,10 @@ class DevSessionManager:
                 ",".join(classified.signals) or "default",
             )
             task = _task_with_loose_tier(task, classified)
+            await record_loose_tier_decision(
+                self._repo, task_id=str(task.get("task_id") or ""),
+                ticket_number=task.get("ticket_number"),
+                decision=classified)
             decision = RoutingDecision(
                 classified.tier, "loose_classifier",
                 f"loose_classifier={classified.tier.value}",
@@ -302,7 +309,7 @@ class DevSessionManager:
         """Simple tiers (design §10, F5): one ticket, one session, gates.
 
         With a resolvable repo the ticket runs the full flow — work branch
-        (+ frozen oracle for qualifying C, policy §24), baseline, one
+        (+ frozen oracle when a qualifying one is declared, policy §24), baseline, one
         executor session, orchestrator gates with retries, size brake with
         material failure (policy §29, no automatic retier to ``tier_s``),
         mandatory handoff, squash and merge. Without a repo (synthetic
@@ -436,12 +443,13 @@ class DevSessionManager:
                 waiting_reason=f"needs_owner: baseline_red: {names}",
                 params=task.get("params") if isinstance(task.get("params"), dict) else None,
             )
-        oracle_frozen = None
-        if tool == CodingTool.TIER_C:
-            params = task.get("params") \
-                if isinstance(task.get("params"), dict) else {}
-            oracle_frozen = freeze_oracle(
-                repo, base_sha, (params or {}).get("oracle"), ref)
+        # Oracle protection (§24) applies to any simple tier with a
+        # declared qualifying oracle; freeze_oracle returns None when
+        # there is nothing qualifying to protect.
+        params = task.get("params") \
+            if isinstance(task.get("params"), dict) else {}
+        oracle_frozen = freeze_oracle(
+            repo, base_sha, (params or {}).get("oracle"), ref)
         return _SimpleBranch(repo=repo, branch=branch, base=base,
                              base_sha=base_sha, ref=ref,
                              oracle_frozen=oracle_frozen)

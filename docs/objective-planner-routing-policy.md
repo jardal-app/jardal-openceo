@@ -474,11 +474,17 @@ tier_c
 Use these mental labels:
 
 ```text
-C = SAFE HIGH-AVAILABILITY EXECUTION
-B = BOUNDED STRONG SOLVING
+C = DEFAULT SAFE EXECUTION
+B = COMPLEX STRONG SOLVING
 A = DISCOVERY / ARCHITECTURE / RECOVERY
 S = INDEPENDENT CHALLENGE + VERIFY + CONVERGE
 ```
+
+The four executors are all top-tier programming models within a few
+points of each other. Letters order the work by nature, not the models
+by quality: `tier_c` is the default for specified work a single
+top-model session can own. S, A and B are chosen only with their
+verifiable justification (§20, §21, §26); when none applies, C.
 
 Quota is not the technical definition of a tier. Quota admission is handled separately.
 
@@ -505,6 +511,10 @@ The justification must identify the residual failure that independent model fami
 
 If this cannot be stated concretely, do not select S.
 
+This pair already answers why the default tier is insufficient: when
+independent consensus has clear value, a single session cannot own the
+work, so Tier S needs no separate `why_not_c`.
+
 ## 21. Tier A — discovery / architecture / recovery
 
 Choose `tier_a` when the dominant difficulty is discovering what is true, what is wrong, what should be changed, what architecture is correct, or what hidden invariant exists.
@@ -513,17 +523,25 @@ Examples include unknown/systemic root cause, undocumented legacy semantics, con
 
 > If the hard part is discovering the right thing to do, prefer A unless S is justified by the value of independent challenge.
 
+Tier A requires `why_not_c`: the ticket must name what breaks if the
+default tier executes it (a misdiagnosed root cause, a wrong
+architecture locked in, a hidden invariant missed).
+
 ## 22. Oracle definition
 
 An **oracle** is an independent mechanism that can determine whether a candidate implementation is correct enough to accept.
 
-For routing between C and B, the key question is not "is this ticket easy?"
+For any tier, the key question is not "is this ticket easy?"
 
 The key question is:
 
-> If the high-availability Tier-C builder is wrong, will a meaningful error be detected independently and cheaply before the ticket is accepted?
+> If the candidate implementation is wrong, will a meaningful error be detected independently before the ticket is accepted?
 
 An oracle is stronger when its expected outcome was fixed before the candidate implementation and the builder cannot silently redefine it to make its own solution pass.
+
+A declared oracle is evidence, not protection: only qualifying oracles
+(§23) declared before the build are frozen and verified by the
+orchestrator (§24), on any simple tier.
 
 ## 23. Oracle types
 
@@ -542,14 +560,14 @@ builder_tests
 - `contract_or_schema`: fixed contract/schema/invariant/golden file not redefinable by builder.
 - `bug_reproduction`: deterministic reproduction fixed before repair.
 - `separate_ticket_tests`: tests/specification created in a separate prior ticket and frozen before build.
-- `planner_executable_spec`: executable acceptance fixed before build by Objective Planner. May qualify for C, but is model-correlated when Muse plans and Muse builds; measure separately.
-- `builder_tests`: useful additional evidence created by the same candidate builder. It does **not** independently validate the builder's interpretation and does not qualify non-trivial work for C.
+- `planner_executable_spec`: executable acceptance fixed before build by Objective Planner. May be frozen as a qualifying oracle, but is model-correlated when Muse plans and Muse builds; measure separately.
+- `builder_tests`: useful additional evidence created by the same candidate builder. It does **not** independently validate the builder's interpretation and never triggers oracle protection (§24); it is recorded as evidence (§35).
 
 ## 24. Deterministic oracle protection
 
 Oracle independence must be enforced, not merely described.
 
-Before a qualifying C build begins, OpenCEO/orchestrator must register the frozen oracle references.
+Before a simple-tier build with a declared qualifying oracle begins, OpenCEO/orchestrator must register the frozen oracle references.
 
 For file-backed oracle references, record at least:
 
@@ -565,48 +583,52 @@ During/after build:
 1. the orchestrator, not the builder, runs the qualifying oracle;
 2. protected oracle references are checked against registered hashes;
 3. if the builder modifies a protected oracle reference, the qualifying oracle is invalidated and the gate fails;
-4. the ticket must not close as C on the basis of that modified oracle;
+4. the ticket must not close on the basis of that modified oracle;
 5. builder-created tests may still run, but remain `builder_tests`.
 
 If implementation legitimately requires changing a contract/schema used as oracle, that artifact cannot simultaneously remain the frozen qualifying oracle. Re-plan or provide another independent oracle.
 
-## 25. Tier C — safe first execution
+## 25. Tier C — default safe execution
 
-Choose `tier_c` when:
+Choose `tier_c` when the work is specified well enough for a single
+top-model session to own, and no S, A or B justification applies.
 
-```text
-a qualifying independent oracle exists
-AND
-(the candidate change is reversible OR its blast radius is bounded)
-AND
-the ticket does not independently require Tier A or Tier S
-```
+C is the default: the ticket needs no oracle, no reversibility proof
+and no blast-radius analysis to select it. Detection still matters —
+a declared qualifying oracle is frozen and verified (§24), gates run,
+and late failures are attributed (§31) — but the absence of an oracle
+is never a reason to leave C.
 
-This conjunction is mandatory.
+Tier C routinely receives difficult or high-volume work: volume and
+difficulty never select a tier by themselves (§41).
 
-**Detectable OR reversible is incorrect.**
+`tier_reason` for C states what the session owns, in one line.
 
-Reversibility without detection does not protect the system: an undetected semantic error can be integrated and remain indefinitely.
+## 26. Tier B — complex strong solving
 
-Tier C may receive difficult or high-volume work if failure is safely detectable under the rule above.
-
-`builder_tests` alone do not qualify non-trivial logic for C.
-
-## 26. Tier B — bounded strong solving
-
-Choose `tier_b` when:
+Choose `tier_b` when the problem is bounded, A is not required for
+open-ended discovery, S is not justified by independent-consensus
+value, AND at least one of the following holds:
 
 ```text
-the problem is bounded
-the definition of success is sufficiently known
-A is not required for open-ended discovery
-S is not justified by independent-consensus value
-C is not sufficiently protected by a qualifying independent oracle
+the solution needs significant interpretation (fuzzy rules, semantic
+judgment calls, compatibility trade-offs), OR
+verification is weak (builder-authored tests only, no usable oracle), OR
+the blast radius is significant while staying below S stakes
 ```
 
-Typical B cases include bounded non-trivial business logic with partial verification, semantic refactors where errors may pass local tests, complex implementation with builder-authored tests only, known-subsystem bugs without a sufficiently independent oracle, or integration logic where correctness requires interpretation.
+Typical B cases include semantic refactors where errors pass local
+tests, complex business logic with builder-authored tests only,
+data/schema migrations with compatibility constraints, concurrency or
+performance work, known-subsystem bugs needing interpretation, or
+integration logic where correctness requires judgment.
 
-B is not "the default because the task is hard".
+Tier B requires `why_not_c`: one verifiable statement of what breaks
+if the default tier executes this ticket. If that cannot be stated
+concretely, do not select B.
+
+B is not "the default because the task is hard" and never a fallback
+for a missing oracle alone.
 
 ## 27. DEV routing algorithm
 
@@ -616,22 +638,23 @@ Apply in this order:
 1. S CHECK
    Would independent planning/challenge/review materially reduce
    high-impact residual risk?
-   YES -> tier_s
+   YES -> tier_s (justify per §20)
 
 2. A CHECK
    Is discovering what is true/wrong/correct-to-do the dominant difficulty?
-   YES -> tier_a
+   YES -> tier_a (justify with why_not_c, §21)
 
-3. C SAFETY CHECK
-   Is there a qualifying independent frozen oracle
-   AND (reversible change OR bounded blast radius)?
-   YES -> tier_c
+3. B CHECK
+   Is this really complex single-session work per §26?
+   YES -> tier_b (justify with why_not_c)
 
 4. OTHERWISE
-   -> tier_b
+   -> tier_c (the default)
 ```
 
-The C/B boundary is primarily about **safe detectability**, not perceived difficulty.
+The C/B boundary is about **provable complexity**, not perceived
+difficulty and not oracle availability: B needs its `why_not_c`, C
+needs nothing beyond specified work.
 
 ## 28. Quota is separate from technical routing
 
@@ -650,6 +673,11 @@ Do not silently downgrade A/B to C merely to obtain throughput.
 The scheduler may dispatch other ready tickets from the same Objective when dependencies permit.
 
 Reservation policy is configuration, not LLM judgment.
+
+Every tier consumes real, paid-for capacity. Generous default-tier
+limits exist because the owner pays for them, not because the tier is
+free: never describe any tier as cheap, free, economical, or weaker,
+and never select a tier for its price.
 
 ## 29. Material failure of a simple DEV tier
 
@@ -738,6 +766,14 @@ Analyze it by oracle type, tier reason, work type, and project.
 
 Pay special attention to `planner_executable_spec` because Muse planner and Muse builder are model-correlated.
 
+Tier mix (planner + classifier) is recorded alongside, as information
+only: per objective, count planned tickets by tier (`tier_mix`); per
+loose-ticket assignment, record the classifier decision (tier, reason,
+signals, classifier version). No threshold, alert or quota derives
+from the mix: a really complex ticket is never forced into C, and the
+owner's estimate (~85 % future C) is a reference to compare against,
+not an approval gate (§33).
+
 ## 33. No automatic C/B policy drift
 
 Telemetry informs decisions. It does not rewrite routing thresholds automatically.
@@ -756,7 +792,7 @@ No self-modifying routing policy.
 
 A Muse planner may fix executable acceptance criteria before implementation.
 
-This can qualify as `planner_executable_spec` if it is persisted/frozen before build, its references/hashes are registered, the builder cannot alter it without invalidating the oracle, and the orchestrator runs it.
+This can be frozen as a `planner_executable_spec` oracle if it is persisted/frozen before build, its references/hashes are registered, the builder cannot alter it without invalidating the oracle, and the orchestrator runs it.
 
 However, `Muse planner -> Muse C builder` is model-correlated. Do not treat it statistically as equivalent to preexisting tests or an independently produced contract.
 
@@ -764,7 +800,7 @@ However, `Muse planner -> Muse C builder` is model-correlated. Do not treat it s
 
 Builder-authored tests are encouraged and are additional evidence.
 
-They are not a qualifying independent oracle for non-trivial Tier-C routing.
+They are not a qualifying independent oracle and never trigger oracle protection (§24).
 
 They must not be mislabeled as stronger oracle types.
 
@@ -865,16 +901,17 @@ Objective
 
 Still Payments, not DEV.
 
-### Large migration with independent contract tests
+### Large migration with a specified target state
 
 ```text
 120 files
-fixed contract tests
-oracle frozen before build
-bounded blast radius
+specified target state
+no open discovery, no S stakes
 ```
 
-Potential `tier_c`, despite volume.
+`tier_c`, despite volume. If the ticket declares the contract tests,
+they freeze before the build (§24); their absence would not move it
+to B without a `why_not_c`.
 
 ### Complex business logic with builder-authored tests only
 
@@ -882,14 +919,28 @@ Potential `tier_c`, despite volume.
 bounded problem
 non-trivial semantics
 builder will write tests
-no independent qualifying oracle
+correctness needs interpretation of fuzzy rules
 ```
 
-`tier_b`.
+`tier_b`, with `why_not_c` naming the interpretation risk (e.g. "a
+misread rule ships wrong amounts; only the builder's own tests would
+catch it"). Without that statement, C.
+
+### Bounded integration with known rules, no prior tests
+
+```text
+specified rule (percent computed from child states)
+known-subsystem integration, event-driven
+no preexisting tests
+```
+
+`tier_c`: specified single-session work with no S/A/B justification.
+The missing oracle is not a reason to select B.
 
 ### Unknown systemic authorization failure
 
 Unknown root cause + cross-service invariants -> `tier_a`, or `tier_s` when independent challenge materially reduces critical security risk.
+Tier A carries `why_not_c` (e.g. "a wrong root cause ships the wrong fix").
 
 ## 41. Anti-patterns
 
@@ -903,8 +954,9 @@ Never:
 - use criticality alone as Tier-S justification;
 - automatically staircase C -> B -> A -> S;
 - retry unchanged materially failed ticket in same tier;
-- classify builder-authored tests as independent C oracle;
-- treat reversibility without detection as sufficient for C;
+- classify builder-authored tests as an independent oracle;
+- select B for a missing oracle alone, without a why_not_c;
+- describe any tier as cheap, free, economical, or weaker;
 - allow builder to rewrite a frozen qualifying oracle;
 - silently degrade A/B to C due to quota;
 - automatically change C/B policy from telemetry;
@@ -938,16 +990,20 @@ You run as one fresh Muse Code / Muse Spark 1.3 Contributor headless planning cy
 7. DEV tiers apply only when target_agent == dev.
 
 8. DEV routing order:
-   S: independent challenge materially reduces high-impact residual risk.
-   A: discovering truth/root cause/architecture is the dominant difficulty.
-   C: qualifying independent frozen oracle exists
-      AND (change is reversible OR blast radius is bounded),
-      and S/A are not required.
-   B: bounded non-trivial DEV work not safely protected enough for C.
+   S: independent challenge materially reduces high-impact residual risk
+      (justify per §20: the pair already states why one session is not enough).
+   A: discovering truth/root cause/architecture is the dominant difficulty
+      (justify with why_not_c).
+   B: really complex single-session work per §26
+      (justify with why_not_c; never for a missing oracle alone).
+   C: the default. Specified work with no S/A/B justification.
+      No oracle, reversibility proof, or blast-radius analysis required.
 
-9. builder_tests alone never qualify non-trivial work for C.
+9. A declared oracle is evidence, not protection: only qualifying
+   oracles declared before the build freeze (§24), on any simple tier.
+   builder_tests never triggers protection.
 
-10. planner_executable_spec may qualify for C only if frozen before build
+10. planner_executable_spec may be frozen only if declared before build
     and protected from builder modification; record it separately because
     Muse-planner -> Muse-builder is model-correlated.
 

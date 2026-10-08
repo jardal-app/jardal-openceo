@@ -177,6 +177,7 @@ def _dev_ticket(local_ref: str = "t1", title: str = "Do the thing",
         "expected_artifacts": ["code"],
         "coding_tool": "tier_b",
         "tier_reason": "bounded work",
+        "why_not_c": "a misjudged step ships wrong behavior",
     }
     ticket.update(overrides)
     return ticket

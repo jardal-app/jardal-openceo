@@ -130,6 +130,8 @@ def _dev_ticket(local_ref: str, title: str, tier: str = "tier_b",
         "coding_tool": tier,
         "tier_reason": "bounded work",
     }
+    if tier in ("tier_a", "tier_b") and "why_not_c" not in overrides:
+        ticket["why_not_c"] = "a misjudged step ships wrong behavior"
     ticket.update(overrides)
     return ticket
 
@@ -166,6 +168,8 @@ class PlannerCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(created[0]["agent_hint"], "dev")
         self.assertEqual(created[0]["params"]["target_agent"], "dev")
         self.assertEqual(created[0]["params"]["tier_reason"], "bounded work")
+        self.assertEqual(created[0]["params"]["why_not_c"],
+                         "a misjudged step ships wrong behavior")
         self.assertEqual(created[1]["params"]["oracle"]["type"],
                          "preexisting_tests")
         self.assertIn("GOAL:", created[0]["description"])
@@ -181,6 +185,7 @@ class PlannerCycleTests(unittest.IsolatedAsyncioTestCase):
         tele = stored["planner_telemetry"]
         self.assertEqual(tele["cycles"], 1)
         self.assertEqual(tele["tickets_created"], 2)
+        self.assertEqual(tele["tier_mix"], {"tier_b": 1, "tier_c": 1})
         self.assertEqual(planner.runs, 1)
         self.assertIn("PLANNER_RESULT.json", planner.prompts[0])
 
