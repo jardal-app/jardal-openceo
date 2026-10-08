@@ -153,7 +153,11 @@ class ShorthandRootsTest(unittest.TestCase):
             "horizon/cockpit.py": "openceo-core/horizon/cockpit.py",
             "tools/erpnext_tickets.py": "openceo-core/tools/erpnext_tickets.py",
             "db/mongo.py": "openceo-core/db/mongo.py",
-            "ceo": "workflows/ceo",
+            # TASK-2026-00119 added openceo-core/ceo/: bare "ceo" is
+            # ambiguous (and never a real citation — cited_path needs
+            # a slash), so each side pins a realistic span instead.
+            "ceo/horizon_daily.yaml": "workflows/ceo/horizon_daily.yaml",
+            "ceo/review.py": "openceo-core/ceo/review.py",
             # TASK-2026-00141 moved the review machinery out of tier_s.
             "tier_s/cycle.py": "openceo-core/agents/dev/tier_s/cycle.py",
             "orchestration/inbox.py": "openceo-core/orchestration/inbox.py",

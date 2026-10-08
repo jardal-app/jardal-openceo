@@ -169,6 +169,15 @@ class ObjectiveService:
         self._config = config_loader
         self._settings = settings
         self._rate_monitor = rate_monitor
+        self._ceo_wake: Any | None = None
+
+    def set_ceo_wake(self, wake: Any | None) -> None:
+        """Inject the CEO loop wake (objective parked/closed events).
+
+        The engine calls it with a reason; without it the company
+        events simply wake nobody. Mirrors ``set_dispatcher_wake``.
+        """
+        self._ceo_wake = wake
 
     # -- env ------------------------------------------------------------
 
@@ -238,6 +247,7 @@ class ObjectiveService:
             base_branch=base,
             vault=dict(dev_cfg.get("vault_project") or {})
             if dev_cfg.get("vault_project") else None,
+            ceo_wake=self._ceo_wake,
         )
 
     @staticmethod

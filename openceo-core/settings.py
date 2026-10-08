@@ -202,6 +202,10 @@ class Settings(BaseSettings):
     DISPATCHER_BACKUP_SECONDS: int = 300
     DISPATCHER_MAX_ACTIVE_PER_PROJECT: int = 1
     DISPATCHER_MAX_ACTIVE_PER_OBJECTIVE: int = 6
+    # F4 CEO loop (TASK-2026-00119): reactive reviews debounce. Each
+    # reactive review costs a headless run, so wakes inside the window
+    # accumulate reasons for the next review instead of storming.
+    CEO_REACTIVE_MIN_INTERVAL_SECONDS: int = 3600
     PROJECTS_DIR: str = "projects"
     # F6 (TASK-2026-00115): roots for end-to-end project creation. Repos live
     # as siblings of the OpenCEO checkout; the vault lives in jardal-knowledge.

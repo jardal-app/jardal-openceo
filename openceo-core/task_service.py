@@ -218,6 +218,7 @@ class TaskService:
         # Dispatcher.wake. Read via getattr: tests build TaskService with
         # __new__ and without __init__, so the attribute may not exist.
         self._dispatcher_wake: Any | None = None
+        self._ceo_wake: Any | None = None
 
     def set_dispatcher_wake(self, wake: Any | None) -> None:
         """Inject the dispatcher wake-up (called on every queue event).
@@ -237,6 +238,41 @@ class TaskService:
             wake()
         except Exception:
             logger.warning("Dispatcher wake failed", exc_info=True)
+
+    def set_ceo_wake(self, wake: Any | None) -> None:
+        """Inject the CEO loop wake-up (incident events only).
+
+        Same outward dependency as the dispatcher wake: TaskService
+        never imports the CEO loop, it just signals. Without a wake
+        the incident events are silent (tests, standalone use).
+        """
+        self._ceo_wake = wake
+
+    def _wake_ceo_incident(self, task: dict[str, Any] | None) -> None:
+        """Signal the CEO loop on a company incident. Never breaks.
+
+        Fires only for failed/escalated executions of company scope:
+        personal work stays out of the company review (privacy), and
+        routine closes are not incidents. The loop debounces bursts.
+        """
+        if task is None:
+            return
+        if str(task.get("status") or "") not in {
+            TaskStatus.FAILED.value,
+            TaskStatus.ESCALATED.value,
+        }:
+            return
+        if is_personal_scope(task):
+            return
+        wake = getattr(self, "_ceo_wake", None)
+        if wake is None:
+            return
+        try:
+            wake(f"Incident: ticket {task.get('task_id')} "
+                 f"{task.get('status')}: "
+                 f"{str(task.get('title') or '')[:120]}")
+        except Exception:
+            logger.warning("CEO wake failed", exc_info=True)
 
     def set_horizon_hooks(self, *, on_task_terminal: Any | None = None) -> None:
         """Inyecta la reaccion de Horizon a un resultado de tarea.
@@ -2103,6 +2139,7 @@ class TaskService:
                     # que repetirse aqui o los tickets ejecutados de verdad
                     # serian justo los que nunca replanifican.
                     asyncio.create_task(self._notify_horizon_terminal(updated))
+                    self._wake_ceo_incident(updated)
                 if final_status == TaskStatus.WAITING.value:
                     reason = str(updated.get("waiting_reason") or "")
                     if reason.startswith(("routing_missing", "config")):
@@ -2569,6 +2606,7 @@ class TaskService:
                 and str(task.get("status")) != str(updated.get("status"))
             ):
                 asyncio.create_task(self._notify_horizon_terminal(updated))
+                self._wake_ceo_incident(updated)
         return updated
 
     async def create_task_review(self, task_id: str, payload: TaskReviewCreateRequest) -> dict[str, Any]:

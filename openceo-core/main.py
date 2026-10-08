@@ -20,6 +20,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from agents.dev.session import DevSessionManager
 from agents.finance.session import FinanceSessionManager
+from ceo.loop import CEOLoop
+from ceo.review import run_review as run_ceo_review
+from ceo.service import CEOService
 from agents.pm.session import PMSessionManager
 from agents.secretary.session import SecretarySessionManager
 from auth.router import auth_router
@@ -201,6 +204,32 @@ dispatcher = Dispatcher(
     repo_for_project=_dispatcher_repo_for,
 )
 task_service.set_dispatcher_wake(dispatcher.wake)
+# F4 CEO loop (TASK-2026-00119): scheduled mandate-cadence reviews plus
+# reactive reviews on company events (objective parked/closed, failed
+# or escalated executions). The mandate is the switch: without a valid
+# one the reviews escalate deterministically and spend zero tokens.
+ceo_service = CEOService(
+    repo=repo,
+    task_service=task_service,
+    config_loader=config_loader,
+    settings=settings,
+    company_reader=erpnext_adapter,
+)
+
+
+async def _run_ceo_review(kind: str, reasons: list[str]) -> dict[str, Any]:
+    env = ceo_service.build_env(ceo_service.current_mandate())
+    return await run_ceo_review(env, kind=kind, reasons=reasons)
+
+
+ceo_loop = CEOLoop(
+    repo=repo,
+    settings=settings,
+    mandate_fn=ceo_service.current_mandate,
+    review_runner=_run_ceo_review,
+)
+task_service.set_ceo_wake(ceo_loop.wake)
+objective_service.set_ceo_wake(ceo_loop.wake)
 internal_mcp = build_internal_mcp_mount(settings, task_service, erpnext_adapter)
 global_mcp = build_global_mcp_mount(settings, task_service, erpnext_adapter)
 horizon_service = HorizonService(settings=settings, repo=repo)
@@ -337,6 +366,7 @@ async def lifespan(_: FastAPI):
         await task_service.startup_reconcile_notion_mirrors()
         await task_service.startup_reconcile_erpnext()
         await dispatcher.start()
+        await ceo_loop.start()
         # Ojo: dentro de ``lifespan`` hay un ``settings = get_settings()`` mas
         # abajo (bloque de auth) que vuelve ``settings`` local a toda la funcion.
         # Leerlo aqui antes de esa asignacion lanzaria UnboundLocalError, asi que
@@ -431,6 +461,7 @@ async def lifespan(_: FastAPI):
         # Horizon se para antes que el resto para que ninguna escritura suya
         # caiga despues de cerrar el repositorio.
         await horizon_scheduler.stop()
+        await ceo_loop.stop()
         await dispatcher.stop()
         await task_service.stop_notion_worker()
         await task_service.stop_erpnext_worker()

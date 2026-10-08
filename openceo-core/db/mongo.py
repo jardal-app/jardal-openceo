@@ -99,6 +99,14 @@ class MongoRepository:
         return self.db["dispatcher_backup"]
 
     @property
+    def ceo_reviews(self):
+        return self.db["ceo_reviews"]
+
+    @property
+    def ceo_review_trigger(self):
+        return self.db["ceo_review_trigger"]
+
+    @property
     def discovery_runs(self):
         return self.db["discovery_runs"]
 
@@ -250,6 +258,8 @@ class MongoRepository:
         await self.findings_inbox.create_index([("project", ASCENDING), ("file", ASCENDING)])
         await self.dev_objectives.create_index([("objective_id", ASCENDING)], unique=True)
         await self.dev_objectives.create_index([("project", ASCENDING), ("status", ASCENDING)])
+        await self.ceo_reviews.create_index([("review_id", ASCENDING)], unique=True)
+        await self.ceo_reviews.create_index([("at", DESCENDING)])
         await self.agent_status.create_index(
             [("slot", ASCENDING)], unique=True,
             partialFilterExpression={"slot": {"$type": "string"}},
@@ -732,6 +742,83 @@ class MongoRepository:
             {"$set": {"resume_at": None, "updated_at": datetime.now(timezone.utc)}},
         )
         return result.modified_count
+
+    # ------------------------- CEO reviews (F4, TASK-2026-00119) -------------------------
+
+    #: The trigger collection holds at most one document (the next
+    #: scheduled review plus pending reactive reasons). No index
+    #: beyond ``_id``.
+    CEO_TRIGGER_DOC_ID = "trigger"
+
+    async def get_ceo_trigger(self) -> dict[str, Any] | None:
+        return self._clean(await self.ceo_review_trigger.find_one(
+            {"_id": self.CEO_TRIGGER_DOC_ID}))
+
+    async def save_ceo_trigger(self, doc: dict[str, Any]) -> None:
+        """Create or replace the single CEO trigger document."""
+        payload = dict(doc)
+        payload.pop("_id", None)
+        payload["updated_at"] = datetime.now(timezone.utc)
+        await self.ceo_review_trigger.update_one(
+            {"_id": self.CEO_TRIGGER_DOC_ID},
+            {"$set": payload},
+            upsert=True,
+        )
+
+    async def save_ceo_review(self, record: dict[str, Any]) -> None:
+        """Append one review record (Horizon reads the latest)."""
+        payload = dict(record)
+        payload.pop("_id", None)
+        await self.ceo_reviews.insert_one(payload)
+
+    async def latest_ceo_review(self) -> dict[str, Any] | None:
+        """Latest published CEO review, or None when none ran yet."""
+        rows = self.ceo_reviews.find({}, sort=[("at", DESCENDING)]).limit(1)
+        found = [self._clean(row) async for row in rows]
+        return found[0] if found else None
+
+    async def list_open_company_titles(self, limit: int = 200) -> list[str]:
+        """Open company ticket titles for the CEO duplicate check.
+
+        Bounded projection (title only), personal scope excluded.
+        """
+        query: dict[str, Any] = {
+            **mirror_exclusion_filter(),
+            "status": {
+                "$in": [
+                    TaskStatus.QUEUED.value,
+                    TaskStatus.IN_PROGRESS.value,
+                    TaskStatus.WAITING.value,
+                ]
+            },
+        }
+        rows = self.tasks.find(
+            query, projection={"title": 1},
+        ).limit(max(1, int(limit)))
+        return [
+            str(row.get("title") or "")
+            async for row in rows
+            if str(row.get("title") or "").strip()
+        ]
+
+    async def list_recent_research_results(
+        self, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """Recently completed research jobs, newest first (CEO signal)."""
+        query: dict[str, Any] = {"status": "completed"}
+        rows = self.research_jobs.find(
+            query, sort=[("updated_at", DESCENDING)],
+        ).limit(max(1, int(limit)))
+        out = []
+        async for row in rows:
+            result = row.get("result") or {}
+            out.append({
+                "research_id": str(row.get("research_id") or ""),
+                "question": str(row.get("question") or ""),
+                "summary": str(result.get("summary") or ""),
+                "project_key": str(row.get("project_key") or ""),
+            })
+        return out
 
     async def list_tasks_needing_erpnext_sync(self, limit: int = 200) -> list[dict[str, Any]]:
         """Tickets con el enlace de negocio roto, para reconciliar al arrancar.
