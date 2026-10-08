@@ -130,6 +130,10 @@ class ObjectiveEnv:
     auto_merge: bool = True
     base_branch: str = "main"
     vault: dict[str, str] | None = None  # {dir, project} (F7b)
+    # Reactive CEO wake (F4 TASK-2026-00119): the engine calls it with a
+    # reason when an objective parks or closes. Sync, never fatal, None
+    # in bare unit envs and dev flows that do not wire the CEO loop.
+    ceo_wake: Callable[[str], None] | None = None
 
 
 class InMemoryObjectiveStore:
@@ -223,7 +227,7 @@ TERMINAL_TICKET_STATUS = frozenset({"completed", "cancelled"})
 SHELL_ORIGIN = "objective_shell"
 
 #: Valid ``entry`` values on the objective document.
-ENTRIES = frozenset({"convert", "top_down", "horizon_promotion"})
+ENTRIES = frozenset({"convert", "top_down", "horizon_promotion", "ceo_review"})
 
 
 # ---------------------------------------------------------------------------
@@ -1167,6 +1171,14 @@ async def _objective_park(
         await env.notify(
             _notify_ref(objective),
             f"Objective waiting ({reason}): {detail}")
+    if env.ceo_wake is not None:
+        try:
+            env.ceo_wake(
+                f"Objective {objective.get('objective_id')} parked "
+                f"({reason}): {str(detail)[:160]}"
+            )
+        except Exception:
+            pass
     return {"ok": False, "reason": reason, "detail": detail}
 
 
@@ -1921,6 +1933,13 @@ async def _finish_objective(
         "delivery": _delivery_record(
             objective, children, verified_by="final_review"),
     })
+    if env.ceo_wake is not None:
+        try:
+            env.ceo_wake(
+                f"Objective {objective_id} closed: final review clean."
+            )
+        except Exception:
+            pass
     parent_id = str(objective.get("conversion_source_task_id") or "")
     if parent_id:
         parent = await env.tasks.get_task(parent_id)

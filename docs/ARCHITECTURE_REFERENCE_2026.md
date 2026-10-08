@@ -381,7 +381,7 @@ steps:
       reporte: "{{steps.reporte}}"
 ```
 
-References over flattening: if Finance improves `cierre_contable`, the composed workflow benefits automatically. Cross-agent workflows are stored under `ceo/`:
+References over flattening: if Finance improves `cierre_contable`, the composed workflow benefits automatically. Cross-agent workflows are stored under `workflows/ceo/`:
 
 ```
 workflows/
@@ -916,13 +916,13 @@ The mandate is a versioned YAML beside `projects/<project>/project.yaml`: axes w
 
 Scheduled review (mandate cadence) plus reactive review (objective closed or blocked, `capability_gap`, incident, research, deferred findings, KPI change) over the same persisted-trigger engine as Horizon and research. Each review ends in exactly one of: keep going, create an Objetivo, create a loose ticket, create a project, escalate, or do nothing. An axis without a measurable KPI produces a report, never new work. Missing capabilities are declared as `capability_gap`, never silently worked around. Business acceptance and transitions remain ERPNext decisions; agent completion and delivery to the user remain distinct events.
 
-> pendiente: TASK-2026-00119 (CEO autónomo; requires 00117 + 00113 + 00114).
+> Implemented by TASK-2026-00119 (`openceo-core/ceo/`: `models.py` CEODecision contract, `review.py` signal compile + one headless run + validate + act once + publish, `loop.py` scheduled/ reactive loop over one persisted trigger, `service.py` production binding; `ceo_reviewer` role in the global `ceo` block, `CEO_DECISION.json` in the orchestrator scratch). Scheduled review follows the mandate cadence (interval-based, no timezone); reactive review wakes on objective parked/closed (engine `ceo_wake`) and failed/escalated company executions (task funnel, personal scope excluded), debounced (`CEO_REACTIVE_MIN_INTERVAL_SECONDS`). Research results, deferred findings and KPI deltas compile as bounded signals every review; their future event emitters call `loop.wake(reason)` — no fake sources. An axis starts new work only with a declared KPI linked and measured this review (closed v1 vocabulary: `objectives.active`, `erpnext.open/working/pending_review`; finance sources stay unknown until HZ-005). Without a valid mandate the review escalates deterministically and never invokes the model; there is deliberately no on/off flag — the mandate is the switch. CEO business effects flow only through sanctioned channels (ERPNext-first creation, `create_owner_escalation`); if a future CEO ever closes or cancels business work directly, it MUST use `TaskService.transition_ticket`, never a direct adapter write.
 
 ### Horizon cockpit
 
 Horizon is the owner's primary interface: "qué sigue" and the daily brief combine the personal plan with what the CEO advanced (objectives, closed tickets), what is blocked (failed/escalated plus Working tickets parked by a missing secret), and what awaits a decision. The decisions tray reads the same source as the "Requiere humano" view (waiting tickets plus pending/changes-requested QA), filtered to waits that name a human action; the owner answers by voice, mobile, or API and the answer is applied (a blocked YAML run resumes or fails, a human phase decides, a standalone owner-escalation records the decision and closes to Completed). Escalations group into the brief except urgent ones (cost deadline, blocking); grouped items deliver once, urgent ones re-surface until answered. Company data enters Horizon read-only; nothing personal leaves. The day plan still runs without any LLM.
 
-> Implemented by TASK-2026-00120 (`horizon/cockpit.py`, `HorizonService.cockpit/company_status/pending_decisions/answer_decision`, `TaskService.apply_owner_decision`, `/api/horizon/cockpit|decisions|decisions/*/answer`, voice intents `horizon_brief/decisions/decide`). Until TASK-2026-00119 lands, company status reads ERPNext and the objectives directly. Push delivery stays pending (TASK-2026-00026).
+> Implemented by TASK-2026-00120 (`horizon/cockpit.py`, `HorizonService.cockpit/company_status/pending_decisions/answer_decision`, `TaskService.apply_owner_decision`, `/api/horizon/cockpit|decisions|decisions/*/answer`, voice intents `horizon_brief/decisions/decide`). Since TASK-2026-00119, company status also merges the latest published CEO review (`ceo` section, None when no review ran yet). Push delivery stays pending (TASK-2026-00026).
 
 ### Create project end-to-end
 

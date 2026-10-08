@@ -92,7 +92,8 @@ class ConfigLoader:
         ``objective_planner`` content is invalid (TASK-2026-00112), and so
         is top-level ``objectives`` (TASK-2026-00117). The shared review
         machinery is global too: top-level ``review`` content is invalid
-        (TASK-2026-00141).
+        (TASK-2026-00141), and so is the company-wide CEO reviewer:
+        top-level ``ceo`` content is invalid (TASK-2026-00119).
         Callers park the project's tickets in ``waiting(config)`` when
         this is non-empty; other projects are unaffected.
         """
@@ -149,6 +150,20 @@ class ConfigLoader:
             else:
                 errors.append(
                     f"review in {project}/project.yaml must be "
+                    "a mapping or absent."
+                )
+        ceo = data.get("ceo")
+        if ceo is not None and ceo != {}:
+            if isinstance(ceo, dict):
+                found = ", ".join(sorted(str(key) for key in ceo))
+                errors.append(
+                    "ceo must not be set in project.yaml: "
+                    "the company CEO reviewer is global. Remove it from "
+                    f"{project}/project.yaml (found: {found})."
+                )
+            else:
+                errors.append(
+                    f"ceo in {project}/project.yaml must be "
                     "a mapping or absent."
                 )
         dev = data.get("dev")
@@ -508,6 +523,30 @@ class ConfigLoader:
                 "max_active_objectives_global": 3,
                 "max_active_objectives_per_project": 2,
                 "max_active_tickets_per_objective": 6,
+            },
+            # Autonomous company CEO (autonomy epic TASK-2026-00110,
+            # F4 TASK-2026-00119). One headless Muse run per review
+            # over bounded compiled state, own CEODecision contract.
+            # Same account/model/invocation as the planner, separate
+            # role label so telemetry never confuses a CEO review
+            # with a planning cycle. Projects must not set ceo
+            # (see validate_project).
+            "ceo": {
+                "engine": "muse_code",
+                "profile": "muse_spark_1_3_contributor",
+                "invocation": "headless",
+                "timeout_minutes": 15,
+                "role": {
+                    "provider": "muse", "account": "muse",
+                    "label": "ceo_reviewer",
+                    "model": "muse-spark-1.3-contributor",
+                    "effort": "max", "active": True,
+                    "command": ["musej", "exec", "--model",
+                                "muse-spark-1.3-contributor",
+                                "--reasoning-effort",
+                                "max", "--yolo"],
+                    "prompt_via": "argv",
+                },
             },
             "voice": {
                 "peer_programming": {

@@ -934,6 +934,30 @@ class HorizonService:
                     for r in desk_only[:10]
                 ]
 
+        ceo: dict[str, Any] | None = None
+        try:
+            latest_review = await self._repo.latest_ceo_review()
+        except Exception:
+            logger.warning(
+                "cockpit: ultima revision CEO no legible", exc_info=True
+            )
+            latest_review = None
+        if isinstance(latest_review, dict) and latest_review:
+            outcome = latest_review.get("outcome") or {}
+            decision = latest_review.get("decision") or {}
+            ceo = {
+                "review_id": latest_review.get("review_id"),
+                "at": latest_review.get("at"),
+                "kind": latest_review.get("kind"),
+                "action": outcome.get("action"),
+                "ok": outcome.get("ok"),
+                "summary": (
+                    decision.get("summary") if isinstance(decision, dict)
+                    else None
+                ),
+                "status": latest_review.get("status"),
+            }
+
         company = {
             "objectives": objectives,
             "objectives_unknown": objectives_unknown,
@@ -943,6 +967,7 @@ class HorizonService:
             "blocked_unknown": blocked_unknown,
             "business_open_without_execution": business_open,
             "business_unknown": business_unknown,
+            "ceo": ceo,
         }
         company["message"] = cockpit_module.describe_company(company)
         return company
