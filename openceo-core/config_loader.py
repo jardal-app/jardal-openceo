@@ -346,7 +346,7 @@ class ConfigLoader:
                     "roles": {
                         "planner": {"provider": "claude", "account": "claudej", "label": "claudej", "model": "opus", "effort": "max", "active": True, "command": ["claudej"], "headless_args": ["--print"], "prompt_via": "argv"},
                         "plan-reviewer": {"provider": "codex", "account": "codexj", "label": "codexj", "model": "gpt-6.1-sol", "effort": "xhigh", "active": True, "command": ["codexj"], "headless_args": ["exec", "--ephemeral", "-"], "prompt_via": "stdin"},
-                        "builder": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "effort": "max", "active": True, "command": ["musej", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"], "prompt_via": "argv"},
+                        "builder": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "effort": "max", "active": True, "command": ["musej", "exec", "--model", "muse-spark-1.3-contributor"], "prompt_via": "argv"},
                     },
                     # Review machinery (pool, rounds, inbox, fix tiers) and the
                     # legacy objectives flow keys moved to the shared
@@ -365,7 +365,7 @@ class ConfigLoader:
                                "model_args": []},
                     "tier_c": {"chain": ["muse", "dsh", "claudep"],
                                "muse": {"model": "muse-spark-1.3-contributor", "effort": "max",
-                                        "command": ["musej", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max"]},
+                                        "command": ["musej", "exec", "--model", "muse-spark-1.3-contributor"]},
                                "dsh": {"model": "deepseek-v4.1-flash", "effort": "max",
                                        "command": ["node", "/home/develop/development/Jardal/jardal-deepseek-harness/apps/cli/lib/bin.js", "--profile", "headless", "-"],
                                        "env": {"DSH_HOME": "/home/develop/.dsh"}},
@@ -429,7 +429,7 @@ class ConfigLoader:
                 # travels per `prompt_via`. The closer runs only in the
                 # objectives final review; the arbiter in both engines.
                 "roles": {
-                    "closer": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "effort": "max", "active": True, "command": ["musej", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max", "--yolo"], "prompt_via": "argv"},
+                    "closer": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "effort": "max", "active": True, "command": ["musej", "exec", "--model", "muse-spark-1.3-contributor"], "prompt_via": "argv"},
                     "arbiter": {"provider": "claude", "account": "claudej", "label": "claudej", "model": "opus", "effort": "max", "active": True, "command": ["claudej"], "headless_args": ["--print"], "prompt_via": "argv"},
                 },
                 "timeouts_minutes": {
@@ -493,8 +493,7 @@ class ConfigLoader:
                     "label": "muse", "model": "muse-spark-1.3-contributor",
                     "effort": "max", "active": True,
                     "command": ["musej", "exec", "--model",
-                                "muse-spark-1.3-contributor", "--reasoning-effort",
-                                "max", "--yolo"],
+                                "muse-spark-1.3-contributor"],
                     "prompt_via": "argv",
                 },
                 # Authoritative agent registry for target_agent (policy
@@ -542,9 +541,7 @@ class ConfigLoader:
                     "model": "muse-spark-1.3-contributor",
                     "effort": "max", "active": True,
                     "command": ["musej", "exec", "--model",
-                                "muse-spark-1.3-contributor",
-                                "--reasoning-effort",
-                                "max", "--yolo"],
+                                "muse-spark-1.3-contributor"],
                     "prompt_via": "argv",
                 },
             },

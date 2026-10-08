@@ -130,8 +130,11 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
                 "musej", name)
             command = " ".join(str(part) for part in builder["command"])
             self.assertIn("--model muse-spark-1.3-contributor", command, name)
-            self.assertIn("--reasoning-effort max", command, name)
-            self.assertIn("--yolo", command, name)
+            # musej owns access/effort flags (TASK-2026-00122): repeating
+            # --reasoning-effort crashes clap (exit 2), so the command
+            # carries subcommand+model only.
+            self.assertNotIn("--reasoning-effort", command, name)
+            self.assertNotIn("--yolo", command, name)
             reviewer = roles["plan-reviewer"]
             self.assertTrue(
                 any("codexj" in str(part) for part in reviewer["command"]),
