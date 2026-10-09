@@ -1218,6 +1218,9 @@ class DevSessionManager:
             vault=dict(dev_cfg.get("vault_project") or {})
             if dev_cfg.get("vault_project") else None,
             project_routing=project_money_routing(project_config),
+            dispatcher_wake=(getattr(self._task_service, "wake_dispatcher",
+                                     None)
+                             if self._task_service is not None else None),
         )
 
     async def _internal_create_ticket(

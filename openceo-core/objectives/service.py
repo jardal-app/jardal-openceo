@@ -250,6 +250,8 @@ class ObjectiveService:
             if dev_cfg.get("vault_project") else None,
             ceo_wake=self._ceo_wake,
             project_routing=project_money_routing(project_config),
+            dispatcher_wake=(getattr(task_service, "wake_dispatcher", None)
+                             if task_service is not None else None),
         )
 
     @staticmethod
@@ -327,3 +329,22 @@ class ObjectiveService:
         return await engine_mod.reflect_group_decision(
             self.env_for(project), objective_id,
             target=target, business_status=business_status)
+
+    async def plan_objective(self, objective_id: str) -> dict[str, Any]:
+        """Run one planning cycle now (external triggers, TASK-2026-00174).
+
+        Used when promotion (or any external producer) leaves work the
+        planner must consider — e.g. a tierless linked child awaiting
+        its contract. Returns the engine result, or ok False when the
+        objective cannot be planned.
+        """
+        if self._repo is None:
+            return {"ok": False, "reason": "no-store"}
+        objective = await self._repo.get_objective(objective_id)
+        if objective is None:
+            return {"ok": False, "reason": "no-objective"}
+        project = str(objective.get("project") or "")
+        if not project or not self._config.has_project(project):
+            return {"ok": False, "reason": "unknown-project"}
+        return await engine_mod.plan_objective(
+            self.env_for(project), objective_id)

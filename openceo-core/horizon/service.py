@@ -1699,6 +1699,12 @@ class HorizonService:
             target_action.get("promoted_at")
             and current_status == ActionStatus.IN_PROGRESS.value
         ):
+            # Retry of a linked promotion whose contract never landed:
+            # re-drive planning instead of duplicating (TASK-2026-00174).
+            redriven: list[str] = []
+            if (target_action.get("promotion_kind") or "ticket") == "ticket":
+                redriven = await self._redrive_linked_contract(
+                    svc, str(target_action.get("task_id") or ""))
             return {
                 "promoted": True,
                 "already_promoted": True,
@@ -1706,6 +1712,8 @@ class HorizonService:
                 "task_id": target_action.get("task_id"),
                 "project": target_action.get("delegated_project") or company_project,
                 "kind": target_action.get("promotion_kind") or "ticket",
+                "planning_redriven": bool(redriven),
+                "contracts_completed": redriven,
                 "message": "Esa acción ya está promovida y en curso.",
             }
         if (
@@ -1885,6 +1893,14 @@ class HorizonService:
         )
         created = await svc.create_task(task_req)
         task_id = str(created.get("task_id") or "")
+        contracts_completed: list[str] = []
+        if objective_id:
+            # The linked stub is tierless by construction: the single
+            # planner completes its contract (TASK-2026-00174). Never
+            # fails the promotion: without a contract the stub waits
+            # exactly as before, and a retry re-drives the plan.
+            contracts_completed = await self._plan_linked_objective(
+                svc, objective_id)
         promotion_ref = None
         created_params = created.get("params")
         mirrors = (
@@ -1918,8 +1934,54 @@ class HorizonService:
             "project": company_project,
             "kind": "ticket",
             "objective_id": objective_id,
+            "planning_triggered": bool(objective_id),
+            "contracts_completed": contracts_completed,
             "message": f"Promoví «{spec['title']}» a ticket de {company_project}.",
         }
+
+    async def _plan_linked_objective(
+        self,
+        svc: Any,
+        objective_id: str,
+    ) -> list[str]:
+        """Trigger one planning cycle; completed contract task_ids.
+
+        Never raises: planning failures degrade to the pre-00174 wait
+        (the stub stays tierless and visible) instead of failing the
+        promotion that already created the ticket.
+        """
+        plan = getattr(svc, "plan_objective", None)
+        if plan is None or not objective_id:
+            return []
+        try:
+            result = await plan(objective_id)
+        except Exception:
+            logger.warning("linked promotion planning failed for %s",
+                           objective_id, exc_info=True)
+            return []
+        if not isinstance(result, dict) or not result.get("ok"):
+            return []
+        completed = result.get("contracts_completed") or []
+        return [str(task_id) for task_id in completed]
+
+    async def _redrive_linked_contract(
+        self,
+        svc: Any,
+        task_id: str,
+    ) -> list[str]:
+        """Re-drive planning when a retry finds its stub still tierless."""
+        if not task_id:
+            return []
+        try:
+            task = await svc.get_task(task_id)
+        except Exception:
+            return []
+        if not isinstance(task, dict):
+            return []
+        if task.get("coding_tool") or not task.get("objective_id"):
+            return []
+        return await self._plan_linked_objective(
+            svc, str(task.get("objective_id") or ""))
 
     # ------------------------------------------------------------------
     # HZ-003: Delegacion autonoma y dev movil

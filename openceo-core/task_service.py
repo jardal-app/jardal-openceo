@@ -253,6 +253,14 @@ class TaskService:
         except Exception:
             logger.warning("Dispatcher wake failed", exc_info=True)
 
+    def wake_dispatcher(self) -> None:
+        """Public queue-event signal for external producers (00174).
+
+        Same guarantee as the internal wake: coalesced by the
+        dispatcher, silent without wiring, never raises.
+        """
+        self._wake_dispatcher()
+
     def set_ceo_wake(self, wake: Any | None) -> None:
         """Inject the CEO loop wake-up (incident events only).
 
@@ -3213,6 +3221,18 @@ class TaskService:
     def set_objective_service(self, service: Any | None) -> None:
         """Company-level objectives entry (TASK-2026-00117, wired in main)."""
         self._objective_service = service
+
+    async def plan_objective(self, objective_id: str) -> dict[str, Any]:
+        """Run one objective planning cycle now (TASK-2026-00174).
+
+        External producers (Horizon promotion) call this after leaving
+        work the planner must consider. Never raises: without wiring
+        it reports ok False.
+        """
+        service = getattr(self, "_objective_service", None)
+        if service is None:
+            return {"ok": False, "reason": "no-objective-service"}
+        return await service.plan_objective(objective_id)
 
     async def create_objective(
         self,
