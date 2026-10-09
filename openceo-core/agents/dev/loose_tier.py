@@ -198,6 +198,54 @@ _S_INCIDENT_UNKNOWN = _compile((
     _phrase("causa raiz"),
 ))
 
+# -- Tier S money-domain extension (per-project guide, TASK-2026-00161) -----
+# Active only when the ticket's project sets ``dev.routing.money_sensitive``.
+# A money-domain signal is a conjunction of DOMAIN context (trading venues,
+# bots, markets) and STAKE (money at risk): either half alone is too
+# ambiguous to route on ("poner en orden", "el problema real", "un bot de
+# avisos"). Precedent for the pair shape: the s_incident pair above.
+MONEY_DOMAIN_WORDS = (
+    "trading", "trader", "traders", "exchange", "exchanges",
+    "broker", "brokers", "bróker", "brókeres", "bot", "bots",
+    "mercado", "mercados", "market", "markets", "bolsa", "bolsas",
+    "forex", "crypto", "cripto", "criptos", "criptomoneda",
+    "criptomonedas", "cryptocurrency", "estrategia", "estrategias",
+    "strategy", "strategies", "portfolio", "portafolio", "portafolios",
+    "ticker", "tickers",
+)
+MONEY_STAKE_WORDS = (
+    "live", "real", "reales", "capital", "capitales", "riesgo",
+    "riesgos", "orden", "ordenes", "órdenes", "order", "orders",
+    "posicion", "posición", "posiciones", "fondo", "fondos", "fund",
+    "funds", "apalancamiento", "apalancamientos", "leverage",
+    "leveraged", "margen", "margenes", "márgenes", "margin", "margins",
+    "liquidacion", "liquidación", "liquidaciones", "slippage",
+    "spread", "spreads", "lotaje", "comision", "comisión",
+    "comisiones", "fee", "fees", "perdida", "pérdida", "perdidas",
+    "pérdidas", "ganancia", "ganancias", "profit", "profits",
+    "balance", "balances",
+)
+MONEY_STAKE_PHRASES = (
+    "en vivo", "dinero real", "capital real", "cuenta real",
+    "fondos reales", "stop loss", "take profit", "margin call",
+    "orden de compra", "orden de venta", "orden pendiente",
+    "ordenes pendientes", "órdenes pendientes", "posicion abierta",
+    "posición abierta", "posiciones abiertas", "abrir posicion",
+    "abrir posición", "cerrar posicion", "cerrar posición",
+    "tamaño de posicion", "tamaño de posición", "tamano de posicion",
+    "gestion del riesgo", "gestión del riesgo", "gestion de riesgo",
+    "gestión de riesgo", "gestion de capital", "gestión de capital",
+    "risk management", "money management", "cuenta live", "bot vivo",
+    "bots vivos", "operativa live", "operativa en vivo", "real money",
+    "live account", "live trading", "market order", "market orders",
+    "limit order", "limit orders",
+)
+_COMPILED_M_DOMAIN = _compile((_alt(*MONEY_DOMAIN_WORDS),))
+_COMPILED_M_STAKE = _compile((
+    _alt(*MONEY_STAKE_WORDS),
+    *(_phrase(entry) for entry in MONEY_STAKE_PHRASES),
+))
+
 # -- Tier A: discovery / architecture / recovery (policy §21) -----------------
 _A_UNKNOWN = (
     "a_unknown",
@@ -433,6 +481,113 @@ _COMPILED_B: tuple[tuple[str, "re.Pattern[str]", str, str], ...] = tuple(
     for signal_id, patterns, reason, why_not_c in _B_SIGNALS
 )
 
+#: Caps for project-provided routing vocabulary (TASK-2026-00161).
+#: ``ConfigLoader.validate_project`` enforces the same caps and parks the
+#: project's tickets on violation; the runtime caps below only keep a
+#: malformed file from crashing classification — dispatch parks it next.
+_M_CUSTOM_ENTRY_MAX = 80
+_M_CUSTOM_LIST_MAX = 64
+
+
+def _clean_custom_entries(entries: Any) -> list[str]:
+    if not isinstance(entries, list):
+        return []
+    cleaned: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, str):
+            continue
+        text = entry.strip()
+        if not text or len(text) > _M_CUSTOM_ENTRY_MAX:
+            continue
+        if text not in cleaned:
+            cleaned.append(text)
+    return cleaned[:_M_CUSTOM_LIST_MAX]
+
+
+def _normalize_money_routing(routing: Any) -> dict[str, Any]:
+    """Enabled project routing, or ``{}`` (fail-open, never raises).
+
+    Only ``money_sensitive: true`` enables the guide; custom vocabulary
+    without the flag is ignored, and malformed values normalize to
+    disabled (shape errors are reported by ``validate_project``).
+    """
+    if not isinstance(routing, dict) \
+            or routing.get("money_sensitive") is not True:
+        return {}
+    normalized: dict[str, Any] = {"money_sensitive": True}
+    domain = _clean_custom_entries(routing.get("money_domain"))
+    stake = _clean_custom_entries(routing.get("money_stake"))
+    if domain:
+        normalized["money_domain"] = domain
+    if stake:
+        normalized["money_stake"] = stake
+    return normalized
+
+
+def project_money_routing(project_config: Any) -> dict[str, Any]:
+    """Normalized ``dev.routing`` for one project (``{}`` when absent)."""
+    if not isinstance(project_config, dict):
+        return {}
+    dev = project_config.get("dev")
+    if not isinstance(dev, dict):
+        return {}
+    return _normalize_money_routing(dev.get("routing"))
+
+
+def _compile_custom(entries: Sequence[str]) -> "re.Pattern[str] | None":
+    """Custom vocabulary as one literal pattern (entries are never regex).
+
+    Word guards are lookarounds, not ``\\b``: entries may start or end in
+    symbols (``c++``), where a word boundary never matches.
+    """
+    if not entries:
+        return None
+    patterns = []
+    for entry in entries:
+        if any(ch.isspace() for ch in entry):
+            patterns.append(_phrase(entry))
+        else:
+            patterns.append(r"(?<!\w)" + re.escape(entry) + r"(?!\w)")
+    return _compile(patterns)
+
+
+def routing_guide_section(project: str, routing: Any) -> str:
+    """Planner prompt section for a money-sensitive project (or ``""``).
+
+    Pure and fail-open: anything but an enabled ``dev.routing`` mapping
+    yields no section. The guide prefers ``tier_s`` for money/algorithm
+    work while keeping A/B/C eligible with their normal justification —
+    guidance, not a rule, and an explicit ``coding_tool`` always wins.
+    """
+    normalized = _normalize_money_routing(routing)
+    if not normalized:
+        return ""
+    customs: list[str] = list(normalized.get("money_domain", ())) \
+        + list(normalized.get("money_stake", ()))
+    words = sorted(set(MONEY_DOMAIN_WORDS) | set(MONEY_STAKE_WORDS)
+                   | {entry for entry in customs
+                      if not any(ch.isspace() for ch in entry)})
+    phrases = sorted(set(MONEY_STAKE_PHRASES)
+                     | {entry for entry in customs
+                        if any(ch.isspace() for ch in entry)})
+    quoted = ", ".join(f'"{entry}"' for entry in phrases)
+    return (
+        f'PROJECT TIER GUIDE (money-sensitive project "{project}"; '
+        "guidance, not a rule):\n"
+        "- This project moves real money and live algorithms: prefer "
+        "tier_s for money/algorithm work when the S justification applies "
+        "(why_consensus_is_needed + why_single_session_is_insufficient per "
+        "§20: wrong debits/credits, duplicated live orders, mishandled "
+        "positions).\n"
+        "- Domain vocabulary (money context, never a forced tier). Words: "
+        + ", ".join(words) + ". Phrases: " + quoted + ".\n"
+        "- tier_a stays for real discovery/root-cause/architecture, tier_b "
+        "for complex single-session work, tier_c remains THE DEFAULT for "
+        "specified work; A/B keep their normal why_not_c justification.\n"
+        "- An explicit coding_tool always wins; this guide never overrides "
+        "it and never collapses to a single tier."
+    )
+
 
 def _scan_text(title: str, description: str,
                attachments: Sequence[str]) -> str:
@@ -470,16 +625,55 @@ def classify_loose_tier(
     title: str,
     description: str,
     attachments: Sequence[str] | None = None,
+    *,
+    project_routing: dict[str, Any] | None = None,
 ) -> LooseTierDecision:
     """Assign a DEV tier to a loose ticket (no ``objective_id``).
 
     Pure and deterministic: same text always yields the same decision, with
     zero token spend. Evaluation order is S → A → B → C (policy §18-27);
     the first tier with a fired signal wins and the reason cites it. With
-    no signal anywhere the default is ``tier_c`` (§25).
+    no signal anywhere the default is ``tier_c`` (§25). A money-sensitive
+    project routing (``dev.routing``) adds the ``s_money_domain`` S signal
+    for this project only; anything else normalizes to disabled.
     """
     text = _scan_text(title, description, attachments or ())
     oracle = _extract_oracle_evidence(text)
+
+    routing = _normalize_money_routing(project_routing)
+    if routing:
+        domain_hit = _first_match(_COMPILED_M_DOMAIN, text)
+        if domain_hit is None:
+            custom_domain = _compile_custom(
+                routing.get("money_domain", ()))
+            if custom_domain is not None:
+                domain_hit = _first_match(custom_domain, text)
+        stake_hit = _first_match(_COMPILED_M_STAKE, text)
+        if stake_hit is None:
+            custom_stake = _compile_custom(
+                routing.get("money_stake", ()))
+            if custom_stake is not None:
+                stake_hit = _first_match(custom_stake, text)
+        if domain_hit is not None and stake_hit is not None:
+            return LooseTierDecision(
+                tier=CodingTool.TIER_S,
+                reason=(f"money-domain signal (s_money_domain: "
+                        f"{domain_hit.strip()!r} + {stake_hit.strip()!r}); "
+                        f"independent challenge/review reduces residual "
+                        f"risk (§19; money_sensitive project guide)"),
+                signals=(f"s_money_domain:{domain_hit.strip()}"
+                         f"+{stake_hit.strip()}",),
+                oracle=oracle,
+                why_consensus_is_needed=(
+                    "Independent challenge is expected to catch "
+                    "money/algorithm errors (wrong amounts, duplicated "
+                    "live orders, mishandled positions) a single session "
+                    "would ship to real funds."),
+                why_single_session_is_insufficient=(
+                    "One session owns both the money logic and its "
+                    "verification, so a misread of the live-money rules "
+                    "propagates to production."),
+            )
 
     for signal_id, pattern, why_consensus, why_single in _COMPILED_S:
         matched = _first_match(pattern, text)

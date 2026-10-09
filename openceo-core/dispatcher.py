@@ -32,7 +32,7 @@ from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
-from agents.dev.loose_tier import classify_loose_tier
+from agents.dev.loose_tier import classify_loose_tier, project_money_routing
 from agents.dev.routing import ROUTING_MISSING_REASON, resolve_coding_tool
 from state import (
     WAIT_BLOCKED_BY,
@@ -126,6 +126,25 @@ def execution_repo_for_project_config(project_config: Any) -> str | None:
     except OSError:
         pass
     return str(local_path)
+
+
+def _project_routing(service: Any, project: str) -> dict[str, Any]:
+    """Project tier routing for the peek (fail-open: ``{}``).
+
+    The peek and the dispatch assignment (``agents.dev.session``) must
+    agree, so the peek reads the same ``dev.routing`` characteristic
+    (TASK-2026-00161). An unreadable project or a missing loader only
+    disables the guide for this peek — admission never breaks.
+    """
+    try:
+        loader = getattr(service, "_config_loader", None)
+        if loader is None:
+            return {}
+        return project_money_routing(loader.load_project(project))
+    except Exception:
+        logger.warning("Dispatcher: project routing unreadable for %s",
+                       project, exc_info=True)
+        return {}
 
 
 class Dispatcher:
@@ -359,6 +378,8 @@ class Dispatcher:
                 str(ticket.get("title") or ""),
                 str(ticket.get("description") or ""),
                 ticket.get("attachments") or [],
+                project_routing=_project_routing(
+                    self._service, str(ticket.get("project") or "")),
             )
             effective = {**ticket, "coding_tool": peeked.tier.value}
             effective_tier = peeked.tier

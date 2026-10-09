@@ -11,6 +11,10 @@ dev:
   # pipeline) and no dev.tier_s (roles and pool are global in
   # config_loader.py; planner is claudej there).
   default_provider: muse
+  # Tier guide (TASK-2026-00161): real money + live algorithms prefer
+  # tier_s, never forced; an explicit coding_tool always wins.
+  routing:
+    money_sensitive: true
   branch_pattern: "{session_id}-{slug}"
   auto_push: false
   create_pr: true
