@@ -461,6 +461,10 @@ class AssuranceRequestTests(unittest.TestCase):
             ("Revisión cruzada del nuevo motor de reglas", ""),
             ("Cálculo de turnos con máxima fiabilidad", ""),
             ("Ranking algorithm with maximum assurance", ""),
+            # The owner's spoken form: a verb of use + several models.
+            ("Decidir el ranking de ofertas", "Usa varios modelos para esto."),
+            ("Pick the retry policy", "Please use multiple models on it."),
+            ("Cálculo de turnos", "Que lo verifiquen varios modelos independientes."),
         ]
         for title, description in cases:
             with self.subTest(title=title):
@@ -517,6 +521,8 @@ class AssuranceRequestTests(unittest.TestCase):
         cases = [
             "Crear varios modelos en la base de datos",
             "Add several models to the ORM layer",
+            "Relacionar la tabla de pedidos con varios modelos del ORM",
+            "El admin muestra varios modelos en la misma pantalla",
             "Exportar las imágenes en máxima calidad",
             "El pipeline debe correr sin fallas en CI",
             "Build con cero errores de lint",
