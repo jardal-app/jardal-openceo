@@ -12,6 +12,9 @@ could break the cited tests without touching them and still read
 - ``_finish_simple_tool`` appends the oracle as a required post-build
   gate with the gates' retries; a retry that edits the oracle is a
   material failure; the session's params survive whole.
+- Declared refs that resolve to no file are named as not verified in
+  the ticket steps when the oracle runs (TASK-2026-00167); the resolved
+  refs still run.
 - The Tier C chain link that ran a ticket is recorded (policy §25/§32).
 
 Real git repos and real (token-free) shell gates. No network, no CLI,
@@ -613,6 +616,92 @@ class ExecutorLinkTests(unittest.IsolatedAsyncioTestCase):
 
     def test_blank_block_declares_by_link(self) -> None:
         self.assertEqual(blank_tier_c_telemetry()["by_link"], {})
+
+
+class UnresolvedRefsVisibilityTests(unittest.TestCase):
+    """Declared refs that resolve to no file are named, never silent.
+
+    TASK-2026-00167: with mixed refs the oracle runs its resolved refs,
+    and the rest must figure as not verified instead of hiding behind an
+    "oracle ok" verdict.
+    """
+
+    @staticmethod
+    def _unresolved(frozen: Any) -> list[str]:
+        from agents.dev.tier_oracle import unresolved_oracle_refs
+        return unresolved_oracle_refs(frozen)
+
+    def test_mixed_refs_name_only_the_unresolved(self) -> None:
+        self.assertEqual(
+            self._unresolved(_frozen(refs=[
+                {"ref": "tests/a.py", "path": "tests/a.py",
+                 "sha256": "x", "resolved": True},
+                {"ref": "spec paragraph 3", "resolved": False},
+                {"ref": "tests/gone.py", "resolved": False},
+            ])),
+            ["spec paragraph 3", "tests/gone.py"])
+
+    def test_all_resolved_is_silent(self) -> None:
+        self.assertEqual(self._unresolved(_frozen()), [])
+
+    def test_nothing_frozen_or_unreadable_is_silent(self) -> None:
+        for frozen in (None, "garbage", {}, {"refs": "nope"},
+                       {"refs": ["stray string"]}):
+            with self.subTest(frozen=frozen):
+                self.assertEqual(self._unresolved(frozen), [])
+
+    def test_duplicates_collapse_and_empty_refs_show(self) -> None:
+        self.assertEqual(
+            self._unresolved(_frozen(refs=[
+                {"ref": "tests/gone.py", "resolved": False},
+                {"ref": "tests/gone.py", "resolved": False},
+                {"ref": "", "resolved": False},
+            ])),
+            ["tests/gone.py", "?"])
+
+
+class MixedOracleIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """A mixed oracle runs its resolved refs AND names the rest (00167)."""
+
+    #: Exits 0 only when handed exactly the resolved ref.
+    _ARGS_CHECK = ("python3 -c \"import sys; "
+                   "sys.exit(0 if sys.argv[1:] == ['tests/test_oracle.py'] "
+                   "else 3)\" {refs}")
+
+    def _finish_mixed(self, refs: Any, oracle_cmd: str):
+        repo = _scratch_repo(self)
+        base = _open_work_branch(repo)
+        frozen = freeze_oracle(repo, base, _oracle(refs=refs), "o1")
+        assert frozen is not None
+        (repo / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+        _write_handoff(repo)
+        branch = _SimpleBranch(repo=repo, branch="work", base="main",
+                               base_sha=base, ref="o1", oracle_frozen=frozen)
+        return _manager()._finish_simple_tool(
+            _loose_task(), _dev_config(oracle_cmd=oracle_cmd),
+            CodingTool.TIER_C,
+            DevExecutionOutput(status=TaskStatus.IN_PROGRESS), branch)
+
+    async def test_mixed_oracle_runs_resolved_and_names_the_rest(self) -> None:
+        output = await self._finish_mixed(
+            ("tests/test_oracle.py", "spec paragraph 3"), self._ARGS_CHECK)
+        self.assertEqual(output.status, TaskStatus.COMPLETED, output.error)
+        gates = " | ".join(step["detail"] for step in output.steps
+                            if step["step"] == "gates")
+        self.assertIn("oracle=pass", gates)
+        (named,) = [step for step in output.steps
+                    if step["step"] == "oracle_refs"]
+        self.assertEqual(named["status"], "skipped")
+        self.assertIn("spec paragraph 3", named["detail"])
+        self.assertIn("not verified", named["detail"])
+
+    async def test_all_resolved_adds_no_noise(self) -> None:
+        output = await self._finish_mixed(
+            ("tests/test_oracle.py",), "true {refs}")
+        self.assertEqual(output.status, TaskStatus.COMPLETED, output.error)
+        self.assertEqual(
+            [step for step in output.steps
+             if step["step"] == "oracle_refs"], [])
 
 
 if __name__ == "__main__":

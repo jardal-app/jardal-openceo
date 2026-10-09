@@ -18,7 +18,12 @@ from .loose_tier import (ASSIGNED_BY, LooseTierDecision, classify_loose_tier,
                           project_money_routing, record_loose_tier_decision)
 from .routing import (ROUTING_MISSING_REASON, TIER_C_CHAIN, RoutingDecision,
                       resolve_coding_tool, select_tier_c_link)
-from .tier_oracle import freeze_oracle, oracle_run_plan, verify_oracle
+from .tier_oracle import (
+    freeze_oracle,
+    oracle_run_plan,
+    unresolved_oracle_refs,
+    verify_oracle,
+)
 from .tier_s.cycle import TierSCycle
 from .tier_s.gates import (baseline_blocked, gates_failed, handoff_gates_section,
                          load_gates, run_gate, run_gates)
@@ -653,6 +658,16 @@ class DevSessionManager:
             specs = [*specs, GateSpec(
                 name="oracle", cmd=oracle_run.cmd,
                 timeout_minutes=oracle_run.timeout_minutes, required=True)]
+            # Mixed refs (TASK-2026-00167): the gate runs the resolved
+            # ones; the rest must figure as not verified, never hide
+            # behind the "oracle ok" verdict. The note branches below
+            # already cover the fully-unverified cases.
+            unverified = unresolved_oracle_refs(branch.oracle_frozen)
+            if unverified:
+                output.steps.append(self._step(
+                    "oracle_refs", "skipped",
+                    "declared oracle refs not verified "
+                    "(resolved to no file): " + ", ".join(unverified)))
         elif oracle_note:
             output.steps.append(self._step("oracle_run", "skipped", oracle_note))
         retries = int(budgets.get("gate_retries", 2) or 0)
