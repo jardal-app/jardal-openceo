@@ -328,30 +328,37 @@ scripts/openceo-core-host.sh restart|status
 
 Solo sesiones del dueño; los ejecutores Tier S lo ignoran (§10).
 
-Cuando el dueño escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el ticket), no preguntes: aplica esta receta. El roadmap vigente es el épico **TASK-2026-00110** (OpenCEO autónomo). El orden y las dependencias están en su comentario «ROADMAP POR FASES».
+Cuando el dueño escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el ticket), no preguntes: aplica esta receta. El roadmap vigente es el épico **TASK-2026-00110** (OpenCEO autónomo), incluidos sus ajustes pendientes. Descubre el trabajo actual en ERPNext; consulta el comentario «ROADMAP POR FASES» y sus ampliaciones, sin mantener aquí una lista fija de tickets. Una observación registrada es una hipótesis que se debe contrastar, no una orden de modificar código sin diagnóstico.
 
 1. **Situarse, sin barridos.**
-   - `openceo_get_ticket TASK-2026-00110`.
-   - `openceo_search_tickets` con `project=jardal-openceo` y `query="[Autonomía"`, más TASK-2026-00013 y TASK-2026-00043.
+   - `openceo_get_ticket TASK-2026-00110`, con sus comentarios actuales y dependencias.
+   - `openceo_search_tickets` con `project=jardal-openceo`, por separado para `status=Open` y `status=Working`. Identificar los pendientes de esta épica por `parent_task`, sus dependencias y referencias explícitas del roadmap, aunque no tengan el prefijo `[Autonomía]`. Leer otros tickets solo si hacen falta para comprobar una dependencia o un posible duplicado.
    - El primer párrafo de «Continuar aquí» en `STATUS.md`.
-   - `git status` y `git log --oneline -5`.
-2. **Elegir un ticket.** El indicado. Si no hay, el que esté a medias. Si tampoco, el primero no `Completed` cuyas dependencias (escritas en su descripción) estén `Completed`, priorizando la ruta crítica 00111 → 00112 → 00117 → 00119 → 00122. Si nada está listo, decir qué lo bloquea y parar.
+   - `git status`, actualizar las referencias remotas y revisar el log de `main` y `origin/main`, además de los diffs dirigidos que afecten al candidato. Si otra sesión tiene trabajo activo en el checkout, usar un worktree aislado; no cambiarle la rama ni incorporar sus cambios al propio ticket.
+2. **Elegir un ticket.** El indicado por el dueño. Si no hay, continuar el trabajo propio a medias; después elegir un pendiente de la épica con dependencias verificadas como `Completed`, según impacto, prioridad y desbloqueo del roadmap vigente. Un ticket `Working` de otra sesión no se toma ni se duplica: comprobar qué cubre y elegir otro independiente. No deducir que la épica está terminada de un traspaso antiguo o de que las fases originales estén cerradas. Si ningún pendiente puede avanzar, explicar el bloqueo concreto y parar.
 3. **Contexto mínimo.**
    - Descripción y comentarios del ticket.
-   - `docs/work/TASK-2026-00110-objetivo-unico-ceo-autonomo.md` y el workfile del ticket si existe.
+   - El workfile del épico y el del ticket, si existen.
    - La decisión del vault `decisions/2026-10-06-objetivo-unico-ceo-autonomo`, solo si hace falta el porqué.
    - El contrato normativo: `docs/ARCHITECTURE_REFERENCE_2026.md` §Proactive CEO (+ `docs/objective-planner-routing-policy.md` y el ADR del planner).
    - Código: búsqueda dirigida + LSP.
-4. **Implementar** en una rama `feat/<ticket>-<tema>`. El tier marca el rigor: en `tier_s`, plan escrito en el workfile antes de codificar y una revisión independiente de solo lectura antes del merge.
-5. **Probar solo lo necesario**: `py_compile` de lo tocado, los tests del área y la suite de §10, respetando la consigna de abajo.
-6. **Cerrar según §9.**
+4. **Contrastar la observación antes de corregir.** Aplicar criterio técnico riguroso a cada afirmación del ticket: comprobar el contrato vigente, seguir el flujo completo de productores y consumidores y buscar evidencia que confirme o refute el problema. Las líneas citadas, el diagnóstico y el estado del ticket pueden haberse quedado atrás respecto al código.
+   - Buscar duplicados en este proyecto por causa y comportamiento, no solo por título. Revisar comentarios, commits, merges y diffs pertinentes de otras sesiones. No suponer que un fallo sigue presente ni que ya fue corregido: demostrar qué cubre el código actual y qué falta.
+   - Cuando sea posible, reproducir con una prueba determinista o un ejecutor simulado, sin modelos en vivo. Si la evidencia es estática, dejar la ruta concreta que provoca el fallo y sus condiciones; no afirmar que se reprodujo. No reproducir un efecto externo irreversible. No poder reproducirlo todavía no demuestra que la observación sea falsa.
+   - Decidir y registrar en el ticket: fallo real vigente, corrección parcial, ya resuelto y verificado, duplicado, observación incorrecta o diagnóstico inconcluso. Incluir evidencia y valorar si el ajuste propuesto es prudente, respeta el rumbo y resuelve la causa sin introducir regresiones ni complejidad innecesaria.
+   - Fallo real vigente o parcial: implementar solo el delta necesario. Ya resuelto: verificar la aceptación y cerrar con evidencia, sin atribuirse una corrección ajena. Observación incorrecta: explicar y demostrar por qué, resolver el ticket con el criterio global y no forzar un cambio para justificar su existencia. Duplicado: enlazar el ticket canónico y evitar una segunda implementación; si el trabajo canónico sigue pendiente, mantener `Working` con la dependencia y razón exactas. Diagnóstico inconcluso: seguir investigando o mantener `Working` con el impedimento concreto; no cerrar ni pedir revisión humana por falta de certeza. Cancelar trabajo fijado por el dueño sigue exigiendo su orden según el criterio global.
+5. **Implementar** en una rama `feat/<ticket>-<tema>` solo si el diagnóstico justifica una corrección. El tier marca el rigor: en `tier_s`, plan escrito en el workfile antes de codificar y una revisión independiente de solo lectura antes del merge. Coordinar cualquier solapamiento comprobado con otra sesión sin sobrescribir su trabajo.
+6. **Probar solo lo necesario**: `py_compile` de lo tocado, los tests del área y la suite de §10, respetando la consigna de abajo. Las regresiones deben comprobar el fallo y la conducta esperada, no convalidar automáticamente el comportamiento existente o el diagnóstico del ticket.
+7. **Cerrar según §9.**
+   - Antes del merge o de cerrar sin cambios, actualizar las referencias remotas y volver a contrastar el diagnóstico y la aceptación con `main`, el ticket y los cambios pertinentes de otras sesiones. Si otra corrección ya cubre el fallo, descartar o ajustar el delta redundante y volver a verificar; no mergear por inercia.
    - Merge `--no-ff` a `main` + push.
    - Restart + status + smoke si cambió el servicio.
    - Ticket en su estado final con `openceo_transition_ticket` (`reason` siempre, `evidence` para cerrar, `human_action` para revisión), con un comentario de resultado.
    - Rama borrada.
    - Un párrafo corto al inicio de «Continuar aquí»: qué se cerró y cuál es el siguiente ticket.
    - Vault solo si hay una decisión o un hecho durable nuevo.
-7. **Seguir.** Si queda margen, volver al paso 2. Al terminar, una línea: qué se cerró y qué sigue.
+   - Cuando el resultado sea verificado sin cambios de código, registrar ese resultado y su evidencia; no fabricar una rama, merge o restart para aparentar una corrección.
+8. **Seguir.** Si queda margen, refrescar los pendientes en ERPNext y volver al paso 2. Al terminar, una línea: qué se resolvió, si hubo fix o verificación sin cambios, y qué sigue según el estado actual.
 
 Al dueño solo se le pregunta por la política de escalado del épico: gasto nuevo, acción irreversible, replanificación estratégica, cambio de mandato o revisión humana exigida por política. Lo demás se decide y se hace.
 
