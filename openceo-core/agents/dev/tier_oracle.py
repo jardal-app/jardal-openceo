@@ -17,6 +17,9 @@ the project's ``dev.oracle_cmd`` template, a required post-build gate with
 the same retries as the other gates. The project owns the runner (pytest,
 vitest, ...); without ``dev.oracle_cmd`` the oracle is hash-protected only
 and the plan says so, so the limit is visible in the ticket steps.
+Declared refs that resolve to no file never run; when the oracle runs
+with the resolved ones, the caller names the rest via
+``unresolved_oracle_refs`` so they figure as not verified (TASK-2026-00167).
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ __all__ = [
     "is_qualifying_oracle",
     "oracle_run_plan",
     "resolve_oracle_ref",
+    "unresolved_oracle_refs",
     "validate_oracle_config",
     "verify_oracle",
 ]
@@ -249,6 +253,25 @@ def oracle_run_plan(
     cmd = template.replace("{refs}", " ".join(shlex.quote(ref) for ref in refs))
     return OracleRun(cmd=cmd, timeout_minutes=_oracle_timeout(dev_cfg),
                      refs=tuple(refs)), ""
+
+
+def unresolved_oracle_refs(frozen: Any) -> list[str]:
+    """Raw labels of declared refs that resolved to no file ([] = none).
+
+    The oracle runs its resolved refs only (``oracle_run_plan``); the rest
+    stay unprotected and unverified (policy §34), so the caller names them
+    in the ticket steps instead of hiding them behind an "oracle ok"
+    verdict (TASK-2026-00167). Order-preserving, deduplicated; entries
+    without a label show as ``?``. Nothing frozen or an unreadable record
+    yields ``[]``: those cases already have their own visible note.
+    """
+    if not isinstance(frozen, Mapping) or not isinstance(
+            frozen.get("refs"), list):
+        return []
+    return list(dict.fromkeys(
+        str(entry.get("ref") or "?")
+        for entry in frozen.get("refs") or []
+        if isinstance(entry, Mapping) and not entry.get("resolved")))
 
 
 def validate_oracle_config(dev_cfg: Mapping[str, Any] | None) -> list[str]:
