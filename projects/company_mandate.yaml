@@ -1,12 +1,5 @@
 version: 1
-ejes:
-- id: piloto_f7
-  meta: 'Piloto F7 (temporal): verificar el ciclo CEO-objetivo-encolador-cierre con
-    un unico objetivo operativo acotado sobre un proyecto existente; retirar el eje
-    al cerrar TASK-2026-00122.'
-  kpis:
-  - id: objetivos_activos
-    fuente: objectives.active
+ejes: []
 presupuesto:
   moneda: USD
   gasto_nuevo_sin_preguntar: '0.00'
