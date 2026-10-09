@@ -71,6 +71,8 @@ Muse planning followed by Muse Tier-C execution can create correlated blind spot
 
 The routing policy mitigates this by requiring Tier C to have a qualifying independent frozen oracle plus bounded/reversible risk.
 
+Superseded (TASK-2026-00168): since TASK-2026-00148 Tier C is the default and needs no oracle to select it, and since TASK-2026-00178 weak verification alone never justifies Tier B. The mitigation today is the uniform control: any declared qualifying oracle freezes before the build and the orchestrator — never the builder — verifies and runs it, gates run on every simple tier, and late failures carry deterministic SHA→ticket→objective attribution (unknown stays unknown).
+
 `planner_executable_spec` is explicitly tracked separately because it remains model-correlated even when planner and builder are different sessions.
 
 ## Required telemetry from day one
