@@ -69,8 +69,9 @@ _ANCHOR_RE = re.compile(
     r"(?P<path>[^:\s]+?)(?::(?P<line>\d+))?(?P<base>@base)?)$"
 )
 
-#: The clean-report marker; dressing and the trailing dot are tolerated.
-_NO_FINDINGS_RE = re.compile(rf"^{_DRESS}No findings\b", re.IGNORECASE)
+#: The clean-report marker; bullets, dressing and the trailing dot are
+#: tolerated (a bare ``1. `No findings.``` line is still a clean report).
+_NO_FINDINGS_RE = re.compile(rf"^{_LEAD}{_DRESS}No findings\b", re.IGNORECASE)
 
 #: Markdown code fences carry no report content.
 _FENCE_RE = re.compile(r"^(?:```|~~~)")
