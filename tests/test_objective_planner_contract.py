@@ -473,6 +473,30 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("Their quota gate never applies the reservation", text)
         self.assertNotIn("Tier-C oracle eligibility", text)
 
+    def test_policy_describes_the_system_as_it_is_today(self) -> None:
+        # TASK-2026-00182: the policy stated things the code does not do.
+        text = self._flat()
+        # §17 lists only what the validator really checks.
+        self.assertIn("oracle declaration shape (known oracle type, at "
+                      "least one ref)", text)
+        self.assertNotIn("refs the ticket does not modify)", text)
+        self.assertIn("Not validated deterministically at this point", text)
+        # §6 / §10 / §34: project creation, the research agent, spec authoring.
+        self.assertIn("carries no `params.workflow`", text)
+        self.assertIn("launched by the CEO review's `create_project` action",
+                      text)
+        # (blockquote: each wrapped line starts with "> ")
+        self.assertIn("is registered but disabled in the agent", text)
+        self.assertIn("It declares; it does not write", text)
+        # §12 / §15: the horizon is a hard maximum; triggers are split.
+        self.assertIn("enforces 3 as a hard maximum", text)
+        self.assertNotIn("Create more only when downstream tickets", text)
+        self.assertIn("Wired today", text)
+        self.assertIn("Reserved, not wired yet", text)
+        # Header: no stale baseline marker, still a runtime document.
+        self.assertNotIn("INITIAL_NORMATIVE_BASELINE", text)
+        self.assertIn("runtime_document: true", text)
+
 
 if __name__ == "__main__":
     unittest.main()
