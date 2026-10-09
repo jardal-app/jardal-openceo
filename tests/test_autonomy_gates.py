@@ -520,7 +520,11 @@ class EngineTopesTests(unittest.IsolatedAsyncioTestCase):
         assert stored is not None
         self.assertEqual(stored["status"], "active")
 
-    async def test_max_tickets_without_open_work_completes(self) -> None:
+    async def test_max_tickets_without_open_work_not_deferred(self) -> None:
+        # TASK-2026-00175 (deliberate contract change): max_tickets with
+        # no open work still tries to close (never defers) — but the
+        # research kids carry no domain verifier, so final review parks
+        # as capability_gap instead of closing on metadata alone.
         repo = _scratch_repo(self)
         tasks = {"kid-1": _child("kid-1", "completed"),
                  "kid-2": _child("kid-2", "cancelled")}
@@ -532,11 +536,12 @@ class EngineTopesTests(unittest.IsolatedAsyncioTestCase):
 
         result = await plan_objective(env, "OBJ-1")
 
-        self.assertEqual(result["action"], "closed")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "capability_gap")
         stored = await env.objectives.get_objective("OBJ-1")
         assert stored is not None
-        self.assertEqual(stored["status"], "closed")
-        self.assertEqual(stored["final_reviews"], 1)
+        self.assertEqual(stored["status"], "waiting")
+        self.assertEqual(stored.get("final_reviews", 0), 0)
 
     async def test_empty_planner_registry_parks_as_config(self) -> None:
         repo = _scratch_repo(self)
