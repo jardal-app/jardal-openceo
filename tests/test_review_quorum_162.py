@@ -168,9 +168,11 @@ class ParseReport162Tests(unittest.TestCase):
                 self.assertEqual(findings_mod.parse_report(clean), [])
 
     def test_no_findings_after_findings_is_prose_not_fatal(self) -> None:
+        # Deliberate tolerance change: the exact marker used to void the
+        # whole report here ("No findings mixed with findings").
         findings = findings_mod.parse_report(
             "[WARN] [bug] a.py — p → f\n"
-            "No findings besides that one.\n")
+            "No findings.\n")
         self.assertEqual(len(findings), 1)
 
 
