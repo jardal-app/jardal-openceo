@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import logging
 import re
 import shutil
 import subprocess
@@ -72,6 +73,8 @@ from agents.dev.tier_s.telemetry import (
     record_sizes,
 )
 from state import CodingTool, TaskStatus
+
+logger = logging.getLogger(__name__)
 
 #: Dependency statuses that unblock a ticket (design §9.5: the enqueuer never
 #: dispatches while a blocker is open; failed counts as open — no work done).
@@ -138,6 +141,9 @@ class _Ctx:
     resumes: int = 0
     review_parks: int = 0
     resume_artifacts: dict[str, str] = field(default_factory=dict)
+    # Set once the cycle observes a business cancellation mid-flight
+    # (TASK-2026-00177): parks and closes fence instead of acting.
+    fenced_cancelled: bool = False
 
 
 def _utcnow_iso() -> str:
@@ -1791,6 +1797,12 @@ class TierSCycle:
             return await self._park(
                 ctx, "needs_owner", f"final gates failed: {names}",
                 patch_run=True)
+        # Last look before the irreversible effects: a business
+        # cancellation that landed mid-cycle stops the squash, the merge,
+        # the push and the objective trigger (TASK-2026-00177).
+        fenced = await self._fenced_cancelled(ctx)
+        if fenced is not None:
+            return fenced
         # Squash the ticket into one commit; keep wips for audit (§12).
         _git(ctx.repo, "update-ref", f"refs/tier-s/{ctx.run_id}/wip", "HEAD")
         _git(ctx.repo, "reset", "--soft", ctx.base_sha)
@@ -1917,6 +1929,46 @@ class TierSCycle:
 
     # -- waiting, cleanup, telemetry ----------------------------------------------
 
+    async def _fenced_cancelled(self, ctx: _Ctx) -> CycleOutcome | None:
+        """Fence the attempt when the business cancelled the ticket.
+
+        Returns the outcome to return instead of parking/closing (run
+        superseded so nothing can resume, work branch dropped, one
+        audit note, no task patch/merge/objective trigger), or None
+        when the ticket is live. A failed status read is fail-open:
+        the patch-level net still fences the task writes
+        (TASK-2026-00177).
+        """
+        task_id = str(ctx.ticket.get("task_id", ""))
+        try:
+            status = await self._tasks.task_status(task_id)
+        except Exception:
+            logger.warning("cancel check failed for %s", task_id,
+                           exc_info=True)
+            return None
+        if status != TaskStatus.CANCELLED.value:
+            return None
+        ctx.fenced_cancelled = True
+        try:
+            await asyncio.to_thread(self._drop_branch, ctx)
+        except Exception:
+            logger.warning("cancelled branch drop failed for %s", task_id,
+                           exc_info=True)
+        await self._runs.patch_run(ctx.run_id, {
+            "status": "superseded",
+            "superseded_reason": "ticket cancelled in ERPNext",
+            "waiting": None,
+            "active_repo": None,
+            "metrics": ctx.metrics,
+            "updated_at": _utcnow_iso(),
+        })
+        await self._say(ctx, "ticket cancelled in ERPNext; cycle fenced "
+                        "(no merge, work branch dropped)")
+        return CycleOutcome(
+            status="failed", run_id=ctx.run_id, reason="cancelled",
+            detail="ticket cancelled in ERPNext; close fenced",
+            branch=None)
+
     async def _park(
         self,
         ctx: _Ctx,
@@ -1930,6 +1982,9 @@ class TierSCycle:
         drop_branch: bool = False,
         extra_comment: str = "",
     ) -> CycleOutcome:
+        fenced = await self._fenced_cancelled(ctx)
+        if fenced is not None:
+            return fenced
         if resume_at is None and resume_in_min is not None:
             resume_at = (datetime.now(timezone.utc)
                          + timedelta(minutes=resume_in_min)).isoformat()
@@ -1992,6 +2047,12 @@ class TierSCycle:
 
     async def _run_waited(self, ctx: _Ctx) -> CycleOutcome:
         # Helper for early exits: the run doc already carries the wait state.
+        if ctx.fenced_cancelled:
+            return CycleOutcome(status="failed", run_id=ctx.run_id,
+                                reason="cancelled",
+                                detail="ticket cancelled in ERPNext; "
+                                "park fenced",
+                                branch=None)
         return CycleOutcome(status="waiting", run_id=ctx.run_id,
                             branch=ctx.branch)
 

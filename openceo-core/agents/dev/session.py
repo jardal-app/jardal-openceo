@@ -835,6 +835,28 @@ class DevSessionManager:
             command, stdin_payload=stdin_payload, timeout=1800,
             cwd=str(repo), env=executor.env or None)
 
+    async def _task_cancelled(self, task_id: str) -> bool:
+        """Fresh cancel check against the stored ticket (fail-open).
+
+        A missing repo, a store without ``get_task`` or a failed read
+        answers False: the patch-level net still fences the writes
+        (TASK-2026-00177).
+        """
+        if not task_id or self._repo is None:
+            return False
+        get_task = getattr(self._repo, "get_task", None)
+        if not callable(get_task):
+            return False
+        try:
+            fresh = await get_task(task_id)
+        except Exception:
+            logger.warning("cancel check failed for %s", task_id,
+                           exc_info=True)
+            return False
+        return (fresh is not None
+                and str(fresh.get("status") or "")
+                == TaskStatus.CANCELLED.value)
+
     async def _material_simple_failure(
         self,
         task: dict[str, Any],
@@ -864,17 +886,24 @@ class DevSessionManager:
             f"Material {tier_label} failure on {self._simple_ref(task)}: "
             f"{cause}. Candidate reset to {branch.base_sha[:12]}; "
             "no automatic retier.")
+        # A business cancellation that landed mid-run wins over the
+        # failure: failing the ticket and replanning would undo the
+        # owner's decision, so the failure stays evidence on the
+        # outcome/comment only, never a replan (TASK-2026-00177).
+        cancelled = await self._task_cancelled(task_id)
+        if cancelled:
+            evidence += " Ticket cancelled in ERPNext; replan skipped."
         # Terminal first: the planner then sees a failed ticket rather than
         # an open duplicate, while the same-tier rule still blocks an
         # unchanged retry (record_material_failure feeds it).
-        if self._repo is not None and task_id:
+        if self._repo is not None and task_id and not cancelled:
             try:
                 await self._repo.patch_task(task_id, {"status": "failed"})
             except Exception:
                 logger.warning("material-failure patch failed for %s",
                                task_id, exc_info=True)
         objective_id = str(task.get("objective_id") or "")
-        if objective_id:
+        if objective_id and not cancelled:
             evidence += await self._material_failure_replan(
                 task, project_config, branch.repo, objective_id,
                 tier_label, cause)
