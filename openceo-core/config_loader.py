@@ -531,9 +531,10 @@ class ConfigLoader:
                 "policy_path": None,
                 # One-shot role spec (live executor shape): a fresh muse
                 # process per planning cycle, prompt via argv, result read
-                # back from .tier-s/PLANNER_RESULT.json. musej (full
-                # access): the planner writes the result file, it is not
-                # an isolated reviewer.
+                # back from .tier-s/objectives/<id>/PLANNER_RESULT.json
+                # (per-objective exclusive output, TASK-2026-00176).
+                # musej (full access): the planner writes the result
+                # file, it is not an isolated reviewer.
                 "role": {
                     "provider": "muse", "account": "muse",
                     "label": "muse", "model": "muse-spark-1.3-contributor",

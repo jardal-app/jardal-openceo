@@ -912,7 +912,7 @@ One Objetivo corresponds to one project/repo. Its identity is an ERPNext group T
 
 Muse Code headless, one fresh run per cycle over bounded OpenCEO-compiled state, returns `PlannerResult` JSON; Pydantic + deterministic validation, then OpenCEO persists the valid tickets. The CEO decides *whether*, *when*, and *how much* (mandate, limits, anti-bloat); the planner decides *which tickets*; Python enforces quotas and resources. The Claude/Codex plan of a Tier S ticket is implementation planning for that ticket, not a second planner; neither is Horizon's deterministic day order.
 
-> Implemented by TASK-2026-00112 (Muse headless → `PlannerResult`, `openceo-core/objectives/planner_models.py`). For objectives in a money-sensitive project (TASK-2026-00161) the prompt also carries a PROJECT TIER GUIDE section: prefer `tier_s` for money/algorithm work when the S justification applies, with A/B/C eligible under their normal justification — guidance, never a forced tier.
+> Implemented by TASK-2026-00112 (Muse headless → `PlannerResult`, `openceo-core/objectives/planner_models.py`). For objectives in a money-sensitive project (TASK-2026-00161) the prompt also carries a PROJECT TIER GUIDE section: prefer `tier_s` for money/algorithm work when the S justification applies, with A/B/C eligible under their normal justification — guidance, never a forced tier. Corrected by TASK-2026-00176 (concurrent-cycle isolation: per-objective exclusive outputs under `.tier-s/objectives/<id>/` — planner and closer verdicts alike, the legacy global files unread — plus a per-objective single flight, so same-objective triggers coalesce and distinct objectives plan in parallel).
 
 ### Company mandate and escalation
 

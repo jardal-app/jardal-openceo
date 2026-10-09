@@ -588,9 +588,14 @@ async def convert_ticket(
 # Objective planner (§9.3): Muse headless → PlannerResult JSON
 # ---------------------------------------------------------------------------
 
+#: Planner/closer result file names (TASK-2026-00176). Each lives under
+#: the objective's own scratch dir
+#: (``.tier-s/objectives/<id>/<name>``), never under the scratch root:
+#: concurrent cycles of one repo must not share an output file. The
+#: legacy global files are neither written nor read anymore.
 PLANNER_RESULT_FILE = "PLANNER_RESULT.json"
 
-#: Closer verdicts file (§16.8), read from the scratch root first.
+#: Closer verdicts file (§16.8), per-objective like the planner result.
 CLOSURE_FILE = "OBJECTIVE_CLOSURE.md"
 
 #: Orchestrator-wide scratch dir inside the project repo (TASK-2026-00136).
@@ -755,7 +760,9 @@ def _planner_prompt(
         lines.extend(["", routing_guide.strip()])
     lines.extend([
         "",
-        f"OUTPUT: write {SCRATCH_DIRNAME}/{PLANNER_RESULT_FILE} with exactly this JSON",
+        f"OUTPUT: write {SCRATCH_DIRNAME}/objectives/"
+        f"{objective.get('objective_id')}/{PLANNER_RESULT_FILE} "
+        "with exactly this JSON",
         "object (no YAML, no markdown fences around the file content):",
         "{",
         '  "objective_status": "active | complete_candidate | blocked | '
@@ -1052,7 +1059,67 @@ def tier_c_late_failure_rate(tier_c: Mapping[str, Any] | None) -> float | None:
     return len(offenders) / denominator
 
 
+@dataclass
+class _PlanFlight:
+    """One in-flight planning per objective (TASK-2026-00176)."""
+
+    task: asyncio.Task
+    rerun_requested: bool = False
+
+
+#: Planning runs in flight by objective. Module-level (not on the env):
+#: the service rebuilds the env per call, so per-env state would not
+#: serialize anything. One entry per planning objective at most, removed
+#: when its leader finishes; single process (instance rule), hence plain
+#: asyncio tasks serialize all producers (API/MCP/CEO/convert/close).
+_PLAN_FLIGHTS: dict[str, _PlanFlight] = {}
+
+
 async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]:
+    """Run the single global planner, coalescing concurrent triggers (§9.3).
+
+    One logical planner with fresh runs: triggers for DIFFERENT
+    objectives plan in parallel over disjoint per-objective files, while
+    triggers for the SAME objective share one flight — latecomers mark
+    ``rerun_requested`` and await the final result instead of launching
+    a second planner, so no planning is lost or duplicated. A call made
+    from inside the leader's own run (final-review recursion) runs
+    inline. The leader completes even if its caller goes away (a
+    detached plan beats a half-planned objective); its exception, if
+    any, reaches every attached trigger like their own run failing.
+    """
+    flight = _PLAN_FLIGHTS.get(objective_id)
+    if flight is not None and not flight.task.done():
+        if flight.task is asyncio.current_task():
+            return await _plan_objective_inner(env, objective_id)
+        flight.rerun_requested = True
+        return await flight.task
+
+    rec: _PlanFlight | None = None
+
+    async def _leader() -> dict[str, Any]:
+        assert rec is not None  # assigned below before any await
+        result = await _plan_objective_inner(env, objective_id)
+        while _PLAN_FLIGHTS.get(objective_id) is rec \
+                and rec.rerun_requested:
+            rec.rerun_requested = False
+            result = await _plan_objective_inner(env, objective_id)
+        return result
+
+    # Check-then-set without an await between: atomic, a single leader.
+    task = asyncio.create_task(_leader())
+    rec = _PlanFlight(task=task)
+    _PLAN_FLIGHTS[objective_id] = rec
+    try:
+        return await task
+    finally:
+        if _PLAN_FLIGHTS.get(objective_id) is rec:
+            del _PLAN_FLIGHTS[objective_id]
+
+
+async def _plan_objective_inner(
+    env: ObjectiveEnv, objective_id: str,
+) -> dict[str, Any]:
     """Run the single global planner once (§9.3). Returns a result summary."""
     objective = await env.objectives.get_objective(objective_id)
     if objective is None:
@@ -1145,18 +1212,21 @@ async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]
     timeout_s = int(planner_cfg.get("timeout_minutes", 15)) * 60
     errors: list[str] = []
     result: planner_mod.PlannerResult | None = None
-    candidates = [scratch_root(env.repo) / PLANNER_RESULT_FILE,
-                  scratch / PLANNER_RESULT_FILE]
+    # Exclusive per-objective output (TASK-2026-00176): this run reads
+    # only its objective's file, so a concurrent cycle of the same repo
+    # can neither feed us its plan nor eat ours. Same-objective runs
+    # never overlap (plan_objective single-flight), hence dropping the
+    # previous cycle's file here is safe.
+    result_path = scratch / PLANNER_RESULT_FILE
     for _attempt in range(2):
         # Drop any previous cycle output: a run that writes nothing must
         # read as missing, never as the last cycle's valid file.
-        for stale in candidates:
-            try:
-                stale.unlink()
-            except OSError:
-                pass
+        try:
+            result_path.unlink()
+        except OSError:
+            pass
         await env.executor.run("objective_planner", prompt, env.repo, timeout_s)
-        text = _read(candidates[0]) or _read(candidates[1])
+        text = _read(result_path)
         if not text:
             errors = [f"no {PLANNER_RESULT_FILE}"]
         else:
@@ -1907,24 +1977,30 @@ async def _inbox_final_finding(
 def _closure_judge_prompt(
     count: int, goal: str, capsule: str, repo: Path,
     findings_path: str = "OBJECTIVE_FINDINGS.md",
+    *,
+    result_path: str,
 ) -> str:
     # Exact paths (TASK-2026-00162): the scratch holds one findings file
     # per objective, and a bare name let the closer read the wrong one.
+    # The verdicts file is per-objective too (TASK-2026-00176): concurrent
+    # closes of one repo must not share an output file.
     return knowledge_mod.with_preamble(
         f"Judge the objective final findings in {findings_path} "
         f"({count} findings, full text: problem, fix, quotes). They are "
         "verified: they point at real code.\n"
         f"Anchor goal: {goal[:500]}\n"
         f"Capsule contracts:\n{capsule[:2000]}\n"
-        f"Write {SCRATCH_DIRNAME}/{CLOSURE_FILE} with one line per finding: "
+        f"Write {result_path} with one line per finding: "
         "`F<n>: REAL — <why>` or `F<n>: FALSO — <verifiable technical "
         f"reason>`. Then emit CLOSURE_READY in {SCRATCH_DIRNAME}/status.",
         repo, "en")
 
 
-def _closure_retry_prompt(missing: Sequence[int], repo: Path) -> str:
+def _closure_retry_prompt(
+    missing: Sequence[int], repo: Path, *, result_path: str,
+) -> str:
     return knowledge_mod.with_preamble(
-        f"{SCRATCH_DIRNAME}/{CLOSURE_FILE} is incomplete: judge each of "
+        f"{result_path} is incomplete: judge each of "
         f"{['F' + str(index) for index in missing]} exactly once "
         "(REAL/FALSO), then emit CLOSURE_READY.", repo, "en")
 
@@ -1944,37 +2020,39 @@ async def _close_objective(
         return await _finish_objective(env, objective)
     scratch = objective_scratch(env.repo, objective_id)
     findings_path = (scratch / "OBJECTIVE_FINDINGS.md").relative_to(env.repo)
+    result_path = scratch / CLOSURE_FILE
     prompt = _closure_judge_prompt(
         len(consolidated), str(anchor.get("goal", "")), capsule, env.repo,
-        findings_path=str(findings_path))
+        findings_path=str(findings_path),
+        result_path=str(result_path.relative_to(env.repo)))
     # Drop any previous closure: a run that writes nothing must read as
-    # missing, never as another objective's verdicts (same rule as the
-    # planner result).
-    for stale in (scratch_root(env.repo) / CLOSURE_FILE,
-                  scratch / CLOSURE_FILE):
-        try:
-            stale.unlink()
-        except OSError:
-            pass
+    # missing, never as another cycle's verdicts (same rule as the
+    # planner result; per-objective: concurrent closes of one repo hold
+    # disjoint files, same-objective closes never overlap).
+    try:
+        result_path.unlink()
+    except OSError:
+        pass
     await env.executor.run("closer", prompt, env.repo, timeout_s)
     try:
         await env.executor.cleanup("closer")
     except Exception:
         pass
-    text = _read(scratch_root(env.repo) / CLOSURE_FILE) or _read(
-        scratch / CLOSURE_FILE)
+    text = _read(result_path)
     verdicts = parse_closure(text)
     missing = [item.id for item in consolidated if item.id not in verdicts]
     if missing:
         await env.executor.run(
-            "closer", _closure_retry_prompt(missing, env.repo),
+            "closer",
+            _closure_retry_prompt(
+                missing, env.repo,
+                result_path=str(result_path.relative_to(env.repo))),
             env.repo, timeout_s)
         try:
             await env.executor.cleanup("closer")
         except Exception:
             pass
-        text = _read(scratch_root(env.repo) / CLOSURE_FILE) or _read(
-            scratch / CLOSURE_FILE)
+        text = _read(result_path)
         verdicts = parse_closure(text)
     real: list[Any] = []
     for item in consolidated:
