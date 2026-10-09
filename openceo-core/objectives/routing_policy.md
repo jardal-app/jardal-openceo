@@ -989,8 +989,9 @@ no open discovery, no S stakes
 ```
 
 `tier_c`, despite volume. If the ticket declares the contract tests,
-they freeze before the build (§24); their absence would not move it
-to B without a `why_not_c`.
+they freeze before the build (§24); their absence never moves it
+to B: B needs a `why_not_c` naming interpretation or blast radius
+(§26), which a missing oracle alone cannot supply.
 
 ### Business logic whose rules need interpretation
 

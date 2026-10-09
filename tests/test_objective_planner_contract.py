@@ -17,7 +17,8 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-CORE = Path(__file__).resolve().parents[1] / "openceo-core"
+REPO = Path(__file__).resolve().parents[1]
+CORE = REPO / "openceo-core"
 if str(CORE) not in sys.path:
     sys.path.insert(0, str(CORE))
 
@@ -518,6 +519,20 @@ class PolicyTests(unittest.TestCase):
         self.assertNotIn("verification is weak (builder-authored", text)
         self.assertIn("select B for a missing oracle or weak verification "
                       "alone", text)
+
+    def test_no_b_door_for_a_missing_oracle_remains(self) -> None:
+        # TASK-2026-00168: residues of the pre-00148 rule that let a
+        # missing oracle push a ticket out of the default tier.
+        text = self._flat()
+        self.assertNotIn("without a `why_not_c`", text)
+        self.assertIn("their absence never moves it to B", text)
+        self.assertIn("which a missing oracle alone cannot supply", text)
+        adr = (REPO / "docs/decision-2026-10-05-planner-objetivos-muse.md"
+               ).read_text(encoding="utf-8")
+        self.assertIn("requiring Tier C to have a qualifying independent "
+                      "frozen oracle", adr)   # history preserved, not rewritten
+        self.assertIn("Superseded (TASK-2026-00168)", adr)
+        self.assertIn("needs no oracle to select it", adr)
 
     def test_oracle_and_chain_contracts_are_written_down(self) -> None:
         text = self._flat()
