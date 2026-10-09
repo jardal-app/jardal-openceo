@@ -21,7 +21,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
@@ -223,6 +223,27 @@ class ProcessExecutor:
         return None
 
 
+def _blocking_resume(status: Any) -> datetime:
+    """Reset instant of the window(s) blocking launch (TASK-2026-00166).
+
+    This gate consumes into the reserve (floors 0/0), so a window
+    blocks only when really exhausted. One window exhausted: its own
+    reset. Both: the later reset — the earliest instant both may have
+    replenished. Neither (``can_launch`` raced a replenish between its
+    read and ours): the earlier reset, a fail-safe early wake.
+    """
+    resets = []
+    if status.remaining_5h <= 0:
+        resets.append(status.resets_5h_at)
+    if status.remaining_weekly <= 0:
+        resets.append(status.resets_weekly_at)
+    if len(resets) == 2:
+        return max(resets)
+    if resets:
+        return resets[0]
+    return min(status.resets_5h_at, status.resets_weekly_at)
+
+
 class RateMonitorQuota:
     """Quota gates over the service rate monitor (design §4.3).
 
@@ -272,7 +293,7 @@ class RateMonitorQuota:
                 continue
             try:
                 status = await self._monitor.get_status(provider)
-                resume = (status.resets_5h_at + self._margin).isoformat()
+                resume = (_blocking_resume(status) + self._margin).isoformat()
                 detail = (f"5h={status.remaining_5h:.0%} "
                           f"weekly={status.remaining_weekly:.0%}")
             except Exception:
