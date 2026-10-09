@@ -606,7 +606,12 @@ class FinalReviewTests(unittest.IsolatedAsyncioTestCase):
             "conversion_source_task_id": "task-parent",
         })
 
-    async def test_nondev_closes_without_pool(self) -> None:
+    async def test_nondev_without_verifier_parks_capability_gap(self) -> None:
+        # TASK-2026-00175 (deliberate contract change, supersedes the
+        # 00117 deterministic close): non-dev delivery without a
+        # registered domain verifier parks as capability_gap instead
+        # of closing on metadata alone. Verified delivery still closes
+        # (see tests/test_nondev_delivery_evidence_175.py).
         repo = _scratch_repo(self)
         parent = _mirrored("task-parent", "TASK-1", status="converted",
                            objective_id="OBJ-1")
@@ -619,20 +624,19 @@ class FinalReviewTests(unittest.IsolatedAsyncioTestCase):
         await self._objective(env)
         result = await run_final_review(env, "OBJ-1")
 
-        self.assertEqual(result["action"], "closed")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "capability_gap")
+        self.assertIn("research", result["detail"])
         stored = await env.objectives.get_objective("OBJ-1")
         assert stored is not None
-        self.assertEqual(stored["status"], "closed")
-        self.assertEqual(stored["final_reviews"], 1)
-        delivery = stored["delivery"]
-        self.assertEqual(delivery["review"], "deterministic")
-        self.assertEqual(delivery["verified_by"], "final_review")
-        self.assertEqual(delivery["criteria"], ["ship"])
-        self.assertEqual(delivery["work_children"], 2)
-        self.assertEqual(delivery["terminal_children"], 2)
-        self.assertEqual(delivery["dev_children"], 0)
-        self.assertIsNone(delivery["outcome_kpi"])
-        self.assertEqual(patches["task-parent"]["status"], "completed")
+        self.assertEqual(stored["status"], "waiting")
+        self.assertEqual(stored.get("final_reviews", 0), 0)
+        self.assertIn("capability_gap", stored["waiting_reason"])
+        gap = stored["capability_gap"]
+        self.assertIn("research", gap["summary"])
+        self.assertEqual(gap["gaps"], [{"domain": "research",
+                                       "children": ["kid-1"]}])
+        self.assertNotIn("task-parent", patches)
         self.assertTrue(notices)
 
     async def test_dev_goes_through_the_pool(self) -> None:
