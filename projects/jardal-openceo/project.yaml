@@ -21,6 +21,11 @@ dev:
   gates:
     - { name: compile, cmd: "python3 -m py_compile openceo-core/main.py openceo-core/first_layer.py openceo-core/project_service.py openceo-core/db/mongo.py", timeout_minutes: 5, required: true }
     - { name: tier_s_focused, cmd: "./.venv/bin/python -m pytest tests/test_tier_s_contract.py tests/test_tier_s_final.py -q", timeout_minutes: 15, required: true }
+  # How the orchestrator RUNS a frozen oracle after the build (policy §24,
+  # TASK-2026-00178): {refs} expands to the shell-quoted oracle refs
+  # (path or path::node). Without it a frozen oracle is hash-protected only.
+  oracle_cmd: "./.venv/bin/python -m pytest {refs} -q"
+  oracle_timeout_minutes: 15
   # Vault location for Tier S knowledge notes (design §9.8, F7b).
   vault_project:
     dir: /home/develop/development/Jardal/jardal-knowledge/vault

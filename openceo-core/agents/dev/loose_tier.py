@@ -15,6 +15,17 @@ Every decision carries a ``tier_reason`` citing the fired signal, so a
 misclassification is auditable and tunable. A/B decisions also carry
 ``why_not_c``: what breaks if the default tier executes the ticket.
 
+Tier S is chosen for the value of orchestrating several independent
+model families, in ANY domain (policy §19, TASK-2026-00178); this
+classifier can only see its textual evidence, in two forms. (1) An
+explicit request for it (``s_assurance``: multi-model orchestration,
+consensus, independent review, maximum reliability, a near fault-free
+result), which is the domain-free path. (2) Domain vocabulary
+(auth, money, destructive, integrity, distributed, privacy/compliance,
+critical incidents, a money-sensitive project's domain). Whatever
+else needs S is the planner's call for objective work, or the explicit
+``coding_tool`` of whoever creates the ticket.
+
 Selection bias (explicit rule): keyword signals fire on mere mention,
 so ambiguous high-stakes, discovery or complexity wording resolves
 UPWARD to S/A/B — over-assigning wastes scarcity, under-assigning
@@ -26,11 +37,12 @@ S (§19), and ``tier_*`` tokens in the text are NOT honored: the
 ``coding_tool`` field is the explicit channel and this classifier only
 runs when it is empty.
 
-A cited oracle (coverage claim plus ``tests/...`` refs) is attached as
-evidence to any tier and freezes at branch time (§24); it never
-decides the tier. Weak verification or a significant blast radius
-below S stakes (§26) needs judgment the keywords do not have, so the
-planner — not this classifier — owns those two B prongs.
+A cited oracle (coverage claim plus ``tests/...`` refs in one
+sentence) is attached as evidence to any tier and freezes at branch
+time (§24); it never decides the tier. A significant blast radius
+below S stakes (§26), and the weak verification that only aggravates
+it, need judgment the keywords do not have, so the planner — not this
+classifier — owns that B prong.
 
 Quota never enters: the signature takes no quota input, so admission
 (00113) cannot be silently degraded by classification. The enqueuer may
@@ -52,9 +64,12 @@ from state import CodingTool
 logger = logging.getLogger(__name__)
 
 #: Provenance marker recorded in ``params.tier_assigned_by``.
-#: v2 = recalibrated S → A → B → C order with ``tier_c`` default
-#: (TASK-2026-00148); v1 decisions were B-default and stay readable.
-ASSIGNED_BY = "loose_classifier/v2"
+#: v3 = explicit-assurance S signal, privacy/compliance S signal and a
+#: stricter oracle-evidence extraction (TASK-2026-00178); v2 =
+#: recalibrated S → A → B → C order with ``tier_c`` default
+#: (TASK-2026-00148); v1 decisions were B-default. Older decisions stay
+#: readable.
+ASSIGNED_BY = "loose_classifier/v3"
 
 
 @dataclass(frozen=True)
@@ -184,7 +199,117 @@ _S_DISTRIBUTED = (
     "A single session cannot hold the whole multi-system interaction in "
     "one head of reasoning; its blind spots become cross-system bugs.",
 )
-_S_SIGNALS = (_S_AUTH, _S_MONEY, _S_DESTRUCTIVE, _S_INTEGRITY, _S_DISTRIBUTED)
+_S_PRIVACY = (
+    "s_privacy",
+    (
+        _phrase("frontera de privacidad"),
+        _phrase("privacy boundary"),
+        _phrase("cumplimiento normativo"),
+        _phrase("regulatory compliance"),
+        _alt("gdpr", "rgpd", "lopd", "hipaa"),
+        _phrase("pci dss"),
+        _phrase("pci-dss"),
+    ),
+    "Independent review is expected to catch privacy or regulatory "
+    "boundary leaks (data crossing a trust line, missing consent or "
+    "retention rules) a single session would not see from inside its own "
+    "design.",
+    "One session both draws the privacy boundary and implements it, so "
+    "its blind spots become the compliance gap.",
+)
+# Domain vocabulary. Bare ambiguous words ("datos personales", "public
+# API") are deliberately absent: they appear in constraint lines such as
+# "no personal data in artifacts" and would fire on mere mention.
+_S_SIGNALS = (_S_AUTH, _S_MONEY, _S_DESTRUCTIVE, _S_INTEGRITY, _S_DISTRIBUTED,
+              _S_PRIVACY)
+
+# -- Tier S, explicit request (policy §19, TASK-2026-00178) -------------------
+# The domain-free path: the requester asks for the multi-model result. Phrases
+# are qualified on purpose ("varios modelos" alone is ORM models, "máxima
+# calidad" is image quality) and a negated mention ("no requiere revisión
+# independiente") never fires.
+_S_ASSURANCE = (
+    "s_assurance",
+    (
+        _phrase("orquestación de modelos"),
+        _phrase("orquestacion de modelos"),
+        _phrase("orquestación de varios modelos"),
+        _phrase("orquestacion de varios modelos"),
+        _phrase("orquestación con varios modelos"),
+        _phrase("orquestacion con varios modelos"),
+        _phrase("orquestación multimodelo"),
+        _phrase("orquestacion multimodelo"),
+        _phrase("orquestación multi-modelo"),
+        _phrase("orquestacion multi-modelo"),
+        _phrase("model orchestration"),
+        _phrase("multi-model orchestration"),
+        _phrase("multimodel orchestration"),
+        _phrase("multi-model consensus"),
+        _phrase("model consensus"),
+        _phrase("consenso de modelos"),
+        _phrase("consenso entre modelos"),
+        _phrase("consenso multimodelo"),
+        _phrase("varios modelos de ia"),
+        _phrase("múltiples modelos de ia"),
+        _phrase("multiples modelos de ia"),
+        _phrase("multiple ai models"),
+        _phrase("several ai models"),
+        _phrase("multiple model families"),
+        _phrase("varias familias de modelos"),
+        _phrase("revisión independiente"),
+        _phrase("revision independiente"),
+        _phrase("revisión cruzada"),
+        _phrase("revision cruzada"),
+        _phrase("revisión multimodelo"),
+        _phrase("revision multimodelo"),
+        _phrase("revisión multifamilia"),
+        _phrase("revision multifamilia"),
+        _phrase("verificación independiente"),
+        _phrase("verificacion independiente"),
+        _phrase("independent review"),
+        _phrase("independent verification"),
+        _phrase("cross-review"),
+        _phrase("cross review"),
+        _phrase("multi-model review"),
+        _phrase("multi-family review"),
+        _phrase("máxima fiabilidad"),
+        _phrase("maxima fiabilidad"),
+        _phrase("máximo rigor"),
+        _phrase("maximo rigor"),
+        _phrase("maximum assurance"),
+        _phrase("maximum reliability"),
+        _phrase("high assurance"),
+        _phrase("casi sin fallas"),
+        _phrase("casi sin fallos"),
+        _phrase("casi sin errores"),
+        _phrase("cero fallas"),
+        _phrase("cero fallos"),
+        _phrase("cero defectos"),
+        _phrase("zero defects"),
+        _phrase("minimizar errores"),
+        _phrase("minimizar los errores"),
+        _phrase("minimizar aún más los errores"),
+        _phrase("minimizando errores"),
+        _phrase("minimizando los errores"),
+        _phrase("minimizando aún más los errores"),
+        _phrase("minimize errors"),
+        _phrase("minimizing errors"),
+    ),
+    "The requester asked for independent multi-model verification to "
+    "minimize residual errors: independent families are expected to catch "
+    "what one session's blind spots would ship.",
+    "A single session cannot independently challenge its own plan and "
+    "implementation; the requester explicitly wants more assurance than "
+    "one session can give.",
+)
+#: Signals whose mention is skipped when negated in its clause.
+_NEGATION_GUARDED = frozenset({"s_assurance", "s_privacy"})
+_NEGATION_WORDS = re.compile(
+    r"(?:\b(?:no|ni|sin|not|without|never|nunca|tampoco|nor)\b"
+    r"|\bnada\s+de\b|n't\b)", re.IGNORECASE | re.UNICODE)
+_NEGATION_EXEMPT = re.compile(
+    r"\b(?:no\s+s[óo]lo|not\s+only)\b", re.IGNORECASE | re.UNICODE)
+_CLAUSE_BREAK = re.compile(r"[.;:,\n(]")
 _S_INCIDENT_WORDS = _compile((
     _alt("incident", "incidents", "incidente", "incidentes", "outage",
          "outages", "caída", "caida", "caídas", "caidas"),
@@ -391,7 +516,7 @@ _B_CONCURRENCY = (
         _phrase("concurrency bug"),
         _phrase("bug de concurrencia"),
     ),
-    "concurrency defect: timing-dependent, weak verification (§26)",
+    "concurrency defect: timing-dependent, errors pass happy-path tests (§26)",
     "a timing-dependent bug survives happy-path tests; only reasoning "
     "about interleavings catches it (§26)",
 )
@@ -425,8 +550,8 @@ _B_INTERPRETATION = (
         _phrase("semantic judgment"),
     ),
     "solution needs significant interpretation of fuzzy rules (§26)",
-    "a misread fuzzy rule ships wrong behavior the builder's own "
-    "tests cannot catch (§26)",
+    "a misread fuzzy rule ships wrong behavior that passes every check "
+    "written from the same reading (§26)",
 )
 _B_COMPAT = (
     "b_compat",
@@ -445,16 +570,24 @@ _B_SIGNALS = (_B_REFACTOR, _B_MIGRATION, _B_CONCURRENCY,
 
 # -- Oracle evidence: coverage claim + test refs (policy §24) -----------------
 # Attached to any tier as freeze material; it never decides the tier.
+# A bare "preexisting"/"preexistente" is NOT a claim: it also means "a
+# pre-existing failure" ("arreglar el fallo preexistente en tests/x.py"),
+# and freezing the very test the ticket must fix fails the work requested
+# (TASK-2026-00178).
 _C_CLAIM = _compile((
     _phrase("covered by"),
     _phrase("cubierto por"),
     _phrase("cubierta por"),
     _phrase("cubiertos por"),
-    _alt("preexisting", "preexistente", "preexistentes"),
+    _phrase("preexisting tests"),
+    _phrase("tests preexistentes"),
+    _phrase("pruebas preexistentes"),
     _phrase("existing tests"),
     _phrase("existing test"),
+    _phrase("existing test suite"),
     _phrase("tests existentes"),
     _phrase("test existentes"),
+    _phrase("pruebas existentes"),
     _phrase("already covered"),
     _phrase("ya cubierto"),
     _phrase("ya cubierta"),
@@ -467,11 +600,33 @@ _C_TEST_PATH = re.compile(
     r"(?:::[A-Za-z0-9_]+)?\b",
     re.IGNORECASE | re.UNICODE,
 )
+#: One claim covers only the paths of its own sentence/paragraph.
+_C_SEGMENT_SPLIT = re.compile(r"\n\s*\n|(?<=[.!?;])\s+")
+#: An edit verb right before a path ("Fix the failing tests in <path>")
+#: means the ticket changes that file: it cannot be its own oracle.
+_C_EDIT_VERBS = (r"(?:fix|repair|update|modify|edit|rewrite|extend|"
+                 r"add\s+to|arregl\w*|corrig\w*|repar\w*|actualiz\w*|"
+                 r"modific\w*|edit\w*|reescrib\w*|extend\w*|ampli\w*|"
+                 r"agreg\w*\s+a)")
+_C_ADJECTIVES = (r"(?:(?:failing|broken|flaky|existing|old|current|roto|"
+                 r"rotos|rota|rotas|existente|existentes|actual|"
+                 r"actuales)\s+)*")
+_C_EDIT_BEFORE_PATH = re.compile(
+    r"\b" + _C_EDIT_VERBS + r"\s+(?:(?:the|a|an|el|la|los|las|un|una)\s+)?"
+    + _C_ADJECTIVES                      # English order: "failing tests"
+    + r"(?:(?:tests?|pruebas?|suite|specs?|casos?)\s+)?"
+    + _C_ADJECTIVES                      # Spanish order: "tests existentes"
+    + r"(?:(?:in|en|de|del|of)\s+)?$",
+    re.IGNORECASE | re.UNICODE,
+)
 
 _COMPILED_S: tuple[tuple[str, "re.Pattern[str]", str, str], ...] = tuple(
     (signal_id, _compile(patterns), why_consensus, why_single)
     for signal_id, patterns, why_consensus, why_single in _S_SIGNALS
 )
+_ASSURANCE_ID, _ASSURANCE_PATTERNS, _ASSURANCE_WHY, _ASSURANCE_SINGLE = \
+    _S_ASSURANCE
+_COMPILED_S_ASSURANCE = _compile(_ASSURANCE_PATTERNS)
 _COMPILED_A: tuple[tuple[str, "re.Pattern[str]", str, str], ...] = tuple(
     (signal_id, _compile(patterns), reason, why_not_c)
     for signal_id, patterns, reason, why_not_c in _A_SIGNALS
@@ -601,20 +756,43 @@ def _first_match(pattern: "re.Pattern[str]", text: str) -> str | None:
     return found.group(0) if found else None
 
 
+def _first_unnegated_match(pattern: "re.Pattern[str]", text: str) -> str | None:
+    """First match that its own clause does not negate.
+
+    "No requiere revisión independiente" or "sin datos GDPR" is the
+    opposite of a request, so it never fires. The clause is the text
+    since the last punctuation/newline before the match; "no solo" is
+    not a negation.
+    """
+    for found in pattern.finditer(text):
+        clause = _CLAUSE_BREAK.split(text[:found.start()])[-1]
+        clause = _NEGATION_EXEMPT.sub(" ", clause)
+        if _NEGATION_WORDS.search(clause):
+            continue
+        return found.group(0)
+    return None
+
+
 def _extract_oracle_evidence(text: str) -> dict[str, Any] | None:
     """Declared oracle evidence (coverage claim + test refs), if cited.
 
     Evidence only: it freezes at branch time (§24) and never decides
-    the tier. Paths without a coverage claim could be builder work, and
-    a claim without extractable paths is not freezable.
+    the tier. The claim and the path must share a sentence/paragraph
+    (a claim about one thing says nothing about a path cited elsewhere),
+    paths without a claim could be builder work, and a path the ticket
+    edits ("fix the failing tests in <path>") is never its own oracle.
+    A claim without extractable paths is not freezable.
     """
-    if _first_match(_C_CLAIM, text) is None:
-        return None
     refs: list[str] = []
-    for found in _C_TEST_PATH.finditer(text):
-        ref = found.group(0)
-        if ref not in refs:
-            refs.append(ref)
+    for segment in _C_SEGMENT_SPLIT.split(text):
+        if _first_match(_C_CLAIM, segment) is None:
+            continue
+        for found in _C_TEST_PATH.finditer(segment):
+            if _C_EDIT_BEFORE_PATH.search(segment[:found.start()]):
+                continue
+            ref = found.group(0)
+            if ref not in refs:
+                refs.append(ref)
     if not refs:
         return None
     return {"type": "preexisting_tests",
@@ -633,12 +811,27 @@ def classify_loose_tier(
     Pure and deterministic: same text always yields the same decision, with
     zero token spend. Evaluation order is S → A → B → C (policy §18-27);
     the first tier with a fired signal wins and the reason cites it. With
-    no signal anywhere the default is ``tier_c`` (§25). A money-sensitive
-    project routing (``dev.routing``) adds the ``s_money_domain`` S signal
-    for this project only; anything else normalizes to disabled.
+    no signal anywhere the default is ``tier_c`` (§25). Inside S, an
+    explicit request for multi-model assurance (``s_assurance``, the
+    domain-free path) is read first. A money-sensitive project routing
+    (``dev.routing``) adds the ``s_money_domain`` S signal for this
+    project only; anything else normalizes to disabled.
     """
     text = _scan_text(title, description, attachments or ())
     oracle = _extract_oracle_evidence(text)
+
+    requested = _first_unnegated_match(_COMPILED_S_ASSURANCE, text)
+    if requested is not None:
+        return LooseTierDecision(
+            tier=CodingTool.TIER_S,
+            reason=(f"explicit assurance request ({_ASSURANCE_ID}: "
+                    f"{requested.strip()!r}); the ticket asks for "
+                    f"multi-model orchestration (§19)"),
+            signals=(f"{_ASSURANCE_ID}:{requested.strip()}",),
+            oracle=oracle,
+            why_consensus_is_needed=_ASSURANCE_WHY,
+            why_single_session_is_insufficient=_ASSURANCE_SINGLE,
+        )
 
     routing = _normalize_money_routing(project_routing)
     if routing:
@@ -676,7 +869,9 @@ def classify_loose_tier(
             )
 
     for signal_id, pattern, why_consensus, why_single in _COMPILED_S:
-        matched = _first_match(pattern, text)
+        matched = (_first_unnegated_match(pattern, text)
+                   if signal_id in _NEGATION_GUARDED
+                   else _first_match(pattern, text))
         if matched is not None:
             return LooseTierDecision(
                 tier=CodingTool.TIER_S,

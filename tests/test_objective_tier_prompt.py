@@ -51,11 +51,33 @@ class ObjectiveTierPromptTests(unittest.TestCase):
     def test_prompt_requires_why_not_c_for_a_and_b(self) -> None:
         prompt = _prompt()
         self.assertIn("why_not_c", prompt)
-        self.assertIn("Never\n     select B for a missing oracle alone.",
-                      prompt)
+        self.assertIn("Never select B for a missing\n"
+                      "     oracle or weak verification alone.", prompt)
         self.assertIn(
-            '"why_not_c?": "<required for tier_a/tier_b: what breaks in C>"',
+            '"why_not_c?": "<required for tier_a/tier_b: what breaks in C; '
+            'omit for tier_s and tier_c>"',
             prompt)
+
+    def test_weak_verification_only_aggravates_b(self) -> None:
+        # TASK-2026-00178: weak verification is no B prong by itself.
+        prompt = _prompt()
+        self.assertIn("weak verification only aggravates those", prompt)
+        self.assertNotIn("interpretation, weak verification, or", prompt)
+
+    def test_prompt_defines_s_by_orchestration_value_in_any_domain(self) -> None:
+        prompt = _prompt()
+        self.assertIn("orchestrating several independent model families",
+                      prompt)
+        self.assertIn("in ANY domain", prompt)
+        self.assertIn("never a domain list", prompt)
+        self.assertIn("maximum assurance", prompt)
+        self.assertIn("Not rationed by percentage.", prompt)
+        self.assertNotIn("high-impact residual risk", prompt)
+
+    def test_prompt_forbids_modified_files_as_oracle(self) -> None:
+        prompt = _prompt()
+        self.assertIn("Never declare as oracle a file the\n"
+                      "  ticket is expected to modify.", prompt)
 
     def test_prompt_treats_oracle_as_evidence(self) -> None:
         prompt = _prompt()
@@ -91,6 +113,44 @@ class ObjectiveTierPromptTests(unittest.TestCase):
                         "NORMATIVE ROUTING POLICY"):
             self.assertIn(section, prompt)
         self.assertIn("did x", prompt)
+
+
+class PlannedTicketDescriptionTests(unittest.TestCase):
+    """The justifications travel into the ticket the executor and the owner read."""
+
+    @staticmethod
+    def _planned(**overrides):
+        from objectives.planner_models import PlannedTicket
+
+        base = {
+            "local_ref": "t1", "title": "Do the thing", "target_agent": "dev",
+            "work_type": "implementation", "goal": "ship it",
+            "why_now": "unblocks the objective",
+            "acceptance_criteria": ["it works"],
+            "expected_artifacts": ["code"],
+            "coding_tool": "tier_b", "tier_reason": "semantic refactor",
+            "why_not_c": "a misjudged refactor ships behavior drift",
+        }
+        base.update(overrides)
+        return PlannedTicket.model_validate(base)
+
+    def test_why_not_c_reaches_the_ticket_description(self) -> None:
+        from objectives.engine import _planned_description, _planned_params
+
+        ticket = self._planned()
+        description = _planned_description(ticket)
+        self.assertIn(
+            "WHY NOT THE DEFAULT TIER (C): a misjudged refactor ships "
+            "behavior drift", description)
+        self.assertEqual(_planned_params(ticket)["why_not_c"],
+                         "a misjudged refactor ships behavior drift")
+
+    def test_default_tier_description_carries_no_why_not_c(self) -> None:
+        from objectives.engine import _planned_description
+
+        ticket = self._planned(coding_tool="tier_c", why_not_c=None,
+                               tier_reason="specified work one session owns")
+        self.assertNotIn("WHY NOT THE DEFAULT TIER", _planned_description(ticket))
 
 
 if __name__ == "__main__":

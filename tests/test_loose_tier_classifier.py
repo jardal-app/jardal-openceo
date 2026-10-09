@@ -438,9 +438,203 @@ class SessionDispatchTests(unittest.IsolatedAsyncioTestCase):
         manager._step_code.assert_not_called()
 
 
+class AssuranceRequestTests(unittest.TestCase):
+    """Tier S is not limited to money/auth (TASK-2026-00178, policy §19).
+
+    The domain-free path: the ticket itself asks for multi-model
+    orchestration, independent review or a near fault-free result.
+    """
+
+    def test_explicit_requests_select_s_in_any_domain(self) -> None:
+        cases = [
+            # (title, description) -- none of them money, payment or auth.
+            ("Reordenar el planificador de turnos",
+             "Queremos orquestación de varios modelos para este cambio."),
+            ("Rewrite the tie-breaking in the scheduler",
+             "Needs independent review of the ordering rules."),
+            ("Parser de rutas casi sin fallas", ""),
+            ("Minimizando aún más los errores en el cálculo de rutas", ""),
+            ("Compactar el formato de logs",
+             "Hace falta consenso entre modelos antes de fusionar."),
+            ("Optimize the cache eviction",
+             "Use multi-model orchestration; zero defects expected."),
+            ("Revisión cruzada del nuevo motor de reglas", ""),
+            ("Cálculo de turnos con máxima fiabilidad", ""),
+            ("Ranking algorithm with maximum assurance", ""),
+        ]
+        for title, description in cases:
+            with self.subTest(title=title):
+                decision = _decision(title, description)
+                self.assertEqual(decision.tier, CodingTool.TIER_S, title)
+                self.assertTrue(decision.signals[0].startswith("s_assurance:"),
+                                decision.signals)
+                self.assertIn("19", decision.reason)
+                self.assertTrue((decision.why_consensus_is_needed or "").strip())
+                self.assertTrue(
+                    (decision.why_single_session_is_insufficient or "").strip())
+
+    def test_request_in_the_description_counts(self) -> None:
+        decision = _decision(
+            "Ajustar el orden de la lista",
+            "Contexto largo.\n\nNota del dueño: revisión independiente "
+            "antes de dar por bueno el cambio.")
+        self.assertEqual(decision.tier, CodingTool.TIER_S)
+
+    def test_request_beats_discovery_and_default(self) -> None:
+        decision = _decision(
+            "Fallo intermitente de causa desconocida en la cola",
+            "Pedimos orquestación de modelos para encontrar la causa.")
+        self.assertEqual(decision.tier, CodingTool.TIER_S)
+        self.assertTrue(decision.signals[0].startswith("s_assurance:"))
+
+    def test_negated_mentions_never_fire(self) -> None:
+        cases = [
+            "No requiere revisión independiente",
+            "Sin orquestación de modelos: es un cambio de texto",
+            "This does not need independent review",
+            "We don't need multi-model orchestration here",
+            "Cambio trivial; ni consenso entre modelos ni revisión cruzada",
+            "Without independent verification this ships as is",
+        ]
+        for title in cases:
+            with self.subTest(title=title):
+                self.assertEqual(_decision(title).tier, CodingTool.TIER_C, title)
+
+    def test_negation_is_scoped_to_its_clause(self) -> None:
+        # "Sin cambios" closes at the semicolon; the request that follows
+        # is a request.
+        self.assertEqual(
+            _decision("Sin cambios de API; requiere revisión independiente").tier,
+            CodingTool.TIER_S)
+        # "no solo" is not a negation.
+        self.assertEqual(
+            _decision("No solo tests: también revisión independiente del "
+                      "diseño").tier, CodingTool.TIER_S)
+
+    def test_ambiguous_phrases_stay_out(self) -> None:
+        # "varios modelos" is ORM models, "máxima calidad" is image
+        # quality, "sin fallas" is an ordinary acceptance line.
+        cases = [
+            "Crear varios modelos en la base de datos",
+            "Add several models to the ORM layer",
+            "Exportar las imágenes en máxima calidad",
+            "El pipeline debe correr sin fallas en CI",
+            "Build con cero errores de lint",
+            "Review the independent variable naming",
+        ]
+        for title in cases:
+            with self.subTest(title=title):
+                self.assertEqual(_decision(title).tier, CodingTool.TIER_C, title)
+
+    def test_domain_signals_keep_working_unchanged(self) -> None:
+        # The owner confirmed money/payment/auth triggers are fine.
+        for title in ("Corregir el cálculo del pago con tarjeta",
+                      "Cambiar el flujo de autenticación OAuth",
+                      "Migración destructiva de la tabla de usuarios"):
+            with self.subTest(title=title):
+                decision = _decision(title)
+                self.assertEqual(decision.tier, CodingTool.TIER_S)
+                self.assertFalse(decision.signals[0].startswith("s_assurance"))
+
+
+class PrivacyComplianceSignalTests(unittest.TestCase):
+    def test_boundary_and_regulation_phrases_select_s(self) -> None:
+        cases = [
+            "Frontera de privacidad entre Horizon y la empresa",
+            "Define the privacy boundary of the exporter",
+            "Cumplimiento normativo del registro de actividad",
+            "Make the exporter GDPR compliant",
+            "Adecuar el módulo a RGPD",
+            "HIPAA audit trail for the viewer",
+            "Cambios para PCI DSS en el formulario",
+        ]
+        for title in cases:
+            with self.subTest(title=title):
+                decision = _decision(title)
+                self.assertEqual(decision.tier, CodingTool.TIER_S, title)
+                self.assertTrue(decision.signals[0].startswith("s_privacy:"))
+
+    def test_constraint_lines_and_negations_do_not_fire(self) -> None:
+        cases = [
+            # bare "datos personales" is a constraint line in most tickets
+            "Exportar el informe sin secretos ni datos personales",
+            "Keep personal data out of the artifacts",
+            # negated regulation mention
+            "Esto no es un tema de GDPR, solo texto",
+            "Not a privacy boundary change; copy fix",
+        ]
+        for title in cases:
+            with self.subTest(title=title):
+                self.assertEqual(_decision(title).tier, CodingTool.TIER_C, title)
+
+
+class OracleEvidenceExtractionTests(unittest.TestCase):
+    """Stricter extraction (TASK-2026-00178): no false freezes."""
+
+    def _refs(self, title: str, description: str = "") -> list[str]:
+        oracle = _decision(title, description).oracle
+        return [item["ref"] for item in oracle["refs"]] if oracle else []
+
+    def test_bare_preexisting_is_not_a_coverage_claim(self) -> None:
+        # "fallo preexistente" is a pre-existing FAILURE, not coverage.
+        self.assertEqual(
+            self._refs("Arreglar el fallo preexistente en tests/test_x.py"), [])
+        self.assertEqual(
+            self._refs("Fix the preexisting failure in tests/test_x.py"), [])
+
+    def test_a_path_the_ticket_edits_is_never_its_oracle(self) -> None:
+        self.assertEqual(
+            self._refs("Fix the failing existing tests in tests/test_x.py"), [])
+        self.assertEqual(
+            self._refs("Arreglar los tests existentes en tests/test_x.py"), [])
+        self.assertEqual(
+            self._refs("Update tests/test_x.py; ya cubierto por la suite"), [])
+
+    def test_the_verb_governs_only_the_path_it_precedes(self) -> None:
+        self.assertEqual(
+            self._refs("Update the service (covered by tests/test_x.py)"),
+            ["tests/test_x.py"])
+        self.assertEqual(
+            self._refs("Refactor del parser, cubierto por tests/test_parser.py"),
+            ["tests/test_parser.py"])
+
+    def test_claim_and_path_must_share_a_sentence(self) -> None:
+        self.assertEqual(
+            self._refs("Refactor ya cubierto por la suite",
+                       "Detalle largo.\n\nAdemás agrega casos en "
+                       "tests/test_new.py."), [])
+        self.assertEqual(
+            self._refs("Fix pagination",
+                       "Covered by tests/test_pager.py::test_pages; "
+                       "extend tests/test_other.py."),
+            ["tests/test_pager.py::test_pages"])
+
+    def test_one_claim_can_list_several_paths(self) -> None:
+        self.assertEqual(
+            self._refs("Cambio acotado",
+                       "Cubierto por:\n- tests/test_a.py\n- tests/test_b.py"),
+            ["tests/test_a.py", "tests/test_b.py"])
+
+    def test_edited_and_covering_paths_split_per_sentence(self) -> None:
+        self.assertEqual(
+            self._refs("Cambio",
+                       "Update tests/test_x.py to cover the new flow; "
+                       "existing tests in tests/test_y.py must keep passing"),
+            ["tests/test_y.py"])
+
+    def test_extraction_never_changes_the_tier(self) -> None:
+        decision = _decision("Fix pagination",
+                             "Covered by tests/test_pager.py")
+        self.assertEqual(decision.tier, CodingTool.TIER_C)
+        assert decision.oracle is not None
+        self.assertEqual(decision.oracle["type"], "preexisting_tests")
+
+
 class ClassifierTelemetryTests(unittest.IsolatedAsyncioTestCase):
-    def test_classifier_version_is_v2(self) -> None:
-        self.assertEqual(ASSIGNED_BY, "loose_classifier/v2")
+    def test_classifier_version_is_v3(self) -> None:
+        # v3 = explicit-assurance + privacy S signals, stricter oracle
+        # extraction (TASK-2026-00178).
+        self.assertEqual(ASSIGNED_BY, "loose_classifier/v3")
 
     async def test_assignment_is_recorded(self) -> None:
         decisions: list[dict] = []

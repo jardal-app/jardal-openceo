@@ -224,7 +224,16 @@ class ProcessExecutor:
 
 
 class RateMonitorQuota:
-    """Quota gates over the service rate monitor (design §4.3)."""
+    """Quota gates over the service rate monitor (design §4.3).
+
+    Every consumer of this gate is the Tier S family: the S cycle
+    preflight (planner + plan reviewer), the S arbiter and the objective
+    final-review arbiter. Policy §28 reserves quota FOR that family, so
+    these checks consume into the reserve down to zero
+    (``honor_reserve=False``); only real exhaustion parks them. A/B
+    admission and the Tier C primary link are not routed through here:
+    they honor the reserve in ``RateMonitor`` itself (TASK-2026-00178).
+    """
 
     #: Account → monitored provider. The claude monitor watches the default
     #: account (clauded), so claudej gates are approximate until the monitor
@@ -251,7 +260,8 @@ class RateMonitorQuota:
                 verdicts[str(account)] = QuotaVerdict(ok=True)
                 continue
             try:
-                launchable = await self._monitor.can_launch(provider)
+                launchable = await self._monitor.can_launch(
+                    provider, honor_reserve=False)
             except Exception:
                 logger.warning("quota probe failed for %s; failing open",
                                account, exc_info=True)

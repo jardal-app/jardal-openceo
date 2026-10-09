@@ -77,6 +77,7 @@ class ParseTests(unittest.TestCase):
         ticket = _ticket(
             coding_tool="tier_c",
             tier_reason="preexisting tests cover it; reversible migration",
+            why_not_c=None,
             oracle={"type": "preexisting_tests",
                     "refs": [{"ref": "tests/test_x.py"}]},
         )
@@ -189,6 +190,45 @@ class ParseTests(unittest.TestCase):
         )
         result = parse_planner_result(json.dumps(_result(tickets=[ticket])))
         self.assertEqual(result.tickets[0].coding_tool.value, "tier_s")
+
+    def test_tier_s_accepts_an_optional_why_not_c(self) -> None:
+        ticket = _ticket(
+            coding_tool="tier_s",
+            tier_reason="ordering logic where the first solution is often wrong",
+            why_consensus_is_needed="independent readings catch the ordering "
+                                    "assumption one session would bake in",
+            why_single_session_is_insufficient="one session owns plan and code",
+            why_not_c="the default tier would ship the first plausible order",
+        )
+        result = parse_planner_result(json.dumps(_result(tickets=[ticket])))
+        self.assertEqual(result.tickets[0].coding_tool.value, "tier_s")
+
+    def test_tier_s_is_not_tied_to_a_domain(self) -> None:
+        # TASK-2026-00178: the schema checks the justification pair, never
+        # a domain list -- a non-money, non-auth S ticket is valid.
+        ticket = _ticket(
+            coding_tool="tier_s",
+            tier_reason="owner asked for a near fault-free result on the "
+                        "scheduling algorithm",
+            why_consensus_is_needed="the owner's explicit request for maximum "
+                                    "assurance; independent plans compare the "
+                                    "tie-breaking rules",
+            why_single_session_is_insufficient="a single session would bake "
+                                               "one tie-breaking reading in",
+            why_not_c=None,
+        )
+        result = parse_planner_result(json.dumps(_result(tickets=[ticket])))
+        self.assertEqual(result.tickets[0].coding_tool.value, "tier_s")
+
+    def test_tier_c_rejects_why_not_c(self) -> None:
+        # A why_not_c on the default tier contradicts itself: the planner
+        # meant tier_a/tier_b (TASK-2026-00178).
+        with self.assertRaises(ValueError) as raised:
+            parse_planner_result(json.dumps(_result(tickets=[
+                _ticket(coding_tool="tier_c",
+                        why_not_c="a misjudged refactor ships drift")])))
+        self.assertIn("tier_c is the default and carries no why_not_c",
+                      str(raised.exception))
 
     def test_why_not_c_only_for_dev(self) -> None:
         ticket = _ticket(target_agent="research", coding_tool=None,
@@ -391,6 +431,47 @@ class PolicyTests(unittest.TestCase):
     def test_missing_policy_is_empty(self) -> None:
         self.assertEqual(
             planner_mod.load_policy_text("/nonexistent/policy.md"), "")
+
+    @staticmethod
+    def _flat() -> str:
+        return " ".join(planner_mod.load_policy_text().split())
+
+    def test_policy_fits_the_prompt_budget(self) -> None:
+        # The planner prompt keeps the first 60000 chars of the policy.
+        self.assertLess(len(planner_mod.load_policy_text().strip()), 60000)
+
+    def test_tier_s_is_defined_by_orchestration_value_not_domain(self) -> None:
+        # TASK-2026-00178 (owner direction 2026-10-09).
+        text = self._flat()
+        self.assertIn("orchestrating several independent model families", text)
+        self.assertIn("The criterion is the expected value of independent "
+                      "challenge, never a domain.", text)
+        self.assertIn("no domain is excluded", text)
+        self.assertIn("illustrative, not a closed list", text)
+        self.assertIn("maximum assurance, a near fault-free result or "
+                      "multi-model orchestration is itself a valid reason",
+                      text)
+        self.assertIn("S is not rationed by percentage", text)
+        self.assertIn("limit Tier S to a fixed list of domains", text)
+        self.assertNotIn("Strong signals include", text)
+
+    def test_weak_verification_is_never_a_b_prong_by_itself(self) -> None:
+        text = self._flat()
+        self.assertIn("Weak verification (builder-authored tests only, no "
+                      "usable oracle) is never a prong by itself", text)
+        self.assertNotIn("verification is weak (builder-authored", text)
+        self.assertIn("select B for a missing oracle or weak verification "
+                      "alone", text)
+
+    def test_oracle_and_chain_contracts_are_written_down(self) -> None:
+        text = self._flat()
+        self.assertIn("dev.oracle_cmd", text)
+        self.assertIn("is never declared as an oracle", text)
+        self.assertIn("is already red there, it cannot accept or reject", text)
+        self.assertIn("executor_link", text)
+        self.assertIn("provides availability, not selection", text)
+        self.assertIn("Their quota gate never applies the reservation", text)
+        self.assertNotIn("Tier-C oracle eligibility", text)
 
 
 if __name__ == "__main__":

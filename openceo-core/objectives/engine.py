@@ -720,17 +720,25 @@ def _planner_prompt(
         "- DEV tiers apply only when target_agent == dev, in this order.",
         "  All four executors are top-tier models; letters order the work,",
         "  never the models. Never describe a tier as cheap or weaker.",
-        "  1. tier_s: independent planning/challenge/review materially",
-        "     reduces high-impact residual risk. Justify with",
+        "  1. tier_s: orchestrating several independent model families",
+        "     (independent plan, challenge, build, multi-family review,",
+        "     arbitration) is expected to give a materially more correct",
+        "     result than one session. The criterion is that expected",
+        "     value, in ANY domain (money, security, data, algorithms,",
+        "     contracts, ambiguous specs...), never a domain list; also",
+        "     when the owner or the ticket asks for maximum assurance.",
+        "     Not rationed by percentage. Justify with",
         "     why_consensus_is_needed + why_single_session_is_insufficient,",
-        "     naming the residual failure other stages would catch.",
+        "     naming the residual failure other stages would catch (or",
+        "     citing the explicit request).",
         "  2. tier_a: discovering truth/root cause/architecture is the",
         "     dominant difficulty. Justify with why_not_c: what breaks",
         "     if the default tier executes it.",
         "  3. tier_b: really complex single-session work (needs",
-        "     interpretation, weak verification, or significant blast",
-        "     radius below S stakes). Justify with why_not_c. Never",
-        "     select B for a missing oracle alone.",
+        "     significant interpretation, or a significant blast radius",
+        "     below S stakes; weak verification only aggravates those).",
+        "     Justify with why_not_c. Never select B for a missing",
+        "     oracle or weak verification alone.",
         "  4. tier_c: THE DEFAULT. Specified work with no S/A/B",
         "     justification. No oracle, reversibility proof, or",
         "     blast-radius analysis required.",
@@ -738,7 +746,8 @@ def _planner_prompt(
         "  types declared before the build freeze on any simple tier",
         "  (preexisting_tests, contract_or_schema, bug_reproduction,",
         "  separate_ticket_tests, planner_executable_spec). builder_tests",
-        "  NEVER triggers protection.",
+        "  NEVER triggers protection. Never declare as oracle a file the",
+        "  ticket is expected to modify.",
         "- Quota never redefines the technical tier. Never choose",
         "  runtime, CLI account, or model.",
     ])
@@ -769,7 +778,8 @@ def _planner_prompt(
         '      "description?": "..."}]},',
         '    "why_consensus_is_needed?": "<tier_s only>",',
         '    "why_single_session_is_insufficient?": "<tier_s only>",',
-        '    "why_not_c?": "<required for tier_a/tier_b: what breaks in C>",',
+        '    "why_not_c?": "<required for tier_a/tier_b: what breaks in C; '
+        'omit for tier_s and tier_c>",',
         '    "includes_findings?": ["<inbox fingerprints claimed>"]',
         "  } ],",
         '  "roadmap_remaining": ["<speculative future work>"],',
@@ -858,6 +868,7 @@ def blank_tier_c_telemetry() -> dict[str, Any]:
         "late_failures": 0,
         "late_failure_severity": {},
         "by_oracle_type": {},
+        "by_link": {},
         "c_ticket_records": [],
         "late_failure_records": [],
     }
@@ -912,18 +923,23 @@ async def record_tier_c(
     severity: str = "",
     detail: str = "",
     attributable: bool = False,
+    executor_link: str = "",
 ) -> None:
     """Append one Tier C telemetry event (routing policy §32).
 
-    Events: ``started`` (C dispatch), ``closed`` (C close;
-    ``attributable`` when the close recorded a SHA in ``tickets_log``),
-    ``cycle_failure`` (one failed gate/oracle round during the candidate
-    cycle), ``material_replan`` (a C ticket failed materially),
-    ``late_failure`` (a defect later attributed to a closed C ticket;
-    only attributed origins are counted, never guesses).
+    Events: ``started`` (C dispatch), ``executor`` (the chain link that
+    ran the ticket: muse/dsh/claudep, stamped on its open record and
+    counted in ``by_link`` -- the chain is availability, not selection,
+    so the link is what lets the owner contrast the primary link with
+    the fallbacks), ``closed`` (C close; ``attributable`` when the close
+    recorded a SHA in ``tickets_log``), ``cycle_failure`` (one failed
+    gate/oracle round during the candidate cycle), ``material_replan``
+    (a C ticket failed materially), ``late_failure`` (a defect later
+    attributed to a closed C ticket; only attributed origins are
+    counted, never guesses).
     Unknown objectives are ignored: telemetry never fails execution.
     """
-    if event not in ("started", "closed", "cycle_failure",
+    if event not in ("started", "executor", "closed", "cycle_failure",
                      "material_replan", "late_failure"):
         return
     objective = await objectives.get_objective(objective_id)
@@ -947,6 +963,12 @@ async def record_tier_c(
             "outcome": "open",
             "started_at": _utcnow_iso(),
         })
+    elif event == "executor":
+        link = str(executor_link or "unknown")[:40]
+        by_link = dict(tier_c.get("by_link") or {})
+        by_link[link] = int(by_link.get(link, 0)) + 1
+        tier_c["by_link"] = by_link
+        _stamp_tier_c_record(records, str(task_id or ""), executor_link=link)
     elif event == "closed":
         tier_c["closed"] = int(tier_c.get("closed", 0)) + 1
         slot["closed"] = int(slot.get("closed", 0)) + 1
@@ -980,6 +1002,19 @@ async def record_tier_c(
     tier_c["c_ticket_records"] = records
     tele["tier_c"] = tier_c
     await objectives.patch_objective(objective_id, {"planner_telemetry": tele})
+
+
+def _stamp_tier_c_record(
+    records: list[dict[str, Any]], task_id: str, **fields: Any,
+) -> None:
+    """Set fields on the latest open record of a ticket (in place)."""
+    if not task_id:
+        return
+    for record in reversed(records):
+        if record.get("task_id") == task_id \
+                and record.get("outcome") == "open":
+            record.update(fields)
+            return
 
 
 def _close_tier_c_record(
@@ -1248,6 +1283,9 @@ def _planned_description(ticket: planner_mod.PlannedTicket) -> str:
         sections.extend(
             ["", "WHY NOT SINGLE SESSION: "
              f"{ticket.why_single_session_is_insufficient}"])
+    if ticket.why_not_c:
+        sections.extend(
+            ["", f"WHY NOT THE DEFAULT TIER (C): {ticket.why_not_c}"])
     return "\n".join(sections)
 
 
