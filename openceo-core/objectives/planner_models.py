@@ -67,6 +67,29 @@ def _string_list_nonblank(value: list[str]) -> list[str]:
     return value
 
 
+#: ``roadmap_remaining`` is the planner's outlook (policy §12): one short note
+#: per foreseen step. The whole list is pasted into every later planning prompt
+#: and into the Objective capsule, so its size is bounded (TASK-2026-00183).
+#: The prompt and the policy quote these numbers; a test keeps them aligned.
+ROADMAP_MAX_LINES = 10
+ROADMAP_MAX_CHARS = 300
+
+
+def _roadmap_within_bounds(value: list[str]) -> list[str]:
+    if len(value) > ROADMAP_MAX_LINES:
+        raise ValueError(
+            f"roadmap_remaining carries at most {ROADMAP_MAX_LINES} lines, "
+            f"got {len(value)}: keep the next steps that matter, one line each")
+    for index, item in enumerate(value, start=1):
+        size = len(str(item).strip())
+        if size > ROADMAP_MAX_CHARS:
+            raise ValueError(
+                f"roadmap_remaining line {index} has {size} characters "
+                f"(max {ROADMAP_MAX_CHARS}): one short line per step, naming "
+                "what it depends on")
+    return value
+
+
 class InformationGap(BaseModel):
     gap: str = Field(min_length=1)
     materiality: Literal["low", "medium", "high", "critical"]
@@ -233,7 +256,6 @@ class PlannerResult(BaseModel):
     information_gaps: list[InformationGap] = Field(default_factory=list)
     tickets: list[PlannedTicket] = Field(default_factory=list, max_length=3)
     roadmap_remaining: list[str] = Field(default_factory=list)
-    replan_when: list[str] = Field(default_factory=list)
 
     @field_validator("state_summary")
     @classmethod
@@ -242,10 +264,10 @@ class PlannerResult(BaseModel):
             raise ValueError("must not be blank")
         return value
 
-    @field_validator("roadmap_remaining", "replan_when")
+    @field_validator("roadmap_remaining")
     @classmethod
-    def _lists_nonblank(cls, value: list[str]) -> list[str]:
-        return _string_list_nonblank(value)
+    def _roadmap_bounded(cls, value: list[str]) -> list[str]:
+        return _roadmap_within_bounds(_string_list_nonblank(value))
 
     @model_validator(mode="after")
     def validate_objective_state(self) -> "PlannerResult":

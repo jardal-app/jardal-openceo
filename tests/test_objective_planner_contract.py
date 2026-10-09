@@ -23,6 +23,8 @@ if str(CORE) not in sys.path:
 
 from objectives import planner_models as planner_mod
 from objectives.planner_models import (
+    ROADMAP_MAX_CHARS,
+    ROADMAP_MAX_LINES,
     PlannerResult,
     parse_planner_result,
     validate_planner_result,
@@ -422,6 +424,60 @@ class DeterministicTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(errors, [])
 
 
+class RoadmapBoundsTests(unittest.TestCase):
+    """``roadmap_remaining`` is the planner's outlook, bounded (TASK-2026-00183)."""
+
+    @staticmethod
+    def _parse(roadmap: list[str], **extra: Any) -> PlannerResult:
+        return parse_planner_result(json.dumps(
+            _result(roadmap_remaining=roadmap, **extra)))
+
+    def test_the_limits_are_the_documented_ones(self) -> None:
+        self.assertEqual((ROADMAP_MAX_LINES, ROADMAP_MAX_CHARS), (10, 300))
+
+    def test_an_outlook_of_seven_or_eight_steps_is_accepted(self) -> None:
+        steps = [f"step {n}: migrate the module; depends on T{n - 1}"
+                 for n in range(1, 8)]
+        self.assertEqual(self._parse(steps).roadmap_remaining, steps)
+
+    def test_exactly_at_the_limits_is_accepted(self) -> None:
+        full = ["x" * ROADMAP_MAX_CHARS for _ in range(ROADMAP_MAX_LINES)]
+        self.assertEqual(len(self._parse(full).roadmap_remaining),
+                         ROADMAP_MAX_LINES)
+
+    def test_one_line_too_many_is_rejected_with_a_clear_message(self) -> None:
+        with self.assertRaises(ValueError) as raised:
+            self._parse(["note"] * (ROADMAP_MAX_LINES + 1))
+        message = str(raised.exception)
+        self.assertIn(f"at most {ROADMAP_MAX_LINES} lines", message)
+        self.assertIn(f"got {ROADMAP_MAX_LINES + 1}", message)
+
+    def test_one_character_too_long_is_rejected_naming_the_line(self) -> None:
+        notes = ["fine", "y" * (ROADMAP_MAX_CHARS + 1)]
+        with self.assertRaises(ValueError) as raised:
+            self._parse(notes)
+        message = str(raised.exception)
+        self.assertIn("roadmap_remaining line 2", message)
+        self.assertIn(f"{ROADMAP_MAX_CHARS + 1} characters", message)
+        self.assertIn(f"max {ROADMAP_MAX_CHARS}", message)
+
+    def test_blank_lines_are_still_rejected(self) -> None:
+        with self.assertRaises(ValueError) as raised:
+            self._parse(["ok", "   "])
+        self.assertIn("must not contain blank items", str(raised.exception))
+
+    def test_surrounding_whitespace_does_not_count_against_the_limit(self) -> None:
+        padded = [("  " + "z" * ROADMAP_MAX_CHARS + "  ")]
+        self.assertEqual(len(self._parse(padded).roadmap_remaining), 1)
+
+    def test_replan_when_is_gone_from_the_contract_but_tolerated(self) -> None:
+        # Dropped in TASK-2026-00183: nothing ever stored or used it. A
+        # planner that still emits it must not fail (unknown keys ignored).
+        result = self._parse(["later"], replan_when=["if the migration fails"])
+        self.assertFalse(hasattr(result, "replan_when"))
+        self.assertNotIn("replan_when", PlannerResult.model_fields)
+
+
 class PolicyTests(unittest.TestCase):
     def test_default_policy_loads(self) -> None:
         text = planner_mod.load_policy_text()
@@ -496,6 +552,19 @@ class PolicyTests(unittest.TestCase):
         # Header: no stale baseline marker, still a runtime document.
         self.assertNotIn("INITIAL_NORMATIVE_BASELINE", text)
         self.assertIn("runtime_document: true", text)
+
+    def test_policy_quotes_the_roadmap_bounds_the_validator_enforces(self) -> None:
+        # TASK-2026-00183: the numbers live in planner_models; the policy,
+        # the prompt and the validator must not drift apart.
+        text = self._flat()
+        bounds = f"at most {ROADMAP_MAX_LINES} lines of {ROADMAP_MAX_CHARS} characters"
+        self.assertIn(f"Use `roadmap_remaining` as your outlook", text)
+        self.assertGreaterEqual(text.count(bounds), 2)   # §12 and §17
+        self.assertIn(f"at most {ROADMAP_MAX_LINES} one-line notes of "
+                      f"{ROADMAP_MAX_CHARS} characters", text)   # §42 rule 13
+        self.assertIn("There is no separate field for re-planning conditions",
+                      text)
+        self.assertNotIn("replan_when", text)
 
 
 if __name__ == "__main__":
