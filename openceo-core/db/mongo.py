@@ -938,6 +938,37 @@ class MongoRepository:
         )
         return result.modified_count + tier_result.modified_count
 
+    async def close_orphan_tier_s_runs(self, limit: int = 500) -> int:
+        """Boot reconcile: waiting Tier S runs whose task already ended.
+
+        Runs orphaned before the terminal-task hook of :meth:`patch_task`
+        existed (F7 pilot: 16 on a cancelled task), or by writes that bypass
+        it, can never resume. One bounded pass at boot closes them; there is
+        no periodic sweep (TASK-2026-00162).
+        """
+        rows = self.tier_s_runs.find(
+            {"status": "waiting"}, {"task_id": 1}).limit(limit)
+        task_ids = sorted({str(row.get("task_id") or "") async for row in rows} - {""})
+        if not task_ids:
+            return 0
+        ended = sorted({
+            str(row.get("task_id"))
+            async for row in self.tasks.find(
+                {"task_id": {"$in": task_ids},
+                 "status": {"$in": sorted(_TERMINAL_TASK_STATUSES)}},
+                {"task_id": 1})
+        })
+        if not ended:
+            return 0
+        result = await self.tier_s_runs.update_many(
+            {"status": "waiting", "task_id": {"$in": ended}},
+            {"$set": {"status": "superseded",
+                      "superseded_reason": "task ended (boot reconcile)",
+                      "active_repo": None,
+                      "updated_at": datetime.now(timezone.utc)}},
+        )
+        return int(result.modified_count)
+
     async def find_task_by_source(self, source: str, source_id: str) -> dict[str, Any] | None:
         row = await self.tasks.find_one({"source": source, "source_id": source_id})
         return self._clean(row)
