@@ -26,6 +26,7 @@ one session — inside its own objective when it already has one),
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import subprocess
 import uuid
@@ -41,6 +42,8 @@ from orchestration import knowledge as knowledge_mod
 from orchestration import review as review_mod
 from orchestration.live import TIMEOUT_RETURNCODE
 from objectives import planner_models as planner_mod
+
+logger = logging.getLogger(__name__)
 
 
 class Runner(Protocol):
@@ -132,6 +135,10 @@ class ObjectiveEnv:
     auto_merge: bool = True
     base_branch: str = "main"
     vault: dict[str, str] | None = None  # {dir, project} (F7b)
+    # Dispatcher wake hook (TASK-2026-00174): filled contracts re-enter
+    # the queue, and routing-held tickets never self-wake. Wired by the
+    # service layers; None in bare unit envs.
+    dispatcher_wake: Callable[[], None] | None = None
     # Reactive CEO wake (F4 TASK-2026-00119): the engine calls it with a
     # reason when an objective parks or closes. Sync, never fatal, None
     # in bare unit envs and dev flows that do not wire the CEO loop.
@@ -643,6 +650,7 @@ def _planner_prompt(
     deferred: Sequence[str],
     sizing_hint: str = "",
     blocked_tickets: Sequence[Mapping[str, Any]] = (),
+    tierless: Sequence[Mapping[str, Any]] = (),
     agents_md: str = "",
     policy_text: str = "",
     handoffs: Sequence[str] = (),
@@ -674,6 +682,9 @@ def _planner_prompt(
 
     opened = [_ticket_line(item) for item in open_tickets] or ["- (none)"]
     blocked = [_ticket_line(item) for item in blocked_tickets] or ["- (none)"]
+    bare = [f"- {item.get('task_id')}: {item.get('title')} :: "
+            f"{str(item.get('description') or '')[:300]}"
+            for item in tierless]
     failures = [_failure_line(item)
                 for item in list(objective.get("material_failures") or [])[-3:]]
     lines = [
@@ -713,6 +724,13 @@ def _planner_prompt(
     if deferred:
         lines.extend(["", "DEFERRED (reviewer suggestions out of scope):",
                       *[f"- {item}" for item in deferred]])
+    if bare:
+        lines.extend([
+            "",
+            "TIERLESS CHILDREN AWAITING CONTRACT (complete each with a",
+            "full-contract entry carrying its completes_task_id; never",
+            "recreate them as new tickets):",
+            *bare])
     if sizing_hint:
         lines.extend(["", "SIZING HINT from the converted ticket:",
                       sizing_hint[:3000]])
@@ -787,15 +805,21 @@ def _planner_prompt(
         '    "why_single_session_is_insufficient?": "<tier_s only>",',
         '    "why_not_c?": "<required for tier_a/tier_b: what breaks in C; '
         'omit for tier_s and tier_c>",',
-        '    "includes_findings?": ["<inbox fingerprints claimed>"]',
+        '    "includes_findings?": ["<inbox fingerprints claimed>"],',
+        '    "completes_task_id?": "<to COMPLETE a tierless child above '
+        'instead of creating: its task_id>"',
         "  } ],",
         '  "roadmap_remaining": ["<speculative future work>"],',
         '  "replan_when": ["<conditions that should trigger replanning>"]',
         "}",
-        "Rules: active carries 1-3 tickets; complete_candidate, blocked and",
-        "capability_gap carry NO tickets. complete_candidate triggers final",
-        "review, it never closes the objective directly. Every ticket has",
-        "one responsibility and fits one bounded execution cycle. No",
+        "Rules: active carries 1-3 NEW tickets plus any completions of",
+        "tierless children above (a completion never recreates: it fills",
+        "the listed task; blocked_by never names a completion's",
+        "local_ref, depend on its task instead). Complete_candidate,",
+        "blocked and capability_gap carry NO tickets. complete_candidate",
+        "triggers final review, it",
+        "never closes the objective directly. Every ticket has one",
+        "responsibility and fits one bounded execution cycle. No",
         "duplicate of an open ticket. Then emit PLANNER_READY in",
         f"{SCRATCH_DIRNAME}/status.",
     ])
@@ -824,7 +848,9 @@ def _trailing_stalled_runs(runs: Sequence[Mapping[str, Any]]) -> int:
         status = run.get("status")
         if status is not None and status != "active":
             break
-        if run.get("tickets_created", 0) == 0 and not run.get("complete"):
+        if (run.get("tickets_created", 0) == 0
+                and not run.get("contracts_completed", 0)
+                and not run.get("complete")):
             stalled += 1
         else:
             break
@@ -1194,7 +1220,10 @@ async def _plan_objective_inner(
         objective, (objective.get("capsule") or {}).get("text", ""),
         ready, inbox_md or "INBOX\n(none)\n", deferred,
         str(objective.get("sizing_hint") or ""),
-        blocked_tickets=blocked, agents_md=_agents_section(agents),
+        blocked_tickets=blocked,
+        tierless=[item for item in open_tickets
+                  if not item.get("coding_tool")],
+        agents_md=_agents_section(agents),
         policy_text=policy_text, handoffs=handoffs,
         roadmap=[str(item) for item in
                  objective.get("roadmap_remaining") or []],
@@ -1261,7 +1290,12 @@ async def _plan_objective_inner(
             f"{'; '.join(errors)}")
     status = result.objective_status.value
     runs.append({"at": _utcnow_iso(), "status": status,
-                 "tickets_created": len(result.tickets),
+                 "tickets_created": len(
+                     [item for item in result.tickets
+                      if not item.completes_task_id]),
+                 "contracts_completed": len(
+                     [item for item in result.tickets
+                      if item.completes_task_id]),
                  "complete": status == "complete_candidate"})
     await env.objectives.patch_objective(objective_id, {
         "planning_runs": runs,
@@ -1286,10 +1320,13 @@ async def _plan_objective_inner(
         })
         return await _objective_park(
             env, objective, "capability_gap", result.state_summary[:300])
+    completed = await _apply_contract_completions(env, objective_id, result)
     created = await _create_planned_tickets(env, objective, result)
     tele = dict((await env.objectives.get_objective(objective_id) or {}
                  ).get("planner_telemetry") or {})
     tele["tickets_created"] = int(tele.get("tickets_created", 0)) + len(created)
+    tele["contracts_completed"] = int(tele.get("contracts_completed", 0)) \
+        + len(completed)
     mix = dict(tele.get("tier_mix") or {})
     for planned in result.tickets:
         if planned.coding_tool is not None:
@@ -1302,7 +1339,8 @@ async def _plan_objective_inner(
         "planner_telemetry": tele,
     })
     return {"ok": True, "tickets_created": len(created),
-            "task_ids": [item["task_id"] for item in created]}
+            "task_ids": [item["task_id"] for item in created],
+            "contracts_completed": completed}
 
 
 async def _objective_park(
@@ -1386,13 +1424,79 @@ def _planned_params(ticket: planner_mod.PlannedTicket) -> dict[str, Any]:
     return params
 
 
+async def _apply_contract_completions(
+    env: ObjectiveEnv,
+    objective_id: str,
+    result: planner_mod.PlannerResult,
+) -> list[str]:
+    """Fill tierless linked children from completion entries (00174).
+
+    Adoption, not creation: the stub keeps its task_id, promotion
+    params and provenance; only the planner-authored contract lands
+    (tier, routing hint, acceptance, machine params merged over the
+    existing ones). A target that is missing, foreign, terminal,
+    already tiered or held for another reason is skipped with a
+    warning — suitability can change between prompt and patch, so a
+    stale directive never fails the plan. A routing hold healed here
+    refloats the ticket; the dispatcher is woken once afterwards.
+    """
+    completed: list[str] = []
+    for planned in result.tickets:
+        task_id = planned.completes_task_id or ""
+        if not task_id:
+            continue
+        try:
+            current = await env.tasks.get_task(task_id)
+        except Exception:
+            logger.warning("completion target %s unreadable; skipping",
+                           task_id)
+            continue
+        if current is None:
+            logger.warning("completion target %s gone; skipping", task_id)
+            continue
+        if str(current.get("objective_id") or "") != objective_id:
+            logger.warning("completion target %s is not ours; skipping",
+                           task_id)
+            continue
+        if str(current.get("status")) in TERMINAL_TICKET_STATUS:
+            logger.warning("completion target %s already terminal; skipping",
+                           task_id)
+            continue
+        if current.get("coding_tool"):
+            continue  # already contracted: idempotent re-drive
+        params = dict(current.get("params") or {})
+        params.update(_planned_params(planned))
+        updates: dict[str, Any] = {
+            "agent_hint": planned.target_agent,
+            "acceptance": list(planned.acceptance_criteria),
+            "params": params,
+        }
+        if planned.coding_tool is not None:
+            updates["coding_tool"] = planned.coding_tool.value
+        if str(current.get("waiting_reason") or "").startswith(
+                "routing_missing"):
+            updates["status"] = "queued"
+            updates["waiting_reason"] = None
+            updates["resume_at"] = None
+        await env.patch_task(task_id, updates)
+        completed.append(task_id)
+    if completed and env.dispatcher_wake is not None:
+        try:
+            env.dispatcher_wake()
+        except Exception:
+            logger.warning("dispatcher wake after completion failed",
+                           exc_info=True)
+    return completed
+
+
 async def _create_planned_tickets(
     env: ObjectiveEnv,
     objective: Mapping[str, Any],
     result: planner_mod.PlannerResult,
 ) -> list[dict[str, Any]]:
     """Create every validated ticket in topological order (§9.3)."""
-    tickets = list(result.tickets)
+    tickets = [item for item in result.tickets
+               if not item.completes_task_id]
     keys = [ticket.local_ref for ticket in tickets]
     order: list[str] = []
     permanent: set[str] = set()

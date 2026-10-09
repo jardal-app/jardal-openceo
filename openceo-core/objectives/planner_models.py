@@ -140,6 +140,14 @@ class PlannedTicket(BaseModel):
     # findings this ticket claims. The orchestrator marks them assigned.
     includes_findings: list[str] = Field(default_factory=list)
 
+    # Adoption (TASK-2026-00174): complete the contract of an existing
+    # tierless linked child instead of creating a ticket. The entry
+    # carries the full contract (tier when dev, acceptance, artefacts);
+    # title/goal/why_now ride along unused and blocked_by/includes are
+    # rejected (completions drain backlog, they take no deps and claim
+    # no findings).
+    completes_task_id: str | None = None
+
     @field_validator("local_ref", "title", "target_agent", "work_type",
                      "goal", "why_now")
     @classmethod
@@ -149,7 +157,8 @@ class PlannedTicket(BaseModel):
         return value
 
     @field_validator("tier_reason", "why_consensus_is_needed",
-                     "why_single_session_is_insufficient", "why_not_c")
+                     "why_single_session_is_insufficient", "why_not_c",
+                     "completes_task_id")
     @classmethod
     def _optional_fields_nonblank(cls, value: str | None) -> str | None:
         if value is not None and not value.strip():
@@ -316,6 +325,34 @@ def _effective_horizon(horizon: Any) -> tuple[int, int] | None:
     return (low, high)
 
 
+async def _validate_completion(
+    errors: list[str],
+    where: str,
+    ticket: "PlannedTicket",
+    task_exists: Callable[[str], Awaitable[bool]],
+) -> None:
+    """Deterministic rules for a contract completion (TASK-2026-00174).
+
+    Completions reference instead of creating: no duplicate-title or
+    same-tier-retry checks (those govern new work) and no deps or
+    claimed findings. Tier presence for dev rides on the Pydantic
+    routing contract; existence is checked here; tierless/linked/open
+    suitability is enforced at apply time (it can change between
+    prompt and patch, so it skips instead of failing the plan).
+    """
+    if ticket.blocked_by:
+        errors.append(f"{where}: completions take no blocked_by")
+    if ticket.includes_findings:
+        errors.append(f"{where}: completions claim no findings")
+    try:
+        exists = await task_exists(str(ticket.completes_task_id or ""))
+    except Exception:
+        exists = False
+    if not exists:
+        errors.append(f"{where}: completes unknown "
+                      f"{str(ticket.completes_task_id or '')!r}")
+
+
 async def validate_planner_result(
     result: PlannerResult,
     *,
@@ -342,14 +379,24 @@ async def validate_planner_result(
     low, high = bounds
     if result.objective_status != ObjectiveStatus.ACTIVE:
         return errors  # Pydantic already enforced no tickets.
-    if len(result.tickets) < low:
+    creations = [ticket for ticket in result.tickets
+                 if not ticket.completes_task_id]
+    completions = [ticket for ticket in result.tickets
+                   if ticket.completes_task_id]
+    if len(creations) + len(completions) < low:
         errors.append(f"active status requires at least {low} ticket(s) "
                       "(policy §37: only blocked/capability_gap/"
                       "complete_candidate carry no tickets)")
-    if len(result.tickets) > high:
+    if len(creations) > high:
         errors.append(f"planning horizon is {low}-{high} tickets, got "
-                      f"{len(result.tickets)}")
+                      f"{len(creations)} new")
+    if len(completions) > high:
+        errors.append(f"planning horizon admits at most {high} contract "
+                      f"completions, got {len(completions)}")
     refs = {ticket.local_ref for ticket in result.tickets}
+    completion_tasks = {ticket.local_ref: str(ticket.completes_task_id or "")
+                        for ticket in result.tickets
+                        if ticket.completes_task_id}
     normalized_open = {str(title).strip().lower() for title in open_titles}
     seen_titles = set(normalized_open)
     failed = set()
@@ -368,7 +415,16 @@ async def validate_planner_result(
             reason = str(spec.get("reason") or "agent disabled").strip()
             errors.append(f"{where}: target_agent "
                           f"{ticket.target_agent!r} is disabled ({reason})")
+        if ticket.completes_task_id:
+            await _validate_completion(
+                errors, where, ticket, task_exists)
+            continue
         for dep in ticket.blocked_by:
+            if dep in completion_tasks:
+                errors.append(
+                    f"{where}: blocked_by names completion {dep!r}; "
+                    f"depend on {completion_tasks[dep]!r} instead")
+                continue
             if dep in refs:
                 continue
             try:

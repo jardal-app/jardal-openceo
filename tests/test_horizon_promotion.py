@@ -120,6 +120,7 @@ class FakeTaskService:
         self.tasks_by_id: dict[str, dict[str, Any]] = {}
         self.escalations: list[dict[str, Any]] = []
         self.objectives: list[dict[str, Any]] = []
+        self.plan_calls: list[str] = []
         self._seq = 0
 
     def _next_id(self, prefix: str) -> str:
@@ -143,6 +144,10 @@ class FakeTaskService:
     async def get_task(self, task_id: str) -> dict[str, Any] | None:
         doc = self.tasks_by_id.get(task_id)
         return dict(doc) if doc is not None else None
+
+    async def plan_objective(self, objective_id: str) -> dict[str, Any]:
+        self.plan_calls.append(objective_id)
+        return {"ok": True, "contracts_completed": []}
 
     async def create_owner_escalation(
         self, *, action: Any, decision: Any, source_id: str | None = None,
@@ -641,6 +646,10 @@ class PromoteServiceTests(_Base):
         self.assertEqual(req.parent_task, "TASK-2026-00999")
         self.assertEqual(req.objective_id, "obj_1")
         self.assertEqual(result["objective_id"], "obj_1")
+        # The link is not the end: planning completes the stub's
+        # contract (TASK-2026-00174).
+        self.assertEqual(self.task_service.plan_calls, ["obj_1"])
+        self.assertTrue(result["planning_triggered"])
 
     async def test_objective_link_stays_loose_otherwise(self) -> None:
         cases = {
@@ -674,6 +683,8 @@ class PromoteServiceTests(_Base):
                 req = svc.created_tasks[0]
                 self.assertIsNone(req.parent_task)
                 self.assertIsNone(req.objective_id)
+                self.assertFalse(result["planning_triggered"])
+                self.assertEqual(svc.plan_calls, [])
 
     async def test_promotion_needs_no_capacity(self) -> None:
         # Usuario fresco, sin plan ni capacidad declarada: promueve igual.
