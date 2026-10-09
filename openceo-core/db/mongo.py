@@ -623,8 +623,11 @@ class MongoRepository:
 
         updates["updated_at"] = datetime.now(timezone.utc)
         await self.tasks.update_one({"task_id": task_id}, {"$set": updates})
-        if str(updates.get("status") or "") in _TERMINAL_TASK_STATUSES:
-            await self._close_waiting_tier_s_runs(task_id, str(updates["status"]))
+        # ``.value``: str() of a TaskStatus member is 'TaskStatus.X' (§8.2).
+        raw_status = updates.get("status")
+        status = str(getattr(raw_status, "value", raw_status) or "")
+        if status in _TERMINAL_TASK_STATUSES:
+            await self._close_waiting_tier_s_runs(task_id, status)
         task = await self.get_task(task_id)
         await self._notify_status_observer(task, updates)
         return task
