@@ -336,7 +336,9 @@ async def lifespan(_: FastAPI):
             log_policy_status(
                 (config_loader.load_project(None).get("objective_planner")
                  or {}).get("policy_path"),
-                logger)
+                # uvicorn's own logger: the app logger has no INFO handler in
+                # host mode, so a healthy status would never reach the log.
+                logging.getLogger("uvicorn.error"))
         # Research: se construye SIEMPRE, aunque falten claves o CLI, para poder
         # explicar el motivo de indisponibilidad en vez de desaparecer sin traza. La
         # flag de capacidad no modifica el contrato de ERPNext (siempre activo).
