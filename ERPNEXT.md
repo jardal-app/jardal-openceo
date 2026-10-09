@@ -2,7 +2,7 @@
 
 **Fecha:** 2026-09-20 · **Estado:** propuesta de instalación — **no desplegado**
 **Alcance:** elección de módulos/apps y topología mínima del sistema financiero de Horizon
-**Se relaciona con:** [`docs/decision-2026-09-19-sistema-financiero-erpnext.md`](file:///home/develop/development/Jardal/jardal-openceo/docs/decision-2026-09-19-sistema-financiero-erpnext.md) · ticket TASK-2026-00025 en ERPNext · `jardal-horizon/README.md` §4.7 y §9.9
+**Se relaciona con:** [decisión del vault](../jardal-knowledge/vault/projects/jardal/jardal-openceo/decisions/2026-09-19-erpnext-financial-record.md) (antes `docs/decision-2026-09-19-sistema-financiero-erpnext.md`, retirado en TASK-2026-00185) · ticket TASK-2026-00025 en ERPNext · `jardal-horizon/README.md` §4.7 y §9.9
 
 > **Este documento decide qué instalar. No decide contabilidad.** El contenido del plan de cuentas boliviano y las alícuotas tributarias se definen con criterio contable local, fuera de OpenCEO y fuera de este archivo.
 

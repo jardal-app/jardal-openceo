@@ -122,7 +122,7 @@ cd openceo-voice-android
 
 ### Planner único de objetivos (global)
 - El único que decide qué tickets deben existir para un Objetivo: Muse Code headless, un run fresco por ciclo, salida `PlannerResult` validada (Pydantic + validación determinista).
-- Normativos: `openceo-core/objectives/routing_policy.md` (el planner lo lee) y `docs/decision-2026-10-05-planner-objetivos-muse.md` (ADR).
+- Normativo único: `openceo-core/objectives/routing_policy.md` (el planner lo lee). El porqué vive en el vault (`decisions/2026-10-06-objetivo-unico-ceo-autonomo`).
 - Sustituye a `claudej`/`TICKETS.yaml` (TASK-2026-00112; motor en `openceo-core/objectives/`, TASK-2026-00117).
 - El plan Claude/Codex de un ticket Tier S planifica cómo implementar ese ticket, no es un segundo planner; tampoco lo es el orden determinista del día en Horizon.
 
@@ -152,7 +152,7 @@ Horizon **no es un agente separado** ni tiene runtime propio. Es la capacidad y 
 2. **HZ-002 — Ciclo proactivo del CEO** (Completada): Capacidad diaria determinista al 70% (`capacity.py`), planificador lexicográfico (`planner.py`), disparadores intencionales persistidos sin barridos (`triggers.py`), revisión periódica (`review.py`), workflows `ceo/horizon_daily.yaml` y `ceo/horizon_review.yaml`.
 3. **HZ-003 — Delegación y dev móvil** (Implementada, pendiente piloto con 3 tickets reales): Encargo de tickets de alcance personal sobre sesiones dev existentes en background, medición de tiempo humano de supervisión y retrabajo, y entrega única del resultado ("delivered once") tolerante a desconexión del móvil.
 4. **HZ-004 — Fuentes conectadas y espacio personal** (vista implementada; fuente conectada pendiente de necesidad observada): vista del espacio personal en `openceo-react` — ruta `/dashboard/personal`, permiso `personal_space` — con misión, objetivos e hitos, plan del día (capacidad, bloques, exclusiones y decisiones), siguiente acción, delegación medida con entrega única, captura y métricas humanas. La integración de fuentes pasivas queda condicionada a que el uso demuestre el ahorro (§9.8 y §11: *"conectar fuente solo si aporta ahorro"*).
-5. **HZ-005 — Frontera financiera con ERPNext**: Consumo de saldos y asientos vía adapter de Finance hacia ERPNext (TICKET-025, `docs/decision-2026-09-19-sistema-financiero-erpnext.md`), sin almacenar dinero en floats ni crear contabilidad propia en OpenCEO.
+5. **HZ-005 — Frontera financiera con ERPNext**: Consumo de saldos y asientos vía adapter de Finance hacia ERPNext (TICKET-025, decisión del vault `decisions/2026-09-19-erpnext-financial-record`), sin almacenar dinero en floats ni crear contabilidad propia en OpenCEO.
 
 ### Reglas Críticas de Horizon
 - **Clasificador determinista antes del LLM**: Evita que frases personales se clasifiquen erróneamente como instrucciones dev enviadas a tmux, y permite operar con presupuesto de IA agotado.
@@ -341,7 +341,7 @@ Cuando el dueño escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el ti
    - Descripción y comentarios del ticket.
    - El workfile del épico y el del ticket, si existen.
    - La decisión del vault `decisions/2026-10-06-objetivo-unico-ceo-autonomo`, solo si hace falta el porqué.
-   - El contrato normativo: `docs/ARCHITECTURE_REFERENCE_2026.md` §Proactive CEO (+ `openceo-core/objectives/routing_policy.md` y el ADR del planner).
+   - El contrato normativo: `docs/ARCHITECTURE_REFERENCE_2026.md` §Proactive CEO (+ `openceo-core/objectives/routing_policy.md`, único normativo del planner).
    - Código: búsqueda dirigida + LSP.
 4. **Contrastar la observación antes de corregir.** Aplicar criterio técnico riguroso a cada afirmación del ticket: comprobar el contrato vigente, seguir el flujo completo de productores y consumidores y buscar evidencia que confirme o refute el problema. Las líneas citadas, el diagnóstico y el estado del ticket pueden haberse quedado atrás respecto al código.
    - Buscar duplicados en este proyecto por causa y comportamiento, no solo por título. Revisar comentarios, commits, merges y diffs pertinentes de otras sesiones. No suponer que un fallo sigue presente ni que ya fue corregido: demostrar qué cubre el código actual y qué falta.
@@ -372,4 +372,4 @@ Al dueño solo se le pregunta por la política de escalado del épico: gasto nue
 
 Se valida con tests unitarios y de contrato, ejecutores o modelos simulados y `py_compile`. La única prueba real completa es **TASK-2026-00122** (F7), al final.
 
-**Palabra clave `audita` (sesiones del dueño).** Cuando el dueño escriba **`audita`**, no preguntes: audita que `main` cumpla el rumbo del épico TASK-2026-00110. Fuentes de verdad, en este orden: la decisión del vault `decisions/2026-10-06-objetivo-unico-ceo-autonomo`, el contrato `docs/ARCHITECTURE_REFERENCE_2026.md` §Proactive CEO (más `openceo-core/objectives/routing_policy.md` y su ADR `docs/decision-2026-10-05-planner-objetivos-muse.md`) y el comentario ROADMAP del épico. Buscar fugas: código en carpetas que no le corresponden, referencias a archivos inexistentes, docs que afirman lo que el código no hace, reglas que contradicen el contrato o las reglas globales del dueño, y tickets viejos que chocan con el rumbo. No arreglar nada: buscar duplicados y crear tickets hijos del épico (batch con `parent_task`) con evidencia `archivo:línea`, y actualizar el comentario ROADMAP. Sin pruebas que gasten tokens; la suite unitaria sí vale.
+**Palabra clave `audita` (sesiones del dueño).** Cuando el dueño escriba **`audita`**, no preguntes: audita que `main` cumpla el rumbo del épico TASK-2026-00110. Fuentes de verdad, en este orden: la decisión del vault `decisions/2026-10-06-objetivo-unico-ceo-autonomo`, el contrato `docs/ARCHITECTURE_REFERENCE_2026.md` §Proactive CEO (más `openceo-core/objectives/routing_policy.md`, único normativo del planner) y el comentario ROADMAP del épico. Buscar fugas: código en carpetas que no le corresponden, referencias a archivos inexistentes, docs que afirman lo que el código no hace, reglas que contradicen el contrato o las reglas globales del dueño, y tickets viejos que chocan con el rumbo. No arreglar nada: buscar duplicados y crear tickets hijos del épico (batch con `parent_task`) con evidencia `archivo:línea`, y actualizar el comentario ROADMAP. Sin pruebas que gasten tokens; la suite unitaria sí vale.
