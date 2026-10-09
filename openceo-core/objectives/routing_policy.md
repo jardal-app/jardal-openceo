@@ -1,9 +1,9 @@
 ---
 document_id: objective-planner-routing-policy
 title: OpenCEO Objective Planner Routing Policy
-version: 1.0
-status: INITIAL_NORMATIVE_BASELINE
-updated: 2026-10-05
+version: 1.3
+status: NORMATIVE
+updated: 2026-10-09
 runtime_document: true
 planner_reads_this_document: true
 language: en
@@ -216,12 +216,16 @@ The planner may select only agents that are enabled and known by this authoritat
 
 If no agent can perform required work, return `capability_gap`.
 
-Registered Tier-0 capabilities are not gaps. Creating a company project
-end-to-end is one: the deterministic `operations.create_project` workflow
-(ERPNext Project, git repo, templates, validated `project.yaml`, vault hub,
-DNS for web projects) runs from a ticket carrying `params.workflow` (or
-`use_workflow` with a matching title). A need to create a project routes to
-such a ticket, never to `capability_gap` (TASK-2026-00115).
+Registered Tier-0 capabilities are not gaps, but not every one is reachable
+from the planner. Creating a company project end-to-end is one of them: the
+deterministic `operations.create_project` workflow (ERPNext Project, git
+repo, templates, validated `project.yaml`, vault hub, DNS for web projects)
+is launched by the CEO review's `create_project` action, spend-gated by the
+company mandate (TASK-2026-00115). The planner has no field to launch a
+workflow (`PlannedTicket` carries no `params.workflow`) and `operations` is
+not a registered agent, so it must not recreate that capability as a DEV
+ticket. If an Objective needs a project that does not exist yet, return
+`blocked` naming the missing project: the park wakes the CEO review (§37).
 
 ## 7. Domain ownership is separate from execution mechanism
 
@@ -308,6 +312,14 @@ Put later work in `roadmap_remaining`.
 
 ## 10. Research returns to the Objective Planner
 
+> **Status.** The `research` agent is registered but disabled in the agent
+> registry (`no ticket execution bridge yet`, §6): the prompt lists it as
+> DISABLED and the planner must not route to it. §10 and §11 describe the
+> flow for when it is enabled. Until then, discovery the DEV agent can do
+> inside the repository (root cause, architecture, compatibility) is a DEV
+> `tier_a` ticket (§21), and an investigation that needs an agent that is
+> not enabled is a `capability_gap` (§6, §37).
+
 Canonical flow:
 
 ```text
@@ -326,6 +338,8 @@ Research does **not** automatically return to DEV.
 After research, the next ticket may belong to DEV, Finance, Payments, Research again, Operations, Creative, another registered agent, or nobody if the Objective is ready for final review.
 
 ## 11. Research ticket quality
+
+Applies when the `research` agent is enabled (see the status note in §10).
 
 A research ticket should identify:
 
@@ -356,15 +370,15 @@ Research should exist to unlock a concrete decision.
 
 ## 12. Planning horizon
 
-Default planning horizon:
+Planning horizon per cycle:
 
 ```text
-1 to 3 child tickets
+1 to 3 new child tickets
 ```
 
-Create more only when downstream tickets are already stable and will not materially change based on upstream results.
+The validator enforces 3 as a hard maximum (`ticket_horizon` in the planner configuration; a cycle that creates more fails with `planning horizon is 1-3 tickets`). Raising it is a change of that configuration, not a planner choice.
 
-Otherwise create the next justified ticket(s), store speculative future work in `roadmap_remaining`, and re-plan after material results.
+Create only the next justified ticket(s), store speculative future work in `roadmap_remaining`, and re-plan after material results.
 
 ## 13. Ticket atomicity
 
@@ -412,18 +426,25 @@ If `T3 blocked_by T2`, T2 closes, and T3 remains valid, dispatch T3 deterministi
 
 ## 15. When to re-plan
 
-Invoke the Objective Planner when semantic state materially changes, including:
+Invoke the Objective Planner when semantic state materially changes.
 
-- no valid ready child ticket remains;
-- research/discovery returns;
+Wired today (each of these starts a planning cycle):
+
+- the Objective is created (first cycle);
+- a ticket closes and no valid ready child ticket remains, or its handoff reports a contract deviation or gotcha touching the Objective's files;
+- a simple DEV tier fails materially (once, §29);
+- an oversized ticket is decomposed inside an Objective, or converted into one (Tier S decides it must be decomposed);
+- the final review finds delivery gaps and the Objective goes back to planning;
+- an external producer asks for a cycle (for example Horizon promotion).
+
+Reserved, not wired yet (the planner only sees these at the next cycle one of the triggers above starts):
+
+- research/discovery returns (the `research` agent is disabled, §6);
 - a durable decision is produced;
-- a ticket reports a contract deviation;
-- a material out-of-scope finding affects the Objective;
-- a simple DEV tier fails materially and requires reclassification;
-- Tier S decides the ticket must be decomposed;
+- a material out-of-scope finding affects the Objective (findings reach the planner as the INBOX of the next cycle);
 - evidence invalidates a previous assumption;
 - relevant external state changes;
-- the Objective may now satisfy acceptance.
+- the Objective may now satisfy acceptance (the planner states `complete_candidate` when a cycle runs; nothing wakes it for that).
 
 Do not re-plan merely because time passed unless the Objective requires periodic re-evaluation.
 
@@ -453,11 +474,13 @@ no duplicate open ticket
 planning horizon
 required Tier-S justification
 why_not_c present for tier_a/tier_b, absent for tier_c
-oracle declaration validity (qualifying type; refs the ticket does not modify)
+oracle declaration shape (known oracle type, at least one ref)
 same-tier replan prohibition after material failure
 ```
 
 Invalid output must not become durable tickets.
+
+Not validated deterministically at this point (prompt and policy only): that an oracle ref is a file the ticket does not modify (§24), and that its type qualifies for freezing (§23: only qualifying types are frozen, at branch time).
 
 # DEV ROUTING
 
@@ -841,9 +864,9 @@ No self-modifying routing policy.
 
 ## 34. Planner-generated executable oracle
 
-A Muse planner may fix executable acceptance criteria before implementation.
+The planner can name executable acceptance (tests or a spec) as the oracle of a ticket: `oracle.type = planner_executable_spec` with `oracle.refs` pointing to files that exist in the repository when the ticket starts (refs that do not resolve to a file are recorded unresolved and unprotected, §24). It declares; it does not write: nothing in OpenCEO authors the spec on the planner's behalf. A specification that has to be written first is its own prior ticket (`separate_ticket_tests`, §23), and the dependent ticket (`blocked_by` it) declares the resulting files as its oracle.
 
-This can be frozen as a `planner_executable_spec` oracle if it is persisted/frozen before build, its references/hashes are registered, the builder cannot alter it without invalidating the oracle, and the orchestrator runs it.
+A declared `planner_executable_spec` is frozen before the build, its references/hashes are registered, the builder cannot alter it without invalidating the oracle, and the orchestrator runs it (§24).
 
 However, `Muse planner -> Muse C builder` is model-correlated. Do not treat it statistically as equivalent to preexisting tests or an independently produced contract.
 
@@ -932,6 +955,8 @@ Objective
  -> Muse Planner
  -> bounded implementation tickets
 ```
+
+While the `research` agent is disabled (§10), the first step is a DEV `tier_a` discovery ticket instead of a Research ticket.
 
 ### Financial analysis
 
@@ -1045,7 +1070,8 @@ You run as one fresh Muse Code / Muse Spark 1.3 Contributor headless planning cy
    artifact, or action.
 
 3. If missing information prevents correct downstream planning,
-   create a research/discovery ticket first.
+   create a research/discovery ticket first (today a DEV tier_a discovery
+   ticket: the research agent is disabled, §10).
 
 4. Research results return to YOU. Route again from first principles.
 
