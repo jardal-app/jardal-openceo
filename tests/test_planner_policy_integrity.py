@@ -196,6 +196,9 @@ class StartupWiringTests(unittest.TestCase):
         source = (CORE / "main.py").read_text(encoding="utf-8")
         lifespan = source[source.index("async def lifespan("):]
         self.assertIn("log_policy_status(", lifespan)
+        # The app logger has no INFO handler in host mode: use uvicorn's.
+        self.assertIn('logging.getLogger("uvicorn.error")',
+                      lifespan[lifespan.index("log_policy_status("):][:600])
         self.assertLess(lifespan.index("log_policy_status("),
                         lifespan.index("mark_interrupted_pm_states"))
         # A failing check must never stop the service from starting.
