@@ -390,6 +390,46 @@ class PlannerCycleTests(unittest.IsolatedAsyncioTestCase):
         assert stored is not None
         self.assertEqual(stored["roadmap_remaining"], ["only what is left"])
 
+    async def test_every_run_records_the_policy_it_saw(self) -> None:
+        # TASK-2026-00184: planning_runs[].policy_sha traces a decision to the
+        # exact policy text the prompt carried (never part of the prompt).
+        from objectives.planner_models import policy_fingerprint
+
+        repo = _scratch_repo(self)
+        first = {"objective_status": "active", "state_summary": "ok",
+                 "tickets": [_dev_ticket("a", "Child")]}
+        second = {"objective_status": "active", "state_summary": "ok",
+                  "tickets": [_dev_ticket("b", "Second")]}
+        env, planner, _created, _patches = _planner_env(
+            self, repo, [first, second])
+        await env.objectives.create_objective({
+            "objective_id": "OBJ-1", "project": "p", "status": "active",
+            "anchor": {"goal": "g", "acceptance": []},
+            "capsule": {"text": "", "compiled_at": None, "tokens": 0},
+            "tickets_log": [],
+        })
+
+        await plan_objective(env, "OBJ-1")
+        stored = await env.objectives.get_objective("OBJ-1")
+        assert stored is not None
+        original = "POLICY: route by oracle, not quota.\n"
+        self.assertEqual(stored["planning_runs"][-1]["policy_sha"],
+                         policy_fingerprint(original))
+        self.assertNotIn(policy_fingerprint(original), planner.prompts[0])
+
+        # Editing the policy changes what the next run records.
+        (repo / "policy.md").write_text(
+            "POLICY: route by nature, S in any domain.\n", encoding="utf-8")
+        await plan_objective(env, "OBJ-1")
+        stored = await env.objectives.get_objective("OBJ-1")
+        assert stored is not None
+        runs = stored["planning_runs"]
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(runs[1]["policy_sha"], policy_fingerprint(
+            "POLICY: route by nature, S in any domain.\n"))
+        self.assertNotEqual(runs[0]["policy_sha"], runs[1]["policy_sha"])
+        self.assertIn("S in any domain", planner.prompts[1])
+
     async def test_missing_registry_parks_before_invocation(self) -> None:
         repo = _scratch_repo(self)
         env, planner, _created, _patches = _planner_env(

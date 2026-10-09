@@ -13,7 +13,9 @@ It moves out of Tier S with the objective engine (TASK-2026-00117).
 
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Collection, Literal, Mapping, Sequence
 
@@ -469,17 +471,102 @@ async def validate_planner_result(
     return errors
 
 
+#: The planner prompt carries at most this many characters of the policy
+#: (:func:`policy_prompt_text`); anything longer is cut off, tail first, and
+#: the tail is where the compact runtime kernel (§42) lives.
+POLICY_PROMPT_MAX_CHARS = 60000
+
+
+def policy_file(policy_path: str | Path | None = None) -> Path:
+    """Where the planner reads its policy: ``policy_path`` or the shipped file.
+
+    The policy is part of the planner's prompt, so by default it ships next to
+    this module (TASK-2026-00181) and travels with the code in any deployment
+    (host, Docker image) instead of living under docs/.
+    """
+    if policy_path is None:
+        return Path(__file__).resolve().with_name("routing_policy.md")
+    return Path(policy_path)
+
+
 def load_policy_text(policy_path: str | Path | None = None) -> str:
     """Read the normative routing policy ("" when unreadable)."""
-    if policy_path is None:
-        # The policy is part of the planner's prompt, so it ships next to
-        # this module (TASK-2026-00181) and travels with the code in any
-        # deployment (host, Docker image) instead of living under docs/.
-        candidate = Path(__file__).resolve().with_name("routing_policy.md")
-    else:
-        candidate = Path(policy_path)
     try:
-        text = candidate.read_text(encoding="utf-8", errors="replace")
+        text = policy_file(policy_path).read_text(
+            encoding="utf-8", errors="replace")
     except OSError:
         return ""
     return text if text.strip() else ""
+
+
+def policy_prompt_text(policy_text: str) -> str:
+    """Exactly the policy text the planner prompt carries (one definition)."""
+    return (policy_text or "").strip()[:POLICY_PROMPT_MAX_CHARS]
+
+
+def policy_fingerprint(policy_text: str) -> str:
+    """Short SHA-256 (12 hex) of what the planner prompt carries ("" if empty).
+
+    Each planning run stores it (``planning_runs[].policy_sha``) so a decision
+    can be traced to the policy text the planner actually saw. Plain hashing:
+    no model call, and it never enters the prompt.
+    """
+    carried = policy_prompt_text(policy_text)
+    if not carried:
+        return ""
+    return hashlib.sha256(carried.encode("utf-8")).hexdigest()[:12]
+
+
+@dataclass(frozen=True)
+class PolicyStatus:
+    """Health of the planner policy file (:func:`check_policy`)."""
+
+    ok: bool
+    path: str
+    chars: int
+    sha: str
+    problem: str = ""
+
+
+def check_policy(policy_path: str | Path | None = None) -> PolicyStatus:
+    """Is the policy readable and does it fit the prompt untruncated?"""
+    path = policy_file(policy_path)
+    text = load_policy_text(policy_path)
+    if not text:
+        return PolicyStatus(
+            False, str(path), 0, "",
+            "the file is missing, unreadable or empty")
+    chars = len(text.strip())
+    if chars > POLICY_PROMPT_MAX_CHARS:
+        return PolicyStatus(
+            False, str(path), chars, policy_fingerprint(text),
+            f"{chars} characters exceed the prompt budget of "
+            f"{POLICY_PROMPT_MAX_CHARS}: the tail (the compact runtime "
+            "kernel) would be cut off")
+    return PolicyStatus(True, str(path), chars, policy_fingerprint(text))
+
+
+def log_policy_status(
+    policy_path: str | Path | None, log: Any,
+) -> PolicyStatus:
+    """Boot-time report of :func:`check_policy` on ``log`` (a logger).
+
+    INFO with the fingerprint when healthy, ERROR saying what will happen
+    otherwise. It never raises and never blocks startup: the planner keeps
+    failing closed per cycle (``plan_objective``), this only says so early.
+    """
+    status = check_policy(policy_path)
+    if status.ok:
+        log.info("Planner routing policy: %s (%d chars, sha %s)",
+                 status.path, status.chars, status.sha)
+    elif status.chars == 0:
+        log.error(
+            "Planner routing policy PROBLEM at %s: %s. Objective planning "
+            "parks with 'config' (refusing to plan blind) until it is fixed.",
+            status.path, status.problem)
+    else:
+        log.error(
+            "Planner routing policy PROBLEM at %s: %s. The planner would "
+            "run with the truncated text (sha %s).",
+            status.path, status.problem, status.sha)
+    return status
