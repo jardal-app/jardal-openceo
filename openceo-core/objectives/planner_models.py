@@ -3,7 +3,7 @@
 The planner (Muse Code headless, one fresh run per cycle) returns
 :class:`PlannerResult` JSON; Pydantic validates the shape and
 :func:`validate_planner_result` applies the deterministic rules from
-``docs/objective-planner-routing-policy.md`` §17. Invalid output never
+``openceo-core/objectives/routing_policy.md`` §17. Invalid output never
 persists. The machine contract is JSON only: there is no YAML mirror.
 
 Not to be confused with the Tier S ticket planner (Claude/Codex plan for
@@ -394,10 +394,10 @@ async def validate_planner_result(
 def load_policy_text(policy_path: str | Path | None = None) -> str:
     """Read the normative routing policy ("" when unreadable)."""
     if policy_path is None:
-        # objectives/planner_models.py -> parents[2] is the repo root
-        # (TASK-2026-00117 moved this module out of the Tier S package).
-        candidate = (Path(__file__).resolve().parents[2] / "docs"
-                     / "objective-planner-routing-policy.md")
+        # The policy is part of the planner's prompt, so it ships next to
+        # this module (TASK-2026-00181) and travels with the code in any
+        # deployment (host, Docker image) instead of living under docs/.
+        candidate = Path(__file__).resolve().with_name("routing_policy.md")
     else:
         candidate = Path(policy_path)
     try:

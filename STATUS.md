@@ -89,7 +89,7 @@ Roadmap, detallado en el comentario del épico:
 - F7: piloto real `00122`, la única prueba con tokens.
 
 Documentos:
-- Planner normativo en `docs/objective-planner-routing-policy.md` + `docs/decision-2026-10-05-planner-objetivos-muse.md`.
+- Planner normativo en `openceo-core/objectives/routing_policy.md` + `docs/decision-2026-10-05-planner-objetivos-muse.md`.
 - Consolidado local en `docs/work/TASK-2026-00110-objetivo-unico-ceo-autonomo.md`.
 - Vault: `decisions/2026-10-06-objetivo-unico-ceo-autonomo`.
 
