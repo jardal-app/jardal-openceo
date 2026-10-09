@@ -622,10 +622,32 @@ class MongoRepository:
             return await self.get_task(task_id)
 
         updates["updated_at"] = datetime.now(timezone.utc)
-        await self.tasks.update_one({"task_id": task_id}, {"$set": updates})
         # ``.value``: str() of a TaskStatus member is 'TaskStatus.X' (§8.2).
         raw_status = updates.get("status")
-        status = str(getattr(raw_status, "value", raw_status) or "")
+        status = (str(getattr(raw_status, "value", raw_status) or "")
+                  if "status" in updates else "")
+        filt: dict[str, Any] = {"task_id": task_id}
+        if status and status != TaskStatus.CANCELLED.value:
+            # Cancel-fencing net (TASK-2026-00177): a business
+            # cancellation is terminal, so no execution write may move a
+            # ticket OUT of cancelled -- not even to another terminal
+            # label (a completed relabel would reopen it to force runs).
+            # Cancelling itself always lands. The filter makes the check
+            # atomic with the write: no read-then-write race.
+            filt["status"] = {"$ne": TaskStatus.CANCELLED.value}
+        result = await self.tasks.update_one(filt, {"$set": updates})
+        if result.matched_count == 0:
+            task = await self.get_task(task_id)
+            if task is None:
+                if status in _TERMINAL_TASK_STATUSES:
+                    await self._close_waiting_tier_s_runs(task_id, status)
+                await self._notify_status_observer(None, updates)
+                return None
+            logger.warning(
+                "patch_task fenced: ticket %s is cancelled; refusing %s",
+                task_id, status or "<no status>",
+            )
+            return task
         if status in _TERMINAL_TASK_STATUSES:
             await self._close_waiting_tier_s_runs(task_id, status)
         task = await self.get_task(task_id)

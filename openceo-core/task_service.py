@@ -2915,15 +2915,42 @@ class TaskService:
             if task is None:
                 return None
 
+            # A business cancellation is terminal: force relaunches a
+            # completed/converted ticket, never an owner-cancelled one
+            # (TASK-2026-00177).
+            if str(task.get("status") or "") == TaskStatus.CANCELLED.value:
+                return task
             if task.get("status") in (
                 TaskStatus.COMPLETED.value, TaskStatus.CONVERTED.value,
             ) and not force:
                 return task
+            entry_status = str(task.get("status") or "")
 
             # Serialize execution per project so dev agents never race on the same repo
             project = task.get("project") or "default"
             project_lock = self._project_locks.setdefault(project, asyncio.Lock())
             async with project_lock:
+                # The ticket may have been cancelled (or closed/converted)
+                # while waiting for the project lock: re-read before
+                # writing in_progress, or the run would resurrect it. Only
+                # a CHANGE to terminal fences: a force relaunch of an
+                # already-completed ticket must still proceed.
+                task = await self._repo.get_task(task_id)
+                if task is None:
+                    return None
+                current_status = str(task.get("status") or "")
+                if current_status != entry_status and current_status in (
+                    TaskStatus.COMPLETED.value,
+                    TaskStatus.CONVERTED.value,
+                    TaskStatus.CANCELLED.value,
+                ):
+                    logger.info(
+                        "run_task: ticket %s is %s after acquiring the "
+                        "project lock; not starting",
+                        task_id, current_status,
+                    )
+                    self._wake_dispatcher()
+                    return task
                 started_at = datetime.now(timezone.utc)
                 patch_started = {
                     "status": TaskStatus.IN_PROGRESS.value,
@@ -2969,6 +2996,17 @@ class TaskService:
                     else:
                         graph_out = await self._graph.execute(task, agent_hint=task.get("agent_hint"))
                 except Exception as exc:
+                    current = await self._repo.get_task(task_id)
+                    current_status = str((current or {}).get("status") or "")
+                    if (current is not None
+                            and current_status == TaskStatus.CANCELLED.value):
+                        logger.info(
+                            "run_task: ticket %s was cancelled during "
+                            "execution; discarding failure %s",
+                            task_id, type(exc).__name__,
+                        )
+                        self._wake_dispatcher()
+                        return current
                     failed = await self._repo.patch_task(
                         task_id,
                         {
@@ -2984,6 +3022,22 @@ class TaskService:
                     self._wake_dispatcher()
                     return failed
 
+            # Fencing before incorporating the result: a business
+            # cancellation that landed mid-run wins over whatever the
+            # graph produced. Only cancelled is fenced here: an F6
+            # conversion legitimately flips the running ticket to
+            # converted, and its outcome must still land.
+            current = await self._repo.get_task(task_id)
+            current_status = str((current or {}).get("status") or "")
+            if (current is not None
+                    and current_status == TaskStatus.CANCELLED.value):
+                logger.info(
+                    "run_task: ticket %s was cancelled during execution; "
+                    "discarding %s result",
+                    task_id, graph_out.get("status"),
+                )
+                self._wake_dispatcher()
+                return current
             final_status = graph_out.get("status", TaskStatus.FAILED.value)
             updates = {
                 "agent": graph_out.get("selected_agent", task.get("agent", "ceo")),
