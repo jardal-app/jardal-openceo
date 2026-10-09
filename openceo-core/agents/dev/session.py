@@ -32,9 +32,7 @@ from objectives.engine import (
     MongoObjectiveStore,
     MongoObjectiveTaskLister,
     ObjectiveEnv,
-    TicketCloseContext,
     checkout_and_update_objective_branch,
-    on_ticket_closed,
     plan_objective,
     record_material_failure,
     record_tier_c,
@@ -775,19 +773,30 @@ class DevSessionManager:
             branch_note = (f"branch kept: {branch.branch} "
                            "(open a PR; policy auto_merge=false, §12)")
 
-        trigger_note = ""
         if task.get("objective_id"):
-            trigger_note = await self._simple_objective_trigger(
-                task, project_config, branch, files, sha, completed_handoff)
+            # The funnel notifies the objective after this COMPLETED is
+            # persisted (TASK-2026-00169): stash the close context for it
+            # instead of triggering on a stale pre-persist read.
+            params = dict(output.params if output.params is not None
+                          else (task.get("params") or {}))
+            params["_objective_close"] = {
+                "task_id": str(task.get("task_id") or ""),
+                "title": str(task.get("title") or ""),
+                "tier": str(task.get("coding_tool") or ""),
+                "sha": sha,
+                "files": list(files),
+                "handoff_excerpt": completed_handoff[:1500],
+            }
+            params.pop("_objective_close_notified", None)
+            output.params = params
         if tool == CodingTool.TIER_C:
-            # Attributable when the close absorbed its SHA into tickets_log.
-            await self._record_tier_c_event(
-                task, "closed", attributable="failed" not in trigger_note)
+            # The funnel absorbs the SHA into tickets_log post-persist.
+            await self._record_tier_c_event(task, "closed", attributable=True)
         output.status = TaskStatus.COMPLETED
         output.modified_files = files
         output.last_response_summary = (
             f"{tool.value} closed: {branch_note}, {sha[:12]}, "
-            f"{len(files)} files.{trigger_note}")
+            f"{len(files)} files.")
         output.steps.append(self._step(
             "close", "ok", output.last_response_summary))
         return output
@@ -1019,46 +1028,6 @@ class DevSessionManager:
         return (RateMonitorQuota(self._rate_monitor)
                 if self._rate_monitor is not None else AllowAllQuota())
 
-    async def _simple_objective_trigger(
-        self,
-        task: dict[str, Any],
-        project_config: dict[str, Any],
-        branch: _SimpleBranch,
-        files: list[str],
-        sha: str,
-        handoff: str,
-    ) -> str:
-        """F6 triggers + capsule after an objective simple ticket closes."""
-        try:
-            task_id = str(task.get("task_id", ""))
-
-            async def notify(ref: str, text: str) -> None:
-                del ref
-                if self._task_service is not None and task_id:
-                    try:
-                        await self._task_service.comment_on_ticket(
-                            task_id, text)
-                    except Exception:
-                        logger.warning(
-                            "objective trigger comment failed for %s",
-                            task_id, exc_info=True)
-
-            env = self._objective_env_for(
-                project_config, branch.repo,
-                objectives_process_executor(project_config),
-                self._objective_quota(), notify)
-            await on_ticket_closed(
-                env, task,
-                TicketCloseContext(
-                    task_id=task_id,
-                    title=str(task.get("title", "")),
-                    tier=str(task.get("coding_tool") or ""),
-                    sha=sha, files=list(files),
-                    handoff_excerpt=handoff[:1500]))
-            return " Objective triggers evaluated."
-        except Exception as exc:
-            return f" Objective trigger failed: {exc}"
-
     async def _run_tier_s(
         self,
         task: dict[str, Any],
@@ -1147,6 +1116,14 @@ class DevSessionManager:
             detail = (f"converted to objective {outcome.detail}"
                       if converted
                       else f"closed {outcome.commit_sha[:12] if outcome.commit_sha else ''}")
+            s_params = dict(params or {})
+            s_params.pop("_objective_close", None)
+            if not converted and task.get("objective_id"):
+                # The cycle already notified the objective post-persist:
+                # the funnel must not notify twice (TASK-2026-00169).
+                s_params["_objective_close_notified"] = True
+            else:
+                s_params.pop("_objective_close_notified", None)
             return DevExecutionOutput(
                 status=(TaskStatus.CONVERTED if converted
                         else TaskStatus.COMPLETED),
@@ -1156,7 +1133,7 @@ class DevSessionManager:
                 ).strip(),
                 steps=[self._step("cycle", "ok", f"Tier S {detail}"),
                        *(self._step("notice", "ok", note) for note in notices[-5:])],
-                params=params,
+                params=s_params,
             )
         # Any non-completed cycle outcome mirrors as WAITING: the cycle
         # already patched the task itself (waiting/transient/needs_owner),

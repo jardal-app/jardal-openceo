@@ -24,7 +24,11 @@ from events import RealtimeHub
 from graph import OpenCEOGraph
 from horizon.privacy import is_personal_scope
 from horizon.promotion import is_horizon_promoted
-from objectives.engine import ObjectiveRejected
+from objectives.engine import (
+    ObjectiveRejected,
+    TicketCloseContext,
+    on_ticket_closed,
+)
 from phase_workflows import (
     find_phase_index,
     first_executable_phase_index,
@@ -3125,6 +3129,13 @@ class TaskService:
                     reason = str(updated.get("waiting_reason") or "")
                     if reason.startswith(("routing_missing", "config")):
                         asyncio.create_task(self._comment_wait_on_erp(updated, reason))
+                if (final_status == TaskStatus.COMPLETED.value
+                        and updated.get("objective_id")):
+                    # Single post-persist objective close (TASK-2026-00169):
+                    # before the dispatcher wake so planner children are
+                    # covered by it.
+                    await self._trigger_objective_close(
+                        updated, graph_out.get("params"))
                 # Any finished run frees its slot: dispatch event.
                 self._wake_dispatcher()
             return updated
@@ -3909,6 +3920,53 @@ class TaskService:
     # ``resume_waiting_tasks``/``resume_queued_tickets``/``_maybe_gate_launch``
     # called ``RateMonitor.can_launch_ticket``, retired in favour of
     # ``RateMonitor.admission_for_ticket`` (tier-aware reserves + reason).
+
+    async def _trigger_objective_close(
+        self,
+        ticket: dict[str, Any],
+        session_params: Any,
+    ) -> None:
+        """Notify the objectives engine of a persisted COMPLETED (§9.4).
+
+        Single post-persist close (TASK-2026-00169): the session no
+        longer triggers on a stale pre-persist read. ``session_params``
+        is the run's fresh output (never the merged ticket params):
+        Tier S marks its inline notification there so this skips it;
+        simple tiers stash their close context there; anything else
+        notifies with what the persisted ticket carries. Never fails
+        the close.
+        """
+        try:
+            fresh = session_params \
+                if isinstance(session_params, dict) else {}
+            if fresh.get("_objective_close_notified"):
+                return  # Tier S already notified inline, post-persist.
+            service = getattr(self, "_objective_service", None)
+            if service is None:
+                return
+            stashed = fresh.get("_objective_close")
+            if isinstance(stashed, dict):
+                close = TicketCloseContext(
+                    task_id=str(ticket.get("task_id") or ""),
+                    title=str(ticket.get("title") or ""),
+                    tier=str(ticket.get("coding_tool") or ""),
+                    sha=str(stashed.get("sha") or ""),
+                    files=list(stashed.get("files") or []),
+                    handoff_excerpt=str(
+                        stashed.get("handoff_excerpt") or ""))
+            else:
+                persisted = ticket.get("params") or {}
+                close = TicketCloseContext(
+                    task_id=str(ticket.get("task_id") or ""),
+                    title=str(ticket.get("title") or ""),
+                    tier=str(ticket.get("coding_tool") or ""),
+                    sha="",
+                    files=list(persisted.get("modified_files") or []))
+            env = service.env_for(str(ticket.get("project") or ""))
+            await on_ticket_closed(env, ticket, close)
+        except Exception:
+            logger.warning("objective close trigger failed for %s",
+                           ticket.get("task_id"), exc_info=True)
 
     async def _on_ticket_done(self, ticket: dict[str, Any]) -> None:
         """Post-completion: QA gate, then refresh rate limits and wake the dispatcher."""
