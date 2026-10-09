@@ -985,7 +985,7 @@ result → replan only if something changed → final review → close
 Only if policy requires: Pending Review + tray + Horizon → OWNER
 ```
 
-The objective close notification fires once, after the terminal state is persisted: `run_task` notifies post-persist from the session's stashed close context (Tier S notifies inline and the funnel skips it, so no double replan), and the closing ticket itself never counts as open work (TASK-2026-00169).
+The objective close notification fires once, after the terminal state is persisted: `run_task` notifies post-persist from the session's stashed close context (Tier S notifies inline and the funnel skips it, so no double replan), and the closing ticket itself never counts as open work (TASK-2026-00169). Corrective children created by the final close carry the same minimum delivery contract as planner children — dev agent hint, acceptance, and the anchored repro/fix artefacts — so the fixed child passes the next delivery check instead of parking it in data gaps (TASK-2026-00173).
 
 ---
 
