@@ -377,6 +377,15 @@ class _ExplodingExecutor:
         del role
 
 
+def _output_target(repo: Path, prompt: str) -> Path:
+    """OUTPUT path the prompt orders (the honest planner follows it)."""
+    for line in prompt.splitlines():
+        if line.startswith("OUTPUT: write "):
+            rel = line[len("OUTPUT: write "):].split(" with exactly")[0]
+            return repo / rel.strip()
+    raise AssertionError("planner prompt names no OUTPUT target")
+
+
 class _RecordedPlanner:
     """Simulated Muse headless run: writes the recorded JSON (0 tokens)."""
 
@@ -385,6 +394,7 @@ class _RecordedPlanner:
         self._payloads = payloads
         self.prompts: list[str] = []
         self.runs = 0
+        self._target = None
 
     async def run(self, role: str, prompt: str, workdir: Path,
                   timeout_s: int) -> Any:
@@ -393,7 +403,13 @@ class _RecordedPlanner:
         self.prompts.append(prompt)
         payload = self._payloads[min(self.runs, len(self._payloads) - 1)]
         self.runs += 1
-        target = self._repo / ".tier-s" / "PLANNER_RESULT.json"
+        try:
+            target = _output_target(self._repo, prompt)
+            self._target = target
+        except AssertionError:
+            # Retry prompt: fix the same file in place.
+            assert self._target is not None
+            target = self._target
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(payload), encoding="utf-8")
         return SimpleNamespace(returncode=0, output_tail="PLANNER_READY")

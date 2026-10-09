@@ -301,14 +301,19 @@ class TierSPromptsTests(_RepoCases):
                      self.neither, self.both):
             with self.subTest(repo=repo.name):
                 prompt = objectives_mod._closure_judge_prompt(
-                    2, "goal", "contracts", repo)
+                    2, "goal", "contracts", repo,
+                    result_path=".tier-s/objectives/OBJ-1/"
+                                "OBJECTIVE_CLOSURE.md")
                 self.assertPreamble(prompt, repo, "en")
 
     def test_closure_retry_prompt(self) -> None:
         for repo in (self.claude_only, self.agents_only, self.symlink,
                      self.neither, self.both):
             with self.subTest(repo=repo.name):
-                prompt = objectives_mod._closure_retry_prompt([1], repo)
+                prompt = objectives_mod._closure_retry_prompt(
+                    [1], repo,
+                    result_path=".tier-s/objectives/OBJ-1/"
+                                "OBJECTIVE_CLOSURE.md")
                 self.assertPreamble(prompt, repo, "en")
 
     def test_objective_planner_retry_prompt(self) -> None:

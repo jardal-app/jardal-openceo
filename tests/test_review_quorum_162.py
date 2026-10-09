@@ -937,12 +937,14 @@ class FinalReview162Tests(unittest.IsolatedAsyncioTestCase):
         # The silent closer leaves no verdicts: with the stale REAL gone,
         # the finding defaults to FALSO and the objective finishes —
         # no fix tickets. On the old code the stale file read as REAL.
+        # The legacy global file is neither read nor swept anymore
+        # (TASK-2026-00176); only the objective's own stale is dropped.
         self.assertEqual(result["action"], "closed")
         self.assertEqual(created, [])
         self.assertEqual(fake.calls.count("closer"), 2)
         self.assertIn(".tier-s/objectives/OBJ-1/OBJECTIVE_FINDINGS.md",
                       fake.prompts["closer"])
-        self.assertFalse(stale_root.exists())
+        self.assertTrue(stale_root.exists())
         self.assertFalse(stale_own.exists())
 
 
