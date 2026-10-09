@@ -832,7 +832,7 @@ def _planner_prompt(
     ])
     if policy_text.strip():
         lines.extend(["", "NORMATIVE ROUTING POLICY (authoritative):",
-                      policy_text.strip()[:60000]])
+                      planner_mod.policy_prompt_text(policy_text)])
     return knowledge_mod.with_preamble("\n".join(lines), repo, "en")
 
 
@@ -1297,6 +1297,8 @@ async def _plan_objective_inner(
             f"{'; '.join(errors)}")
     status = result.objective_status.value
     runs.append({"at": _utcnow_iso(), "status": status,
+                 # Which policy text this decision saw (TASK-2026-00184).
+                 "policy_sha": planner_mod.policy_fingerprint(policy_text),
                  "tickets_created": len(
                      [item for item in result.tickets
                       if not item.completes_task_id]),

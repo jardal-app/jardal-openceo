@@ -329,6 +329,14 @@ async def lifespan(_: FastAPI):
             await stack.enter_async_context(global_mcp.lifespan())
 
         await repo.connect()
+        # Planner policy: say at boot (not at the first planning cycle) if it
+        # is missing or would be truncated. Never blocks or breaks startup.
+        with suppress(Exception):
+            from objectives.planner_models import log_policy_status
+            log_policy_status(
+                (config_loader.load_project(None).get("objective_planner")
+                 or {}).get("policy_path"),
+                logger)
         # Research: se construye SIEMPRE, aunque falten claves o CLI, para poder
         # explicar el motivo de indisponibilidad en vez de desaparecer sin traza. La
         # flag de capacidad no modifica el contrato de ERPNext (siempre activo).
