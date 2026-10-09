@@ -358,6 +358,12 @@ async def lifespan(_: FastAPI):
             logger.info("Broker de research montado en %s", _research_broker.url)
         await repo.mark_interrupted_pm_states()
         await repo.mark_interrupted_tasks()
+        # One bounded pass, never a sweep loop: Tier S runs left waiting on
+        # an already-ended task can never resume (TASK-2026-00162).
+        try:
+            await repo.close_orphan_tier_s_runs()
+        except Exception:
+            logger.warning("Tier S orphan-run reconcile failed", exc_info=True)
         await repo.mark_interrupted_dev_sessions()
         await dev_session_service.startup_reconcile()
         # Mirror workers + startup repairs (ex-WaitingTaskScheduler.start).

@@ -11,11 +11,21 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+#: Run statuses that still claim a future (legacy engine: active/resuming).
+#: A new run of the same task supersedes them (TASK-2026-00162).
+OPEN_RUN_STATUSES = frozenset({"waiting", "running", "active", "resuming"})
+
 
 class RunStore(Protocol):
     async def create_run(self, doc: dict[str, Any]) -> dict[str, Any]: ...
     async def patch_run(
         self, run_id: str, updates: dict[str, Any]) -> None: ...
+    # Close the task's other open runs (TASK-2026-00162).
+    async def supersede_runs(
+        self, task_id: str, keep_run_id: str) -> int: ...
+    # Latest waiting run of the task with a review checkpoint (§14.2).
+    async def resumable_run(
+        self, task_id: str) -> dict[str, Any] | None: ...
 
 
 class LockStore(Protocol):
@@ -43,6 +53,29 @@ class InMemoryRunStore:
         if run is None:
             raise KeyError(run_id)
         run.update(updates)
+
+    async def supersede_runs(self, task_id: str, keep_run_id: str) -> int:
+        closed = 0
+        for run in self.runs.values():
+            if (run.get("task_id") == task_id
+                    and run.get("run_id") != keep_run_id
+                    and run.get("status") in OPEN_RUN_STATUSES):
+                run.update({"status": "superseded",
+                            "superseded_reason": f"run {keep_run_id}",
+                            "superseded_by": keep_run_id,
+                            "active_repo": None})
+                closed += 1
+        return closed
+
+    async def resumable_run(self, task_id: str) -> dict[str, Any] | None:
+        found: dict[str, Any] | None = None
+        for run in self.runs.values():  # insertion order: latest wins
+            checkpoint = run.get("checkpoint") or {}
+            if (run.get("task_id") == task_id
+                    and run.get("status") == "waiting"
+                    and checkpoint.get("phase") == "review"):
+                found = run
+        return dict(found) if found is not None else None
 
 
 class InMemoryLockStore:
@@ -87,6 +120,12 @@ class MongoRunStore:
 
     async def patch_run(self, run_id: str, updates: dict[str, Any]) -> None:
         await self._repo.patch_tier_s_run(run_id, updates)
+
+    async def supersede_runs(self, task_id: str, keep_run_id: str) -> int:
+        return await self._repo.supersede_tier_s_runs(task_id, keep_run_id)
+
+    async def resumable_run(self, task_id: str) -> dict[str, Any] | None:
+        return await self._repo.resumable_tier_s_run(task_id)
 
 
 class MongoLockStore:

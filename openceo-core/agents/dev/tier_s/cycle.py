@@ -40,6 +40,7 @@ from orchestration import inbox as inbox_mod
 from orchestration import knowledge as knowledge_mod
 from orchestration import review as review_mod
 from orchestration.live import (
+    TIMEOUT_RETURNCODE,
     AllowAllQuota,
     ExecResult,
     Executor,
@@ -80,6 +81,11 @@ TERMINAL_BLOCKER_STATUS = frozenset({"completed", "converted", "cancelled"})
 _ROLE_KEYS = ("planner", "plan_reviewer", "plan-reviewer", "builder")
 
 _ORCHESTRATOR_USER = ("OpenCEO", "openceo@jardal.app")
+
+#: Scratch artifacts a review checkpoint carries back on resume (§14.2: the
+#: approved plan and the written responses are reused, never redone).
+_CHECKPOINT_ARTIFACTS = ("PLAN.md", "PLAN_RESPONSE.md", "HANDOFF.md")
+_CHECKPOINT_ARTIFACT_CAP = 64000
 
 
 @dataclass(frozen=True)
@@ -125,6 +131,13 @@ class _Ctx:
     discarded_notes: list[str] = field(default_factory=list)
     used_review_roles: list[str] = field(default_factory=list)
     converted: str | None = None  # objective id after F6 conversion
+    quorum_detail: str = ""  # per-slot story of the last failed round
+    # Resume at review (design §14.2, TASK-2026-00162): set from the parked
+    # run's checkpoint; review_parks counts no-quorum parks across resumes.
+    resumed: bool = False
+    resumes: int = 0
+    review_parks: int = 0
+    resume_artifacts: dict[str, str] = field(default_factory=dict)
 
 
 def _utcnow_iso() -> str:
@@ -398,10 +411,14 @@ class TierSCycle:
         task_id = str(ticket.get("task_id", ""))
         ref = str(ticket.get("ref") or ticket.get("ticket_number")
                   or task_id[:8])
+        resume = await self._resume_point(task_id, repo)
+        checkpoint = (resume or {}).get("checkpoint") or {}
         ctx = _Ctx(
             ticket=dict(ticket), repo=repo, ref=ref,
-            run_id=f"ts-{uuid.uuid4().hex[:12]}",
-            branch=f"tier-s/{ref}-{uuid.uuid4().hex[:8]}",
+            run_id=(str(resume["run_id"]) if resume
+                    else f"ts-{uuid.uuid4().hex[:12]}"),
+            branch=(str(checkpoint["branch"]) if resume
+                    else f"tier-s/{ref}-{uuid.uuid4().hex[:8]}"),
             base_branch=str(cycle_cfg.get("base_branch", "main")),
             budgets=dict(cycle_cfg.get("budgets", BUDGETS_DEFAULTS)),
             timeouts=dict(cycle_cfg.get("timeouts", TIMEOUTS_DEFAULTS)),
@@ -418,6 +435,8 @@ class TierSCycle:
             inbox_rule=dict(cycle_cfg.get("inbox_rule", {}) or {}),
             fix_tiers=dict(cycle_cfg.get("fix_tiers", {}) or {}),
         )
+        if resume is not None:
+            self._restore_checkpoint(ctx, resume)
         try:
             return await self._run_guarded(ctx)
         except Exception as exc:  # fail explicit, resumable, lock always freed
@@ -464,21 +483,32 @@ class TierSCycle:
         roster = self._freeze_roster(ctx)
         ctx.metrics["tier"] = CodingTool.TIER_S.value
         ctx.metrics["origin"] = ctx.ticket.get("origin")
-        await self._runs.create_run({
-            "run_id": ctx.run_id,
-            "task_id": task_id,
-            "project": ctx.ticket.get("project"),
-            "objective_id": ctx.ticket.get("objective_id"),
-            "engine": "tier_s",
-            "status": "running",
-            "phase": "planning",
-            "roster": roster,
-            "branch": ctx.branch,
-            "metrics": ctx.metrics,
-            "active_repo": str(ctx.repo),
-            "created_at": _utcnow_iso(),
-            "updated_at": _utcnow_iso(),
-        })
+        # One task, one open run (TASK-2026-00162, pilot: 16 orphaned
+        # waiting runs): every other open run of the task is superseded —
+        # only a resumed run is kept. Before create_run, so a dead run's
+        # repo marker cannot refuse this one.
+        await self._runs.supersede_runs(task_id, ctx.run_id)
+        if ctx.resumed:
+            await self._runs.patch_run(ctx.run_id, {
+                "status": "running", "phase": "round1", "waiting": None,
+                "resumes": ctx.resumes, "active_repo": str(ctx.repo),
+                "updated_at": _utcnow_iso()})
+        else:
+            await self._runs.create_run({
+                "run_id": ctx.run_id,
+                "task_id": task_id,
+                "project": ctx.ticket.get("project"),
+                "objective_id": ctx.ticket.get("objective_id"),
+                "engine": "tier_s",
+                "status": "running",
+                "phase": "planning",
+                "roster": roster,
+                "branch": ctx.branch,
+                "metrics": ctx.metrics,
+                "active_repo": str(ctx.repo),
+                "created_at": _utcnow_iso(),
+                "updated_at": _utcnow_iso(),
+            })
         await self._tasks.patch_task(task_id, {
             "status": TaskStatus.IN_PROGRESS.value,
             "waiting_reason": None,
@@ -498,7 +528,9 @@ class TierSCycle:
         if problems:
             return await self._park(
                 ctx, "config", "; ".join(problems), patch_run=True)
-        quota_hit = await self._quota_gate(ctx)
+        # The scarce planner/plan-reviewer accounts only gate a fresh run:
+        # a resume never calls them (arbitration checks its own quota).
+        quota_hit = None if ctx.resumed else await self._quota_gate(ctx)
         if quota_hit is not None:
             return await self._park(
                 ctx, "quota", quota_hit[1], resume_at=quota_hit[0],
@@ -507,6 +539,8 @@ class TierSCycle:
         if pool_block is not None:
             return await self._park(
                 ctx, "config", pool_block, patch_run=True)
+        if ctx.resumed:
+            return await self._resume_review(ctx)
 
         objective_id = str(ctx.ticket.get("objective_id") or "")
         if objective_id and not ctx.auto_merge:
@@ -666,6 +700,126 @@ class TierSCycle:
     def _backoff(self, ctx: _Ctx, attempt: int) -> int:
         steps = ctx.waiting_cfg.get("backoff_minutes", [15, 30, 60]) or [15]
         return int(steps[min(attempt, len(steps) - 1)])
+
+    # -- resume at review (design §14.2, TASK-2026-00162) ------------------
+
+    async def _resume_point(
+        self, task_id: str, repo: Path,
+    ) -> dict[str, Any] | None:
+        """The task's parked run that can resume at review, else None.
+
+        Only a no-quorum park after a successful build leaves a review
+        checkpoint. It resumes while its branch still points at the
+        checkpoint head; anything else starts a fresh run (which supersedes
+        the parked one). Read-only: safe before the repo lock.
+        """
+        try:
+            run = await self._runs.resumable_run(task_id)
+            checkpoint = (run or {}).get("checkpoint") or {}
+            branch = str(checkpoint.get("branch") or "")
+            head = str(checkpoint.get("head_sha") or "")
+            base = str(checkpoint.get("base_sha") or "")
+            if not (run and run.get("run_id") and branch and head and base):
+                return None
+            tip = _git(repo, "rev-parse", "--verify", "--quiet",
+                       f"refs/heads/{branch}").stdout.strip()
+            if tip != head:
+                return None
+            if _git(repo, "cat-file", "-e",
+                    f"{base}^{{commit}}").returncode != 0:
+                return None
+        except Exception:  # no resume is always safe: a fresh run follows
+            return None
+        return run
+
+    def _restore_checkpoint(self, ctx: _Ctx, run: Mapping[str, Any]) -> None:
+        checkpoint = dict(run.get("checkpoint") or {})
+        ctx.resumed = True
+        ctx.resumes = int(run.get("resumes") or 0) + 1
+        ctx.review_parks = int(checkpoint.get("review_parks") or 0)
+        ctx.base_branch = str(checkpoint.get("base_branch") or ctx.base_branch)
+        ctx.base_sha = str(checkpoint.get("base_sha") or "")
+        ctx.head_sha = str(checkpoint.get("head_sha") or "")
+        ctx.build_sha = str(checkpoint.get("build_sha") or ctx.head_sha)
+        ctx.resume_artifacts = {
+            str(name): str(text)
+            for name, text in dict(checkpoint.get("artifacts") or {}).items()
+            if name in _CHECKPOINT_ARTIFACTS}
+        if isinstance(run.get("metrics"), Mapping):
+            ctx.metrics = dict(run["metrics"])
+        ctx.gate_runs = [dict(item) for item in run.get("gates") or []
+                         if isinstance(item, Mapping)]
+        ctx.rounds = [dict(item) for item in run.get("rounds") or []
+                      if isinstance(item, Mapping)]
+
+    def _review_checkpoint(self, ctx: _Ctx) -> dict[str, Any]:
+        artifacts: dict[str, str] = {}
+        for name in _CHECKPOINT_ARTIFACTS:
+            text = self._read_artifact(ctx, name)
+            if text:
+                artifacts[name] = text[:_CHECKPOINT_ARTIFACT_CAP]
+        return {
+            "phase": "review",
+            "branch": ctx.branch,
+            "base_branch": ctx.base_branch,
+            "base_sha": ctx.base_sha,
+            "build_sha": ctx.build_sha,
+            "head_sha": ctx.head_sha or ctx.build_sha,
+            "review_parks": ctx.review_parks,
+            "artifacts": artifacts,
+            "at": _utcnow_iso(),
+        }
+
+    async def _resume_review(self, ctx: _Ctx) -> CycleOutcome:
+        """Back on the parked branch, straight to the review rounds.
+
+        Planning, plan review, build and its gates are not redone: the
+        approved plan, responses and handoff come back from the checkpoint
+        and the final gates still run before the merge (§14.2). A branch
+        that cannot be restored drops the checkpoint, so the next launch
+        starts fresh instead of retrying the same resume.
+        """
+        checked_out = _git(ctx.repo, "checkout", "-q", ctx.branch).returncode == 0
+        head = _git(ctx.repo, "rev-parse", "HEAD").stdout.strip()
+        if not checked_out or head != ctx.head_sha:
+            await self._runs.patch_run(ctx.run_id, {
+                "checkpoint": None, "updated_at": _utcnow_iso()})
+            return await self._park(
+                ctx, "transient", f"cannot resume {ctx.branch} at "
+                f"{ctx.head_sha[:12]} (fresh run next)",
+                resume_in_min=self._backoff(ctx, 0), patch_run=True,
+                notify=False)
+        tier_dir = _tier_dir(ctx.repo)
+        tier_dir.mkdir(exist_ok=True)
+        for name, text in ctx.resume_artifacts.items():
+            (tier_dir / name).write_text(text, encoding="utf-8")
+        return await self._close(ctx)
+
+    async def _park_review_quorum(self, ctx: _Ctx, round_no: int) -> CycleOutcome:
+        """No quorum: checkpoint, backoff 15/30/60, then needs_owner (§14.2).
+
+        The checkpoint makes the next launch resume this run at review (no
+        new planning or build). Parks are counted across resumes; past the
+        last backoff step the pool is broken beyond self-healing and the
+        ticket stops retrying instead of burning quota (no livelock).
+        """
+        ctx.review_parks += 1
+        await self._runs.patch_run(ctx.run_id, {
+            "checkpoint": self._review_checkpoint(ctx),
+            "updated_at": _utcnow_iso()})
+        detail = f"round {round_no} without quorum: {ctx.quorum_detail}"
+        steps = ctx.waiting_cfg.get("backoff_minutes", [15, 30, 60]) or [15]
+        if ctx.review_parks > len(steps):
+            return await self._park(
+                ctx, "needs_owner",
+                f"review pool short of quorum {ctx.review_parks} times; "
+                "restore the reviewer pool, then relaunch (resumes at "
+                f"review). Last: {detail}",
+                patch_run=True)
+        return await self._park(
+            ctx, "review_quorum", detail,
+            resume_in_min=self._backoff(ctx, ctx.review_parks - 1),
+            patch_run=True, notify=False)
 
     async def _convert(
         self, ctx: _Ctx, cause: str, sizing: str, role: str) -> None:
@@ -948,10 +1102,7 @@ class TierSCycle:
         round1 = await self._run_round(ctx, 1, plan1, "", quorum,
                                        builder_family)
         if round1 is None:
-            return await self._park(
-                ctx, "review_quorum", "round 1 without quorum",
-                resume_in_min=self._backoff(ctx, 0), patch_run=True,
-                notify=False)
+            return await self._park_review_quorum(ctx, 1)
         fix1 = await self._muse_fix(ctx, 1, round1["findings"])
         if fix1 is None:  # parked inside (fix gates unrecoverable)
             return await self._run_waited(ctx)
@@ -968,10 +1119,7 @@ class TierSCycle:
         round2 = await self._run_round(ctx, 2, plan2, extra, quorum,
                                        builder_family)
         if round2 is None:
-            return await self._park(
-                ctx, "review_quorum", "round 2 without quorum",
-                resume_in_min=self._backoff(ctx, 0), patch_run=True,
-                notify=False)
+            return await self._park_review_quorum(ctx, 2)
         fix2 = await self._muse_fix(ctx, 2, round2["findings"])
         if fix2 is None:
             return await self._run_waited(ctx)
@@ -1087,39 +1235,31 @@ class TierSCycle:
             request, encoding="utf-8")
         handoff = self._read_artifact(ctx, "HANDOFF.md")
 
-        reviewers = list(plan.reviewers)
-        outcomes = await asyncio.gather(*[
-            self._run_reviewer(ctx, slot, round_no, request, request_name,
-                               handoff, head, builder_family)
-            for slot in [*reviewers, *plan.extras]
-        ])
-        valid = {item["slot"]: item["valid"] for item in outcomes}
-        if not review_mod.quorum_met(valid, reviewers, builder_family, quorum):
-            have = {slot.family for slot in reviewers
-                    if valid.get(slot.label) and not slot.extra
-                    and slot.family != builder_family}
-            shortfall = max(1, quorum - len(have))
-            tried = [item["slot"] for item in outcomes]
-            refill = await review_mod.select_round(
-                ctx.pool, self._slots, shortfall + 1,
-                builder_family=builder_family, include_extras=False,
-                exclude=tried)
-            if refill.reviewers:
-                extra_outcomes = await asyncio.gather(*[
-                    self._run_reviewer(ctx, slot, round_no, request,
-                                       request_name, handoff, head,
-                                       builder_family)
-                    for slot in refill.reviewers
-                ])
-                outcomes = [*outcomes, *extra_outcomes]
-                reviewers = [*reviewers, *refill.reviewers]
-                valid = {item["slot"]: item["valid"] for item in outcomes}
-        if not review_mod.quorum_met(valid, reviewers, builder_family, quorum):
+        async def run_one(
+            slot: review_mod.ReviewSlot,
+            attempt: int,
+            previous: Mapping[str, Any] | None,
+        ) -> dict[str, Any]:
+            return await self._run_reviewer(
+                ctx, slot, round_no, request, request_name, handoff, head,
+                attempt=attempt, previous=previous)
+
+        # Relief + one retry per slot (shared with the objective final
+        # review): one slow or sloppy slot no longer voids the round.
+        result = await review_mod.run_quorum_round(
+            ctx.pool, self._slots, plan, run_one,
+            builder_family=builder_family, quorum=quorum)
+        slots_run = sorted(result.valid)
+        valid_reports = sum(1 for label in slots_run if result.valid.get(label))
+        verdicts = result.verdicts
+        if not result.met:
+            # The park detail and the run doc keep why each slot fell short.
+            ctx.quorum_detail = result.summary()
+            ctx.rounds.append(review_mod.round_telemetry(
+                round_no, slots_run, valid_reports, verdicts, {},
+                attempts=result.outcomes, met=False))
             return None
 
-        verdicts: list[Any] = []
-        for item in outcomes:
-            verdicts.extend(item["verdicts"])
         consolidated = findings_mod.consolidate(verdicts)
         text = findings_mod.render_findings(
             consolidated, round_no, head, builder_family=builder_family)
@@ -1127,15 +1267,14 @@ class TierSCycle:
             text, encoding="utf-8")
         await self._record_inbox(ctx, round_no, verdicts)
         await self._evaluate_promotions(ctx)
-        slots_run = sorted(valid)
         ctx.rounds.append(review_mod.round_telemetry(
-            round_no, slots_run,
-            sum(1 for label in slots_run if valid.get(label)), verdicts, {}))
+            round_no, slots_run, valid_reports, verdicts, {},
+            attempts=result.outcomes, met=True))
         await self._runs.patch_run(ctx.run_id, {
             "rounds": ctx.rounds, "metrics": ctx.metrics,
             "updated_at": _utcnow_iso()})
         return {"findings": consolidated, "verdicts": verdicts,
-                "slots": slots_run, "valid": valid}
+                "slots": slots_run, "valid": result.valid}
 
     async def _run_reviewer(
         self,
@@ -1146,20 +1285,25 @@ class TierSCycle:
         request_name: str,
         handoff: str,
         head_sha: str,
-        builder_family: str,
+        attempt: int = 1,
+        previous: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """One reviewer on its own detached read-only worktree (§7.5)."""
+        """One reviewer attempt on its own detached read-only worktree (§7.5).
+
+        The outcome's ``kind`` (see :func:`review_mod.new_outcome`) decides
+        whether the round may retry the slot; every attempt is persisted.
+        """
         role = f"review:{slot.label}"
         if role not in ctx.used_review_roles:
             ctx.used_review_roles.append(role)
-        outcome: dict[str, Any] = {"slot": slot.label, "valid": False,
-                                   "verdicts": [], "reason": ""}
+        outcome = review_mod.new_outcome(slot, attempt)
+        suffix = f"-a{attempt}" if attempt > 1 else ""
         try:
             worktree = await asyncio.to_thread(
                 review_mod.create_worktree, ctx.repo, head_sha,
-                f"r{round_no}-{slot.label}")
+                f"r{round_no}-{slot.label}{suffix}")
         except RuntimeError as exc:
-            outcome["reason"] = str(exc)[:200]
+            outcome.update(kind="worktree", reason=str(exc)[:200])
             await self._persist_review(ctx, slot, round_no, outcome)
             return outcome
         try:
@@ -1167,42 +1311,52 @@ class TierSCycle:
             (worktree / "HANDOFF.md").write_text(handoff, encoding="utf-8")
             before = await asyncio.to_thread(
                 review_mod.worktree_snapshot, worktree)
-            timeout_s = int(ctx.review_cfg.get(
-                "reviewer_timeout_minutes", 15)) * 60
+            timeout_s = review_mod.slot_timeout_s(
+                slot, ctx.review_cfg.get("reviewer_timeout_minutes", 15),
+                previous)
             result = await self._exec.run(
                 role, review_mod.reviewer_prompt(
                     slot.label, request_name, "ticket", round_no,
-                    repo=worktree),
+                    repo=worktree, retry=review_mod.retry_note(previous)),
                 worktree, timeout_s)
             self._record_session(ctx, "reviewer", role, result)
+            outcome.update(elapsed_s=float(result.elapsed_s or 0.0),
+                           exit_code=result.returncode)
             after = await asyncio.to_thread(
                 review_mod.worktree_snapshot, worktree)
             if before and after and before != after:
-                outcome["reason"] = "write_attempt"
+                outcome.update(kind="write_attempt", reason="write_attempt")
                 await self._persist_review(ctx, slot, round_no, outcome)
                 return outcome
             text = (result.output_tail or "").strip()
             if result.returncode != 0:
-                action, patch = review_mod.classify_slot_error(text, slot)
-                if action in {"cooling_down", "disabled"}:
-                    await self._slots.set_slot(slot.label, patch)
-                outcome["reason"] = (
-                    f"slot error ({action}): {text[:200]}" or "slot error")
+                if (result.returncode == TIMEOUT_RETURNCODE
+                        or (result.usage or {}).get("timeout")):
+                    outcome.update(
+                        kind="timeout",
+                        reason=text[:200] or f"timeout after {timeout_s}s")
+                else:
+                    action, patch = review_mod.classify_slot_error(text, slot)
+                    if action in {"cooling_down", "disabled"}:
+                        await self._slots.set_slot(slot.label, patch)
+                    outcome.update(
+                        kind=(action if action in {"cooling_down", "disabled"}
+                              else "slot_error"),
+                        reason=f"slot error ({action}): {text[:200]}")
                 await self._persist_review(ctx, slot, round_no, outcome)
                 return outcome
-            (_tier_dir(ctx.repo) / f"REVIEW-{slot.label}-{round_no}.md"
+            (_tier_dir(ctx.repo) / f"REVIEW-{slot.label}-{round_no}{suffix}.md"
              ).write_text(text + "\n", encoding="utf-8")
             try:
                 raw = findings_mod.parse_report(text)
             except findings_mod.ReportMalformed as exc:
-                outcome["reason"] = f"malformed: {exc}"
+                outcome.update(kind="malformed", reason=f"malformed: {exc}")
                 await self._persist_review(ctx, slot, round_no, outcome)
                 return outcome
             verdicts = await asyncio.to_thread(
                 findings_mod.verify_report, raw, ctx.repo, head_sha,
                 ctx.base_sha, slot.label, slot.family, self._acceptance(ctx))
-            outcome["verdicts"] = verdicts
-            outcome["valid"] = True
+            outcome.update(verdicts=verdicts, valid=True, kind="valid")
             await self._persist_review(ctx, slot, round_no, outcome)
             return outcome
         finally:
@@ -1227,7 +1381,12 @@ class TierSCycle:
                 slot=slot.label, family=slot.family,
                 valid=bool(outcome.get("valid")),
                 verdicts=list(outcome.get("verdicts") or []),
-                invalid_reason=str(outcome.get("reason") or "")))
+                invalid_reason=str(outcome.get("reason") or ""),
+                meta={"attempt": int(outcome.get("attempt") or 1),
+                      "kind": str(outcome.get("kind") or ""),
+                      "elapsed_s": float(outcome.get("elapsed_s") or 0.0),
+                      "exit_code": outcome.get("exit_code"),
+                      "project": ctx.ticket.get("project")}))
         except Exception:
             pass  # telemetry persistence never fails a round
 
@@ -1782,6 +1941,7 @@ class TierSCycle:
                             "since": _utcnow_iso(), "resume_at": resume_at},
                 "metrics": ctx.metrics,
                 "gates": ctx.gate_runs,
+                "rounds": ctx.rounds,
                 "updated_at": _utcnow_iso(),
             })
         await self._tasks.patch_task(task_id, {
