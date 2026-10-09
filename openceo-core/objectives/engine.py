@@ -2163,6 +2163,27 @@ async def _arbitrate_final(
     return True  # unparseable: reproduce rather than drop a CRITICAL
 
 
+def _closure_expected_artifacts(item: Any) -> list[str]:
+    """Repro/fix artefacts for a closure child (TASK-2026-00173).
+
+    The anchored files, deduplicated. A finding that only cites
+    acceptance criteria names them instead — the parser guarantees at
+    least one anchor, so this is never empty on real findings.
+    """
+    artefacts: list[str] = []
+    for anchor in item.anchors or []:
+        path = getattr(anchor, "path", None)
+        if path and path not in artefacts:
+            artefacts.append(path)
+    if not artefacts:
+        for anchor in item.anchors or []:
+            criterion = getattr(anchor, "criterion", None)
+            ref = f"criterion:{criterion}" if criterion else ""
+            if ref and ref not in artefacts:
+                artefacts.append(ref)
+    return artefacts
+
+
 def _closure_fix_ticket(
     env: ObjectiveEnv,
     objective: Mapping[str, Any],
@@ -2192,6 +2213,15 @@ def _closure_fix_ticket(
             "reproducir el problema; si no se reproduce, cerrar como no válido",
         ],
         "coding_tool": tier,
+        # Same minimum delivery contract as planner children
+        # (TASK-2026-00173): without it the fixed child parks the next
+        # final review in data_gaps, and misroutes as non-dev.
+        "agent_hint": "dev",
+        "params": {
+            "target_agent": "dev",
+            "work_type": "debugging",
+            "expected_artifacts": _closure_expected_artifacts(item),
+        },
         "objective_id": str(objective.get("objective_id")),
         "origin": "objective_closure",
         "project": str(objective.get("project") or ""),
