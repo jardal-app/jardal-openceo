@@ -517,14 +517,26 @@ class RateMonitor:
     # Launch gating
     # ------------------------------------------------------------------
 
-    async def can_launch(self, provider: str) -> bool:
-        """Check if we have enough quota to launch a new ticket on this provider."""
+    async def can_launch(
+        self, provider: str, *, honor_reserve: bool = True,
+    ) -> bool:
+        """Check if we have enough quota to launch a new ticket on this provider.
+
+        The reserves (``RATE_*_RESERVE_*``) belong to the Tier S family
+        (policy §28, TASK-2026-00148/00178): callers that are NOT that
+        family (Tier A/B admission, the Tier C primary link) honor them;
+        the Tier S cycle, its arbiter and the objective final review
+        consume into the reserve down to zero and pass
+        ``honor_reserve=False``. Real exhaustion still blocks everyone.
+        """
         # Gemini, OpenCode, GLM, Kimi – always available (no tracking)
         if provider not in ("codex", "claude", "muse"):
             return True
 
         status = await self.get_status(provider)
-        if provider == "codex":
+        if not honor_reserve:
+            reserve_5h = reserve_weekly = 0.0
+        elif provider == "codex":
             reserve_5h = self._settings.RATE_CODEX_RESERVE_5H
             reserve_weekly = self._settings.RATE_CODEX_RESERVE_WEEKLY
         elif provider == "muse":

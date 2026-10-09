@@ -273,6 +273,13 @@ class ConfigLoader:
                 f"{project}/project.yaml: {err}"
                 for err in validate_gates_config(dev)
             )
+        # dev.oracle_cmd / dev.oracle_timeout_minutes: how the orchestrator
+        # runs a frozen oracle (policy §24, TASK-2026-00178). Optional.
+        from agents.dev.tier_oracle import validate_oracle_config
+        errors.extend(
+            f"{project}/project.yaml: {err}"
+            for err in validate_oracle_config(dev)
+        )
         return errors
 
     def company_mandate_path(self) -> Path:

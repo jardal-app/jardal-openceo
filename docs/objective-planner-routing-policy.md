@@ -452,7 +452,8 @@ no dependency cycle
 no duplicate open ticket
 planning horizon
 required Tier-S justification
-Tier-C oracle eligibility
+why_not_c present for tier_a/tier_b, absent for tier_c
+oracle declaration validity (qualifying type; refs the ticket does not modify)
 same-tier replan prohibition after material failure
 ```
 
@@ -490,13 +491,38 @@ Quota is not the technical definition of a tier. Quota admission is handled sepa
 
 ## 19. Tier S — independent high assurance
 
-Choose `tier_s` when independent planning/challenge/review has clear expected value in reducing material residual risk.
+Choose `tier_s` when orchestrating several independent model families
+(independent plan, plan challenge, build, multi-family review,
+arbitration) is expected to produce a materially more correct result than
+one session can: a result as close to fault-free as possible, or
+materially fewer residual errors.
 
-Strong signals include critical security/auth boundaries, money movement/payment correctness, destructive migrations, high-impact data-integrity rules, critical multi-system incidents with unknown cause, durable architecture with expensive reversal, conflicting evidence on high-leverage decisions, subtle distributed invariants, or cross-repository compatibility with large blast radius.
+The criterion is the expected value of independent challenge, never a
+domain. No domain qualifies by itself and no domain is excluded: any work
+qualifies when the justification of §20 holds. The examples below are
+illustrative, not a closed list: critical security/auth boundaries, money
+movement/payment correctness, destructive migrations, high-impact
+data-integrity rules, critical multi-system incidents with unknown cause,
+durable architecture with expensive reversal, conflicting evidence on
+high-leverage decisions, subtle distributed invariants, cross-repository
+compatibility with large blast radius, privacy or compliance boundaries,
+public contracts whose breaking change is expensive, logic that fails
+silently (numerics, ordering, idempotency, concurrency) where the first
+plausible solution is often wrong, ambiguous specifications whose
+independent readings should be compared, and algorithm or strategy
+correctness where one wrong assumption compounds.
+
+An explicit request from the owner or the ticket for maximum assurance, a
+near fault-free result or multi-model orchestration is itself a valid
+reason to choose S: cite it.
 
 Tier S is not "big ticket mode".
 
 Do not choose S solely because many files change, a ticket is P1, the implementation is long, or premium quota is available.
+
+S is not rationed by percentage: when it is needed it is chosen and quota
+admission (§28) paces it. A really complex ticket is never forced into C,
+and a routine one is never promoted to S to spend capacity.
 
 ## 20. Mandatory Tier-S justification
 
@@ -507,7 +533,7 @@ why_consensus_is_needed
 why_single_session_is_insufficient
 ```
 
-The justification must identify the residual failure that independent model families or review stages are expected to catch.
+The justification must identify the residual failure that independent model families or review stages are expected to catch, or cite the explicit request for maximum assurance or multi-model orchestration made by the owner or the ticket (§19).
 
 If this cannot be stated concretely, do not select S.
 
@@ -580,13 +606,17 @@ ticket id
 
 During/after build:
 
-1. the orchestrator, not the builder, runs the qualifying oracle;
+1. the orchestrator, not the builder, runs the qualifying oracle: the executable types (`preexisting_tests`, `bug_reproduction`, `separate_ticket_tests`, `planner_executable_spec`) run through the project's `dev.oracle_cmd` as a required gate after the build, with the same retries as the other gates; `contract_or_schema` is hash-protected and verified by the gates that consume it; without `dev.oracle_cmd` the oracle is hash-protected only and the run records that limit;
 2. protected oracle references are checked against registered hashes;
 3. if the builder modifies a protected oracle reference, the qualifying oracle is invalidated and the gate fails;
 4. the ticket must not close on the basis of that modified oracle;
 5. builder-created tests may still run, but remain `builder_tests`.
 
 If implementation legitimately requires changing a contract/schema used as oracle, that artifact cannot simultaneously remain the frozen qualifying oracle. Re-plan or provide another independent oracle.
+
+A ref that the ticket is expected to modify (a test it must fix or extend, a schema it must change) is never declared as an oracle: freezing it would fail the very work requested.
+
+A `preexisting_tests` oracle must be green on the base branch to judge the work. If it is already red there, it cannot accept or reject anything: it stays hash-protected only and the run records that. Reproductions and specs written before the build are red at baseline by design and are never probed.
 
 ## 25. Tier C — default safe execution
 
@@ -604,6 +634,13 @@ difficulty never select a tier by themselves (§41).
 
 `tier_reason` for C states what the session owns, in one line.
 
+The C executor chain (muse, dsh, claudep) provides availability, not
+selection: when the primary link is unavailable or below its quota
+reserve (§28), the same C ticket runs on the next link. The link used is
+recorded per ticket (`executor_link`) and analyzed separately (§32); the
+fallback never changes the tier and never escalates (§29). Equivalence
+between links is measured through that record, not assumed.
+
 ## 26. Tier B — complex strong solving
 
 Choose `tier_b` when the problem is bounded, A is not required for
@@ -613,12 +650,15 @@ value, AND at least one of the following holds:
 ```text
 the solution needs significant interpretation (fuzzy rules, semantic
 judgment calls, compatibility trade-offs), OR
-verification is weak (builder-authored tests only, no usable oracle), OR
 the blast radius is significant while staying below S stakes
 ```
 
+Weak verification (builder-authored tests only, no usable oracle) is
+never a prong by itself: it only aggravates one of the two above, and
+the `why_not_c` must name that interpretation or blast radius.
+
 Typical B cases include semantic refactors where errors pass local
-tests, complex business logic with builder-authored tests only,
+tests, business logic whose rules need interpretation,
 data/schema migrations with compatibility constraints, concurrency or
 performance work, known-subsystem bugs needing interpretation, or
 integration logic where correctness requires judgment.
@@ -636,8 +676,9 @@ Apply in this order:
 
 ```text
 1. S CHECK
-   Would independent planning/challenge/review materially reduce
-   high-impact residual risk?
+   Would orchestrating independent model families materially improve
+   correctness (any domain, or the owner/ticket asks for maximum
+   assurance)?
    YES -> tier_s (justify per §20)
 
 2. A CHECK
@@ -660,7 +701,12 @@ needs nothing beyond specified work.
 
 After technical classification, deterministic admission control protects scarce Tier-S capacity.
 
-Configuration must define reservations for both scarce accounts/families used by Tier S: Claude and Codex.
+Configuration must define reservations for the scarce accounts/families used by Tier S: Claude and Codex, and Muse, which carries the Tier S builder and closer, the objective planner and the CEO review and is shared with the C primary link.
+
+The reservations are quota for the Tier S family, with a fixed semantic:
+
+- honored by Tier A/B admission and by the Tier C primary link (below its reserve the same C ticket runs on the next chain link, §25);
+- consumed down to zero by Tier S: its cycle, its arbiter and the objective final-review arbiter. Their quota gate never applies the reservation; only real exhaustion parks them.
 
 A Tier A or Tier B ticket that would invade its configured reservation becomes:
 
@@ -751,6 +797,7 @@ oracle_type
 tier_reason
 work_type
 project
+executor_link
 ```
 
 Core metric:
@@ -762,7 +809,11 @@ late_failure_rate =
   attributable Tier-C tickets closed
 ```
 
-Analyze it by oracle type, tier reason, work type, and project.
+Analyze it by oracle type, tier reason, work type, executor link, and project.
+
+The executor link (muse, dsh, claudep) is what lets the owner contrast the
+primary link with the fallbacks; without it a late failure cannot be
+attributed to the model that built the work.
 
 Pay special attention to `planner_executable_spec` because Muse planner and Muse builder are model-correlated.
 
@@ -913,18 +964,33 @@ no open discovery, no S stakes
 they freeze before the build (§24); their absence would not move it
 to B without a `why_not_c`.
 
-### Complex business logic with builder-authored tests only
+### Business logic whose rules need interpretation
 
 ```text
 bounded problem
 non-trivial semantics
-builder will write tests
 correctness needs interpretation of fuzzy rules
+the builder will write the tests
 ```
 
 `tier_b`, with `why_not_c` naming the interpretation risk (e.g. "a
-misread rule ships wrong amounts; only the builder's own tests would
-catch it"). Without that statement, C.
+misread rule ships wrong amounts"). Without that statement, C. The
+builder-authored tests do not move the ticket: the same ticket with plain,
+specified rules is C.
+
+### Silent-failure logic where independent readings should be compared
+
+```text
+bounded module; this ticket moves no money and touches no auth
+logic that fails silently (ordering, rounding, idempotency)
+the first plausible solution is often wrong
+the owner asks for a near fault-free result
+```
+
+`tier_s`: the justification is the value of independent plans and review
+(`why_consensus_is_needed`: "independent families are expected to catch
+the ordering and rounding assumptions one session would bake in"), not the
+domain. Any domain reaches S this way.
 
 ### Bounded integration with known rules, no prior tests
 
@@ -955,7 +1021,8 @@ Never:
 - automatically staircase C -> B -> A -> S;
 - retry unchanged materially failed ticket in same tier;
 - classify builder-authored tests as an independent oracle;
-- select B for a missing oracle alone, without a why_not_c;
+- select B for a missing oracle or weak verification alone;
+- limit Tier S to a fixed list of domains, or ration it by percentage;
 - describe any tier as cheap, free, economical, or weaker;
 - allow builder to rewrite a frozen qualifying oracle;
 - silently degrade A/B to C due to quota;
@@ -990,8 +1057,11 @@ You run as one fresh Muse Code / Muse Spark 1.3 Contributor headless planning cy
 7. DEV tiers apply only when target_agent == dev.
 
 8. DEV routing order:
-   S: independent challenge materially reduces high-impact residual risk
-      (justify per §20: the pair already states why one session is not enough).
+   S: orchestrating several independent model families is expected to give
+      a materially more correct result, in any domain (money, security,
+      data, algorithms, contracts...) or when the owner/ticket asks for
+      maximum assurance; justify per §20: the pair already states why one
+      session is not enough.
    A: discovering truth/root cause/architecture is the dominant difficulty
       (justify with why_not_c).
    B: really complex single-session work per §26

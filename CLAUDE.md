@@ -128,6 +128,7 @@ cd openceo-voice-android
 
 ### Dev Tier S (Consenso Crítico Multi-IA)
 - Se activa enviando `"coding_tool": "tier_s"` en la raíz del ticket o dentro de `params` (routing per-task; `dev.coding_tool` en `project.yaml` está obsoleto).
+- **Criterio de selección (dueño, 2026-10-09)**: S se elige cuando orquestar varios modelos independientes dará un resultado materialmente más correcto, en **cualquier dominio**. Dinero, pagos y auth son ejemplos, no la lista; un pedido explícito de máxima garantía, de casi cero fallas o de orquestación multi-modelo también basta. Sin cupo por porcentaje (política §19–§20).
 - Orquesta: Planner (`claudej`), Plan Reviewer (`codexj` no bloqueante), Builder y Closer (procesos one-shot `musej`), árbitro (`claudej`), y pool de revisores con quorum por familias en 2 rondas (slots vigentes en `config_loader.py`).
 
 ---

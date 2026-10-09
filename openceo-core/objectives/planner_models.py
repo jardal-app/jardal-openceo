@@ -131,7 +131,9 @@ class PlannedTicket(BaseModel):
 
     # Required when coding_tool is tier_a or tier_b (policy §§21/26):
     # what breaks if the default tier executes this ticket. Accepted
-    # (not required) for tier_s and tier_c; rejected for non-dev.
+    # (not required) for tier_s, whose pair already answers it (§20);
+    # rejected for tier_c (the default needs no such statement, so one
+    # means the planner meant A/B) and for non-dev.
     why_not_c: str | None = None
 
     # Tier S v2 §8.4 carry-over (not in the §B schema): pre-existing inbox
@@ -202,10 +204,15 @@ class PlannedTicket(BaseModel):
                     f"{self.coding_tool.value} requires why_not_c: name "
                     "what breaks if the default tier executes it")
 
-        # Tier C is the default (policy §25): no oracle required. A
-        # declared oracle of any type is evidence; only qualifying
-        # types freeze (§24), which the orchestrator enforces, not this
-        # schema.
+        # Tier C is the default (policy §25): no oracle and no
+        # justification required. A declared oracle of any type is
+        # evidence; only qualifying types freeze (§24), which the
+        # orchestrator enforces, not this schema. A why_not_c on a C
+        # ticket contradicts itself: the planner meant tier_a/tier_b.
+        if self.coding_tool == DevTier.TIER_C and self.why_not_c:
+            raise ValueError(
+                "tier_c is the default and carries no why_not_c: choose "
+                "tier_a/tier_b for it or drop the statement")
 
         return self
 

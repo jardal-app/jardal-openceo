@@ -18,9 +18,11 @@ from .loose_tier import (ASSIGNED_BY, LooseTierDecision, classify_loose_tier,
                           project_money_routing, record_loose_tier_decision)
 from .routing import (ROUTING_MISSING_REASON, TIER_C_CHAIN, RoutingDecision,
                       resolve_coding_tool, select_tier_c_link)
-from .tier_oracle import freeze_oracle, verify_oracle
+from .tier_oracle import freeze_oracle, oracle_run_plan, verify_oracle
 from .tier_s.cycle import TierSCycle
-from .tier_s.gates import baseline_blocked, gates_failed, handoff_gates_section, load_gates, run_gates
+from .tier_s.gates import (baseline_blocked, gates_failed, handoff_gates_section,
+                         load_gates, run_gate, run_gates)
+from .tier_s.models import GateSpec
 from orchestration.inbox import InMemoryInboxStore, MongoInboxStore
 from orchestration.knowledge import detect_prompt_lang, with_preamble
 from orchestration.live import AllowAllQuota, ProcessExecutor, RateMonitorQuota
@@ -145,6 +147,10 @@ class _SimpleBranch:
     base_sha: str
     ref: str
     oracle_frozen: dict[str, Any] | None = None
+    #: Why a frozen ``preexisting_tests`` oracle is NOT run after the build:
+    #: it was already red on the base branch, so it can neither accept nor
+    #: reject this work (TASK-2026-00178). "" = it runs as a gate.
+    oracle_baseline_red: str = ""
 
 
 def _task_with_loose_tier(
@@ -352,6 +358,17 @@ class DevSessionManager:
             task.get("params"),
             code_result.review_links,
         )
+        if code_result.executor_link:
+            # The Tier C chain link that ran this ticket (policy §25/§32):
+            # the chain is availability, not selection, so the link is
+            # recorded per ticket. The funnel replaces ``params``, so start
+            # from the full set (never a partial dict).
+            params = dict(output.params if output.params is not None
+                          else (task.get("params") or {}))
+            params["executor_link"] = code_result.executor_link
+            output.params = params
+            await self._record_tier_c_event(
+                task, "executor", executor_link=code_result.executor_link)
         if code_result.waiting_reason:
             if branch is not None:
                 self._drop_simple_branch(branch)
@@ -459,9 +476,27 @@ class DevSessionManager:
             if isinstance(task.get("params"), dict) else {}
         oracle_frozen = freeze_oracle(
             repo, base_sha, (params or {}).get("oracle"), ref)
+        # A preexisting oracle must be green on the base to judge the work.
+        # Red there (an environment problem, or a test cited for the very
+        # failure the ticket fixes) it only stays hash-protected: parking
+        # the ticket would stall the autonomy and failing it after the
+        # build would discard the work. Other types are red at baseline by
+        # design (a reproduction, a spec written before the build).
+        oracle_baseline_red = ""
+        if oracle_frozen is not None \
+                and oracle_frozen.get("oracle_type") == "preexisting_tests":
+            run, _ = oracle_run_plan(oracle_frozen, dev_cfg)
+            if run is not None:
+                probe = run_gate(repo, GateSpec(
+                    name="oracle", cmd=run.cmd,
+                    timeout_minutes=run.timeout_minutes, required=True))
+                if probe.status != "pass":
+                    oracle_baseline_red = probe.status + (
+                        f" ({probe.detail})" if probe.detail else "")
         return _SimpleBranch(repo=repo, branch=branch, base=base,
                              base_sha=base_sha, ref=ref,
-                             oracle_frozen=oracle_frozen)
+                             oracle_frozen=oracle_frozen,
+                             oracle_baseline_red=oracle_baseline_red)
 
     def _drop_simple_branch(self, branch: _SimpleBranch) -> None:
         self._simple_git(branch.repo, "checkout", "-q", branch.base)
@@ -508,6 +543,54 @@ class DevSessionManager:
         return sorted({name for name in names
                        if name != ".tier-s" and not name.startswith(".tier-s/")})
 
+    async def _oracle_integrity(
+        self,
+        task: dict[str, Any],
+        project_config: dict[str, Any],
+        tool: CodingTool,
+        branch: _SimpleBranch,
+        output: DevExecutionOutput,
+        *,
+        recheck: bool = False,
+    ) -> DevExecutionOutput | None:
+        """Verify the frozen oracle hashes (policy §24).
+
+        ``None`` when intact or when nothing was frozen. When the builder
+        touched a protected ref, the material failure (policy §29) is
+        returned. ``recheck`` is the verification after a gate-retry turn:
+        it only reports a failure, so a clean recheck adds no step. The
+        failure names where the oracle came from: a ref the loose
+        classifier read out of the ticket text is the likelier false
+        positive, and the owner should see that at a glance.
+        """
+        if branch.oracle_frozen is None:
+            return None
+        tampered = verify_oracle(branch.repo, branch.oracle_frozen)
+        if tampered:
+            names = ", ".join(tampered)
+            params = task.get("params") if isinstance(task.get("params"), dict) else {}
+            origin = ("frozen from the ticket text by the loose classifier"
+                      if (params or {}).get("tier_assigned_by")
+                      else "declared by the planner")
+            output.steps.append(self._step(
+                "oracle", "failed",
+                f"protected oracle refs modified by builder: {names} ({origin})"))
+            if tool == CodingTool.TIER_C:
+                await self._record_tier_c_event(task, "cycle_failure")
+            return await self._material_simple_failure(
+                task, project_config, tool, branch,
+                f"oracle modified: {names} ({origin})",
+                prior_steps=output.steps, params_base=output.params)
+        if not recheck:
+            protected = sum(1 for item in
+                            branch.oracle_frozen.get("refs", [])
+                            if isinstance(item, dict) and item.get("resolved"))
+            output.steps.append(self._step(
+                "oracle", "ok",
+                f"{protected} protected oracle refs intact "
+                f"({branch.oracle_frozen.get('oracle_type')})"))
+        return None
+
     async def _finish_simple_tool(
         self,
         task: dict[str, Any],
@@ -522,7 +605,11 @@ class DevSessionManager:
         exclude = list(dev_cfg.get("budget_exclude", []) or [])
         repo = branch.repo
         if branch.oracle_frozen is not None:
-            params = dict(output.params or {})
+            # The funnel replaces ``params``: build on the FULL set, never
+            # on a partial dict (``output.params`` is None when no review
+            # link changed; TASK-2026-00178).
+            params = dict(output.params if output.params is not None
+                          else (task.get("params") or {}))
             params["oracle_frozen"] = branch.oracle_frozen
             output.params = params
 
@@ -541,26 +628,10 @@ class DevSessionManager:
             output.waiting_reason = "needs_owner: executor produced no changes"
             return output
 
-        if branch.oracle_frozen is not None:
-            tampered = verify_oracle(repo, branch.oracle_frozen)
-            if tampered:
-                names = ", ".join(tampered)
-                output.steps.append(self._step(
-                    "oracle", "failed",
-                    f"protected oracle refs modified by builder: {names}"))
-                if tool == CodingTool.TIER_C:
-                    await self._record_tier_c_event(task, "cycle_failure")
-                return await self._material_simple_failure(
-                    task, project_config, tool, branch,
-                    f"oracle modified: {names}",
-                    prior_steps=output.steps)
-            protected = sum(1 for item in
-                            branch.oracle_frozen.get("refs", [])
-                            if isinstance(item, dict) and item.get("resolved"))
-            output.steps.append(self._step(
-                "oracle", "ok",
-                f"{protected} protected oracle refs intact "
-                f"({branch.oracle_frozen.get('oracle_type')})"))
+        tampered_out = await self._oracle_integrity(
+            task, project_config, tool, branch, output)
+        if tampered_out is not None:
+            return tampered_out
 
         try:
             specs = load_gates(dev_cfg)
@@ -569,6 +640,23 @@ class DevSessionManager:
             output.status = TaskStatus.WAITING
             output.waiting_reason = f"config: gates: {exc}"
             return output
+        # Policy §24: the orchestrator, not the builder, RUNS the frozen
+        # oracle -- a required gate after the build, with the gates'
+        # retries. Not at baseline: a bug reproduction fails there by
+        # design. Without ``dev.oracle_cmd`` the limit is stated, never
+        # silent (TASK-2026-00178).
+        oracle_run, oracle_note = oracle_run_plan(branch.oracle_frozen, dev_cfg)
+        if oracle_run is not None and branch.oracle_baseline_red:
+            oracle_run, oracle_note = None, (
+                "frozen oracle was already red on the base branch "
+                f"({branch.oracle_baseline_red}): it cannot accept or reject "
+                "this work, so it stays hash-protected only")
+        if oracle_run is not None:
+            specs = [*specs, GateSpec(
+                name="oracle", cmd=oracle_run.cmd,
+                timeout_minutes=oracle_run.timeout_minutes, required=True)]
+        elif oracle_note:
+            output.steps.append(self._step("oracle_run", "skipped", oracle_note))
         retries = int(budgets.get("gate_retries", 2) or 0)
         attempt = 0
         while True:
@@ -587,14 +675,22 @@ class DevSessionManager:
                 return await self._material_simple_failure(
                     task, project_config, tool, branch,
                     f"gates failed after {retries} retries: {names}",
-                    prior_steps=output.steps)
+                    prior_steps=output.steps, params_base=output.params)
             tail = "\n\n".join(
                 f"[{item.name}] {item.status}: {item.detail}\n{item.output_tail}"
                 for item in failed)
             await self._simple_followup(
                 tool, project_config, repo,
                 f"Gates failed:\n{tail[:6000]}\nFix the code (no commits), "
-                "keep HANDOFF.md truthful.")
+                "keep HANDOFF.md truthful. Never edit the frozen oracle "
+                "files: fix the code under test.")
+            # The retry saw the failing oracle's output: re-verify its hashes
+            # before running the gates again (a "fix" by editing the test is
+            # the oracle being redefined).
+            tampered_out = await self._oracle_integrity(
+                task, project_config, tool, branch, output, recheck=True)
+            if tampered_out is not None:
+                return tampered_out
             attempt += 1
 
         files_n, lines_n = self._simple_diff_sizes(branch, exclude)
@@ -606,7 +702,7 @@ class DevSessionManager:
                 task, project_config, tool, branch,
                 f"size {files_n} files/{lines_n} lines over budget "
                 f"({files_budget}/{brake})",
-                prior_steps=output.steps)
+                prior_steps=output.steps, params_base=output.params)
 
         handoff_path = repo / ".tier-s" / "HANDOFF.md"
         handoff = ""
@@ -747,6 +843,7 @@ class DevSessionManager:
         branch: _SimpleBranch,
         cause: str,
         prior_steps: list[dict[str, Any]] | None = None,
+        params_base: dict[str, Any] | None = None,
     ) -> DevExecutionOutput:
         """Material simple-tier failure (policy §29, replaces F5 escalation).
 
@@ -787,8 +884,13 @@ class DevSessionManager:
             except Exception:
                 logger.warning("material-failure comment failed for %s",
                                task_id, exc_info=True)
-        params = dict(task.get("params") or {}) \
-            if isinstance(task.get("params"), dict) else {}
+        # ``params_base`` carries what this run already added (executor_link,
+        # oracle_frozen); the funnel replaces params, so keep it whole.
+        if isinstance(params_base, dict):
+            params = dict(params_base)
+        else:
+            params = dict(task.get("params") or {}) \
+                if isinstance(task.get("params"), dict) else {}
         if branch.oracle_frozen is not None:
             params["oracle_frozen"] = branch.oracle_frozen
         params["material_failure"] = {
@@ -1125,6 +1227,16 @@ class DevSessionManager:
         """
         return await create_internal_ticket(self._task_service, payload)
 
+    @staticmethod
+    def _executor_link(executor: "TierExecutor") -> str | None:
+        """Tier C chain link of ``executor`` (``muse``/``dsh``/``claudep``).
+
+        None for tiers without a chain (A/B): only C degrades to another
+        link, and that is what policy §25/§32 records per ticket.
+        """
+        label = str(executor.label or "")
+        return label.split(":", 1)[1] if label.startswith("tier_c:") else None
+
     async def _step_code(
         self,
         task: dict[str, Any],
@@ -1164,6 +1276,7 @@ class DevSessionManager:
                 prompt=prompt,
                 summary="",
                 error=detail,
+                executor_link=self._executor_link(executor),
             )
 
         text = output or "ok"
@@ -1173,6 +1286,7 @@ class DevSessionManager:
             step=self._step("code", "ok", f"Coding CLI finished ({executor.label})"),
             prompt=prompt,
             summary=summary,
+            executor_link=self._executor_link(executor),
             review_links=review_links,
         )
 
@@ -1285,6 +1399,13 @@ class DevSessionManager:
         return availability
 
     async def _muse_available(self) -> bool:
+        """Is the Tier C primary link (muse) launchable?
+
+        Honors the Muse reserve on purpose (policy §28): Muse also carries
+        the Tier S builder/closer, the objective planner and the CEO
+        review, so below its reserve the same C ticket runs on the next
+        chain link instead. Tier S itself consumes into the reserve.
+        """
         if self._rate_monitor is None:
             return True
         try:
@@ -1569,6 +1690,8 @@ class CodingStepResult:
     waiting_reason: str | None = None
     resume_at: datetime | None = None
     review_links: ReviewLinksExtraction = field(default_factory=lambda: ReviewLinksExtraction([], False))
+    #: Tier C chain link that ran the step (policy §25/§32), None otherwise.
+    executor_link: str | None = None
 
 
 @dataclass

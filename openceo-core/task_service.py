@@ -3021,10 +3021,19 @@ class TaskService:
                     }
                 ]
                 updates["phase_index"] = 0
-            # Persist modified files into params to keep task document stable
+            # Persist modified files into params to keep task document stable.
+            # The dev session's own additions (loose-tier assignment, frozen
+            # oracle, executor link, material failure...) travel in
+            # ``graph_out["params"]``: merge them over the ticket's params.
+            # Rebuilding from ``task`` alone discarded them on every run that
+            # touched files (TASK-2026-00178; live ticket #196 kept only the
+            # planner keys).
             modified_files = graph_out.get("modified_files")
             if modified_files:
                 params = dict(task.get("params") or {})
+                session_params = graph_out.get("params")
+                if isinstance(session_params, dict):
+                    params.update(session_params)
                 params["modified_files"] = modified_files
                 updates["params"] = params
 
