@@ -15,7 +15,7 @@ La direccion de arquitectura asigna el trabajo empresarial y la contabilidad a E
 | Arquitectura extensa, protocolos y ejemplos del README anterior | [referencia completa](docs/ARCHITECTURE_REFERENCE_2026.md) |
 | Configurar y arrancar el backend | [docs/SETUP.md](docs/SETUP.md) |
 | Configurar proyectos y providers | `projects/*/project.yaml` (validado por `config_loader.py`; los proyectos existentes son la plantilla) |
-| Finance y ERPNext | [decision](docs/decision-2026-09-19-sistema-financiero-erpnext.md), [contrato del adapter](docs/finance-erpnext-integration-contract.md) y [propuesta de instalacion](ERPNEXT.md) |
+| Finance y ERPNext | [decision](../jardal-knowledge/vault/projects/jardal/jardal-openceo/decisions/2026-09-19-erpnext-financial-record.md), [contrato del adapter](docs/finance-erpnext-integration-contract.md) y [propuesta de instalacion](ERPNEXT.md) |
 | Horizon y su contexto personal | [jardal-horizon/README.md](jardal-horizon/README.md) |
 | Voz y app Android | [VOICE_GUIDE.md](VOICE_GUIDE.md), [openceo-voice/README.md](openceo-voice/README.md) y [Android](openceo-voice-android/README.md) |
 | Guia visual del dashboard | [DESIGN.md](DESIGN.md) |

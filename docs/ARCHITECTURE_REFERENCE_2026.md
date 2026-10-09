@@ -894,7 +894,7 @@ The CEO acts autonomously under a company mandate approved once by the owner (20
 
 > **Single company Objective, single planner (amends "One engine, two scopes", 2026-10-06, TASK-2026-00111).** Identity lives in ERPNext: a group Task with real children (`parent_task`) and `depends_on`. Mongo `objectives` holds execution state only (capsule, cycles, replans, final review, telemetry) — never a business backlog. One global planner (Muse Code headless, one fresh run per cycle, `PlannerResult` validated with Pydantic + deterministic rules) is the only component that decides which tickets exist for an Objective. A deterministic dispatcher (0 tokens) launches ready tickets on events, with a single conditional backup trigger while tickets wait for a slot. Work is persisted with `next_run_at` and awakened reactively, never by per-minute database sweeps.
 
-Normative sources: vault decision `decisions/2026-10-06-objetivo-unico-ceo-autonomo`, `openceo-core/objectives/routing_policy.md` (runtime policy the planner reads), `docs/decision-2026-10-05-planner-objetivos-muse.md` (ADR). Behaviour the code does not have yet is marked `pendiente: TASK-2026-00NNN` below.
+Normative sources: vault decision `decisions/2026-10-06-objetivo-unico-ceo-autonomo` (why + history), `openceo-core/objectives/routing_policy.md` (runtime policy the planner reads; sole planner normative). Behaviour the code does not have yet is marked `pendiente: TASK-2026-00NNN` below.
 
 ### Glossary
 
@@ -1656,7 +1656,6 @@ openceo/
 │   └── systemd/
 ├── docs/
 │   ├── OPENCEO_DIRECTION.md          # Domain ownership and integration direction
-│   ├── decision-2026-10-05-planner-objetivos-muse.md
 │   ├── finance-erpnext-integration-contract.md
 │   └── SETUP.md
 ├── openceo-core/                     # Backend: FastAPI + OpenWebUI-compatible API + MCP

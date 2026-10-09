@@ -1,1 +1,0 @@
-../openceo-core/objectives/routing_policy.md

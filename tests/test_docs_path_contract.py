@@ -34,7 +34,6 @@ DOCS = [
     "CLAUDE.md",
     "docs/ARCHITECTURE_REFERENCE_2026.md",
     "openceo-core/objectives/routing_policy.md",
-    "docs/decision-2026-10-05-planner-objetivos-muse.md",
 ]
 
 #: Prefixes that never resolve inside this repo (temporal trees, vault).
