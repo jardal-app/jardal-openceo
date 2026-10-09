@@ -25,9 +25,11 @@ SIGNALS: dict[str, str] = {
     "objective_closed": "OBJECTIVE_CLOSED",  # F6
 }
 
-#: Run lifecycle (design §15.3).
+#: Run lifecycle (design §15.3). ``superseded``: a newer run of the same
+#: task (or the task's own terminal status) closed it (TASK-2026-00162).
 RUN_STATUSES: tuple[str, ...] = (
     "running", "waiting", "completed", "failed", "canceled", "converted",
+    "superseded",
 )
 
 #: Typed wait reasons (design §14.2). ``review_quorum`` is recorded here but

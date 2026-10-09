@@ -39,6 +39,7 @@ from orchestration import findings as findings_mod
 from orchestration import inbox as inbox_mod
 from orchestration import knowledge as knowledge_mod
 from orchestration import review as review_mod
+from orchestration.live import TIMEOUT_RETURNCODE
 from objectives import planner_models as planner_mod
 
 
@@ -588,6 +589,9 @@ async def convert_ticket(
 # ---------------------------------------------------------------------------
 
 PLANNER_RESULT_FILE = "PLANNER_RESULT.json"
+
+#: Closer verdicts file (§16.8), read from the scratch root first.
+CLOSURE_FILE = "OBJECTIVE_CLOSURE.md"
 
 #: Orchestrator-wide scratch dir inside the project repo (TASK-2026-00136).
 #: Shared with the Tier S executor files (PLAN, reviews, HANDOFF) and the
@@ -1650,7 +1654,7 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
     anchor = objective.get("anchor") or {}
     capsule = (objective.get("capsule") or {}).get("text", "")
     since = objective.get("last_final_review_sha") or objective.get("base_sha")
-    head = _git(env.repo, "rev-parse", "HEAD").strip()
+    head = _integration_head(env, objective_id)
     diff_stat = _git(env.repo, "diff", "--stat", since or "HEAD", head)
     files = sorted({name for paths in
                     (objective.get("tickets_files") or {}).values()
@@ -1672,18 +1676,26 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
     )
     plan = await review_mod.select_round(
         env.pool, env.slots, 3, builder_family="muse")
-    outcomes = await asyncio.gather(*[
-        _run_final_reviewer(env, slot, request, head, objective)
-        for slot in [*plan.reviewers, *plan.extras]
-    ])
-    valid = {item["slot"]: item["valid"] for item in outcomes}
-    if not review_mod.quorum_met(valid, list(plan.reviewers), "muse", 2):
+
+    async def run_one(
+        slot: review_mod.ReviewSlot,
+        attempt: int,
+        previous: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        return await _run_final_reviewer(
+            env, slot, request, head, objective, attempt=attempt,
+            previous=previous, review_no=reviews + 1)
+
+    # Same round machinery as the ticket cycle (TASK-2026-00162): relief
+    # slots plus one retry per slot before the objective parks.
+    result = await review_mod.run_quorum_round(
+        env.pool, env.slots, plan, run_one, builder_family="muse",
+        quorum=int(env.review_cfg.get("quorum", 2)))
+    if not result.met:
         return await _objective_park(
             env, objective, "no_quorum",
-            "final review without quorum (pool exhausted)")
-    verdicts: list[Any] = []
-    for item in outcomes:
-        verdicts.extend(item["verdicts"])
+            f"final review without quorum: {result.summary() or 'empty pool'}")
+    verdicts = result.verdicts
     consolidated = findings_mod.consolidate(verdicts)
     scratch = objective_scratch(env.repo, objective_id)
     scratch.mkdir(parents=True, exist_ok=True)
@@ -1700,74 +1712,136 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
     return closed
 
 
+def _integration_head(env: ObjectiveEnv, objective_id: str) -> str:
+    """Final review target: the objective's integration ref (TASK-2026-00162).
+
+    Never the live checkout's HEAD: the service repo may sit on any branch
+    (the F7 pilot reviewed unmerged scaffolding without the deliverable).
+    Children merge into ``objective/<id>`` under ``auto_merge=false`` and
+    into the base branch otherwise (§12).
+    """
+    refs = [] if env.auto_merge else [f"objective/{objective_id}"]
+    refs.append(env.base_branch or "main")
+    for ref in refs:
+        sha = _git(env.repo, "rev-parse", "--verify", "--quiet",
+                   f"{ref}^{{commit}}").strip()
+        if sha:
+            return sha
+    return _git(env.repo, "rev-parse", "HEAD").strip()
+
+
 async def _run_final_reviewer(
     env: ObjectiveEnv,
     slot: review_mod.ReviewSlot,
     request: str,
     head_sha: str,
     objective: Mapping[str, Any],
+    attempt: int = 1,
+    previous: Mapping[str, Any] | None = None,
+    review_no: int = 0,
 ) -> dict[str, Any]:
-    outcome: dict[str, Any] = {"slot": slot.label, "valid": False,
-                               "verdicts": [], "reason": ""}
+    """One final-review attempt; every attempt lands in ``task_reviews``."""
+    outcome = review_mod.new_outcome(slot, attempt)
+    suffix = f"-a{attempt}" if attempt > 1 else ""
     try:
         worktree = await asyncio.to_thread(
             review_mod.create_worktree, env.repo, head_sha,
-            f"final-{slot.label}")
+            f"final-{slot.label}{suffix}")
     except RuntimeError as exc:
-        outcome["reason"] = str(exc)[:200]
+        outcome.update(kind="worktree", reason=str(exc)[:200])
+        await _persist_final_review(env, objective, outcome, review_no)
         return outcome
     try:
         (worktree / "OBJECTIVE_REVIEW_REQUEST.md").write_text(
             request, encoding="utf-8")
         before = await asyncio.to_thread(
             review_mod.worktree_snapshot, worktree)
-        timeout_s = int(env.review_cfg.get(
-            "reviewer_timeout_minutes", 15)) * 60
+        timeout_s = review_mod.slot_timeout_s(
+            slot, env.review_cfg.get("reviewer_timeout_minutes", 15),
+            previous)
         result = await env.executor.run(
             f"review:{slot.label}",
             review_mod.reviewer_prompt(
                 slot.label, "OBJECTIVE_REVIEW_REQUEST.md",
-                "objective_final", 0, repo=worktree),
+                "objective_final", 0, repo=worktree,
+                retry=review_mod.retry_note(previous)),
             worktree, timeout_s)
+        outcome.update(elapsed_s=float(result.elapsed_s or 0.0),
+                       exit_code=result.returncode)
         after = await asyncio.to_thread(
             review_mod.worktree_snapshot, worktree)
         if before and after and before != after:
-            outcome["reason"] = "write_attempt"
+            outcome.update(kind="write_attempt", reason="write_attempt")
+            await _persist_final_review(env, objective, outcome, review_no)
             return outcome
         text = (result.output_tail or "").strip()
         if result.returncode != 0:
-            action, patch = review_mod.classify_slot_error(text, slot)
-            if action in {"cooling_down", "disabled"}:
-                await env.slots.set_slot(slot.label, patch)
-            outcome["reason"] = f"slot error ({action})"
+            if (result.returncode == TIMEOUT_RETURNCODE
+                    or (result.usage or {}).get("timeout")):
+                outcome.update(
+                    kind="timeout",
+                    reason=text[:200] or f"timeout after {timeout_s}s")
+            else:
+                action, patch = review_mod.classify_slot_error(text, slot)
+                if action in {"cooling_down", "disabled"}:
+                    await env.slots.set_slot(slot.label, patch)
+                outcome.update(
+                    kind=(action if action in {"cooling_down", "disabled"}
+                          else "slot_error"),
+                    reason=f"slot error ({action}): {text[:200]}")
+            await _persist_final_review(env, objective, outcome, review_no)
             return outcome
         try:
             raw = findings_mod.parse_report(text)
         except findings_mod.ReportMalformed as exc:
-            outcome["reason"] = f"malformed: {exc}"
+            outcome.update(kind="malformed", reason=f"malformed: {exc}")
+            await _persist_final_review(env, objective, outcome, review_no)
             return outcome
         base = str(objective.get("base_sha") or head_sha)
         acceptance = (objective.get("anchor") or {}).get("acceptance", [])
         verdicts = await asyncio.to_thread(
             findings_mod.verify_report, raw, env.repo, head_sha, base,
             slot.label, slot.family, acceptance)
-        outcome["verdicts"] = verdicts
-        outcome["valid"] = True
-        if env.reviews is not None:
-            try:
-                await env.reviews.create_review(findings_mod.review_document(
-                    review_id=f"rev-{uuid.uuid4().hex[:12]}",
-                    task_id=str(objective.get("conversion_source_task_id") or ""),
-                    run_id=f"final-{objective.get('objective_id')}",
-                    scope="objective_final", round_no=0,
-                    slot=slot.label, family=slot.family, valid=True,
-                    verdicts=verdicts))
-            except Exception:
-                pass
+        outcome.update(verdicts=verdicts, valid=True, kind="valid")
+        await _persist_final_review(env, objective, outcome, review_no)
         return outcome
     finally:
         await asyncio.to_thread(
             review_mod.remove_worktree, env.repo, worktree)
+
+
+async def _persist_final_review(
+    env: ObjectiveEnv,
+    objective: Mapping[str, Any],
+    outcome: Mapping[str, Any],
+    review_no: int,
+) -> None:
+    """Append one final-review attempt to ``task_reviews``, valid or not.
+
+    Invalid attempts used to vanish with ``no_quorum`` (TASK-2026-00162):
+    the reason per slot (timeout/malformed/error) is now on record.
+    """
+    if env.reviews is None:
+        return
+    try:
+        await env.reviews.create_review(findings_mod.review_document(
+            review_id=f"rev-{uuid.uuid4().hex[:12]}",
+            task_id=str(objective.get("conversion_source_task_id") or ""),
+            run_id=f"final-{objective.get('objective_id')}",
+            scope="objective_final", round_no=0,
+            slot=str(outcome.get("slot") or ""),
+            family=str(outcome.get("family") or ""),
+            valid=bool(outcome.get("valid")),
+            verdicts=list(outcome.get("verdicts") or []),
+            invalid_reason=str(outcome.get("reason") or ""),
+            meta={"attempt": int(outcome.get("attempt") or 1),
+                  "kind": str(outcome.get("kind") or ""),
+                  "elapsed_s": float(outcome.get("elapsed_s") or 0.0),
+                  "exit_code": outcome.get("exit_code"),
+                  "final_review": review_no,
+                  "project": objective.get("project")}))
+    except Exception:
+        pass  # telemetry persistence never fails a review
 
 
 async def _inbox_final_finding(
@@ -1794,14 +1868,17 @@ async def _inbox_final_finding(
 
 def _closure_judge_prompt(
     count: int, goal: str, capsule: str, repo: Path,
+    findings_path: str = "OBJECTIVE_FINDINGS.md",
 ) -> str:
+    # Exact paths (TASK-2026-00162): the scratch holds one findings file
+    # per objective, and a bare name let the closer read the wrong one.
     return knowledge_mod.with_preamble(
-        "Judge the objective final findings in OBJECTIVE_FINDINGS.md "
-        f"({count} findings). They are verified: they point at "
-        "real code.\n"
+        f"Judge the objective final findings in {findings_path} "
+        f"({count} findings, full text: problem, fix, quotes). They are "
+        "verified: they point at real code.\n"
         f"Anchor goal: {goal[:500]}\n"
         f"Capsule contracts:\n{capsule[:2000]}\n"
-        "Write OBJECTIVE_CLOSURE.md with one line per finding: "
+        f"Write {SCRATCH_DIRNAME}/{CLOSURE_FILE} with one line per finding: "
         "`F<n>: REAL — <why>` or `F<n>: FALSO — <verifiable technical "
         f"reason>`. Then emit CLOSURE_READY in {SCRATCH_DIRNAME}/status.",
         repo, "en")
@@ -1809,7 +1886,7 @@ def _closure_judge_prompt(
 
 def _closure_retry_prompt(missing: Sequence[int], repo: Path) -> str:
     return knowledge_mod.with_preamble(
-        "OBJECTIVE_CLOSURE.md is incomplete: judge each of "
+        f"{SCRATCH_DIRNAME}/{CLOSURE_FILE} is incomplete: judge each of "
         f"{['F' + str(index) for index in missing]} exactly once "
         "(REAL/FALSO), then emit CLOSURE_READY.", repo, "en")
 
@@ -1827,16 +1904,27 @@ async def _close_objective(
     timeout_s = int(env.timeouts.get("closer", 15)) * 60
     if not consolidated:
         return await _finish_objective(env, objective)
+    scratch = objective_scratch(env.repo, objective_id)
+    findings_path = (scratch / "OBJECTIVE_FINDINGS.md").relative_to(env.repo)
     prompt = _closure_judge_prompt(
-        len(consolidated), str(anchor.get("goal", "")), capsule, env.repo)
+        len(consolidated), str(anchor.get("goal", "")), capsule, env.repo,
+        findings_path=str(findings_path))
+    # Drop any previous closure: a run that writes nothing must read as
+    # missing, never as another objective's verdicts (same rule as the
+    # planner result).
+    for stale in (scratch_root(env.repo) / CLOSURE_FILE,
+                  scratch / CLOSURE_FILE):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
     await env.executor.run("closer", prompt, env.repo, timeout_s)
     try:
         await env.executor.cleanup("closer")
     except Exception:
         pass
-    scratch = objective_scratch(env.repo, objective_id)
-    text = _read(scratch_root(env.repo) / "OBJECTIVE_CLOSURE.md") or _read(
-        scratch / "OBJECTIVE_CLOSURE.md")
+    text = _read(scratch_root(env.repo) / CLOSURE_FILE) or _read(
+        scratch / CLOSURE_FILE)
     verdicts = parse_closure(text)
     missing = [item.id for item in consolidated if item.id not in verdicts]
     if missing:
@@ -1847,8 +1935,8 @@ async def _close_objective(
             await env.executor.cleanup("closer")
         except Exception:
             pass
-        text = _read(scratch_root(env.repo) / "OBJECTIVE_CLOSURE.md") or _read(
-            scratch / "OBJECTIVE_CLOSURE.md")
+        text = _read(scratch_root(env.repo) / CLOSURE_FILE) or _read(
+            scratch / CLOSURE_FILE)
         verdicts = parse_closure(text)
     real: list[Any] = []
     for item in consolidated:

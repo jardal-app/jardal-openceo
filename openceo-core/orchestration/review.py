@@ -15,6 +15,7 @@ slot's ``limit_patterns`` / ``expired_patterns``.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import shutil
 import subprocess
@@ -53,6 +54,9 @@ class ReviewSlot:
     expired_patterns: tuple[str, ...] = ()
     extra: bool = False  # never counts toward quorum (§7.3)
     active: bool = True
+    # Per-slot reviewer timeout; 0 = the round default
+    # (``review.reviewer_timeout_minutes``). TASK-2026-00162.
+    timeout_minutes: int = 0
 
 
 def parse_pool(raw: Sequence[Mapping[str, Any]] | None) -> list[ReviewSlot]:
@@ -72,6 +76,10 @@ def parse_pool(raw: Sequence[Mapping[str, Any]] | None) -> list[ReviewSlot]:
             priority = int(entry.get("priority", 50))
         except (TypeError, ValueError):
             priority = 50
+        try:
+            timeout_minutes = max(0, int(entry.get("timeout_minutes") or 0))
+        except (TypeError, ValueError):
+            timeout_minutes = 0
         slots.append(ReviewSlot(
             label=label, family=family,
             model=str(entry.get("model") or ""),
@@ -87,6 +95,7 @@ def parse_pool(raw: Sequence[Mapping[str, Any]] | None) -> list[ReviewSlot]:
                 str(p) for p in entry.get("expired_patterns") or []),
             extra=bool(entry.get("extra", False)),
             active=entry.get("active", True) is not False,
+            timeout_minutes=timeout_minutes,
         ))
     slots.sort(key=lambda slot: (slot.priority, slot.label))
     return slots
@@ -301,6 +310,189 @@ def quorum_met(
 
 
 # ---------------------------------------------------------------------------
+# Quorum round: relief + one retry per slot (§7.2, TASK-2026-00162)
+# ---------------------------------------------------------------------------
+
+#: Outcome kinds worth one more attempt in the same round: a slow or sloppy
+#: run of a slot that is still available. Classified slot errors
+#: (``cooling_down`` / ``disabled``) leave the pool and a ``write_attempt``
+#: breached the read-only rule: neither is retried.
+RETRIABLE_KINDS = frozenset({"timeout", "malformed", "slot_error", "worktree"})
+
+#: A slot that timed out gets this much more time on its one retry.
+RETRY_TIMEOUT_FACTOR = 1.5
+
+#: ``run_one(slot, attempt, previous)`` → outcome (see :func:`new_outcome`);
+#: ``previous`` is the failed first attempt being retried, else None.
+RunOne = Callable[
+    [ReviewSlot, int, "Mapping[str, Any] | None"], Awaitable[dict[str, Any]]]
+
+
+def new_outcome(slot: ReviewSlot, attempt: int = 1) -> dict[str, Any]:
+    """Blank outcome of one reviewer attempt; both engines fill it.
+
+    ``kind``: ``valid``, ``timeout``, ``malformed``, ``slot_error``,
+    ``cooling_down``, ``disabled``, ``write_attempt`` or ``worktree``.
+    """
+    return {"slot": slot.label, "family": slot.family, "attempt": attempt,
+            "valid": False, "kind": "", "reason": "", "verdicts": [],
+            "elapsed_s": 0.0, "exit_code": None}
+
+
+def slot_timeout_s(
+    slot: ReviewSlot,
+    default_minutes: Any,
+    previous: Mapping[str, Any] | None = None,
+) -> int:
+    """Reviewer timeout: the slot's own, else the round default; a retry
+    after a timeout gets :data:`RETRY_TIMEOUT_FACTOR` more."""
+    try:
+        minutes = slot.timeout_minutes or int(default_minutes or 15)
+    except (TypeError, ValueError):
+        minutes = 15
+    seconds = max(60, int(minutes) * 60)
+    if previous is not None and previous.get("kind") == "timeout":
+        seconds = int(seconds * RETRY_TIMEOUT_FACTOR)
+    return seconds
+
+
+def retry_note(previous: Mapping[str, Any] | None) -> str:
+    """Prompt lead for a slot's second attempt ("" on a first attempt)."""
+    if not previous:
+        return ""
+    kind = str(previous.get("kind") or "")
+    reason = str(previous.get("reason") or "")[:300]
+    if kind == "timeout":
+        return ("RETRY: your previous attempt in this round timed out. Stay "
+                "on the listed files and print the report as soon as it is "
+                "ready.")
+    if kind == "malformed":
+        return (f"RETRY: your previous report in this round was rejected "
+                f"({reason}). Print ONLY the report, in the exact format "
+                "below.")
+    return (f"RETRY: your previous attempt in this round failed ({reason}). "
+            "Print ONLY the report, in the exact format below.")
+
+
+def quorum_summary(outcomes: Sequence[Mapping[str, Any]], limit: int = 900) -> str:
+    """``label#attempt kind (reason)`` per attempt: why a round fell short."""
+    parts: list[str] = []
+    for outcome in outcomes:
+        valid = bool(outcome.get("valid"))
+        kind = "valid" if valid else str(outcome.get("kind") or "invalid")
+        text = f"{outcome.get('slot')}#{outcome.get('attempt', 1)} {kind}"
+        reason = "" if valid else str(outcome.get("reason") or "")
+        if reason and reason != kind:
+            text += f" ({reason[:120]})"
+        parts.append(text)
+    return "; ".join(parts)[:limit]
+
+
+def _valid_by_label(outcomes: Sequence[Mapping[str, Any]]) -> dict[str, bool]:
+    """Label → any attempt valid (a retry's success clears its failure)."""
+    valid: dict[str, bool] = {}
+    for outcome in outcomes:
+        label = str(outcome.get("slot"))
+        valid[label] = valid.get(label, False) or bool(outcome.get("valid"))
+    return valid
+
+
+def _counted_families(
+    valid: Mapping[str, bool],
+    slots: Sequence[ReviewSlot],
+    builder_family: str,
+) -> set[str]:
+    by_label = {slot.label: slot for slot in slots}
+    families: set[str] = set()
+    for label, ok in valid.items():
+        slot = by_label.get(label)
+        if (ok and slot is not None and slot.family and not slot.extra
+                and slot.family != builder_family):
+            families.add(slot.family)
+    return families
+
+
+@dataclass
+class QuorumRound:
+    """One round across its waves; every attempt is kept for telemetry."""
+
+    met: bool
+    outcomes: list[dict[str, Any]]  # every attempt, in run order
+    reviewers: list[ReviewSlot]  # counting slots that ran
+    valid: dict[str, bool]  # label → any attempt valid
+
+    @property
+    def verdicts(self) -> list[Any]:
+        return [item for outcome in self.outcomes
+                for item in outcome.get("verdicts") or []]
+
+    def summary(self) -> str:
+        return quorum_summary(self.outcomes)
+
+
+async def run_quorum_round(
+    pool: Sequence[ReviewSlot],
+    store: SlotStore,
+    plan: RoundPlan,
+    run_one: RunOne,
+    builder_family: str = "muse",
+    quorum: int = 2,
+) -> QuorumRound:
+    """Run one round until quorum or exhaustion (§7.2; both engines).
+
+    Wave 1 runs the plan (reviewers + extras) in parallel. Short of quorum,
+    wave 2 runs ``shortfall + 1`` slots in parallel: untried eligible slots
+    of uncounted families first (relief), then ONE retry of first attempts
+    that failed for a retriable reason (:data:`RETRIABLE_KINDS`) on slots
+    still available. A failed slot never voids the others' reports; the
+    round only fails when no combination reaches quorum, and no slot runs
+    more than twice per round (bounded cost, TASK-2026-00162).
+    """
+    first = [*plan.reviewers, *plan.extras]
+    outcomes: list[dict[str, Any]] = list(await asyncio.gather(
+        *[run_one(slot, 1, None) for slot in first]))
+    reviewers = list(plan.reviewers)
+    valid = _valid_by_label(outcomes)
+    if quorum_met(valid, reviewers, builder_family, quorum):
+        return QuorumRound(True, outcomes, reviewers, valid)
+    counted = _counted_families(valid, reviewers, builder_family)
+    target = max(1, quorum - len(counted)) + 1
+    relief = await select_round(
+        pool, store, target, builder_family=builder_family,
+        include_extras=False,
+        exclude=[str(outcome.get("slot")) for outcome in outcomes])
+    wave: list[tuple[ReviewSlot, int, Mapping[str, Any] | None]] = [
+        (slot, 1, None) for slot in relief.reviewers]
+    covered = counted | {slot.family for slot in relief.reviewers}
+    by_label = {slot.label: slot for slot in reviewers}
+    for outcome in outcomes:
+        if len(wave) >= target:
+            break
+        slot = by_label.get(str(outcome.get("slot")))
+        if slot is None or outcome.get("valid") or slot.family in covered:
+            continue
+        if str(outcome.get("kind") or "") not in RETRIABLE_KINDS:
+            continue
+        ok, _reason = slot_available(slot, await store.get_slot(slot.label))
+        if not ok:
+            continue
+        wave.append((slot, 2, outcome))
+        covered.add(slot.family)
+    if not wave:
+        return QuorumRound(False, outcomes, reviewers, valid)
+    outcomes.extend(await asyncio.gather(
+        *[run_one(slot, attempt, previous)
+          for slot, attempt, previous in wave]))
+    labels = {slot.label for slot in reviewers}
+    reviewers.extend(slot for slot, _attempt, _previous in wave
+                     if slot.label not in labels)
+    valid = _valid_by_label(outcomes)
+    return QuorumRound(
+        quorum_met(valid, reviewers, builder_family, quorum),
+        outcomes, reviewers, valid)
+
+
+# ---------------------------------------------------------------------------
 # Worktree (read-only review environment, §7.5)
 # ---------------------------------------------------------------------------
 
@@ -386,8 +578,14 @@ def reviewer_prompt(
     scope: str,
     round_no: int,
     repo: Path | str | None = None,
+    retry: str = "",
 ) -> str:
-    """Pointed review prompt (§7.5): diff-only, no tests, no-wide review."""
+    """Pointed review prompt (§7.5): diff-only, no tests, no-wide review.
+
+    ``retry`` (see :func:`retry_note`) leads the body on a second attempt.
+    The output contract is explicit because the report is machine-parsed
+    (TASK-2026-00162: preambles voided 4 of 5 valid pilot reports).
+    """
     body = (
         f"You are review slot {slot_label}. Read {request_name} in this "
         "worktree (read-only checkout at the ticket head).\n"
@@ -395,15 +593,21 @@ def reviewer_prompt(
         "contract needs it (e.g. a caller). Do NOT run tests or builds: gate "
         "results are in the request. Do NOT do a general system review. A "
         "grave bug outside the diff may be reported, but do not go hunting.\n"
-        "Print your report on stdout, exactly one finding per header:\n"
-        "`[CRITICAL|WARN|INFO] [bug|security|contract|performance|test|"
-        "maintainability] <anchor> — <problem> → <fix>` (§16.4), each line "
-        "anchor with its literal `>` quote, optional explanation ≤5 lines. "
-        "Anchors: `path:line`, `path:line@base` (deleted/changed code), "
-        "`path:line + path:line` (cross-location, quote each), `path` "
-        "(whole file), `CRITERIO:<id>`. If clean, print `No findings.`.\n"
+        "OUTPUT CONTRACT: your stdout IS the report and a program parses "
+        "it. The first line is a finding header or `No findings.`: no "
+        "preamble, no summary, no markdown, no bullets, no backticks.\n"
+        "Exactly one finding per header line:\n"
+        "[CRITICAL|WARN|INFO] [bug|security|contract|performance|test|"
+        "maintainability] <anchor> — <problem> → <fix>  (§16.4)\n"
+        "then one `> <source text copied verbatim>` line per line anchor, "
+        "then an optional explanation of at most 5 lines. "
+        "Anchors: path:line, path:line@base (deleted/changed code), "
+        "path:line + path:line (cross-location, quote each), path "
+        "(whole file), CRITERIO:<id>. If clean, print `No findings.`.\n"
         f"End with REVIEW_DONE_{scope}_{round_no} on its own last line."
     )
+    if retry:
+        body = f"{retry}\n{body}"
     return with_preamble(body, repo, "en")
 
 
@@ -597,8 +801,15 @@ def round_telemetry(
     valid_reports: int,
     verdicts: Sequence[VerifiedFinding],
     fix: Mapping[int, list[FixVerdict]],
+    attempts: Sequence[Mapping[str, Any]] = (),
+    met: bool = True,
 ) -> dict[str, Any]:
-    """One ``rounds[]`` entry for the run document."""
+    """One ``rounds[]`` entry for the run document.
+
+    ``attempts`` (every reviewer attempt of the round) adds ``quorum`` and
+    ``attempts`` (slot, attempt, kind, reason, seconds): a failed round
+    keeps why each slot fell short (TASK-2026-00162).
+    """
     counts = {"verified": 0, "unverified": 0, "pre_existing": 0, "in_scope": 0}
     for item in verdicts:
         if not item.verified:
@@ -615,10 +826,21 @@ def round_telemetry(
     discarded = sum(1 for verdicts_list in fix.values()
                     for verdict in verdicts_list[:1]
                     if verdict.verdict == "DESCARTADO")
-    return {
+    entry: dict[str, Any] = {
         "r": round_no,
         "slots": list(slots),
         "valid_reports": valid_reports,
         "findings": counts,
         "muse": {"fixed": fixed, "discarded": discarded, "no_response": 0},
     }
+    if attempts:
+        entry["quorum"] = met
+        entry["attempts"] = [
+            {"slot": str(item.get("slot")),
+             "attempt": int(item.get("attempt") or 1),
+             "kind": "valid" if item.get("valid") else str(item.get("kind") or ""),
+             "reason": "" if item.get("valid") else str(item.get("reason") or "")[:200],
+             "elapsed_s": round(float(item.get("elapsed_s") or 0.0), 1)}
+            for item in attempts
+        ]
+    return entry

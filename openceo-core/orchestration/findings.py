@@ -15,8 +15,9 @@ from __future__ import annotations
 import re
 import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 
 #: Severities (§16.4), ordered worst-first for grouping.
@@ -35,14 +36,31 @@ CATEGORIES = (
 #: Line window for quote matching and diff-range scope checks (§7.7).
 ANCHOR_WINDOW = 5
 
-#: Trailing signal of every report (§15.7); recorded, not required.
-_DONE_RE = re.compile(r"^REVIEW_DONE_\S+_\d+\s*$")
+#: Trailing signal of every report (§15.7); recorded, not required. Any
+#: ``REVIEW_DONE_*`` line is skipped (legacy trailers also named the slot).
+_DONE_RE = re.compile(r"^REVIEW_DONE_\S*$")
 
-#: ``[CRITICAL] [bug] <anchor> — <problem> → <fix>`` (§16.4).
+#: Markdown a model wraps around a header (TASK-2026-00162): one list
+#: bullet or number, then bold/italic/code markers.
+_LEAD = r"(?:[-*•+]\s+|\d+[.)]\s+)?"
+_DRESS = r"[*_`]*"
+
+#: ``[CRITICAL] [bug] <anchor> — <problem> → <fix>`` (§16.4). Severity and
+#: category match case-insensitively; ``WARNING`` reads as ``WARN``.
 _FINDING_RE = re.compile(
-    r"^\[(CRITICAL|WARN|INFO)\]\s+"
-    r"\[(bug|security|contract|performance|test|maintainability)\]\s+"
-    r"(\S+(?:\s+\+\s+\S+)*)\s+[—–-]\s*(.+?)\s*(?:→|->)\s*(.+?)\s*$"
+    rf"^{_LEAD}{_DRESS}\[\s*(CRITICAL|WARN(?:ING)?|INFO)\s*\]{_DRESS}\s*"
+    rf"{_DRESS}\[\s*(bug|security|contract|performance|test|maintainability)"
+    rf"\s*\]{_DRESS}\s+"
+    r"(\S+(?:\s+\+\s+\S+)*)\s+[—–-]\s*(.+?)\s*(?:→|->)\s*(.+?)\s*$",
+    re.IGNORECASE,
+)
+
+#: A line that opens like a finding (severity bracket first). It must parse
+#: as a full header or the whole report is malformed: tolerance to prose
+#: never drops a finding silently (fail-closed, TASK-2026-00162).
+_HEADER_LIKE_RE = re.compile(
+    rf"^{_LEAD}{_DRESS}\[\s*(?:CRITICAL|WARN(?:ING)?|INFO)\s*\]",
+    re.IGNORECASE,
 )
 
 #: ``path:line``, ``path:line@base``, ``path`` or ``CRITERIO:<id>``.
@@ -51,7 +69,24 @@ _ANCHOR_RE = re.compile(
     r"(?P<path>[^:\s]+?)(?::(?P<line>\d+))?(?P<base>@base)?)$"
 )
 
-_NO_FINDINGS_RE = re.compile(r"^No findings\.\s*$")
+#: The clean-report marker; dressing and the trailing dot are tolerated.
+_NO_FINDINGS_RE = re.compile(rf"^{_DRESS}No findings\b", re.IGNORECASE)
+
+#: Markdown code fences carry no report content.
+_FENCE_RE = re.compile(r"^(?:```|~~~)")
+
+#: Explanation lines kept per finding (§16.4); further prose is dropped.
+MAX_EXPLANATION_LINES = 5
+
+#: Characters a model wraps around an anchor (code span, bold, quotes).
+#: Never ``_``: paths such as ``__init__.py`` start with it.
+_ANCHOR_WRAP = "`*'\""
+
+#: Characters a model wraps around a whole quote (code span, quotes).
+_QUOTE_WRAP = "`'\""
+
+#: Per-field cap for finding text persisted in ``task_reviews``.
+_TEXT_CAP = 600
 
 
 class ReportMalformed(ValueError):
@@ -119,45 +154,60 @@ class Finding:
 
 
 # ---------------------------------------------------------------------------
-# Parsing (§16.4, strict)
+# Parsing (§16.4: tolerant to prose, strict on findings — TASK-2026-00162)
 # ---------------------------------------------------------------------------
 
 def _parse_anchor(raw: str) -> Anchor:
-    match = _ANCHOR_RE.match(raw.strip())
+    text = raw.strip().strip(_ANCHOR_WRAP).strip()
+    match = _ANCHOR_RE.match(text)
     if not match:
         raise ReportMalformed(f"bad anchor: {raw!r}")
     criterion = match.group("criterion")
     if criterion is not None:
-        return Anchor(raw=raw.strip(), path=None, line=None, base=False,
+        return Anchor(raw=text, path=None, line=None, base=False,
                       criterion=criterion.upper())
     path = str(match.group("path") or "").strip().lstrip("./")
     line_raw = match.group("line")
     if not path or path.startswith(("/", "~")) or ".." in path.split("/"):
         raise ReportMalformed(f"bad anchor path: {raw!r}")
-    return Anchor(raw=raw.strip(), path=path,
+    return Anchor(raw=text, path=path,
                   line=int(line_raw) if line_raw else None,
                   base=bool(match.group("base")), criterion=None)
 
 
-def parse_report(text: str) -> list[RawFinding]:
-    """Parse a reviewer report strictly. Raises :class:`ReportMalformed`.
+def _unwrap_quote(text: str) -> str:
+    """Drop a code span/quote wrapped around the whole quote.
 
-    ``No findings.`` parses to []. The ``REVIEW_DONE_*`` trailer and blank
-    lines are ignored; every other line must be a finding header, a ``>``
-    quote, or an explanation line belonging to the current finding (max 5).
+    Only edge characters go, so a quote that matched the source before
+    still matches (a substring of it): unwrapping never weakens verification.
+    """
+    quote = text.strip()
+    while len(quote) >= 2 and quote[0] == quote[-1] and quote[0] in _QUOTE_WRAP:
+        quote = quote[1:-1].strip()
+    return quote
+
+
+def parse_report(text: str) -> list[RawFinding]:
+    """Parse a reviewer report. Raises :class:`ReportMalformed`.
+
+    Tolerant to prose, strict on findings (TASK-2026-00162; the pilot lost
+    4 of 5 valid reports to a one-line preamble). Prose before the first
+    finding is skipped, prose after a finding is its explanation (first
+    5 lines kept), and blank lines, code fences and ``REVIEW_DONE_*``
+    trailers are skipped. Strict, and fatal for the whole report: a line
+    that opens like a finding (severity bracket first) must be a complete
+    §16.4 header with valid anchors, every line anchor needs its literal
+    ``>`` quote, and a report with neither findings nor the ``No findings``
+    marker is empty. Anything a finding claims is still verified against
+    git by :func:`verify_report`; prose never reaches it.
     """
     findings: list[RawFinding] = []
     current: RawFinding | None = None
     explanation_lines: list[str] = []
-    saw_content = False
+    clean = False
     for raw_line in (text or "").splitlines():
         line = raw_line.strip()
-        if not line or _DONE_RE.match(line):
-            continue
-        if _NO_FINDINGS_RE.match(line):
-            if findings or saw_content:
-                raise ReportMalformed("No findings mixed with findings")
-            saw_content = True
+        if not line or _DONE_RE.match(line) or _FENCE_RE.match(line):
             continue
         header = _FINDING_RE.match(line)
         if header is not None:
@@ -167,28 +217,31 @@ def parse_report(text: str) -> list[RawFinding]:
             anchors = [_parse_anchor(part) for part in anchor_raws if part]
             if not anchors:
                 raise ReportMalformed(f"finding without anchor: {line!r}")
+            severity = header.group(1).upper()
             current = RawFinding(
-                severity=header.group(1), category=header.group(2),
+                severity="WARN" if severity == "WARNING" else severity,
+                category=header.group(2).lower(),
                 anchors=anchors, problem=header.group(4).strip(),
                 fix=header.group(5).strip())
             findings.append(current)
             explanation_lines = []
-            saw_content = True
+            continue
+        if _HEADER_LIKE_RE.match(line):
+            raise ReportMalformed(f"bad finding header: {line[:200]!r}")
+        if current is None:
+            # Preamble: summaries, markdown, stray quotes. Never content.
+            if _NO_FINDINGS_RE.match(line):
+                clean = True
             continue
         if line.startswith(">"):
-            if current is None:
-                raise ReportMalformed("quote without finding")
-            current.quotes.append(line[1:].strip())
+            current.quotes.append(_unwrap_quote(line[1:]))
             continue
-        if current is None:
-            raise ReportMalformed(f"prose outside findings: {line!r}")
-        if len(explanation_lines) >= 5:
-            raise ReportMalformed("explanation over 5 lines (§16.4)")
-        explanation_lines.append(line)
+        if len(explanation_lines) < MAX_EXPLANATION_LINES:
+            explanation_lines.append(line)
     if current is not None:
         current.explanation = "\n".join(explanation_lines).strip()
-    if not saw_content:
-        raise ReportMalformed("empty report")
+    if not findings and not clean:
+        raise ReportMalformed("empty report: no findings and no 'No findings.'")
     # Line anchors require their literal quote (§7.6); file/criterion do not.
     for item in findings:
         need = sum(1 for anchor in item.anchors if anchor.line is not None)
@@ -500,8 +553,16 @@ def review_document(
     valid: bool,
     verdicts: Sequence[VerifiedFinding],
     invalid_reason: str = "",
+    meta: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """One document per reviewer report: the source of per-slot precision."""
+    """One document per reviewer report: the source of per-slot precision.
+
+    Every attempt is recorded, valid or not, and each finding carries its
+    own text (problem, fix, quotes, explanation; capped) so a closed round
+    stays auditable without the scratch files (TASK-2026-00162). ``meta``
+    adds the attempt facts (``attempt``, ``kind``, ``elapsed_s``,
+    ``exit_code``, ``project``).
+    """
     return {
         "review_id": review_id,
         "task_id": task_id,
@@ -512,11 +573,17 @@ def review_document(
         "family": family,
         "valid": valid,
         "invalid_reason": invalid_reason,
+        **dict(meta or {}),
+        "created_at": datetime.now(timezone.utc),
         "findings": [
             {
                 "severity": item.raw.severity,
                 "category": item.raw.category,
                 "anchor": " + ".join(_anchor_text(a) for a in item.raw.anchors),
+                "problem": item.raw.problem[:_TEXT_CAP],
+                "fix": item.raw.fix[:_TEXT_CAP],
+                "quotes": [quote[:_TEXT_CAP] for quote in item.raw.quotes[:4]],
+                "explanation": item.raw.explanation[:_TEXT_CAP],
                 "verified": item.verified,
                 "strength": item.strength,
                 "scope": item.scope,

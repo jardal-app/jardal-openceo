@@ -27,6 +27,15 @@ from state import (
 
 logger = logging.getLogger(__name__)
 
+#: Task statuses that end execution for good: their waiting Tier S runs
+#: can never resume (TASK-2026-00162).
+_TERMINAL_TASK_STATUSES = frozenset({
+    TaskStatus.COMPLETED.value,
+    TaskStatus.CANCELLED.value,
+    TaskStatus.FAILED.value,
+    TaskStatus.CONVERTED.value,
+})
+
 
 class MongoRepository:
     """Persistence layer for task and dev-session lifecycle state."""
@@ -614,9 +623,31 @@ class MongoRepository:
 
         updates["updated_at"] = datetime.now(timezone.utc)
         await self.tasks.update_one({"task_id": task_id}, {"$set": updates})
+        if str(updates.get("status") or "") in _TERMINAL_TASK_STATUSES:
+            await self._close_waiting_tier_s_runs(task_id, str(updates["status"]))
         task = await self.get_task(task_id)
         await self._notify_status_observer(task, updates)
         return task
+
+    async def _close_waiting_tier_s_runs(self, task_id: str, status: str) -> None:
+        """A terminal task leaves no resumable Tier S run behind (TASK-2026-00162).
+
+        Only ``waiting`` runs: a ``running`` one is either alive (its cycle
+        patches itself on exit) or dead after a restart (boot reconcile in
+        :meth:`mark_interrupted_tasks`). Same placement rationale as the status
+        observer: every transition passes here. Never fails the task patch.
+        """
+        try:
+            await self.tier_s_runs.update_many(
+                {"task_id": task_id, "status": "waiting"},
+                {"$set": {"status": "superseded",
+                          "superseded_reason": f"task {status}",
+                          "active_repo": None,
+                          "updated_at": datetime.now(timezone.utc)}},
+            )
+        except Exception:
+            logger.warning("Tier S runs of %s could not be closed", task_id,
+                           exc_info=True)
 
     def set_status_observer(self, observer: Any | None) -> None:
         """Instala el observador de cambios de estado (uno solo, opcional).
@@ -881,8 +912,19 @@ class MongoRepository:
         tier_result = await self.tasks.update_many(
             {"status": TaskStatus.IN_PROGRESS.value, "coding_tool": "tier_s"},
             {"$set": {"status": TaskStatus.WAITING.value,
-                      "waiting_reason": "Tier S pausado por reinicio; relanza el ticket para reanudar el mismo intento",
+                      "waiting_reason": "Tier S interrumpido por reinicio; relanza el ticket (abre un intento nuevo)",
                       "resume_at": None, "updated_at": datetime.now(timezone.utc)}},
+        )
+        # Single instance (CLAUDE.md §4): no cycle survives a restart, so a
+        # run still marked live died with the old process. Close it and free
+        # its repo marker, or the unique ``active_repo`` index would refuse
+        # the next run on that repo (TASK-2026-00162).
+        await self.tier_s_runs.update_many(
+            {"status": {"$in": ["running", "active", "resuming"]}},
+            {"$set": {"status": "failed",
+                      "failure": "interrupted by service restart",
+                      "active_repo": None,
+                      "updated_at": datetime.now(timezone.utc)}},
         )
         result = await self.tasks.update_many(
             {"status": TaskStatus.IN_PROGRESS.value},
@@ -1017,6 +1059,24 @@ class MongoRepository:
             return_document=ReturnDocument.AFTER,
         )
         return self._clean(row)
+
+    async def supersede_tier_s_runs(self, task_id: str, keep_run_id: str) -> int:
+        """Close a task's other open runs when a new run starts (TASK-2026-00162).
+
+        One task has at most one live cycle (the dispatcher claim is atomic),
+        so every other open run of the task can never resume: it goes
+        terminal and drops its ``active_repo`` marker (unique per repo).
+        """
+        result = await self.tier_s_runs.update_many(
+            {"task_id": task_id, "run_id": {"$ne": keep_run_id},
+             "status": {"$in": ["waiting", "running", "active", "resuming"]}},
+            {"$set": {"status": "superseded",
+                      "superseded_reason": f"run {keep_run_id}",
+                      "superseded_by": keep_run_id,
+                      "active_repo": None,
+                      "updated_at": datetime.now(timezone.utc)}},
+        )
+        return int(result.modified_count)
 
     async def patch_tier_s_run(self, run_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
         patch = {**updates, "updated_at": datetime.now(timezone.utc)}

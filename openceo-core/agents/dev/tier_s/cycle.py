@@ -40,6 +40,7 @@ from orchestration import inbox as inbox_mod
 from orchestration import knowledge as knowledge_mod
 from orchestration import review as review_mod
 from orchestration.live import (
+    TIMEOUT_RETURNCODE,
     AllowAllQuota,
     ExecResult,
     Executor,
@@ -125,6 +126,7 @@ class _Ctx:
     discarded_notes: list[str] = field(default_factory=list)
     used_review_roles: list[str] = field(default_factory=list)
     converted: str | None = None  # objective id after F6 conversion
+    quorum_detail: str = ""  # per-slot story of the last failed round
 
 
 def _utcnow_iso() -> str:
@@ -464,6 +466,11 @@ class TierSCycle:
         roster = self._freeze_roster(ctx)
         ctx.metrics["tier"] = CodingTool.TIER_S.value
         ctx.metrics["origin"] = ctx.ticket.get("origin")
+        # One task, one open run: earlier parks of this task can never
+        # resume once a fresh run starts (TASK-2026-00162, pilot: 16
+        # orphaned waiting runs). Before create_run, so a dead run's repo
+        # marker cannot refuse this one.
+        await self._runs.supersede_runs(task_id, ctx.run_id)
         await self._runs.create_run({
             "run_id": ctx.run_id,
             "task_id": task_id,
@@ -949,7 +956,8 @@ class TierSCycle:
                                        builder_family)
         if round1 is None:
             return await self._park(
-                ctx, "review_quorum", "round 1 without quorum",
+                ctx, "review_quorum",
+                f"round 1 without quorum: {ctx.quorum_detail}",
                 resume_in_min=self._backoff(ctx, 0), patch_run=True,
                 notify=False)
         fix1 = await self._muse_fix(ctx, 1, round1["findings"])
@@ -969,7 +977,8 @@ class TierSCycle:
                                        builder_family)
         if round2 is None:
             return await self._park(
-                ctx, "review_quorum", "round 2 without quorum",
+                ctx, "review_quorum",
+                f"round 2 without quorum: {ctx.quorum_detail}",
                 resume_in_min=self._backoff(ctx, 0), patch_run=True,
                 notify=False)
         fix2 = await self._muse_fix(ctx, 2, round2["findings"])
@@ -1087,39 +1096,31 @@ class TierSCycle:
             request, encoding="utf-8")
         handoff = self._read_artifact(ctx, "HANDOFF.md")
 
-        reviewers = list(plan.reviewers)
-        outcomes = await asyncio.gather(*[
-            self._run_reviewer(ctx, slot, round_no, request, request_name,
-                               handoff, head, builder_family)
-            for slot in [*reviewers, *plan.extras]
-        ])
-        valid = {item["slot"]: item["valid"] for item in outcomes}
-        if not review_mod.quorum_met(valid, reviewers, builder_family, quorum):
-            have = {slot.family for slot in reviewers
-                    if valid.get(slot.label) and not slot.extra
-                    and slot.family != builder_family}
-            shortfall = max(1, quorum - len(have))
-            tried = [item["slot"] for item in outcomes]
-            refill = await review_mod.select_round(
-                ctx.pool, self._slots, shortfall + 1,
-                builder_family=builder_family, include_extras=False,
-                exclude=tried)
-            if refill.reviewers:
-                extra_outcomes = await asyncio.gather(*[
-                    self._run_reviewer(ctx, slot, round_no, request,
-                                       request_name, handoff, head,
-                                       builder_family)
-                    for slot in refill.reviewers
-                ])
-                outcomes = [*outcomes, *extra_outcomes]
-                reviewers = [*reviewers, *refill.reviewers]
-                valid = {item["slot"]: item["valid"] for item in outcomes}
-        if not review_mod.quorum_met(valid, reviewers, builder_family, quorum):
+        async def run_one(
+            slot: review_mod.ReviewSlot,
+            attempt: int,
+            previous: Mapping[str, Any] | None,
+        ) -> dict[str, Any]:
+            return await self._run_reviewer(
+                ctx, slot, round_no, request, request_name, handoff, head,
+                attempt=attempt, previous=previous)
+
+        # Relief + one retry per slot (shared with the objective final
+        # review): one slow or sloppy slot no longer voids the round.
+        result = await review_mod.run_quorum_round(
+            ctx.pool, self._slots, plan, run_one,
+            builder_family=builder_family, quorum=quorum)
+        slots_run = sorted(result.valid)
+        valid_reports = sum(1 for label in slots_run if result.valid.get(label))
+        verdicts = result.verdicts
+        if not result.met:
+            # The park detail and the run doc keep why each slot fell short.
+            ctx.quorum_detail = result.summary()
+            ctx.rounds.append(review_mod.round_telemetry(
+                round_no, slots_run, valid_reports, verdicts, {},
+                attempts=result.outcomes, met=False))
             return None
 
-        verdicts: list[Any] = []
-        for item in outcomes:
-            verdicts.extend(item["verdicts"])
         consolidated = findings_mod.consolidate(verdicts)
         text = findings_mod.render_findings(
             consolidated, round_no, head, builder_family=builder_family)
@@ -1127,15 +1128,14 @@ class TierSCycle:
             text, encoding="utf-8")
         await self._record_inbox(ctx, round_no, verdicts)
         await self._evaluate_promotions(ctx)
-        slots_run = sorted(valid)
         ctx.rounds.append(review_mod.round_telemetry(
-            round_no, slots_run,
-            sum(1 for label in slots_run if valid.get(label)), verdicts, {}))
+            round_no, slots_run, valid_reports, verdicts, {},
+            attempts=result.outcomes, met=True))
         await self._runs.patch_run(ctx.run_id, {
             "rounds": ctx.rounds, "metrics": ctx.metrics,
             "updated_at": _utcnow_iso()})
         return {"findings": consolidated, "verdicts": verdicts,
-                "slots": slots_run, "valid": valid}
+                "slots": slots_run, "valid": result.valid}
 
     async def _run_reviewer(
         self,
@@ -1146,20 +1146,25 @@ class TierSCycle:
         request_name: str,
         handoff: str,
         head_sha: str,
-        builder_family: str,
+        attempt: int = 1,
+        previous: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """One reviewer on its own detached read-only worktree (§7.5)."""
+        """One reviewer attempt on its own detached read-only worktree (§7.5).
+
+        The outcome's ``kind`` (see :func:`review_mod.new_outcome`) decides
+        whether the round may retry the slot; every attempt is persisted.
+        """
         role = f"review:{slot.label}"
         if role not in ctx.used_review_roles:
             ctx.used_review_roles.append(role)
-        outcome: dict[str, Any] = {"slot": slot.label, "valid": False,
-                                   "verdicts": [], "reason": ""}
+        outcome = review_mod.new_outcome(slot, attempt)
+        suffix = f"-a{attempt}" if attempt > 1 else ""
         try:
             worktree = await asyncio.to_thread(
                 review_mod.create_worktree, ctx.repo, head_sha,
-                f"r{round_no}-{slot.label}")
+                f"r{round_no}-{slot.label}{suffix}")
         except RuntimeError as exc:
-            outcome["reason"] = str(exc)[:200]
+            outcome.update(kind="worktree", reason=str(exc)[:200])
             await self._persist_review(ctx, slot, round_no, outcome)
             return outcome
         try:
@@ -1167,42 +1172,52 @@ class TierSCycle:
             (worktree / "HANDOFF.md").write_text(handoff, encoding="utf-8")
             before = await asyncio.to_thread(
                 review_mod.worktree_snapshot, worktree)
-            timeout_s = int(ctx.review_cfg.get(
-                "reviewer_timeout_minutes", 15)) * 60
+            timeout_s = review_mod.slot_timeout_s(
+                slot, ctx.review_cfg.get("reviewer_timeout_minutes", 15),
+                previous)
             result = await self._exec.run(
                 role, review_mod.reviewer_prompt(
                     slot.label, request_name, "ticket", round_no,
-                    repo=worktree),
+                    repo=worktree, retry=review_mod.retry_note(previous)),
                 worktree, timeout_s)
             self._record_session(ctx, "reviewer", role, result)
+            outcome.update(elapsed_s=float(result.elapsed_s or 0.0),
+                           exit_code=result.returncode)
             after = await asyncio.to_thread(
                 review_mod.worktree_snapshot, worktree)
             if before and after and before != after:
-                outcome["reason"] = "write_attempt"
+                outcome.update(kind="write_attempt", reason="write_attempt")
                 await self._persist_review(ctx, slot, round_no, outcome)
                 return outcome
             text = (result.output_tail or "").strip()
             if result.returncode != 0:
-                action, patch = review_mod.classify_slot_error(text, slot)
-                if action in {"cooling_down", "disabled"}:
-                    await self._slots.set_slot(slot.label, patch)
-                outcome["reason"] = (
-                    f"slot error ({action}): {text[:200]}" or "slot error")
+                if (result.returncode == TIMEOUT_RETURNCODE
+                        or (result.usage or {}).get("timeout")):
+                    outcome.update(
+                        kind="timeout",
+                        reason=text[:200] or f"timeout after {timeout_s}s")
+                else:
+                    action, patch = review_mod.classify_slot_error(text, slot)
+                    if action in {"cooling_down", "disabled"}:
+                        await self._slots.set_slot(slot.label, patch)
+                    outcome.update(
+                        kind=(action if action in {"cooling_down", "disabled"}
+                              else "slot_error"),
+                        reason=f"slot error ({action}): {text[:200]}")
                 await self._persist_review(ctx, slot, round_no, outcome)
                 return outcome
-            (_tier_dir(ctx.repo) / f"REVIEW-{slot.label}-{round_no}.md"
+            (_tier_dir(ctx.repo) / f"REVIEW-{slot.label}-{round_no}{suffix}.md"
              ).write_text(text + "\n", encoding="utf-8")
             try:
                 raw = findings_mod.parse_report(text)
             except findings_mod.ReportMalformed as exc:
-                outcome["reason"] = f"malformed: {exc}"
+                outcome.update(kind="malformed", reason=f"malformed: {exc}")
                 await self._persist_review(ctx, slot, round_no, outcome)
                 return outcome
             verdicts = await asyncio.to_thread(
                 findings_mod.verify_report, raw, ctx.repo, head_sha,
                 ctx.base_sha, slot.label, slot.family, self._acceptance(ctx))
-            outcome["verdicts"] = verdicts
-            outcome["valid"] = True
+            outcome.update(verdicts=verdicts, valid=True, kind="valid")
             await self._persist_review(ctx, slot, round_no, outcome)
             return outcome
         finally:
@@ -1227,7 +1242,12 @@ class TierSCycle:
                 slot=slot.label, family=slot.family,
                 valid=bool(outcome.get("valid")),
                 verdicts=list(outcome.get("verdicts") or []),
-                invalid_reason=str(outcome.get("reason") or "")))
+                invalid_reason=str(outcome.get("reason") or ""),
+                meta={"attempt": int(outcome.get("attempt") or 1),
+                      "kind": str(outcome.get("kind") or ""),
+                      "elapsed_s": float(outcome.get("elapsed_s") or 0.0),
+                      "exit_code": outcome.get("exit_code"),
+                      "project": ctx.ticket.get("project")}))
         except Exception:
             pass  # telemetry persistence never fails a round
 
@@ -1782,6 +1802,7 @@ class TierSCycle:
                             "since": _utcnow_iso(), "resume_at": resume_at},
                 "metrics": ctx.metrics,
                 "gates": ctx.gate_runs,
+                "rounds": ctx.rounds,
                 "updated_at": _utcnow_iso(),
             })
         await self._tasks.patch_task(task_id, {
