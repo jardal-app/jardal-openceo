@@ -147,6 +147,13 @@ class ObjectiveEnv:
     # ``dev.routing`` mapping for the objective's project (``{}`` when the
     # project carries no characteristic). Feeds the planner prompt guide.
     project_routing: dict[str, Any] = field(default_factory=dict)
+    # Deterministic delivery verifiers by non-dev domain
+    # (TASK-2026-00175): ``domain -> DeliveryVerifier``. Dev work verifies
+    # through the reviewer pool, never here. Empty in prod (no non-dev
+    # runner exists — research has no bridge), so unverified non-dev
+    # work parks as capability_gap.
+    delivery_verifiers: dict[str, DeliveryVerifier] = field(
+        default_factory=dict)
 
 
 class InMemoryObjectiveStore:
@@ -1740,6 +1747,28 @@ def _is_dev_ticket(ticket: Mapping[str, Any]) -> bool:
     return str(ticket.get("agent_hint") or "") == "dev"
 
 
+def _delivery_domain(ticket: Mapping[str, Any]) -> str:
+    """Non-dev delivery domain, for the evidence-verifier lookup."""
+    params = ticket.get("params")
+    if isinstance(params, Mapping):
+        agent = str(params.get("target_agent") or "").strip()
+        if agent:
+            return agent
+    hint = str(ticket.get("agent_hint") or "").strip()
+    return hint or "unknown"
+
+
+def _work_children(
+    objective: Mapping[str, Any],
+    children: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Work children: everything but the parent shell and converted tickets."""
+    source_id = str(objective.get("conversion_source_task_id") or "")
+    return [item for item in children
+            if str(item.get("task_id") or "") != source_id
+            and str(item.get("status") or "") != "converted"]
+
+
 def verify_delivery(
     objective: Mapping[str, Any],
     children: Sequence[Mapping[str, Any]],
@@ -1754,10 +1783,7 @@ def verify_delivery(
     are history (``failed_children``), never open gaps. No LLM is
     involved, ever.
     """
-    source_id = str(objective.get("conversion_source_task_id") or "")
-    work = [item for item in children
-            if str(item.get("task_id") or "") != source_id
-            and str(item.get("status") or "") != "converted"]
+    work = _work_children(objective, children)
     open_gaps: list[str] = []
     data_gaps: list[str] = []
     failed: list[str] = []
@@ -1791,18 +1817,87 @@ def verify_delivery(
     }
 
 
+#: Deterministic delivery verifier: async over one child record, report
+#: ``{"ok": bool, "missing_artifacts": [...], "unmet_criteria": [...]}``.
+#: Context (repo, anchor) rides via closure. Doubts are gaps, never
+#: crashes: a raising verifier parks the objective (TASK-2026-00175).
+DeliveryVerifier = Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any]]]
+
+
+async def verify_evidence(
+    objective: Mapping[str, Any],
+    children: Sequence[Mapping[str, Any]],
+    verifiers: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Evidence layer over ``verify_delivery``'s metadata check.
+
+    Every non-dev delivery needs a deterministic domain runner:
+    cancelled/failed children are history (never proof, never required),
+    dev work verifies through the reviewer pool, and each completed
+    non-dev child must clear its domain verifier. Missing verifiers and
+    failed evidence park the objective (capability_gap / data_gaps in
+    ``run_final_review``); an empty ``verified`` map means the acceptance
+    has no coverage. No LLM is involved, ever.
+    """
+    runs = verifiers or {}
+    gaps: list[str] = []
+    unverified: dict[str, list[str]] = {}
+    verified: dict[str, str] = {}
+    for item in _work_children(objective, children):
+        short = str(item.get("task_id") or "")[:8]
+        status = str(item.get("status") or "")
+        if status != "completed":
+            # History (cancelled/failed) or still open (the metadata
+            # layer already routed those): never evidence.
+            continue
+        if _is_dev_ticket(item):
+            continue
+        domain = _delivery_domain(item)
+        verifier = runs.get(domain)
+        if verifier is None:
+            unverified.setdefault(domain, []).append(short)
+            continue
+        try:
+            report = await verifier(item)
+        except Exception as exc:
+            gaps.append(f"{short}: verifier error: {type(exc).__name__}")
+            continue
+        if not isinstance(report, Mapping):
+            gaps.append(f"{short}: verifier error: bad report")
+            continue
+        if report.get("ok"):
+            verified[short] = domain
+            continue
+        missing = report.get("missing_artifacts") or []
+        unmet = report.get("unmet_criteria") or []
+        gaps.extend(f"{short}: missing artifact: {name}" for name in missing)
+        gaps.extend(f"{short}: unmet criterion: {name}" for name in unmet)
+        if not missing and not unmet:
+            gaps.append(f"{short}: not verified")
+    return {
+        "ok": not gaps and not unverified,
+        "evidence_gaps": gaps,
+        "unverified_domains": unverified,
+        "verified": verified,
+    }
+
+
 def _delivery_record(
     objective: Mapping[str, Any],
     children: Sequence[Mapping[str, Any]],
     *,
     verified_by: str,
     review: str | None = None,
+    evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Delivery verdict stored on close (criteria + counts + provenance).
 
     The objective closes on its DELIVERY criteria. The business outcome
     (KPI) is evaluated afterwards by the CEO (F4): ``outcome_kpi`` stays
     ``None`` here — closing every ticket never claims a metric moved.
+    ``evidence`` links each non-dev delivery to the domain runner that
+    verified it (TASK-2026-00175); dev evidence lives in the pool
+    findings/closure files.
     """
     verdict = verify_delivery(objective, children)
     return {
@@ -1817,6 +1912,7 @@ def _delivery_record(
         "failed_children": len(verdict["failed_children"]),
         "dev_children": verdict["dev_children"],
         "outcome_kpi": None,
+        "evidence": dict(evidence or {}),
     }
 
 _CLOSURE_RE = re.compile(
@@ -1867,7 +1963,10 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
     deterministic delivery verification first (no tokens). Open work
     sends the objective back to planning; data gaps park it; clean
     non-dev work closes deterministically; clean dev work goes through
-    the reviewer pool over the objective branch.
+    the reviewer pool over the objective branch. Non-dev deliveries
+    clear a registered deterministic verifier per domain (missing
+    verifiers park as capability_gap, failed evidence or no verified
+    delivery as data_gaps).
     """
     objective = await env.objectives.get_objective(objective_id)
     if objective is None:
@@ -1897,14 +1996,50 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
                 f"Objective {objective_id} back to planning: "
                 f"{'; '.join(verdict['open_gaps'][:5])}")
         return await plan_objective(env, objective_id)
+    evidence = await verify_evidence(
+        objective, children, env.delivery_verifiers)
+    if evidence["unverified_domains"]:
+        pending = "; ".join(
+            f"{domain}: {','.join(shorts)}"
+            for domain, shorts in sorted(
+                evidence["unverified_domains"].items()))
+        summary = (f"no delivery verifier for non-dev work ({pending}): "
+                   "register a deterministic runner per domain")
+        await env.objectives.patch_objective(objective_id, {
+            "capability_gap": {
+                "declared_at": _utcnow_iso(),
+                "summary": summary[:2000],
+                "gaps": [{"domain": domain, "children": list(shorts)}
+                         for domain, shorts in sorted(
+                             evidence["unverified_domains"].items())],
+            },
+        })
+        return await _objective_park(
+            env, objective, "capability_gap", summary[:300])
+    if evidence["evidence_gaps"]:
+        return await _objective_park(
+            env, objective, "data_gaps",
+            "delivery evidence gaps: "
+            f"{'; '.join(evidence['evidence_gaps'][:5])}")
+    if not verdict["dev_children"] and not evidence["verified"]:
+        if not verdict["work_children"]:
+            detail = ("no verified delivery: objective has no work "
+                      "children")
+        else:
+            detail = ("no verified delivery: all "
+                      f"{verdict['work_children']} work children are "
+                      "history (cancelled/failed)")
+        return await _objective_park(env, objective, "data_gaps", detail)
     await env.objectives.patch_objective(
         objective_id, {"status": "final_review",
                        "final_reviews": reviews + 1})
     if not verdict["dev_children"]:
-        # Non-dev: the deterministic verification above IS the review.
+        # Non-dev: the deterministic verification above IS the review,
+        # now backed by the domain evidence it cleared.
         objective = await env.objectives.get_objective(objective_id) \
             or objective
-        return await _finish_objective(env, objective)
+        return await _finish_objective(
+            env, objective, {"verified": evidence["verified"]})
     anchor = objective.get("anchor") or {}
     capsule = (objective.get("capsule") or {}).get("text", "")
     since = objective.get("last_final_review_sha") or objective.get("base_sha")
@@ -1960,7 +2095,9 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
     for item in verdicts:
         if item.destination == "inbox" and env.inbox is not None:
             await _inbox_final_finding(env, objective, item)
-    closed = await _close_objective(env, objective, consolidated, head)
+    closed = await _close_objective(
+        env, objective, consolidated, head,
+        {"verified": evidence["verified"]})
     if not closed.get("ok"):
         # The close parked (closer without verdicts): this head was not
         # reviewed, so the SHA must not advance — the next final review
@@ -2161,6 +2298,7 @@ async def _close_objective(
     objective: Mapping[str, Any],
     consolidated: Sequence[Any],
     head_sha: str,
+    evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """``muse`` judges the final findings; REAL ones become tickets (§9.7)."""
     objective_id = str(objective.get("objective_id"))
@@ -2168,7 +2306,7 @@ async def _close_objective(
     capsule = (objective.get("capsule") or {}).get("text", "")
     timeout_s = int(env.timeouts.get("closer", 15)) * 60
     if not consolidated:
-        return await _finish_objective(env, objective)
+        return await _finish_objective(env, objective, evidence)
     scratch = objective_scratch(env.repo, objective_id)
     findings_path = (scratch / "OBJECTIVE_FINDINGS.md").relative_to(env.repo)
     result_path = scratch / CLOSURE_FILE
@@ -2225,7 +2363,7 @@ async def _close_objective(
             continue
         real.append(item)
     if not real:
-        return await _finish_objective(env, objective)
+        return await _finish_objective(env, objective, evidence)
     created: list[str] = []
     for item in real:
         payload = _closure_fix_ticket(env, objective, item)
@@ -2358,13 +2496,16 @@ def _notify_ref(objective: Mapping[str, Any]) -> str:
 async def _finish_objective(
     env: ObjectiveEnv,
     objective: Mapping[str, Any],
+    evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Close the objective: delivery record, ERP note, vault note (§9.7).
 
     The parent ticket (the ERP group) completes here, so the business
     close pushes through the standard queue: children first, then the
     group — a 417 parks as ``pending_status`` and the startup reconcile
-    retries it. No group push is done directly.
+    retries it. No group push is done directly. ``evidence`` is the
+    ``{"verified": ...}`` link the final review cleared (None when the
+    review ran elsewhere).
     """
     from orchestration import knowledge as knowledge_mod
 
@@ -2374,7 +2515,8 @@ async def _finish_objective(
         "status": "closed",
         "closed_at": _utcnow_iso(),
         "delivery": _delivery_record(
-            objective, children, verified_by="final_review"),
+            objective, children, verified_by="final_review",
+            evidence=evidence),
     })
     if env.ceo_wake is not None:
         try:

@@ -250,6 +250,10 @@ class ObjectiveService:
             if dev_cfg.get("vault_project") else None,
             ceo_wake=self._ceo_wake,
             project_routing=project_money_routing(project_config),
+            # No deterministic non-dev runner exists (research has no
+            # bridge), so unverified non-dev work parks as
+            # capability_gap (TASK-2026-00175).
+            delivery_verifiers={},
             dispatcher_wake=(getattr(task_service, "wake_dispatcher", None)
                              if task_service is not None else None),
         )
