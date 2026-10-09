@@ -956,7 +956,7 @@ Loose tickets (no `objective_id`) without a tier self-classify at dev dispatch (
 
 ### Delivery vs outcome
 
-An Objetivo closes on its delivery criteria, after the final review (`complete_candidate` never closes directly). The business outcome (KPI) is evaluated by the CEO afterwards; closing every ticket does not prove a metric moved. Final review by domain: dev = the current pool over the `objective/<id>` branch; non-dev = verification against criteria and artefacts.
+An Objetivo closes on its delivery criteria, after the final review (`complete_candidate` never closes directly). The business outcome (KPI) is evaluated by the CEO afterwards; closing every ticket does not prove a metric moved. Final review by domain: dev = the current pool over the `objective/<id>` branch; non-dev = verification against criteria and artefacts. The closer judges every consolidated finding exactly once: a finding still without a verdict after the bounded retry parks the objective (`closer_no_verdict`) with the attempts as evidence — a missing verdict is never FALSO and the reviewed SHA does not advance (TASK-2026-00170).
 
 ### Safe tiers and material failure
 

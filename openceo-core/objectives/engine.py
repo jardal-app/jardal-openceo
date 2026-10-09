@@ -1714,6 +1714,30 @@ def parse_closure(text: str) -> dict[int, tuple[str, str]]:
     return verdicts
 
 
+def _closer_no_verdict_detail(
+    missing: Sequence[int],
+    attempts: Sequence[Any],
+    text: str,
+    parsed: int,
+) -> str:
+    """Evidence for a ``closer_no_verdict`` park (TASK-2026-00170)."""
+    runs: list[str] = []
+    for result in attempts:
+        tag = f"rc={result.returncode}"
+        if result.returncode == TIMEOUT_RETURNCODE \
+                or (result.usage or {}).get("timeout"):
+            tag += "/timeout"
+        runs.append(tag)
+    names = ",".join(f"F{index}" for index in missing)
+    if not (text or "").strip():
+        state = "closure file empty"
+    else:
+        lines = len((text or "").splitlines())
+        state = f"closure file has {lines} lines, {parsed} parsed verdicts"
+    return (f"closer left {names} without a verdict after "
+            f"{len(attempts)} runs ({','.join(runs)}); {state}")[:300]
+
+
 async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]:
     """Final review by domain + close (§9.7).
 
@@ -1815,6 +1839,11 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
         if item.destination == "inbox" and env.inbox is not None:
             await _inbox_final_finding(env, objective, item)
     closed = await _close_objective(env, objective, consolidated, head)
+    if not closed.get("ok"):
+        # The close parked (closer without verdicts): this head was not
+        # reviewed, so the SHA must not advance — the next final review
+        # re-derives the same findings (TASK-2026-00170).
+        return closed
     await env.objectives.patch_objective(
         objective_id, {"last_final_review_sha": head})
     return closed
@@ -2033,7 +2062,7 @@ async def _close_objective(
         result_path.unlink()
     except OSError:
         pass
-    await env.executor.run("closer", prompt, env.repo, timeout_s)
+    first = await env.executor.run("closer", prompt, env.repo, timeout_s)
     try:
         await env.executor.cleanup("closer")
     except Exception:
@@ -2041,23 +2070,32 @@ async def _close_objective(
     text = _read(result_path)
     verdicts = parse_closure(text)
     missing = [item.id for item in consolidated if item.id not in verdicts]
+    attempts = [first]
     if missing:
-        await env.executor.run(
+        attempts.append(await env.executor.run(
             "closer",
             _closure_retry_prompt(
                 missing, env.repo,
                 result_path=str(result_path.relative_to(env.repo))),
-            env.repo, timeout_s)
+            env.repo, timeout_s))
         try:
             await env.executor.cleanup("closer")
         except Exception:
             pass
         text = _read(result_path)
         verdicts = parse_closure(text)
+        missing = [item.id for item in consolidated if item.id not in verdicts]
+    if missing:
+        # No verdict is never FALSO (TASK-2026-00170): a silent, failed
+        # or malformed closer parks the objective with the attempts as
+        # evidence. The findings stay unconsumed for the next review.
+        return await _objective_park(
+            env, objective, "closer_no_verdict",
+            _closer_no_verdict_detail(missing, attempts, text,
+                                       len(verdicts)))
     real: list[Any] = []
     for item in consolidated:
-        verdict = verdicts.get(item.id, ("FALSO", "no verdict"))[0]
-        reason = verdicts.get(item.id, ("", ""))[1]
+        verdict, reason = verdicts[item.id]
         if verdict != "REAL":
             if item.severity == "CRITICAL" and len(item.families) >= 2:
                 if await _arbitrate_final(env, objective, item, reason):

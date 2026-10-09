@@ -935,13 +935,29 @@ class FinalReview162Tests(unittest.IsolatedAsyncioTestCase):
         result = await run_final_review(env, "OBJ-1")
 
         # The silent closer leaves no verdicts: with the stale REAL gone,
-        # the finding defaults to FALSO and the objective finishes —
-        # no fix tickets. On the old code the stale file read as REAL.
-        # The legacy global file is neither read nor swept anymore
-        # (TASK-2026-00176); only the objective's own stale is dropped.
-        self.assertEqual(result["action"], "closed")
+        # nothing judges the WARN finding, so the objective parks with
+        # the attempts as evidence instead of closing (TASK-2026-00170).
+        # The old expectation (closed, FALSO by default) hid a
+        # pool-confirmed finding behind a provider failure. The legacy
+        # global file is neither read nor swept anymore (TASK-2026-00176);
+        # only the objective's own stale is dropped.
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "closer_no_verdict")
+        self.assertIn("F1", result["detail"])
         self.assertEqual(created, [])
         self.assertEqual(fake.calls.count("closer"), 2)
+        stored = await env.objectives.get_objective("OBJ-1")
+        assert stored is not None
+        self.assertEqual(stored["status"], "waiting")
+        self.assertIn("closer_no_verdict", stored["waiting_reason"])
+        # The findings survive for the next review, and the reviewed SHA
+        # does not advance past an unreviewed head.
+        findings_file = (objective_scratch(repo, "OBJ-1")
+                         / "OBJECTIVE_FINDINGS.md")
+        self.assertTrue(findings_file.exists())
+        self.assertIn("changed line is bare",
+                      findings_file.read_text(encoding="utf-8"))
+        self.assertIsNone(stored.get("last_final_review_sha"))
         self.assertIn(".tier-s/objectives/OBJ-1/OBJECTIVE_FINDINGS.md",
                       fake.prompts["closer"])
         self.assertTrue(stale_root.exists())
