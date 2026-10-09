@@ -93,7 +93,8 @@ class ConfigLoader:
         is top-level ``objectives`` (TASK-2026-00117). The shared review
         machinery is global too: top-level ``review`` content is invalid
         (TASK-2026-00141), and so is the company-wide CEO reviewer:
-        top-level ``ceo`` content is invalid (TASK-2026-00119).
+        top-level ``ceo`` content is invalid (TASK-2026-00119). The optional
+        ``dev.routing`` tier guide (TASK-2026-00161) is shape-checked.
         Callers park the project's tickets in ``waiting(config)`` when
         this is non-empty; other projects are unaffected.
         """
@@ -225,6 +226,44 @@ class ConfigLoader:
                     f"{project}/project.yaml: 'dev.vault_project' needs "
                     "'dir' and 'project'."
                 )
+        # Optional per-project tier guide (TASK-2026-00161): a
+        # money-sensitive project prefers tier_s for money/algorithm work,
+        # never forced. Malformed shape parks the project's tickets.
+        routing = dev.get("routing")
+        if routing is not None:
+            if not isinstance(routing, dict):
+                errors.append(
+                    f"{project}/project.yaml: 'dev.routing' must be a mapping."
+                )
+            else:
+                money = routing.get("money_sensitive")
+                if money is not None and money is not True \
+                        and money is not False:
+                    errors.append(
+                        f"{project}/project.yaml: "
+                        "'dev.routing.money_sensitive' must be true or false."
+                    )
+                for key in ("money_domain", "money_stake"):
+                    words = routing.get(key)
+                    if words is None:
+                        continue
+                    if not isinstance(words, list) or any(
+                            not isinstance(entry, str) or not entry.strip()
+                            for entry in words):
+                        errors.append(
+                            f"{project}/project.yaml: 'dev.routing.{key}' "
+                            "must be a list of non-empty strings."
+                        )
+                    elif len(words) > 64:
+                        errors.append(
+                            f"{project}/project.yaml: 'dev.routing.{key}' "
+                            "carries at most 64 entries."
+                        )
+                    elif any(len(entry.strip()) > 80 for entry in words):
+                        errors.append(
+                            f"{project}/project.yaml: 'dev.routing.{key}' "
+                            "entries run at most 80 characters."
+                        )
         # dev.gates shape (design §11, §17.2 — F1). dev.qa stays tolerated:
         # the old engine still reads it, and §17.3 key removal lands when the
         # old engine retires, not while both dispatch paths exist.

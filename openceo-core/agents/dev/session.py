@@ -15,7 +15,7 @@ from typing import Any
 
 from .review_links import ReviewLinksExtraction, apply_review_links_to_params, extract_review_links
 from .loose_tier import (ASSIGNED_BY, LooseTierDecision, classify_loose_tier,
-                          record_loose_tier_decision)
+                          project_money_routing, record_loose_tier_decision)
 from .routing import (ROUTING_MISSING_REASON, TIER_C_CHAIN, RoutingDecision,
                       resolve_coding_tool, select_tier_c_link)
 from .tier_oracle import freeze_oracle, verify_oracle
@@ -229,11 +229,14 @@ class DevSessionManager:
                     params=task.get("params") if isinstance(task.get("params"), dict) else None,
                 )
             # Loose ticket (TASK-2026-00137): deterministic tier authority,
-            # zero tokens. Never parks in routing_missing.
+            # zero tokens. Never parks in routing_missing. A money-sensitive
+            # project (TASK-2026-00161) adds its domain signal here, same as
+            # the dispatcher peek.
             classified = classify_loose_tier(
                 str(task.get("title") or ""),
                 str(task.get("description") or ""),
                 task.get("attachments") or [],
+                project_routing=project_money_routing(project_config),
             )
             logger.info(
                 "loose tier task_id=%s tier=%s signals=%s",
@@ -1106,6 +1109,7 @@ class DevSessionManager:
             base_branch=base,
             vault=dict(dev_cfg.get("vault_project") or {})
             if dev_cfg.get("vault_project") else None,
+            project_routing=project_money_routing(project_config),
         )
 
     async def _internal_create_ticket(

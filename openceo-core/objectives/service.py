@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any, Mapping
 
+from agents.dev.loose_tier import project_money_routing
 from orchestration.inbox import InMemoryInboxStore, MongoInboxStore
 from orchestration.live import AllowAllQuota, ProcessExecutor, RateMonitorQuota
 from orchestration.review import (
@@ -248,6 +249,7 @@ class ObjectiveService:
             vault=dict(dev_cfg.get("vault_project") or {})
             if dev_cfg.get("vault_project") else None,
             ceo_wake=self._ceo_wake,
+            project_routing=project_money_routing(project_config),
         )
 
     @staticmethod

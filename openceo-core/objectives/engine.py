@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
+from agents.dev.loose_tier import routing_guide_section
 from orchestration import findings as findings_mod
 from orchestration import inbox as inbox_mod
 from orchestration import knowledge as knowledge_mod
@@ -134,6 +135,10 @@ class ObjectiveEnv:
     # reason when an objective parks or closes. Sync, never fatal, None
     # in bare unit envs and dev flows that do not wire the CEO loop.
     ceo_wake: Callable[[str], None] | None = None
+    # Normalized per-project tier routing (TASK-2026-00161): the
+    # ``dev.routing`` mapping for the objective's project (``{}`` when the
+    # project carries no characteristic). Feeds the planner prompt guide.
+    project_routing: dict[str, Any] = field(default_factory=dict)
 
 
 class InMemoryObjectiveStore:
@@ -634,6 +639,7 @@ def _planner_prompt(
     handoffs: Sequence[str] = (),
     roadmap: Sequence[str] = (),
     repo: Path | str | None = None,
+    routing_guide: str = "",
 ) -> str:
     """Planner prompt: bounded state + JSON contract (self-contained).
 
@@ -731,6 +737,10 @@ def _planner_prompt(
         "  NEVER triggers protection.",
         "- Quota never redefines the technical tier. Never choose",
         "  runtime, CLI account, or model.",
+    ])
+    if (routing_guide or "").strip():
+        lines.extend(["", routing_guide.strip()])
+    lines.extend([
         "",
         f"OUTPUT: write {SCRATCH_DIRNAME}/{PLANNER_RESULT_FILE} with exactly this JSON",
         "object (no YAML, no markdown fences around the file content):",
@@ -1082,7 +1092,10 @@ async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]
         policy_text=policy_text, handoffs=handoffs,
         roadmap=[str(item) for item in
                  objective.get("roadmap_remaining") or []],
-        repo=env.repo)
+        repo=env.repo,
+        routing_guide=routing_guide_section(
+            str(objective.get("project") or ""),
+            env.project_routing))
     scratch = objective_scratch(env.repo, objective_id)
     scratch.mkdir(parents=True, exist_ok=True)
     (scratch / "OBJECTIVE_CAPSULE.md").write_text(
