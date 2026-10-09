@@ -400,7 +400,7 @@ class OracleGateIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tamper_message_names_where_the_oracle_came_from(self) -> None:
         for assigned_by, expected in (
-                ("loose_classifier/v3", "frozen from the ticket text"),
+                ("loose_classifier/v4", "frozen from the ticket text"),
                 (None, "declared by the planner")):
             with self.subTest(origin=expected):
                 repo, base, frozen = self._prepared()
@@ -421,7 +421,7 @@ class OracleGateIntegrationTests(unittest.IsolatedAsyncioTestCase):
         repo, base, frozen = self._prepared()
         task = _loose_task()
         task["params"] = {**task["params"], "why_not_c": None,
-                          "tier_assigned_by": "loose_classifier/v3"}
+                          "tier_assigned_by": "loose_classifier/v4"}
         output = await self._finish(
             repo, base, frozen, _dev_config(), task=task)
         self.assertEqual(output.status, TaskStatus.COMPLETED, output.error)

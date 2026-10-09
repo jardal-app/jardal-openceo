@@ -35,7 +35,12 @@ S/A/B justification, and a keyword rule cannot prove complexity any
 more than it could prove an oracle. ``priority`` alone never selects
 S (§19), and ``tier_*`` tokens in the text are NOT honored: the
 ``coding_tool`` field is the explicit channel and this classifier only
-runs when it is empty.
+runs when it is empty. A mention that its own clause clearly excludes
+from the work ("no toca pagos", "payments excluded"), that sits in an
+out-of-scope section, or that only cites the routing policy (a §
+reference, not work) is not a work signal and never selects S on its
+own (TASK-2026-00171); a goal stated as an end state ("sin pagos
+duplicados") still fires, since the work is the money logic itself.
 
 A cited oracle (coverage claim plus ``tests/...`` refs in one
 sentence) is attached as evidence to any tier and freezes at branch
@@ -64,12 +69,13 @@ from state import CodingTool
 logger = logging.getLogger(__name__)
 
 #: Provenance marker recorded in ``params.tier_assigned_by``.
-#: v3 = explicit-assurance S signal, privacy/compliance S signal and a
-#: stricter oracle-evidence extraction (TASK-2026-00178); v2 =
-#: recalibrated S → A → B → C order with ``tier_c`` default
-#: (TASK-2026-00148); v1 decisions were B-default. Older decisions stay
-#: readable.
-ASSIGNED_BY = "loose_classifier/v3"
+#: v4 = excluded/out-of-scope/policy-cited S mentions stop firing
+#: (TASK-2026-00171); v3 = explicit-assurance S signal,
+#: privacy/compliance S signal and a stricter oracle-evidence
+#: extraction (TASK-2026-00178); v2 = recalibrated S → A → B → C order
+#: with ``tier_c`` default (TASK-2026-00148); v1 decisions were
+#: B-default. Older decisions stay readable.
+ASSIGNED_BY = "loose_classifier/v4"
 
 
 @dataclass(frozen=True)
@@ -319,14 +325,77 @@ _S_ASSURANCE = (
     "implementation; the requester explicitly wants more assurance than "
     "one session can give.",
 )
-#: Signals whose mention is skipped when negated in its clause.
-_NEGATION_GUARDED = frozenset({"s_assurance", "s_privacy"})
+#: Domain S signals whose mention is skipped only as a clear exclusion:
+#: an exclusion marker, or a negation word governing a scope verb, in
+#: the clause before or after the mention (TASK-2026-00171). Bare
+#: negation is not enough here: "no toca pagos" excludes the work,
+#: while "sin pagos duplicados" states it as a goal.
+_EXCLUSION_GUARDED = frozenset({
+    "s_auth", "s_money", "s_destructive", "s_integrity", "s_distributed",
+})
 _NEGATION_WORDS = re.compile(
     r"(?:\b(?:no|ni|sin|not|without|never|nunca|tampoco|nor)\b"
     r"|\bnada\s+de\b|n't\b)", re.IGNORECASE | re.UNICODE)
 _NEGATION_EXEMPT = re.compile(
     r"\b(?:no\s+s[óo]lo|not\s+only)\b", re.IGNORECASE | re.UNICODE)
+#: Touch/scope verbs and nouns: with a negation word in the same clause
+#: they exclude the mention ("no toca pagos", "without changes in the
+#: login", "sin modificar pagos"). Deliberately NOT "except/salvo": "all
+#: X except Y" excludes Y but keeps the rest of X in scope, which a
+#: keyword rule cannot tell apart — upward bias keeps it firing.
+_SCOPE_VERBS = re.compile(
+    r"\b(?:toca\w*|touch\w*|inclu\w*|include\w*|afecta\w*|affect\w*|"
+    r"cambia\w*|cambio\w*|chang\w*|modif\w*|alter\w*|romp\w*|break|"
+    r"breaks|breaking|usa|usan|usar|usando|usad[oa]s?|use|uses|used|"
+    r"using|uso\w*|utiliz\w*|requier\w*|requir\w*|necesit\w*|need\w*|"
+    r"implica\w*|involv\w*|cubr\w*|cover\w*)\b",
+    re.IGNORECASE | re.UNICODE)
+#: Exclusion markers: they exclude the mention on their own, with no
+#: negation word needed ("payments excluded", "login untouched",
+#: "pagos, ajenos al ticket", "non-goal: pagos").
+_EXCLUSION_MARKERS = re.compile(
+    r"\b(?:exclu\w*|exclud\w*|untouched|ajeno\w*|non-?goals?|"
+    r"no\s+objetivos?)\b|\bout\s+of\s+scope\b|"
+    r"\bfuera\s+de[ln]?\s+alcance\b",
+    re.IGNORECASE | re.UNICODE)
+#: A sentence that cites the routing policy as an example list instead of
+#: describing work ("Per routing policy §19, S examples include
+#: authentication"). Both halves must share the sentence: a bare §
+#: reference next to real work ("Fix the OAuth flow per §19") still
+#: fires, since the work is genuine.
+_POLICY_CITE = re.compile(
+    r"§\s*\d|routing_policy|\brouting\s+policy\b|"
+    r"política\s+de\s+ruteo|politica\s+de\s+ruteo",
+    re.IGNORECASE | re.UNICODE)
+_EXAMPLE_WORDS = re.compile(
+    r"\b(?:examples?|ejemplos?|includes?|including|inclu\w*|"
+    r"such\s+as|tales\s+como|mentions?|mencion\w*|mención\w*|"
+    r"cited?|cita\w*)\b",
+    re.IGNORECASE | re.UNICODE)
+_SENTENCE_BREAK = re.compile(r"[.!?\n]")
+#: Stake qualifiers: "real/live" negated at the mention's edge means no
+#: real stake ("bot sin dinero real"), while a goal ("sin pagos
+#: duplicados") still fires. Before the match the qualifier must touch
+#: it ("without real money", never "el problema real es el login");
+#: after it a copula gap is allowed ("el dinero no es real"), but no
+#: content word ("pagos sin errores reales" still fires).
+_STAKE_QUALIFIER = r"(?:real(?:es)?|live|vivo\w*|en\s+vivo)"
+_QUALIFIER_BEFORE = re.compile(
+    _STAKE_QUALIFIER + r"\W*$", re.IGNORECASE | re.UNICODE)
+_QUALIFIER_GAP = (r"(?:no|not|nunca|never|ni|nor|sin|without|es|son|sea|"
+                  r"sean|ser|está|están|estar|is|are|be|been|el|la|los|"
+                  r"las|the|a|an|que|that|which)")
+_QUALIFIER_AFTER = re.compile(
+    r"^\W*(?:" + _QUALIFIER_GAP + r"\W+)*" + _STAKE_QUALIFIER + r"\b",
+    re.IGNORECASE | re.UNICODE)
 _CLAUSE_BREAK = re.compile(r"[.;:,\n(]")
+#: Section headers whose body is out of scope: the header line and every
+#: line until the next blank line, markdown header, or end of text.
+_OUT_OF_SCOPE_HEADER = re.compile(
+    r"^\s*(?:#{1,6}\s*)?(?:out\s+of\s+scope|fuera\s+de[ln]?\s+alcance|"
+    r"alcance\s+excluido|non-?goals?|no\s+objetivos?)\b",
+    re.IGNORECASE | re.UNICODE)
+_MD_HEADER = re.compile(r"^\s*#{1,6}\s+\S")
 _S_INCIDENT_WORDS = _compile((
     _alt("incident", "incidents", "incidente", "incidentes", "outage",
          "outages", "caída", "caida", "caídas", "caidas"),
@@ -773,18 +842,82 @@ def _first_match(pattern: "re.Pattern[str]", text: str) -> str | None:
     return found.group(0) if found else None
 
 
+def _mask_out_of_scope_sections(text: str) -> str:
+    """Text without out-of-scope sections (S signals only).
+
+    From an out-of-scope header line to the next blank line, markdown
+    header, or end of text, mentions describe work the ticket will NOT
+    do, so S signals must not read them. A/B scans keep the raw text:
+    the ticket asked to fix them, and 00171 scopes the exclusion to S.
+    """
+    kept: list[str] = []
+    skipping = False
+    for line in text.split("\n"):
+        if _OUT_OF_SCOPE_HEADER.match(line):
+            skipping = True
+            continue
+        if skipping and (not line.strip() or _MD_HEADER.match(line)):
+            skipping = False
+        if skipping:
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _first_unnegated_match(pattern: "re.Pattern[str]", text: str) -> str | None:
     """First match that its own clause does not negate.
 
-    "No requiere revisión independiente" or "sin datos GDPR" is the
-    opposite of a request, so it never fires. The clause is the text
-    since the last punctuation/newline before the match; "no solo" is
-    not a negation.
+    Used by ``s_assurance``/``s_privacy``: "No requiere revisión
+    independiente" or "sin datos GDPR" is the opposite of a request,
+    so it never fires. The clause is the text since the last
+    punctuation/newline before the match; "no solo" is not a negation.
+    Policy-cited and excluded mentions are skipped as well.
+    """
+    return _first_valid_match(pattern, text, bare_negation_skips=True)
+
+
+def _first_valid_match(pattern: "re.Pattern[str]", text: str,
+                       *, bare_negation_skips: bool) -> str | None:
+    """First match that counts as a work signal.
+
+    A match is skipped when its sentence cites the routing policy as an
+    example list, when either neighboring clause carries an exclusion
+    marker, or when a negation governs the mention: assurance/privacy
+    and the incident halves keep the older rule where any clause
+    negation skips (``bare_negation_skips``), while domain signals and
+    the money halves require a scope verb ("no toca pagos") or a
+    negated stake qualifier at the mention's edge ("sin dinero real") —
+    a bare "sin pagos duplicados" states the work as a goal and still
+    fires. Clauses end at punctuation, newlines and open parens; "no
+    solo" is not a negation.
     """
     for found in pattern.finditer(text):
-        clause = _CLAUSE_BREAK.split(text[:found.start()])[-1]
-        clause = _NEGATION_EXEMPT.sub(" ", clause)
-        if _NEGATION_WORDS.search(clause):
+        before = _CLAUSE_BREAK.split(text[:found.start()])[-1]
+        after = _CLAUSE_BREAK.split(text[found.end():], maxsplit=1)[0]
+        before = _NEGATION_EXEMPT.sub(" ", before)
+        after = _NEGATION_EXEMPT.sub(" ", after)
+        sentence = (_SENTENCE_BREAK.split(text[:found.start()])[-1]
+                    + " " + _SENTENCE_BREAK.split(text[found.end():],
+                                                  maxsplit=1)[0])
+        if _POLICY_CITE.search(sentence) and _EXAMPLE_WORDS.search(sentence):
+            continue
+        if _EXCLUSION_MARKERS.search(before) or _EXCLUSION_MARKERS.search(after):
+            continue
+        negated = (_NEGATION_WORDS.search(before) is not None
+                   or _NEGATION_WORDS.search(after) is not None)
+        if not negated:
+            return found.group(0)
+        if bare_negation_skips:
+            continue
+        if _SCOPE_VERBS.search(before) or _SCOPE_VERBS.search(after):
+            continue
+        if _QUALIFIER_BEFORE.search(before) or _QUALIFIER_AFTER.search(after):
+            continue
+        # A multi-word hit can carry the qualifier inside itself
+        # ("bot sin dinero real" hits the "dinero real" stake phrase).
+        matched = found.group(0)
+        if (_QUALIFIER_BEFORE.search(matched)
+                or _QUALIFIER_AFTER.search(matched)):
             continue
         return found.group(0)
     return None
@@ -832,12 +965,18 @@ def classify_loose_tier(
     explicit request for multi-model assurance (``s_assurance``, the
     domain-free path) is read first. A money-sensitive project routing
     (``dev.routing``) adds the ``s_money_domain`` S signal for this
-    project only; anything else normalizes to disabled.
+    project only; anything else normalizes to disabled. An S mention
+    that its clause excludes from the work, that sits in an
+    out-of-scope section, or that only cites the routing policy is not
+    a work signal and never selects S on its own (TASK-2026-00171).
     """
     text = _scan_text(title, description, attachments or ())
     oracle = _extract_oracle_evidence(text)
+    # S signals read the text without out-of-scope sections: mentions
+    # there describe work the ticket will NOT do (TASK-2026-00171).
+    s_text = _mask_out_of_scope_sections(text)
 
-    requested = _first_unnegated_match(_COMPILED_S_ASSURANCE, text)
+    requested = _first_unnegated_match(_COMPILED_S_ASSURANCE, s_text)
     if requested is not None:
         return LooseTierDecision(
             tier=CodingTool.TIER_S,
@@ -852,18 +991,26 @@ def classify_loose_tier(
 
     routing = _normalize_money_routing(project_routing)
     if routing:
-        domain_hit = _first_match(_COMPILED_M_DOMAIN, text)
+        # Either half excluded or policy-cited is no stake: "bot de
+        # avisos sin dinero real" is not money work, while "stop loss
+        # no salta" is a live-money bug (00171) — hence exclusion mode,
+        # not bare negation, like the domain signals below.
+        domain_hit = _first_valid_match(
+            _COMPILED_M_DOMAIN, s_text, bare_negation_skips=False)
         if domain_hit is None:
             custom_domain = _compile_custom(
                 routing.get("money_domain", ()))
             if custom_domain is not None:
-                domain_hit = _first_match(custom_domain, text)
-        stake_hit = _first_match(_COMPILED_M_STAKE, text)
+                domain_hit = _first_valid_match(
+                    custom_domain, s_text, bare_negation_skips=False)
+        stake_hit = _first_valid_match(
+            _COMPILED_M_STAKE, s_text, bare_negation_skips=False)
         if stake_hit is None:
             custom_stake = _compile_custom(
                 routing.get("money_stake", ()))
             if custom_stake is not None:
-                stake_hit = _first_match(custom_stake, text)
+                stake_hit = _first_valid_match(
+                    custom_stake, s_text, bare_negation_skips=False)
         if domain_hit is not None and stake_hit is not None:
             return LooseTierDecision(
                 tier=CodingTool.TIER_S,
@@ -886,9 +1033,10 @@ def classify_loose_tier(
             )
 
     for signal_id, pattern, why_consensus, why_single in _COMPILED_S:
-        matched = (_first_unnegated_match(pattern, text)
-                   if signal_id in _NEGATION_GUARDED
-                   else _first_match(pattern, text))
+        # s_privacy is not exclusion-guarded: it keeps bare negation.
+        matched = _first_valid_match(
+            pattern, s_text,
+            bare_negation_skips=signal_id not in _EXCLUSION_GUARDED)
         if matched is not None:
             return LooseTierDecision(
                 tier=CodingTool.TIER_S,
@@ -900,8 +1048,10 @@ def classify_loose_tier(
                 why_consensus_is_needed=why_consensus,
                 why_single_session_is_insufficient=why_single,
             )
-    incident = _first_match(_S_INCIDENT_WORDS, text)
-    unknown = _first_match(_S_INCIDENT_UNKNOWN, text)
+    incident = _first_valid_match(
+        _S_INCIDENT_WORDS, s_text, bare_negation_skips=True)
+    unknown = _first_valid_match(
+        _S_INCIDENT_UNKNOWN, s_text, bare_negation_skips=True)
     if incident is not None and unknown is not None:
         return LooseTierDecision(
             tier=CodingTool.TIER_S,

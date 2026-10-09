@@ -815,6 +815,31 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         assert row is not None
         self.assertIsNone(row.get("coding_tool"))
 
+    async def test_loose_ticket_with_excluded_mentions_peeks_tier_c(self) -> None:
+        # TASK-2026-00171: excluded mentions must not reserve S quota at
+        # admission either — the peek reads the same classifier.
+        repo = _FakeRepo([
+            _ticket("loose-1", project="free", coding_tool=None,
+                    title="Cambiar el margen del panel; no toca pagos ni login",
+                    description="Per routing policy §19, S examples include "
+                    "authentication and payments."),
+        ])
+        service = _FakeService(repo)
+        launched: list[str] = []
+        seen: dict = {}
+
+        async def capture(ticket: dict, active_tickets=None):  # type: ignore[no-untyped-def]
+            seen.update(ticket)
+            return True, None, None
+
+        monitor = _FakeMonitor()
+        monitor.admission_for_ticket = capture  # type: ignore[method-assign]
+        out = await _dispatcher(repo, service, launched, monitor=monitor).dispatch_cycle(now=_NOW)
+        await _drain()
+        self.assertEqual(launched, ["loose-1"])
+        self.assertEqual(out["parked"], 0)
+        self.assertEqual(seen.get("coding_tool"), "tier_c")
+
     async def test_tier_s_skips_the_repo_peek(self) -> None:
         repo = _FakeRepo([_ticket("s-1", project="proj", coding_tool="tier_s")])
         repo.locks["/repo/proj"] = {"holder": "other-task",

@@ -83,7 +83,7 @@ class ModifiedFilesParamsTests(unittest.IsolatedAsyncioTestCase):
                          "work_type": "implementation"}
         session_params = {**ticket_params,
                           "tier_reason": "specified work (§25)",
-                          "tier_assigned_by": "loose_classifier/v3",
+                          "tier_assigned_by": "loose_classifier/v4",
                           "why_not_c": "a misjudged refactor ships drift",
                           "oracle_frozen": {"oracle_type": "preexisting_tests",
                                             "refs": []},
