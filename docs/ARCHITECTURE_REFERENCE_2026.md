@@ -985,6 +985,8 @@ result → replan only if something changed → final review → close
 Only if policy requires: Pending Review + tray + Horizon → OWNER
 ```
 
+The objective close notification fires once, after the terminal state is persisted: `run_task` notifies post-persist from the session's stashed close context (Tier S notifies inline and the funnel skips it, so no double replan), and the closing ticket itself never counts as open work (TASK-2026-00169).
+
 ---
 
 ## Internal Scheduler — Recurring Tasks & Reminders

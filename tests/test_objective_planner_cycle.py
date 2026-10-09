@@ -16,13 +16,12 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 CORE = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE) not in sys.path:
     sys.path.insert(0, str(CORE))
 
-from agents.dev.session import DevSessionManager
 from objectives.engine import (
     InMemoryObjectiveStore,
     InMemoryTaskLister,
@@ -30,7 +29,6 @@ from objectives.engine import (
     convert_ticket,
     plan_objective,
 )
-from settings import Settings
 
 
 def _scratch_repo(test: unittest.TestCase) -> Path:
@@ -444,34 +442,11 @@ class StallCounterTests(unittest.TestCase):
               "complete": False}]), 0)
 
 
-class SimpleTriggerWiringTests(unittest.IsolatedAsyncioTestCase):
-    async def test_simple_close_reaches_objective_triggers(self) -> None:
-        repo = _scratch_repo(self)
-        manager = DevSessionManager(Settings(), MagicMock())
-        manager._task_service = None
-        manager._rate_monitor = None
-        manager._repo = None
-        project_config = {
-            "project": {"repos": []},
-            "dev": {"tier_s": {}},
-            "objective_planner": {
-                "agents": {"dev": {"enabled": True}},
-                "role": {"command": ["true"]},
-            },
-        }
-        branch = SimpleNamespace(repo=repo)
-        task = {"task_id": "task-child", "title": "child",
-                "coding_tool": "tier_b", "objective_id": "OBJ-1"}
-
-        with patch("agents.dev.session.on_ticket_closed",
-                   new=AsyncMock(return_value={"ok": True})) as closed:
-            note = await manager._simple_objective_trigger(
-                task, project_config, branch, ["a.py"], "sha", "handoff")
-
-        self.assertEqual(note, " Objective triggers evaluated.")
-        closed.assert_awaited_once()
-        env = closed.await_args.args[0]
-        self.assertEqual(env.planner_cfg["agents"]["dev"]["enabled"], True)
+# NOTE (TASK-2026-00169): the simple close no longer triggers the
+# objective inline (that pre-persist read wedged the objective). The
+# session stashes the close context and the funnel notifies once after
+# persisting COMPLETED; the contract lives in
+# tests/test_simple_close_event_169.py.
 
 
 if __name__ == "__main__":

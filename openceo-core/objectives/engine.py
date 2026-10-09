@@ -1495,9 +1495,18 @@ async def on_ticket_closed(
             objective = await env.objectives.get_objective(objective_id) or objective
         await _recompile_capsule(env, objective)
         tickets = await env.tasks.list_by_objective(objective_id)
+        # The notification asserts its subject is closed: never count it
+        # as open work, whatever a racy store read says (TASK-2026-00169:
+        # a pre-persist trigger — or the concurrent QA flip — reads the
+        # subject back as non-terminal and wedges the objective).
+        closed_ids = {str(ticket.get("task_id") or "")}
+        if close is not None:
+            closed_ids.add(str(close.task_id or ""))
+        closed_ids.discard("")
         ready = [item for item in tickets
                  if str(item.get("status")) not in TERMINAL_TICKET_STATUS
                  and str(item.get("status")) != FAILED_HISTORY_STATUS
+                 and str(item.get("task_id") or "") not in closed_ids
                  and not await _blocked(env, item)]
         if ready:
             if close is not None and _touches_objective(objective, close) \
