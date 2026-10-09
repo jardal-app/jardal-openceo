@@ -79,7 +79,9 @@ def git_snapshot(repo: Path) -> GitSnapshot:
     return GitSnapshot(files, digest)
 
 
-_FINDING_RE = re.compile(r"^\[(CRITICAL|WARN|SUGGEST)\] .+", re.MULTILINE)
+# Severity vocabulary of §16.4 (findings.SEVERITIES); the retired SUGGEST
+# rejected INFO-only reports (TASK-2026-00162, found by 3 pilot reviewers).
+_FINDING_RE = re.compile(r"^\[(CRITICAL|WARN|INFO)\] .+", re.MULTILINE)
 
 
 def valid_review(text: str) -> bool:
