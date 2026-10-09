@@ -809,9 +809,16 @@ def _planner_prompt(
         '    "completes_task_id?": "<to COMPLETE a tierless child above '
         'instead of creating: its task_id>"',
         "  } ],",
-        '  "roadmap_remaining": ["<speculative future work>"],',
-        '  "replan_when": ["<conditions that should trigger replanning>"]',
+        '  "roadmap_remaining": ["<one line per foreseen next step: what, '
+        'and what it depends on>"]',
         "}",
+        "ROADMAP_REMAINING is your outlook: after choosing this cycle's",
+        "tickets, list the next steps you already foresee (at most",
+        f"{planner_mod.ROADMAP_MAX_LINES} lines of "
+        f"{planner_mod.ROADMAP_MAX_CHARS} characters), one line per step",
+        "saying what it depends on. They are speculative notes for the next",
+        "cycle, not commitments: rewrite the whole list every cycle and drop",
+        "what stopped being valid. A longer list or line is rejected.",
         "Rules: active carries 1-3 NEW tickets plus any completions of",
         "tierless children above (a completion never recreates: it fills",
         "the listed task; blocked_by never names a completion's",

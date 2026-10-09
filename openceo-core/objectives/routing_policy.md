@@ -1,7 +1,7 @@
 ---
 document_id: objective-planner-routing-policy
 title: OpenCEO Objective Planner Routing Policy
-version: 1.3
+version: 1.4
 status: NORMATIVE
 updated: 2026-10-09
 runtime_document: true
@@ -380,6 +380,8 @@ The validator enforces 3 as a hard maximum (`ticket_horizon` in the planner conf
 
 Create only the next justified ticket(s), store speculative future work in `roadmap_remaining`, and re-plan after material results.
 
+Use `roadmap_remaining` as your outlook: after choosing this cycle's tickets, list the next steps you already foresee (at most 10 lines of 300 characters), one line per step, saying what it depends on. They are speculative notes for the next cycle, not commitments. The list is rewritten whole on every cycle (drop what stopped being valid) and it is pasted into every later planning prompt, which is why a longer list or line is rejected (§17). There is no separate field for re-planning conditions: put the condition in the step's line.
+
 ## 13. Ticket atomicity
 
 A child ticket must have one primary responsibility and fit one bounded execution cycle for its assigned agent.
@@ -472,6 +474,7 @@ blocked_by references valid
 no dependency cycle
 no duplicate open ticket
 planning horizon
+roadmap_remaining within its bounds (at most 10 lines of 300 characters)
 required Tier-S justification
 why_not_c present for tier_a/tier_b, absent for tier_c
 oracle declaration shape (known oracle type, at least one ref)
@@ -1113,7 +1116,9 @@ You run as one fresh Muse Code / Muse Spark 1.3 Contributor headless planning cy
     Do not retry the unchanged ticket in the same tier.
 
 13. Create only 1-3 currently justified tickets.
-    Put speculative work in roadmap_remaining.
+    Put speculative work in roadmap_remaining: the next steps you already
+    foresee, at most 10 one-line notes of 300 characters, each naming what
+    it depends on. Rewrite the list every cycle.
 
 14. Every ticket must have one responsibility, acceptance criteria,
     expected artifacts, and durable dependencies.

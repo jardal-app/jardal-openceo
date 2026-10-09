@@ -115,6 +115,41 @@ class ObjectiveTierPromptTests(unittest.TestCase):
         self.assertIn("did x", prompt)
 
 
+class RoadmapOutlookPromptTests(unittest.TestCase):
+    """The planner is asked for an outlook, with the validator's numbers."""
+
+    def test_prompt_asks_for_the_outlook_with_the_enforced_bounds(self) -> None:
+        from objectives.planner_models import ROADMAP_MAX_CHARS, ROADMAP_MAX_LINES
+
+        prompt = _prompt()
+        flat = " ".join(prompt.split())
+        self.assertIn("ROADMAP_REMAINING is your outlook", prompt)
+        self.assertIn(f"(at most {ROADMAP_MAX_LINES} lines of "
+                      f"{ROADMAP_MAX_CHARS} characters)", flat)
+        self.assertIn("one line per step saying what it depends on", flat)
+        self.assertIn("speculative notes for the next cycle, not commitments",
+                      flat)
+        self.assertIn("rewrite the whole list every cycle", flat)
+        self.assertIn("A longer list or line is rejected.", prompt)
+
+    def test_json_contract_describes_a_line_per_step(self) -> None:
+        prompt = _prompt()
+        self.assertIn('"roadmap_remaining": ["<one line per foreseen next '
+                      'step: what, and what it depends on>"]', prompt)
+        self.assertNotIn("<speculative future work>", prompt)
+
+    def test_replan_when_is_no_longer_requested(self) -> None:
+        self.assertNotIn("replan_when", _prompt())
+
+    def test_the_contract_object_still_closes_cleanly(self) -> None:
+        # roadmap_remaining is now the last key: no dangling comma.
+        prompt = _prompt()
+        start = prompt.index('"roadmap_remaining"')
+        line_end = prompt.index("\n", start)
+        self.assertFalse(prompt[start:line_end].rstrip().endswith(","))
+        self.assertEqual(prompt[line_end + 1].strip(), "}")
+
+
 class PlannedTicketDescriptionTests(unittest.TestCase):
     """The justifications travel into the ticket the executor and the owner read."""
 

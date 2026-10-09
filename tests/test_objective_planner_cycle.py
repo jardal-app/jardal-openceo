@@ -334,6 +334,62 @@ class PlannerCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["tickets_created"], 1)
         self.assertEqual(created[0]["title"], "Child")
 
+    async def test_oversized_roadmap_is_rejected_then_corrected_on_retry(self) -> None:
+        # TASK-2026-00183: the outlook is bounded; the planner rewrites it in
+        # the retry the cycle already has, and only the valid list persists.
+        repo = _scratch_repo(self)
+        too_long = {"objective_status": "active", "state_summary": "ok",
+                    "tickets": [_dev_ticket("a", "Child")],
+                    "roadmap_remaining": [f"step {n}" for n in range(11)]}
+        fixed = {"objective_status": "active", "state_summary": "ok",
+                 "tickets": [_dev_ticket("a", "Child")],
+                 "roadmap_remaining": ["migrate data; depends on Child",
+                                       "retire the old path; depends on the migration"]}
+        env, planner, created, _patches = _planner_env(
+            self, repo, [too_long, fixed])
+        await env.objectives.create_objective({
+            "objective_id": "OBJ-1", "project": "p", "status": "active",
+            "anchor": {"goal": "g", "acceptance": []},
+            "capsule": {"text": "", "compiled_at": None, "tokens": 0},
+            "tickets_log": [],
+        })
+
+        result = await plan_objective(env, "OBJ-1")
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(planner.runs, 2)            # initial + the retry
+        self.assertIn("roadmap_remaining carries at most 10 lines",
+                      planner.prompts[1])
+        self.assertEqual(len(created), 1)            # created once, after the fix
+        stored = await env.objectives.get_objective("OBJ-1")
+        assert stored is not None
+        self.assertEqual(stored["roadmap_remaining"],
+                         fixed["roadmap_remaining"])
+
+    async def test_the_outlook_returns_to_the_next_cycle_prompt(self) -> None:
+        repo = _scratch_repo(self)
+        first = {"objective_status": "active", "state_summary": "ok",
+                 "tickets": [_dev_ticket("a", "Child")],
+                 "roadmap_remaining": ["ship the API; depends on Child"]}
+        env, planner, _created, _patches = _planner_env(self, repo, [first])
+        await env.objectives.create_objective({
+            "objective_id": "OBJ-1", "project": "p", "status": "active",
+            "anchor": {"goal": "g", "acceptance": []},
+            "capsule": {"text": "", "compiled_at": None, "tokens": 0},
+            "tickets_log": [],
+        })
+        await plan_objective(env, "OBJ-1")
+        self.assertNotIn("ship the API", planner.prompts[0])
+
+        env.executor._payloads = [{**first, "tickets": [_dev_ticket("b", "Second")],
+                                   "roadmap_remaining": ["only what is left"]}]
+        await plan_objective(env, "OBJ-1")
+
+        self.assertIn("- ship the API; depends on Child", planner.prompts[1])
+        stored = await env.objectives.get_objective("OBJ-1")
+        assert stored is not None
+        self.assertEqual(stored["roadmap_remaining"], ["only what is left"])
+
     async def test_missing_registry_parks_before_invocation(self) -> None:
         repo = _scratch_repo(self)
         env, planner, _created, _patches = _planner_env(
