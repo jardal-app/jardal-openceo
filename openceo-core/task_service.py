@@ -3619,6 +3619,24 @@ class TaskService:
             ):
                 asyncio.create_task(self._notify_horizon_terminal(updated))
                 self._wake_ceo_incident(updated)
+            if (
+                str(updated.get("status")) == TaskStatus.CANCELLED.value
+                and str(task.get("status")) != TaskStatus.CANCELLED.value
+            ):
+                # Dependency wakeup (§9.5, TASK-2026-00180): a cancel
+                # landing through the funnel (desk webhook, explicit
+                # transition) releases direct dependents, like a
+                # run_task finish does. run_task never lands cancelled
+                # itself (00177 fencing), so without this the
+                # event-held blocked_by parks strand. Never breaks
+                # the patch.
+                try:
+                    await self._requeue_dependents(task_id)
+                except Exception:
+                    logger.warning(
+                        "Dependent requeue error for %s",
+                        task_id, exc_info=True,
+                    )
         return updated
 
     async def create_task_review(self, task_id: str, payload: TaskReviewCreateRequest) -> dict[str, Any]:

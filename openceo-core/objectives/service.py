@@ -326,9 +326,29 @@ class ObjectiveService:
         project = str(objective.get("project") or "")
         if not project or not self._config.has_project(project):
             return {"ok": False, "reason": "unknown-project"}
-        return await engine_mod.reflect_group_decision(
+        result = await engine_mod.reflect_group_decision(
             self.env_for(project), objective_id,
             target=target, business_status=business_status)
+        if (result.get("action") == "cancelled"
+                and result.get("cancelled_children")):
+            # Dependency wakeup (§9.5, TASK-2026-00180): dependents of
+            # cascade-cancelled children requeue like any other cancel
+            # landing. Children of the dead objective are already
+            # cancelled, so the waiting/queued filter (plus the 00177
+            # atomic net) excludes them: no resurrection. Optional
+            # wiring, like dispatcher_wake above.
+            requeue = getattr(
+                self._task_service, "_requeue_dependents", None)
+            if callable(requeue):
+                try:
+                    for child_id in result["cancelled_children"]:
+                        await requeue(str(child_id))
+                except Exception:
+                    logger.warning(
+                        "Dependent requeue error for objective %s",
+                        objective_id, exc_info=True,
+                    )
+        return result
 
     async def plan_objective(self, objective_id: str) -> dict[str, Any]:
         """Run one planning cycle now (external triggers, TASK-2026-00174).
