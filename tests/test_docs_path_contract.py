@@ -33,7 +33,7 @@ REPO = Path(__file__).resolve().parents[1]
 DOCS = [
     "CLAUDE.md",
     "docs/ARCHITECTURE_REFERENCE_2026.md",
-    "docs/objective-planner-routing-policy.md",
+    "openceo-core/objectives/routing_policy.md",
     "docs/decision-2026-10-05-planner-objetivos-muse.md",
 ]
 

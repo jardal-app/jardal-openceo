@@ -894,7 +894,7 @@ The CEO acts autonomously under a company mandate approved once by the owner (20
 
 > **Single company Objective, single planner (amends "One engine, two scopes", 2026-10-06, TASK-2026-00111).** Identity lives in ERPNext: a group Task with real children (`parent_task`) and `depends_on`. Mongo `objectives` holds execution state only (capsule, cycles, replans, final review, telemetry) — never a business backlog. One global planner (Muse Code headless, one fresh run per cycle, `PlannerResult` validated with Pydantic + deterministic rules) is the only component that decides which tickets exist for an Objective. A deterministic dispatcher (0 tokens) launches ready tickets on events, with a single conditional backup trigger while tickets wait for a slot. Work is persisted with `next_run_at` and awakened reactively, never by per-minute database sweeps.
 
-Normative sources: vault decision `decisions/2026-10-06-objetivo-unico-ceo-autonomo`, `docs/objective-planner-routing-policy.md` (runtime policy the planner reads), `docs/decision-2026-10-05-planner-objetivos-muse.md` (ADR). Behaviour the code does not have yet is marked `pendiente: TASK-2026-00NNN` below.
+Normative sources: vault decision `decisions/2026-10-06-objetivo-unico-ceo-autonomo`, `openceo-core/objectives/routing_policy.md` (runtime policy the planner reads), `docs/decision-2026-10-05-planner-objetivos-muse.md` (ADR). Behaviour the code does not have yet is marked `pendiente: TASK-2026-00NNN` below.
 
 ### Glossary
 
@@ -1050,7 +1050,7 @@ Work whose result gains materially from orchestrating independent model families
 
 - **Engine:** `openceo-core/agents/dev/tier_s/` (v2, single-ticket cycle). Shared executors, review pool/rounds, findings, inbox and knowledge live in `openceo-core/orchestration/` (TASK-2026-00141). Cycle roles and reviewer slots live in the global config (`config_loader.py`); checked-in projects carry no routing or Tier S overrides.
 - **Design:** `docs/work/TIER_S_DESIGN_FINAL.md` v2 (TASK-2026-00085): one ticket = one cycle = one builder session; tiers `tier_s/a/b/c`; non-blocking plan review.
-- **Routing:** `coding_tool` per ticket (top-level only). DEV tier semantics (C default, `why_not_c` for A/B) and the uniform oracle rule are normative in `docs/objective-planner-routing-policy.md`.
+- **Routing:** `coding_tool` per ticket (top-level only). DEV tier semantics (C default, `why_not_c` for A/B) and the uniform oracle rule are normative in `openceo-core/objectives/routing_policy.md`.
 - **Large work:** decomposition belongs to the single objective planner (§Proactive CEO; TASK-2026-00112/00117), not to Tier S.
 - **Review quorum (TASK-2026-00162):** reviewer reports are parsed tolerant to prose and strict on findings: a line that opens with a severity must be a full §16.4 header, line anchors keep their literal quote, and every finding is still verified against git. One round machinery (`orchestration/review.py`, `run_quorum_round`) serves ticket rounds and the objective final review: relief with untried families, then one retry per slot for timeouts (×1.5), malformed reports and unclassified errors. Every attempt lands in `task_reviews` with its kind and the finding text. A no-quorum park checkpoints the run, and the next launch resumes it at review, reusing the plan, the responses and the handoff (no new planning or build). Retries back off 15/30/60 min, then park as `needs_owner`. A new run supersedes the task's other open runs, and terminal tasks and boot close the rest. The final review targets the objective's integration ref, never the live checkout.
 
@@ -1656,7 +1656,6 @@ openceo/
 │   └── systemd/
 ├── docs/
 │   ├── OPENCEO_DIRECTION.md          # Domain ownership and integration direction
-│   ├── objective-planner-routing-policy.md  # Read at runtime by the single objective planner
 │   ├── decision-2026-10-05-planner-objetivos-muse.md
 │   ├── finance-erpnext-integration-contract.md
 │   └── SETUP.md

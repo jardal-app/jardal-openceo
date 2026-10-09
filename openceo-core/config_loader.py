@@ -526,8 +526,8 @@ class ConfigLoader:
                 "invocation": "headless",
                 "ticket_horizon": [1, 3],
                 "timeout_minutes": 15,
-                # None = docs/objective-planner-routing-policy.md relative
-                # to the repo root (resolved by the planner module).
+                # None = openceo-core/objectives/routing_policy.md, next to
+                # the planner module (resolved by it).
                 "policy_path": None,
                 # One-shot role spec (live executor shape): a fresh muse
                 # process per planning cycle, prompt via argv, result read
