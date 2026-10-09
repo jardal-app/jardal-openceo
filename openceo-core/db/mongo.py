@@ -1060,6 +1060,14 @@ class MongoRepository:
         )
         return self._clean(row)
 
+    async def resumable_tier_s_run(self, task_id: str) -> dict[str, Any] | None:
+        """Latest waiting run of the task with a review checkpoint (§14.2)."""
+        return self._clean(await self.tier_s_runs.find_one(
+            {"task_id": task_id, "status": "waiting",
+             "checkpoint.phase": "review"},
+            sort=[("updated_at", DESCENDING)],
+        ))
+
     async def supersede_tier_s_runs(self, task_id: str, keep_run_id: str) -> int:
         """Close a task's other open runs when a new run starts (TASK-2026-00162).
 

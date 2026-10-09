@@ -23,6 +23,9 @@ class RunStore(Protocol):
     # Close the task's other open runs (TASK-2026-00162).
     async def supersede_runs(
         self, task_id: str, keep_run_id: str) -> int: ...
+    # Latest waiting run of the task with a review checkpoint (§14.2).
+    async def resumable_run(
+        self, task_id: str) -> dict[str, Any] | None: ...
 
 
 class LockStore(Protocol):
@@ -63,6 +66,16 @@ class InMemoryRunStore:
                             "active_repo": None})
                 closed += 1
         return closed
+
+    async def resumable_run(self, task_id: str) -> dict[str, Any] | None:
+        found: dict[str, Any] | None = None
+        for run in self.runs.values():  # insertion order: latest wins
+            checkpoint = run.get("checkpoint") or {}
+            if (run.get("task_id") == task_id
+                    and run.get("status") == "waiting"
+                    and checkpoint.get("phase") == "review"):
+                found = run
+        return dict(found) if found is not None else None
 
 
 class InMemoryLockStore:
@@ -110,6 +123,9 @@ class MongoRunStore:
 
     async def supersede_runs(self, task_id: str, keep_run_id: str) -> int:
         return await self._repo.supersede_tier_s_runs(task_id, keep_run_id)
+
+    async def resumable_run(self, task_id: str) -> dict[str, Any] | None:
+        return await self._repo.resumable_tier_s_run(task_id)
 
 
 class MongoLockStore:
