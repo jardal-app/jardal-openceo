@@ -112,6 +112,20 @@ class MoneyDomainClassifierTests(unittest.TestCase):
                     self.assertEqual(decision.tier, CodingTool.TIER_C,
                                      f"{title} routing={routing is not None}")
 
+    def test_negated_or_excluded_stake_is_no_money_work(self) -> None:
+        # TASK-2026-00171: a negated/excluded conjunction half is no
+        # stake, so the guide stays silent. A negation that states the
+        # bug ("no salta") is already covered by MONEY_TEXTS above.
+        cases = [
+            "Bot de avisos sin dinero real, solo alertas",
+            "Alert bot without real money, notifications only",
+            "Bot de avisos; las órdenes están excluidas del alcance",
+        ]
+        for title in cases:
+            with self.subTest(title=title):
+                decision = _decision(title, "", ROUTING)
+                self.assertEqual(decision.tier, CodingTool.TIER_C, title)
+
     def test_custom_vocabulary_extends_signals(self) -> None:
         routing = {"money_sensitive": True,
                    "money_domain": ["quiniela"],

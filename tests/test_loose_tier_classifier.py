@@ -574,6 +574,108 @@ class PrivacyComplianceSignalTests(unittest.TestCase):
                 self.assertEqual(_decision(title).tier, CodingTool.TIER_C, title)
 
 
+class ScopeExclusionTests(unittest.TestCase):
+    """Excluded, out-of-scope, or policy-cited S mentions (TASK-2026-00171).
+
+    A negated mention ("no toca pagos"), an out-of-scope section, or a
+    routing-policy citation is not a work signal and never selects S on
+    its own. Goals stated as end states ("sin pagos duplicados") and
+    genuine risk still fire: the exclusion must be clear.
+    """
+
+    def test_negated_scope_verbs_do_not_fire(self) -> None:
+        cases = [
+            # The ticket's example, both languages.
+            "Cambiar el margen del panel; no toca pagos ni login",
+            "Update the panel margin; does not touch payments or login",
+            "Sin cambios en el login; reescribir los textos",
+            "No changes to payments; rewrite the onboarding copy",
+            "Los pagos no se tocan en este ticket",
+            "Login is not modified by this change",
+            "Reescribir textos sin modificar pagos ni login",
+            "Rewrite copy without touching auth",
+        ]
+        for title in cases:
+            with self.subTest(title=title):
+                decision = _decision(title)
+                self.assertEqual(decision.tier, CodingTool.TIER_C, title)
+                self.assertEqual(decision.signals, (), title)
+
+    def test_exclusion_markers_do_not_fire(self) -> None:
+        cases = [
+            "Update copy; payments excluded, login untouched",
+            "Actualizar textos; pagos excluidos del alcance",
+            "Reescribir la ayuda; el login queda excluido",
+            # No comma: a comma closes the clause, so an appositive
+            # after one ("pagos, ajenos ...") still fires (upward bias).
+            "Rewrite the help; pagos ajenos a este ticket",
+            "Copy fix; payments are a non-goal here",
+        ]
+        for title in cases:
+            with self.subTest(title=title):
+                self.assertEqual(_decision(title).tier, CodingTool.TIER_C, title)
+
+    def test_out_of_scope_sections_do_not_fire(self) -> None:
+        bodies = [
+            "Rewrite the onboarding copy.\n\nOut of scope:\n"
+            "- payments flow\n- login screen",
+            "Reescribir los textos.\n\nFuera del alcance:\n- pagos\n- login",
+            "Rewrite the onboarding copy.\n\n## Out of scope\n"
+            "- payments rewrite\n\n## Acceptance\n- copy merged",
+            "Rewrite the onboarding copy.\n\nNon-goals:\n- payments rewrite",
+        ]
+        for description in bodies:
+            with self.subTest(description=description):
+                decision = _decision("Update dashboard copy", description)
+                self.assertEqual(decision.tier, CodingTool.TIER_C, description)
+        # A later section is work again: masking ends at the next header.
+        decision = _decision(
+            "Update dashboard copy",
+            "Rewrite the onboarding copy.\n\nOut of scope:\n- docs\n\n"
+            "## Scope\n- fix the OAuth login flow")
+        self.assertEqual(decision.tier, CodingTool.TIER_S)
+
+    def test_policy_citations_do_not_fire(self) -> None:
+        cases = [
+            "Rewrite the onboarding copy. Per routing policy §19, S "
+            "examples include authentication and payments.",
+            "Reescribir los textos. Según la política de ruteo §19, "
+            "ejemplos de S: autenticación y pagos.",
+        ]
+        for description in cases:
+            with self.subTest(description=description):
+                decision = _decision("Update dashboard copy", description)
+                self.assertEqual(decision.tier, CodingTool.TIER_C, description)
+
+    def test_negated_stake_qualifier_is_no_money_work(self) -> None:
+        cases = [
+            "Bot de avisos sin dinero real, solo alertas",
+            "Alert bot without real money, notifications only",
+            "Paper-trading bot; el dinero no es real",
+        ]
+        for title in cases:
+            with self.subTest(title=title):
+                self.assertEqual(_decision(title).tier, CodingTool.TIER_C, title)
+
+    def test_authentic_risk_still_fires(self) -> None:
+        cases = [
+            "Corregir el cálculo del pago con tarjeta",
+            "Fix session handling on the auth boundary",
+            "Toca pagos y login: migrar el checkout a OAuth",
+            "Fix OAuth login; payments out of scope",
+            "Fix the OAuth flow per routing policy §19",
+            "El problema real es el login roto",
+            "Eliminar pagos duplicados en la facturación",
+            "Sin pagos duplicados en la facturación",
+            "Fix auth for all tenants except demo",
+        ]
+        for title in cases:
+            with self.subTest(title=title):
+                decision = _decision(title)
+                self.assertEqual(decision.tier, CodingTool.TIER_S, title)
+                self.assertIn("19", decision.reason, title)
+
+
 class OracleEvidenceExtractionTests(unittest.TestCase):
     """Stricter extraction (TASK-2026-00178): no false freezes."""
 
@@ -637,10 +739,11 @@ class OracleEvidenceExtractionTests(unittest.TestCase):
 
 
 class ClassifierTelemetryTests(unittest.IsolatedAsyncioTestCase):
-    def test_classifier_version_is_v3(self) -> None:
-        # v3 = explicit-assurance + privacy S signals, stricter oracle
-        # extraction (TASK-2026-00178).
-        self.assertEqual(ASSIGNED_BY, "loose_classifier/v3")
+    def test_classifier_version_is_v4(self) -> None:
+        # v4 = excluded/out-of-scope/policy-cited S mentions stop firing
+        # (TASK-2026-00171); v3 = explicit-assurance + privacy S signals,
+        # stricter oracle extraction (TASK-2026-00178).
+        self.assertEqual(ASSIGNED_BY, "loose_classifier/v4")
 
     async def test_assignment_is_recorded(self) -> None:
         decisions: list[dict] = []
