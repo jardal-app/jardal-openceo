@@ -4,6 +4,8 @@ Resumen operativo corto del estado real del repo.
 
 ## Continuar aquí (traspaso a la próxima sesión)
 
+**00189 CERRADO (2026-10-11, `sigue`, tier_b).** Contrato v2 mergeado (`b099044`, 2 docs + vault): sección «Agentes por rol» nueva en ARCH (vocabulario, planner único, catálogo+perfil, frontera+criterio, hecho/bloqueado/no_aplica, skills/borradores, playbooks, canal humano, misiones, etapa-ticket/paso-workflow); Retired en discovery→YAML (parcial), CEO Discovery e Inter-Agent/Claim + bala p2p reescrita; «skill package»→agent package (4 sitios); §Proactive CEO (00110 base, 5 categorías sin credencial); CLAUDE.md Owner normativo + §5/§11/audita al contrato nuevo; vault `decisions/2026-10-11-agentes-por-rol-planner-unico` + continuación + hub (checker 0/0); 6 supersedidos releídos Cancelled con comentario. Tests: docs-path 10/7 subtests + §10 70; sin tokens; sin restart (solo .md). Cierre oficial (negocio+ejecución Completed, espejo aligned, relectura verificada). Sigue: **00191** (catálogo único, tier_b, ruta crítica, desbloqueado por 00189); ola 1 restante 00188/00190 en paralelo.
+
 **NUEVO ROADMAP: ÉPICO TASK-2026-00187 «Planner único, agentes por rol con skills y tools de frontera» (2026-10-11, sesión de diseño del Owner).**
 - **Qué se creó.** 37 hijos `[Agentes/…]`, sin autorun, en 11 olas (comentario «ROADMAP POR OLAS» del épico), más 2 futuros fuera del épico: 00225 personal y 00226 memoria de decisiones. El diseño completo con el porqué está adjunto, privado, al épico. Antes de crear los tickets, una revisión independiente de solo lectura corrigió el plan.
 - **Primero en `sigue` (ola 1, en paralelo):**
