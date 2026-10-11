@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import date
 from enum import Enum
@@ -37,11 +38,13 @@ __all__ = [
     "CatalogError",
     "CatalogStatus",
     "IndexEntry",
+    "LEGACY_LIVE_DISABLED",
     "StaffEntry",
     "StaffRoster",
     "catalog_fingerprint",
     "catalog_root",
     "check_catalog",
+    "find_consumer_mismatches",
     "load_catalog",
     "short_index",
 ]
@@ -410,3 +413,75 @@ def short_index(catalog: Catalog) -> str:
     """Render the always-loaded short index: ``name: summary`` per line."""
     return "\n".join(f"{entry.name}: {entry.summary}"
                      for entry in catalog.entries)
+
+
+#: Disabled names that stay live in the legacy enum until their removal
+#: ticket lands (TASK-2026-00209). The consistency check keeps them.
+LEGACY_LIVE_DISABLED = ("pm", "marketing", "sales", "media")
+
+
+def find_consumer_mismatches(
+    agent_names: Collection[str],
+    alias_values: Collection[str],
+    registry: Mapping[str, Mapping[str, Any]],
+    wired: Collection[str],
+    catalog: Catalog,
+) -> list[str]:
+    """Mismatches between the four agent views and the catalog.
+
+    Empty means every view matches. Pure: views arrive as arguments so
+    this module never imports its consumers (no cycles).
+
+    R1: every enum name except ``ceo`` is a catalog agent.
+    R2: every router alias value is a catalog agent.
+    R3: the planner registry is exactly the catalog AI agents, with the
+    catalog enabled flags and reasons.
+    R4: every wired graph agent is a catalog agent.
+    R5: the disabled-but-live legacy names stay in the enum until removal.
+    """
+    problems: list[str] = []
+    names = set(catalog.agents)
+    ai_names = {name for name, card in catalog.agents.items()
+                if card.type.value == "ai"}
+
+    for name in sorted(set(agent_names)):
+        if name != "ceo" and name not in names:
+            problems.append(
+                f"R1: enum agent {name!r} is not in the catalog")
+    for value in sorted(set(alias_values)):
+        if value not in names:
+            problems.append(
+                f"R2: router alias value {value!r} is not in the catalog")
+    registry_names = set(registry)
+    for name in sorted(registry_names - ai_names):
+        problems.append(
+            f"R3: planner registry agent {name!r} is not a catalog AI agent")
+    for name in sorted(ai_names - registry_names):
+        problems.append(
+            f"R3: catalog AI agent {name!r} is missing from the planner "
+            "registry")
+    for name in sorted(registry_names & ai_names):
+        spec = registry[name]
+        card = catalog.agents[name]
+        enabled = bool(spec.get("enabled", False)) if isinstance(spec, Mapping) \
+            else False
+        if enabled != card.enabled:
+            problems.append(
+                f"R3: planner registry enabled={enabled!r} for {name!r} "
+                f"disagrees with the catalog ({card.enabled!r})")
+        elif not card.enabled and str(spec.get("reason") or "") != str(
+                card.disabled_reason or ""):
+            problems.append(
+                f"R3: planner registry reason for {name!r} disagrees with "
+                "the catalog")
+    for name in sorted(set(wired)):
+        if name not in names:
+            problems.append(
+                f"R4: wired graph agent {name!r} is not in the catalog")
+    enum_names = set(agent_names)
+    for name in LEGACY_LIVE_DISABLED:
+        if name not in enum_names:
+            problems.append(
+                f"R5: disabled-but-live legacy agent {name!r} left the enum "
+                "before its removal (TASK-2026-00209)")
+    return problems

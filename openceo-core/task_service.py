@@ -133,6 +133,35 @@ def _transition_audit_text(value: Any, limit: int = _TRANSITION_AUDIT_MAX) -> st
     return " ".join(str(value or "").split())[:limit]
 
 
+def wait_comment_text(task: dict[str, Any], reason: str) -> str:
+    """ERP one-shot text for a ``routing_missing`` wait (pure).
+
+    Agent waits (unknown/disabled/human target, TASK-2026-00195) name the
+    agent and its reason; tier waits keep the historical wording.
+    """
+    if "agent '" in reason:
+        detail = reason.split("routing_missing:", 1)[1].strip() \
+            if "routing_missing:" in reason else reason.strip()
+        return ("OpenCEO no puede ejecutar este ticket: "
+                f"el agente pedido no puede correr ({detail}).")
+    # Loose tickets self-classify at dispatch (TASK-2026-00137), so
+    # this wait now means an objective child arrived without the
+    # planner tier: a planner/validation gap, not an owner action.
+    if task.get("objective_id"):
+        return (
+            "OpenCEO no puede ejecutar este ticket: pertenece a un "
+            "objetivo pero llegó sin tier (coding_tool). La "
+            "clasificación automática solo cubre tickets sueltos; "
+            "hay que regenerar el hijo con tier o fijar coding_tool "
+            "(tier_s, tier_a, tier_b o tier_c) por API."
+        )
+    return (
+        "OpenCEO no puede ejecutar este ticket: falta el campo coding_tool, "
+        "que se fija al crear la tarea (tier_s, tier_a, tier_b o tier_c; "
+        "tier_c es la opción por defecto). Asigna el tier para continuar."
+    )
+
+
 def _classify_transition_error(exc: Exception) -> dict[str, Any]:
     """Fallo del adapter -> resultado clasificado (mismo vocabulario que el MCP)."""
     if isinstance(exc, ERPNextPermissionError):
@@ -3169,23 +3198,7 @@ class TaskService:
             if not name:
                 return
             if key == "routing_missing":
-                # Loose tickets self-classify at dispatch (TASK-2026-00137), so
-                # this wait now means an objective child arrived without the
-                # planner tier: a planner/validation gap, not an owner action.
-                if task.get("objective_id"):
-                    text = (
-                        "OpenCEO no puede ejecutar este ticket: pertenece a un "
-                        "objetivo pero llegó sin tier (coding_tool). La "
-                        "clasificación automática solo cubre tickets sueltos; "
-                        "hay que regenerar el hijo con tier o fijar coding_tool "
-                        "(tier_s, tier_a, tier_b o tier_c) por API."
-                    )
-                else:
-                    text = (
-                        "OpenCEO no puede ejecutar este ticket: falta el campo coding_tool, "
-                        "que se fija al crear la tarea (tier_s, tier_a, tier_b o tier_c; "
-                        "tier_c es la opción por defecto). Asigna el tier para continuar."
-                    )
+                text = wait_comment_text(task, reason)
             else:
                 text = f"OpenCEO no puede ejecutar este ticket: configuración inválida ({reason})."
             await adapter.add_comment(name, text)

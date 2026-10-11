@@ -77,8 +77,10 @@ async def create_internal_ticket(
     try:
         agent_hint = AgentName(str(hint)) if hint else AgentName.DEV
     except ValueError:
-        # Unknown to the router enum: leave it unset so the router
-        # classifies; the planner target stays in params.
+        # Unknown to the router enum: leave it unset. The graph agent gate
+        # resolves the planner target from params (TASK-2026-00195): wired
+        # names route by name, the rest wait with routing_missing.
+        # Nothing reclassifies silently.
         agent_hint = None
     request = TaskCreateRequest(
         source=source,
