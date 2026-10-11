@@ -14,9 +14,14 @@ if str(CORE_DIR) not in sys.path:
 from agents.pm import session as pm_session
 from agents.pm.session import PMSessionManager
 from config_loader import ConfigLoader
+from mcp_identity import MemoryTokenStore, TokenIssuer
 from settings import Settings
 from state import TaskStatus
 from tools.notion import NotionTicketManager
+
+
+def _memory_issuer() -> TokenIssuer:
+    return TokenIssuer(MemoryTokenStore(), {})
 
 
 class FakeTaskService:
@@ -153,6 +158,7 @@ class PMSubprocessReliabilityTests(unittest.IsolatedAsyncioTestCase):
         manager = PMSessionManager(settings, config_loader=ConfigLoader(settings))
         service = FakeTaskService()
         manager.set_task_service(service)
+        manager.set_token_issuer(_memory_issuer())
         captured: dict[str, object] = {}
 
         class FakeProc:
@@ -187,6 +193,7 @@ class PMSubprocessReliabilityTests(unittest.IsolatedAsyncioTestCase):
         settings = Settings(PROJECTS_DIR="projects", DEFAULT_PROJECT="jardal-openceo")
         manager = PMSessionManager(settings, config_loader=ConfigLoader(settings))
         manager.set_task_service(FakeTaskService())
+        manager.set_token_issuer(_memory_issuer())
 
         class FakeProc:
             returncode = 0

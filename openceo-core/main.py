@@ -46,6 +46,7 @@ from integrations.openwebui_compat import (
     extract_latest_user_message,
     parse_agent_hint,
 )
+from mcp_identity import MongoAuditSink, MongoTokenStore, TokenIssuer
 from mcp_server import build_global_mcp_mount, build_internal_mcp_mount
 from objectives.engine import (
     ObjectiveDuplicate,
@@ -170,6 +171,17 @@ task_service = TaskService(
     config_loader=config_loader,
 )
 qa_review_service.set_task_service(task_service)
+# MCP ticket identity (TASK-2026-00196): the catalog snapshot below also
+# fails the boot on an invalid catalog, like the lifespan gate does.
+from catalog import load_catalog as _load_identity_catalog
+
+_identity_catalog = _load_identity_catalog()
+mcp_token_issuer = TokenIssuer(
+    MongoTokenStore(db_provider=lambda: repo.db),
+    _identity_catalog.agents)
+mcp_audit_sink = MongoAuditSink(db_provider=lambda: repo.db)
+task_service.set_token_issuer(mcp_token_issuer)
+pm_step_manager.set_token_issuer(mcp_token_issuer)
 pm_step_manager.set_task_service(task_service)
 workflow_service.set_task_service(task_service)
 dev_step_manager.set_task_service(task_service)  # Tier S notices + internal tickets (F3–F6)
@@ -230,8 +242,12 @@ ceo_loop = CEOLoop(
 )
 task_service.set_ceo_wake(ceo_loop.wake)
 objective_service.set_ceo_wake(ceo_loop.wake)
-internal_mcp = build_internal_mcp_mount(settings, task_service, erpnext_adapter)
-global_mcp = build_global_mcp_mount(settings, task_service, erpnext_adapter)
+internal_mcp = build_internal_mcp_mount(
+    settings, task_service, erpnext_adapter,
+    issuer=mcp_token_issuer, audit=mcp_audit_sink)
+global_mcp = build_global_mcp_mount(
+    settings, task_service, erpnext_adapter,
+    issuer=mcp_token_issuer, audit=mcp_audit_sink)
 horizon_service = HorizonService(settings=settings, repo=repo)
 # El timer unico de Horizon: duerme hasta el proximo vencimiento y lo despierta
 # cada encolado. No es un barrido (AGENTS.md §5.1).

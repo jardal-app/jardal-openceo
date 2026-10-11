@@ -7,6 +7,11 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from mcp_identity import (
+    MCPIdentityMiddleware,
+    McpAuthError,
+    bearer_from_headers,
+)
 from settings import Settings
 from tools.cloudflare import CloudflareDNSManager
 from tools.erpnext_client import (
@@ -45,10 +50,11 @@ class MountedMCPServer:
     bearer_token: str | None
     stateless_http: bool = False
     json_response: bool = False
+    identity_enforced: bool = False
 
     @property
     def auth_enabled(self) -> bool:
-        return bool(self.bearer_token)
+        return bool(self.bearer_token) or self.identity_enforced
 
     @asynccontextmanager
     async def lifespan(self):
@@ -70,6 +76,8 @@ def build_internal_mcp_mount(
     settings: Settings,
     task_service: "TaskService",
     erpnext: Any | None = None,
+    issuer: Any | None = None,
+    audit: Any | None = None,
 ) -> MountedMCPServer | None:
     """Build the internal MCP — all tools (infra + OpenCEO-specific). Used by OpenCEO tmux sessions."""
     if not settings.MCP_SERVER_ENABLED:
@@ -81,6 +89,8 @@ def build_internal_mcp_mount(
         register_fn=lambda s, st: _register_all_tools(s, st, task_service, erpnext),
         stateless_http=True,
         json_response=True,
+        issuer=issuer,
+        audit=audit,
     )
 
 
@@ -88,6 +98,8 @@ def build_global_mcp_mount(
     settings: Settings,
     task_service: "TaskService | None" = None,
     erpnext: Any | None = None,
+    issuer: Any | None = None,
+    audit: Any | None = None,
 ) -> MountedMCPServer | None:
     """Build the global MCP — infra + tickets. Used by manual Claude/Codex on any project.
 
@@ -117,6 +129,8 @@ def build_global_mcp_mount(
         transport="streamable-http",
         stateless_http=False,
         json_response=True,
+        issuer=issuer,
+        audit=audit,
     )
 
 
@@ -128,16 +142,40 @@ def _build_mcp(
     transport: str | None = None,
     stateless_http: bool = False,
     json_response: bool = False,
+    issuer: Any | None = None,
+    audit: Any | None = None,
 ) -> MountedMCPServer:
     if FastMCP is None:
         raise RuntimeError("MCP_SERVER_ENABLED=true pero fastmcp no está instalado.") from _FASTMCP_IMPORT_ERROR
+    if (issuer is None) != (audit is None):
+        raise ValueError("Ticket identity needs both issuer and audit, or neither.")
 
     transport = _normalize_transport(transport if transport is not None else settings.MCP_SERVER_TRANSPORT)
-    bearer_token = _resolve_bearer_token(settings)
     allowed_networks = _parse_allowed_networks(settings.MCP_SERVER_ALLOWED_IPS)
 
     server = FastMCP(name)
     tool_names = register_fn(server, settings)
+    if issuer is not None and audit is not None:
+        if settings.MCP_SERVER_API_KEY.strip():
+            logger.warning(
+                "%s enforces ticket tokens; the shared MCP_SERVER_API_KEY is ignored",
+                name,
+            )
+        server.add_middleware(MCPIdentityMiddleware(issuer, audit))
+        return build_mounted_mcp_server(
+            path=path,
+            name=name,
+            server=server,
+            bearer_token=None,
+            allowed_networks=allowed_networks,
+            transport=transport,
+            tool_names=tool_names,
+            internal_url=_build_internal_url(settings, path),
+            stateless_http=stateless_http,
+            json_response=json_response,
+            authenticator=issuer,
+        )
+    bearer_token = settings.MCP_SERVER_API_KEY.strip() or None
     return build_mounted_mcp_server(
         path=path,
         name=name,
@@ -164,6 +202,7 @@ def build_mounted_mcp_server(
     internal_url: str = "",
     stateless_http: bool = False,
     json_response: bool = False,
+    authenticator: Any | None = None,
 ) -> MountedMCPServer:
     """Protege y monta un servidor FastMCP ya construido.
 
@@ -175,13 +214,14 @@ def build_mounted_mcp_server(
     """
     if allowed_networks is None:
         allowed_networks = _parse_allowed_networks(_DEFAULT_ALLOWED_IPS)
-    if bearer_token is None:
+    if bearer_token is None and authenticator is None:
         logger.warning("%s enabled without Bearer token; loopback restriction is the only control", name)
     return MountedMCPServer(
         path=_normalize_path(path),
         app=_InternalOnlyBearerWrapper(
             allowed_networks=allowed_networks,
             bearer_token=bearer_token,
+            authenticator=authenticator,
         ),
         server=server,
         transport=_normalize_transport(transport),
@@ -190,27 +230,34 @@ def build_mounted_mcp_server(
         bearer_token=bearer_token,
         stateless_http=stateless_http,
         json_response=json_response,
+        identity_enforced=authenticator is not None,
     )
 
 
 def build_mcp_provider_env(settings: Settings) -> dict[str, str]:
-    """Env vars injected into OpenCEO tmux sessions — points to internal MCP (all tools)."""
+    """Env vars injected into OpenCEO tmux sessions — points to internal MCP (all tools).
+
+    Location only, never credentials: each caller authenticates with its own
+    ticket token (TASK-2026-00196).
+    """
     if not settings.MCP_SERVER_ENABLED:
         return {}
 
-    env = {
+    return {
         "OPENCEO_INTERNAL_MCP_ENABLED": "true",
         "OPENCEO_INTERNAL_MCP_URL": _build_internal_url(settings, _normalize_path(settings.MCP_SERVER_PATH)),
         "OPENCEO_INTERNAL_MCP_TRANSPORT": _normalize_transport(settings.MCP_SERVER_TRANSPORT),
     }
-    bearer_token = _resolve_bearer_token(settings)
-    if bearer_token:
-        env["OPENCEO_INTERNAL_MCP_BEARER_TOKEN"] = bearer_token
-    return env
 
 
-def build_mcp_provider_config(settings: Settings) -> dict[str, Any] | None:
-    """Serializable MCP config for headless provider CLIs such as Claude Code."""
+def build_mcp_provider_config(
+    settings: Settings, bearer: str | None = None,
+) -> dict[str, Any] | None:
+    """Serializable MCP config for headless provider CLIs such as Claude Code.
+
+    `bearer` is the caller's own ticket token; without one the config carries
+    no credentials and every call answers 401.
+    """
     if not settings.MCP_SERVER_ENABLED:
         return None
 
@@ -219,9 +266,8 @@ def build_mcp_provider_config(settings: Settings) -> dict[str, Any] | None:
         "type": "sse" if transport == "sse" else "http",
         "url": _build_internal_url(settings, _normalize_path(settings.MCP_SERVER_PATH)),
     }
-    bearer_token = _resolve_bearer_token(settings)
-    if bearer_token:
-        server["headers"] = {"Authorization": f"Bearer {bearer_token}"}
+    if bearer:
+        server["headers"] = {"Authorization": f"Bearer {bearer}"}
     return {"mcpServers": {"openceo-internal": server}}
 
 
@@ -830,11 +876,6 @@ def _normalize_transport(transport: str) -> str:
     return value
 
 
-def _resolve_bearer_token(settings: Settings) -> str | None:
-    token = settings.MCP_SERVER_API_KEY.strip()
-    return token or None
-
-
 def _build_internal_url(settings: Settings, path: str) -> str:
     host = _format_host_for_url(settings.MCP_SERVER_INTERNAL_HOST.strip() or "127.0.0.1")
     return f"http://{host}:{settings.OPENCEO_PORT}{path}/"
@@ -877,16 +918,26 @@ class _InternalOnlyBearerWrapper:
         self,
         allowed_networks: tuple[ipaddress._BaseNetwork, ...],
         bearer_token: str | None,
+        authenticator: Any | None = None,
     ) -> None:
         self._allowed_networks = allowed_networks
         self._bearer_token = bearer_token
+        self._authenticator = authenticator
         self._inner_app: Any | None = None
 
     def set_inner_app(self, app: Any | None) -> None:
         self._inner_app = app
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope.get("type") != "http":
+        scope_type = scope.get("type")
+        if scope_type != "http" and scope_type != "lifespan":
+            logger.warning("Rejecting non-HTTP MCP scope: %s", scope_type)
+            if scope_type == "websocket":
+                await send({"type": "websocket.close", "code": 4401})
+            else:
+                await _send_json_error(send, 403, "MCP interno solo admite HTTP.")
+            return
+        if scope_type != "http":
             if self._inner_app is None:
                 await _send_json_error(send, 503, "MCP interno no inicializado.")
                 return
@@ -898,10 +949,23 @@ class _InternalOnlyBearerWrapper:
             await _send_json_error(send, 403, "MCP interno disponible solo desde loopback.")
             return
 
-        # GET SSE streams (server→client notifications) may omit the
-        # Authorization header — rely on the IP allowlist above instead.
-        # POST/DELETE always require the Bearer token when one is configured.
-        if self._bearer_token and scope.get("method") != "GET":
+        # Ticket identity mounts authenticate every method, streams
+        # included. Legacy mounts only: GET SSE streams may omit the
+        # header and rely on the IP allowlist instead.
+        if self._authenticator is not None:
+            authorization = _decode_header(scope.get("headers", []), b"authorization")
+            token = bearer_from_headers({"authorization": authorization})
+            try:
+                await self._authenticator.authenticate(token)
+            except McpAuthError as exc:
+                logger.warning(
+                    "MCP %s %s denied for %s (%s)",
+                    scope.get("method"), scope.get("path"),
+                    client_host or "unknown", exc.reason,
+                )
+                await _send_json_error(send, 401, "MCP ticket token missing or invalid.")
+                return
+        elif self._bearer_token and scope.get("method") != "GET":
             authorization = _decode_header(scope.get("headers", []), b"authorization")
             expected = f"Bearer {self._bearer_token}"
             if authorization != expected:

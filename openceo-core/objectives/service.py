@@ -206,6 +206,9 @@ class ObjectiveService:
         async def patch_task(task_id: str, updates: dict[str, Any]) -> None:
             if repo is not None:
                 await repo.patch_task(task_id, updates)
+            revoke = getattr(task_service, "revoke_badges_for_patch", None)
+            if revoke is not None:
+                await revoke(task_id, str((updates or {}).get("status") or "") or None)
 
         async def create_ticket(
             payload: dict[str, Any],

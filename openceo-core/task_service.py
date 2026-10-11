@@ -281,6 +281,16 @@ class TaskService:
         # __new__ and without __init__, so the attribute may not exist.
         self._dispatcher_wake: Any | None = None
         self._ceo_wake: Any | None = None
+        self._token_issuer: Any | None = None
+
+    def set_token_issuer(self, issuer: Any | None) -> None:
+        """Inject the MCP ticket-token issuer (TASK-2026-00196).
+
+        Lets the terminal-transition funnel revoke the ticket's badges.
+        Read via getattr like the other wakes: tests may build
+        TaskService without __init__.
+        """
+        self._token_issuer = issuer
 
     def set_dispatcher_wake(self, wake: Any | None) -> None:
         """Inject the dispatcher wake-up (called on every queue event).
@@ -370,6 +380,41 @@ class TaskService:
         except Exception:
             # Un fallo de Horizon nunca puede impedir que un ticket se cierre.
             logger.warning("Horizon no pudo registrar el resultado de la tarea", exc_info=True)
+
+    async def _revoke_ticket_badges(self, task: dict[str, Any] | None) -> None:
+        """Revoke the ticket's MCP badges on terminal execution (TASK-2026-00196).
+
+        Never breaks the close: runs as a background task and swallows
+        every failure. Silent without an issuer (tests, standalone use).
+        """
+        issuer = getattr(self, "_token_issuer", None)
+        if issuer is None or not task:
+            return
+        name = self._webhook_name(task)
+        if not name:
+            return
+        try:
+            await issuer.revoke_ticket(name)
+        except Exception:
+            logger.warning("MCP badge revocation failed for %s", name, exc_info=True)
+
+    async def revoke_badges_for_patch(
+        self, task_id: str, status: str | None,
+    ) -> None:
+        """Prompt badge revocation for direct repo writers (objectives envs).
+
+        Best-effort and silent: never breaks the writer. The service
+        funnel covers its own writes; env.patch_task closures call here.
+        """
+        if not status or status not in _TERMINAL_TASK_STATUSES:
+            return
+        try:
+            task = await self._repo.get_task(task_id)
+        except Exception:
+            logger.warning("MCP badge lookup failed for %s", task_id,
+                           exc_info=True)
+            return
+        await self._revoke_ticket_badges(task)
 
     def start_notion_worker(self) -> None:
         """Start the background worker that drains the Notion mirror queue."""
@@ -3285,6 +3330,7 @@ class TaskService:
                     if failed is not None:
                         await self._hub.broadcast("task_updated", failed)
                         asyncio.create_task(self._fire_notion_sync_back(failed, "failed"))
+                        asyncio.create_task(self._revoke_ticket_badges(failed))
                     # A freed slot is a dispatch event even on crash.
                     self._wake_dispatcher()
                     return failed
@@ -3388,6 +3434,8 @@ class TaskService:
                     # serian justo los que nunca replanifican.
                     asyncio.create_task(self._notify_horizon_terminal(updated))
                     self._wake_ceo_incident(updated)
+                if final_status in _TERMINAL_TASK_STATUSES:
+                    asyncio.create_task(self._revoke_ticket_badges(updated))
                 if final_status == TaskStatus.WAITING.value:
                     reason = str(updated.get("waiting_reason") or "")
                     if reason.startswith(("routing_missing", "config")):
@@ -4369,6 +4417,7 @@ class TaskService:
                 and str(task.get("status")) != str(updated.get("status"))
             ):
                 asyncio.create_task(self._notify_horizon_terminal(updated))
+                asyncio.create_task(self._revoke_ticket_badges(updated))
                 self._wake_ceo_incident(updated)
             if (
                 str(updated.get("status")) == TaskStatus.CANCELLED.value

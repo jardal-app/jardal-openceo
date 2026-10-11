@@ -41,6 +41,7 @@ __all__ = [
     "LEGACY_LIVE_DISABLED",
     "StaffEntry",
     "StaffRoster",
+    "TICKET_PATTERN",
     "catalog_fingerprint",
     "catalog_root",
     "check_catalog",
@@ -67,7 +68,8 @@ OWNER_SKILLS = ("decidir", "aprobar", "responder", "hacer")
 RESERVED_NAMES = ("ceo", "planner")
 
 _NAME_PATTERN = r"^[a-z][a-z0-9_]*$"
-_TICKET_PATTERN = r"^TASK-2026-\d+$"
+TICKET_PATTERN = r"^TASK-2026-\d+$"
+_TICKET_PATTERN = TICKET_PATTERN
 
 
 class CatalogError(Exception):
