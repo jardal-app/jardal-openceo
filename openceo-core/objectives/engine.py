@@ -1672,6 +1672,7 @@ async def create_tool_proposal_questions(
             "source_id": spec["source_id"],
             "params": spec["params"],
             "priority": spec["priority"],
+            "tags": spec["tags"],
             "autorun": False,
         })
         if not created:
@@ -1685,6 +1686,12 @@ async def create_tool_proposal_questions(
             "status": "waiting",
             "phase": spec["phase"],
             "waiting_reason": spec["waiting_reason"],
+            # H4 (revisión 00206): same phase cleanup as
+            # TaskService.create_owner_question.
+            "workflow_key": None,
+            "workflow_phases": [],
+            "phase_index": 0,
+            "phase_assignments": {},
         })
         task_ids.append(question_id)
     return task_ids

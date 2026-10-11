@@ -292,6 +292,11 @@ class _SvcRepo:
     ) -> dict[str, Any] | None:
         return None
 
+    async def list_tasks_blocked_by(
+        self, task_id: str
+    ) -> list[dict[str, Any]]:
+        return []
+
 
 class _SvcHub:
     def __init__(self) -> None:
@@ -1016,6 +1021,329 @@ class PlannerProposedToolTests(unittest.TestCase):
             env, "OBJ-1", "jardal-openceo", result))
         self.assertEqual(task_ids, [])
         self.assertEqual(patched, [])
+
+
+def _manager():
+    from unittest.mock import MagicMock
+
+    from agents.dev.session import DevSessionManager
+
+    settings = MagicMock()
+    settings.DEV_EXECUTION_MODE = "real"
+    loader = MagicMock()
+    loader.validate_project = MagicMock(return_value=[])
+    return DevSessionManager(settings, loader, repo=None)
+
+
+class OwnerAnswerPromptTests(unittest.TestCase):
+    """H1: el texto del Owner llega a la ejecución reanudada."""
+
+    def test_dev_prompt_carries_owner_answer(self) -> None:
+        prompt = _manager()._build_coding_prompt(
+            {"task_id": "t", "title": "t", "description": "d",
+             "params": {"owner_answer": {
+                 "decision": "approved", "by": "owner",
+                 "comment": "adelante, 50 USD"}}},
+            {},
+        )
+        self.assertIn("adelante, 50 USD", prompt)
+        self.assertIn("dueño", prompt)
+
+    def test_dev_prompt_without_answer_has_no_owner_section(self) -> None:
+        prompt = _manager()._build_coding_prompt(
+            {"task_id": "t", "title": "t", "description": "d"}, {})
+        self.assertNotIn("dueño", prompt)
+
+    def test_tier_s_planner_prompt_carries_owner_answer(self) -> None:
+        from agents.dev.tier_s import cycle as cycle_mod
+
+        ctx = SimpleNamespace(
+            ticket={"title": "t", "description": "d", "acceptance": ["a1"],
+                    "params": {"owner_answer": {
+                        "decision": "approved", "comment": "usa el plan B"}}},
+            repo=Path(tempfile.gettempdir()),
+            ref="T-1",
+            budgets={"files_per_ticket": 8, "lines_per_ticket": 400},
+        )
+        prompt = cycle_mod.TierSCycle._planner_prompt(None, ctx)
+        self.assertIn("usa el plan B", prompt)
+        self.assertIn("OWNER ANSWER", prompt)
+
+    def test_tier_s_planner_prompt_without_answer_has_no_owner_section(
+        self,
+    ) -> None:
+        from agents.dev.tier_s import cycle as cycle_mod
+
+        ctx = SimpleNamespace(
+            ticket={"title": "t", "description": "d", "acceptance": ["a1"]},
+            repo=Path(tempfile.gettempdir()),
+            ref="T-1",
+            budgets={"files_per_ticket": 8, "lines_per_ticket": 400},
+        )
+        prompt = cycle_mod.TierSCycle._planner_prompt(None, ctx)
+        self.assertNotIn("OWNER ANSWER", prompt)
+
+
+class OwnerAnswerRetryTests(unittest.IsolatedAsyncioTestCase):
+    """H3: la continuación es reintentable y honra la decisión grabada."""
+
+    async def test_desk_close_with_dev_failure_retries_from_cockpit(
+        self,
+    ) -> None:
+        repo = _SvcRepo()
+        repo.tasks["origin-1"] = _svc_task(
+            "origin-1", waiting_reason="needs_owner: falta tool",
+            params={"owner_question_id": "q1"},
+        )
+        question = _question_task("q1", kind="new_tool", origin="origin-1")
+        question["params"]["owner_question"]["tool"] = {
+            "name": "dns.delete_record", "need": "n", "spec": "s"
+        }
+        repo.tasks["q1"] = question
+        service = _make_service(repo)
+        service._erpnext = SimpleNamespace(is_enabled=True)
+        service.set_dispatcher_wake(lambda: None)
+        calls: list[Any] = []
+
+        async def _flaky(payload: Any) -> dict[str, Any]:
+            calls.append(payload)
+            if len(calls) == 1:
+                raise RuntimeError("erpnext caido")
+            return {"task_id": "dev-1"}
+
+        service.create_task = _flaky  # type: ignore[method-assign]
+        result = await service.apply_business_status(
+            task_id="q1", business_status="Completed"
+        )
+        continuation = result.get("owner_answer") or {}
+        self.assertFalse(continuation.get("continued"))
+        stored = await repo.get_task("q1")
+        assert stored is not None
+        block = (stored.get("params") or {}).get("owner_question") or {}
+        # La decisión del desk queda grabada aunque falle el resto.
+        self.assertEqual(
+            (block.get("decision") or {}).get("decision"), "approved"
+        )
+        origin = await repo.get_task("origin-1")
+        assert origin is not None
+        self.assertEqual(origin["status"], "waiting")
+
+        # Reintento desde cockpit: aunque pulse deny, manda lo grabado.
+        retry = await service.apply_owner_decision(
+            "q1", approve=False, actor_id="owner", comment="reintento"
+        )
+        self.assertTrue(retry["applied"])
+        self.assertEqual(retry["route"], "owner_question_tool")
+        self.assertEqual(retry.get("dev_task_id"), "dev-1")
+        origin = await repo.get_task("origin-1")
+        assert origin is not None
+        self.assertEqual(origin["status"], "failed")
+
+    async def test_recorded_approve_honored_on_retry(self) -> None:
+        repo = _SvcRepo()
+        repo.tasks["origin-2"] = _svc_task(
+            "origin-2", waiting_reason="needs_owner: cuanto?",
+            params={"owner_question_id": "q2"},
+        )
+        question = _question_task(
+            "q2", origin="origin-2", status="completed")
+        question["params"]["owner_question"]["decision"] = {
+            "decision": "approved", "by": "owner",
+            "at": "2026-10-11T12:00:00+00:00", "comment": "adelante",
+        }
+        repo.tasks["q2"] = question
+        service = _make_service(repo)
+        service.set_dispatcher_wake(lambda: None)
+
+        retry = await service.apply_owner_decision(
+            "q2", approve=False, actor_id="owner", comment="no"
+        )
+        self.assertTrue(retry["applied"])
+        self.assertEqual(retry["route"], "owner_question_resume")
+        origin = await repo.get_task("origin-2")
+        assert origin is not None
+        self.assertEqual(origin["status"], "queued")
+
+    async def test_recorded_deny_honored_on_retry(self) -> None:
+        repo = _SvcRepo()
+        repo.tasks["origin-4"] = _svc_task(
+            "origin-4", waiting_reason="needs_owner: cuanto?",
+            params={"owner_question_id": "q4"},
+        )
+        question = _question_task(
+            "q4", origin="origin-4", status="cancelled")
+        question["params"]["owner_question"]["decision"] = {
+            "decision": "denied", "by": "erpnext-desk",
+            "at": "2026-10-11T12:00:00+00:00", "comment": "",
+        }
+        repo.tasks["q4"] = question
+        service = _make_service(repo)
+        service.set_dispatcher_wake(lambda: None)
+
+        retry = await service.apply_owner_decision(
+            "q4", approve=True, actor_id="owner", comment="reintento"
+        )
+        self.assertTrue(retry["applied"])
+        self.assertEqual(retry["route"], "owner_question_deny")
+        origin = await repo.get_task("origin-4")
+        assert origin is not None
+        self.assertEqual(origin["status"], "failed")
+        # El desk-cancelled no flipa a completed en el reintento.
+        stored = await repo.get_task("q4")
+        assert stored is not None
+        self.assertEqual(stored["status"], "cancelled")
+
+    async def test_done_question_stays_not_answerable(self) -> None:
+        repo = _SvcRepo()
+        repo.tasks["origin-3"] = _svc_task("origin-3", status="completed")
+        question = _question_task(
+            "q3", origin="origin-3", status="completed")
+        question["params"]["owner_question"]["decision"] = {
+            "decision": "approved", "by": "owner",
+            "at": "2026-10-11T12:00:00+00:00", "comment": "ok",
+        }
+        repo.tasks["q3"] = question
+        service = _make_service(repo)
+
+        result = await service.apply_owner_decision(
+            "q3", approve=True, actor_id="owner", comment="otra vez"
+        )
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["reason"], "not_answerable")
+
+
+class HookProducerHygieneTests(unittest.IsolatedAsyncioTestCase):
+    """H4+H5: los productores por hook limpian fases y ponen la tag."""
+
+    def _cycle(self, create_ticket=None):
+        from unittest.mock import MagicMock
+
+        from agents.dev.tier_s.cycle import TierSCycle
+        from agents.dev.tier_s.stores import (
+            InMemoryLockStore,
+            InMemoryRunStore,
+            InMemoryTaskStore,
+        )
+
+        runs = InMemoryRunStore()
+        tasks = InMemoryTaskStore()
+
+        async def notify(ref: str, text: str) -> None:
+            del ref, text
+
+        cycle = TierSCycle(
+            runs, InMemoryLockStore(), tasks, MagicMock(),
+            notify=notify, create_ticket=create_ticket,
+        )
+        return cycle, runs, tasks
+
+    async def test_ask_owner_clears_phases_and_tags(self) -> None:
+        from agents.dev.tier_s.cycle import _Ctx
+
+        seen: list[dict[str, Any]] = []
+
+        async def fake_create(payload: dict[str, Any]) -> dict[str, Any]:
+            seen.append(payload)
+            return {"task_id": "q1", "params": payload.get("params")}
+
+        cycle, runs, tasks = self._cycle(create_ticket=fake_create)
+        await runs.create_run({"run_id": "run-1", "task_id": "t1",
+                               "status": "running"})
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _Ctx(
+                ticket={"task_id": "t1", "project": "jardal-openceo",
+                        "title": "T", "params": {}},
+                repo=Path(tmp), ref="T-1", run_id="run-1",
+                branch="tier-s/t1-x", base_branch="main", budgets={},
+                timeouts={}, waiting_cfg={}, auto_merge=False,
+                budget_exclude=[], gate_specs=[], roles={},
+            )
+            await cycle.ask_owner(
+                ctx, question="Apruebas?",
+                human_action="Aprobar o rechazar",
+            )
+        self.assertIn("pregunta-dueno", seen[0].get("tags") or [])
+        patch = tasks.patches.get("q1") or {}
+        self.assertEqual(patch.get("workflow_phases"), [])
+        self.assertIsNone(patch.get("workflow_key"))
+        self.assertEqual(patch.get("phase_index"), 0)
+        self.assertEqual(patch.get("phase_assignments"), {})
+
+    async def test_tool_hook_clears_phases_and_tags(self) -> None:
+        import asyncio
+
+        from objectives.engine import create_tool_proposal_questions
+        from objectives.planner_models import PlannerResult
+
+        created: list[dict[str, Any]] = []
+        patched: list[dict[str, Any]] = []
+
+        async def fake_create(payload: dict[str, Any]) -> dict[str, Any]:
+            created.append(payload)
+            return {"task_id": "q-1", "params": payload.get("params")}
+
+        async def fake_patch(task_id: str, updates: dict[str, Any]) -> None:
+            patched.append({"task_id": task_id, "updates": updates})
+
+        env = SimpleNamespace(create_ticket=fake_create, patch_task=fake_patch)
+        result = PlannerResult.model_validate({
+            "objective_status": "active", "state_summary": "s", "tickets": [],
+            "proposed_tools": [{"name": "dns.x", "need": "borrar"}],
+        })
+        await asyncio.sleep(0)
+        task_ids = await create_tool_proposal_questions(
+            env, "OBJ-1", "jardal-openceo", result)
+        self.assertEqual(task_ids, ["q-1"])
+        self.assertIn("pregunta-dueno", created[0].get("tags") or [])
+        updates = patched[0]["updates"]
+        self.assertEqual(updates.get("workflow_phases"), [])
+        self.assertIsNone(updates.get("workflow_key"))
+
+    async def test_internal_ticket_passes_tags_through(self) -> None:
+        from objectives.service import create_internal_ticket
+
+        seen: list[Any] = []
+
+        class _Service:
+            async def create_task(self, payload: Any) -> dict[str, Any]:
+                seen.append(payload)
+                return {"task_id": "t9"}
+
+        created = await create_internal_ticket(_Service(), {
+            "title": "T", "description": "D", "project": "p",
+            "source": "api", "source_id": "s1",
+            "tags": ["pregunta-dueno", "question"],
+        })
+        self.assertEqual((created or {})["task_id"], "t9")
+        self.assertEqual(
+            seen[0].tags, ["pregunta-dueno", "question"]
+        )
+
+    async def test_legacy_phased_question_still_routes(self) -> None:
+        # Tolerancia: preguntas creadas antes del fix conservan la
+        # plantilla dev.default; la ruta del canal las sigue atendiendo.
+        repo = _SvcRepo()
+        repo.tasks["origin-5"] = _svc_task(
+            "origin-5", waiting_reason="needs_owner: cuanto?",
+            params={"owner_question_id": "q5"},
+        )
+        question = _question_task("q5", origin="origin-5")
+        question["workflow_key"] = "dev.default"
+        question["workflow_phases"] = [
+            {"key": "dev_work", "type": "agent"},
+            {"key": "qa_review", "type": "human",
+             "permission": "qa_review"},
+        ]
+        question["phase_index"] = 0
+        repo.tasks["q5"] = question
+        service = _make_service(repo)
+        service.set_dispatcher_wake(lambda: None)
+
+        result = await service.apply_owner_decision(
+            "q5", approve=True, actor_id="owner", comment="ok"
+        )
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["route"], "owner_question_resume")
 
 
 if __name__ == "__main__":

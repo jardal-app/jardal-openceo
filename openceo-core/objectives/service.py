@@ -90,6 +90,7 @@ async def create_internal_ticket(
         project=data.get("project"),
         priority=data.get("priority", "medium"),  # type: ignore[arg-type]
         params=data.get("params"),
+        tags=data.get("tags"),
         acceptance=data.get("acceptance"),
         objective_id=data.get("objective_id"),
         blocked_by=data.get("blocked_by"),
