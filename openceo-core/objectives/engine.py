@@ -747,6 +747,7 @@ def _planner_prompt(
         "",
         "ROUTING (summary; the normative policy below rules on conflicts):",
         "- Choose target_agent FIRST, only from enabled registered agents.",
+        "- skill is an optional suggestion for any agent; the agent decides.",
         "- DEV tiers apply only when target_agent == dev, in this order.",
         "  All four executors are top-tier models; letters order the work,",
         "  never the models. Never describe a tier as cheap or weaker.",
@@ -799,6 +800,7 @@ def _planner_prompt(
         '    "local_ref": "<unique short key>", "title": "...",',
         '    "target_agent": "<enabled agent>", "work_type": '
         '"<e.g. implementation|debugging|research|documentation>",',
+        '    "skill?": "<optional suggested skill, any agent>",',
         '    "goal": "...", "why_now": "...",',
         '    "inputs": [], "constraints": [], "out_of_scope": [],',
         '    "acceptance_criteria": ["<at least one>"],',
@@ -1424,6 +1426,8 @@ def _planned_params(ticket: planner_mod.PlannedTicket) -> dict[str, Any]:
     }
     if ticket.tier_reason:
         params["tier_reason"] = ticket.tier_reason
+    if ticket.skill:
+        params["skill"] = ticket.skill
     if ticket.oracle is not None:
         params["oracle"] = {
             "type": ticket.oracle.type.value,

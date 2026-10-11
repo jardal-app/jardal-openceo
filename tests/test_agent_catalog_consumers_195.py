@@ -135,16 +135,17 @@ class ConsumerConsistencyTest(unittest.TestCase):
 
 
 class PlannerRegistryDerivationTest(unittest.TestCase):
-    def test_registry_is_catalog_ai_agents(self):
+    def test_registry_is_catalog_agents_plus_staff(self):
         catalog = load_catalog()
         registry = planner_registry()
         expected = {name for name, card in catalog.agents.items()
-                    if card.type.value == "ai"}
+                    if card.type.value == "ai" or name == "owner"}
+        expected |= {entry.name for entry in catalog.staff.roster}
         self.assertEqual(expected, set(registry))
 
-    def test_owner_excluded_dev_enabled(self):
+    def test_owner_included_dev_enabled(self):
         registry = planner_registry()
-        self.assertNotIn("owner", registry)
+        self.assertEqual({"enabled": True}, registry["owner"])
         self.assertEqual({"enabled": True}, registry["dev"])
 
     def test_disabled_carry_catalog_reasons(self):

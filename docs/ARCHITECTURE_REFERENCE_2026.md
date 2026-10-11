@@ -1017,7 +1017,7 @@ Contract of epic TASK-2026-00187 (planner único, agentes por rol con skills y t
 
 ### Single planner
 
-One planning function of the CEO decides every pedido, loose or objective child: ticket or objective, agent, suggested skill and, for dev, the tier. Explicit requests (Owner, approved playbook, validated plan) are validated against the catalog only. No separate router; no keyword routing; no silent reclassification. (TASK-2026-00204; result model TASK-2026-00198.)
+One planning function of the CEO decides every pedido, loose or objective child: ticket or objective, agent, suggested skill and, for dev, the tier. Explicit requests (Owner, approved playbook, validated plan) are validated against the catalog only. No separate router; no keyword routing; no silent reclassification. (TASK-2026-00204; result model TASK-2026-00198: target_agent is any enabled catalog agent — dev, owner, staff names — skill is an optional suggestion for any agent, coding_tool stays the dev-only tier.)
 
 ### Single catalog and role profile
 

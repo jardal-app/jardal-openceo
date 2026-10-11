@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from catalog import load_catalog
+from catalog import Catalog, load_catalog, planner_registry_view
 from settings import Settings
 
 if TYPE_CHECKING:
@@ -545,8 +545,8 @@ class ConfigLoader:
                     "prompt_via": "argv",
                 },
                 # Authoritative agent registry for target_agent (policy
-                # §6): derived from the single catalog (TASK-2026-00195),
-                # AI agents only — humans never execute tickets.
+                # §6): derived from the single catalog (TASK-2026-00195;
+                # humans included by TASK-2026-00198).
                 "agents": _planner_agents_from_catalog(),
             },
             # Company-level objectives (autonomy epic TASK-2026-00110, F2
@@ -728,24 +728,17 @@ class ConfigLoader:
         return _deep_merge(defaults, cfg)
 
 
-def _planner_agents_from_catalog() -> dict[str, dict[str, Any]]:
-    """Planner registry derived from the single catalog (AI agents only).
+def _planner_agents_from_catalog(
+    catalog: Catalog | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Planner registry derived from the single catalog.
 
-    Shape kept: name → {"enabled": bool, "reason"?: str}, consumed by the
-    planner prompt and ``validate_planner_result``. Humans (owner) never
-    execute tickets, so they stay out of the planner registry.
+    AI agents plus humans (owner and staff names): the planner may target
+    any enabled one (TASK-2026-00198). Shape kept: name →
+    {"enabled": bool, "reason"?: str}, consumed by the planner prompt and
+    ``validate_planner_result``.
     """
-    catalog = load_catalog()
-    registry: dict[str, dict[str, Any]] = {}
-    for name, card in catalog.agents.items():
-        if card.type.value != "ai":
-            continue
-        if card.enabled:
-            registry[name] = {"enabled": True}
-        else:
-            registry[name] = {"enabled": False,
-                              "reason": card.disabled_reason or "disabled"}
-    return registry
+    return planner_registry_view(catalog or load_catalog())
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
