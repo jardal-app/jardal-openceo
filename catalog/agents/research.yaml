@@ -1,0 +1,15 @@
+# Agent card: research (disabled until bridged).
+name: research
+type: ai
+engine: muse-code
+profile: null
+boundary_tools: []
+skills_dir: skills/research
+skills: []
+inputs:
+  - research question with budget
+outputs:
+  - grounded report with sources
+enabled: false
+disabled_reason: no ticket execution bridge yet
+decided_by_ticket: TASK-2026-00222

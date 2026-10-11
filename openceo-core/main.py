@@ -322,6 +322,20 @@ _PM_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # Agent catalog: the single source of who exists and what each one can
+    # do. Unlike the planner policy (warn-only), an invalid catalog refuses
+    # startup: nothing can route, plan or execute without it (TASK-2026-00191).
+    from catalog import check_catalog as _check_catalog
+    _catalog_status = _check_catalog()
+    _boot_log = logging.getLogger("uvicorn.error")
+    if not _catalog_status.ok:
+        _boot_log.error("Agent catalog PROBLEM at %s: %s. Refusing to start.",
+                        _catalog_status.path, _catalog_status.problem)
+        raise RuntimeError(
+            f"invalid agent catalog: {_catalog_status.problem}")
+    _boot_log.info("Agent catalog: %s (%d agents, sha %s)",
+                   _catalog_status.path, _catalog_status.agents,
+                   _catalog_status.sha)
     async with AsyncExitStack() as stack:
         if internal_mcp is not None:
             await stack.enter_async_context(internal_mcp.lifespan())

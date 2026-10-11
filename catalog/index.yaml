@@ -1,0 +1,34 @@
+# Single agent catalog: short index (always loaded; card detail on demand).
+# Epic TASK-2026-00187. Content language: en (the planner reads it).
+version: 1
+agents:
+  - name: dev
+    summary: Writes, deploys and maintains repos. Never decides business work or moves real money.
+    card: agents/dev.yaml
+  - name: owner
+    summary: Decides, approves, answers and does. Never receives plans.
+    card: agents/owner.yaml
+  - name: operations
+    summary: Creates company projects end to end. Disabled until it has an executor and a skill.
+    card: agents/operations.yaml
+  - name: secretary
+    summary: Sends email and coordinates lightly. Disabled until migrated.
+    card: agents/secretary.yaml
+  - name: finance
+    summary: Answers and records dated finance against ERPNext. Disabled until migrated, never executes a transfer by itself.
+    card: agents/finance.yaml
+  - name: research
+    summary: Runs grounded research on demand. Disabled, no ticket execution bridge yet.
+    card: agents/research.yaml
+  - name: pm
+    summary: Extracted tickets from interviews. Retired, the single planner takes new work.
+    card: agents/pm.yaml
+  - name: marketing
+    summary: Never connected to a runner. Retired with the unconnected agents.
+    card: agents/marketing.yaml
+  - name: sales
+    summary: Never connected to a runner. Retired with the unconnected agents.
+    card: agents/sales.yaml
+  - name: media
+    summary: Never connected to a runner. Retired with the unconnected agents.
+    card: agents/media.yaml

@@ -1,0 +1,15 @@
+# Agent card: pm (retired).
+name: pm
+type: ai
+engine: muse-code
+profile: null
+boundary_tools: []
+skills_dir: skills/pm
+skills: []
+inputs:
+  - client interview or requirements
+outputs:
+  - structured tickets
+enabled: false
+disabled_reason: retired, ticket creation moves to the single planner
+decided_by_ticket: TASK-2026-00209

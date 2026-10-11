@@ -1,0 +1,15 @@
+# Agent card: operations (disabled until executor + skill).
+name: operations
+type: ai
+engine: muse-code
+profile: null
+boundary_tools: []
+skills_dir: skills/operations
+skills: []
+inputs:
+  - ticket with project spec
+outputs:
+  - created project (ERPNext, repo, config, vault, DNS)
+enabled: false
+disabled_reason: enabled once it has a generic executor (TASK-2026-00205) and the create-project skill (TASK-2026-00214)
+decided_by_ticket: TASK-2026-00214
