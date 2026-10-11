@@ -105,7 +105,7 @@ OpenCEO core does not require Redis, PostgreSQL, LiteLLM, or aider. ERPNext oper
 
 - Crystallized workflows execute as deterministic Python. Zero LLM tokens on step sequencing, flow control, or variable resolution. Discovery mode uses LLM to find unknown flows — but discovered flows crystallize into YAML and become deterministic thereafter.
 - LLMs support contextual conversation in `first_layer.py`, routing fallback (`router.py`), discovery, document extraction, secretary payload extraction fallback, and the coding CLIs. Crystallized workflow sequencing, conditions, and variable resolution stay deterministic; `llm_eval` is a design extension, not an enabled condition type in the deterministic executor.
-- Runtime wiring is explicit. A folder in `openceo-core/agents/` is a portable skill package, but it becomes executable only when it is registered in `router.py`, `graph.py`, and the relevant service entrypoints.
+- Runtime wiring is explicit. A folder in `openceo-core/agents/` is a portable agent package (paquete de agente), but it becomes executable only when it is registered in `router.py`, `graph.py`, and the relevant service entrypoints.
 - The bundled worker graph wires `dev`, `pm`, `finance`, and `secretary`.
 - Versioned execution configuration lives in YAML (`projects/*/project.yaml`); business project identity lives in ERPNext. CEO routing triggers and patterns are read from `routing.agents`. Project is optional for runtime operations using company-level defaults; the Dev agent needs repository context. A missing project never implies personal scope or authorizes a project-sensitive business write.
 - Guided chat workflows are deterministic state machines. They accept required inputs in any order, persist whatever the user already provided, and ask only for the missing fields before executing.
@@ -113,7 +113,7 @@ OpenCEO core does not require Redis, PostgreSQL, LiteLLM, or aider. ERPNext oper
 - Voice/chat UX must guide the user explicitly. The system should not assume the employee already knows the input order or that all required data will arrive in the first turn.
 - CEO routing should also recognize substantive workflow payloads when they arrive first. A pasted interview or requirements block must enter the guided PM flow even if the user never typed the trigger phrase.
 - Browser automation uses Playwright-based flows.
-- Inter-agent communication is **peer-to-peer** during Tier 2 discovery. Agents pass results directly to the next agent without CEO as relay. In crystallized workflows (YAML), the executor calls Python functions directly — no inter-agent communication, only sequential tool execution. The CEO initiates tasks (top-down) but does not relay data between active agents.
+- Agents never talk to each other: the agent returns hecho / bloqueado / no_aplica and the single planner re-decides (the peer-to-peer Tier 2 rule was retired 2026-10-11, TASK-2026-00187/00189; see Inter-Agent Communication below). In crystallized workflows (YAML), the executor calls Python functions directly — no inter-agent communication, only sequential tool execution. The CEO initiates tasks (top-down) but does not relay data between active agents.
 - User project selection and active dev-session focus live in MongoDB.
 - MongoDB is authoritative for OpenCEO execution state, queues, runtime tasks, workflow-local params, and execution dashboard data. ERPNext is authoritative for business work. Notion compatibility mirrors do not change either boundary.
 - Business status and runtime status are distinct: `completed` in an execution record does not bypass an ERPNext business approval. Local users/groups govern access to OpenCEO; they are not a replacement business directory.
@@ -125,9 +125,11 @@ OpenCEO core does not require Redis, PostgreSQL, LiteLLM, or aider. ERPNext oper
 - Integration side effects originate from the CRUD operation or explicit event that caused them. No periodic database/API sweeps, duplicate watchers, or full-collection scans. Queries must be indexed and bounded; retries must retain the same operation identity. Include required creation fields in one API request instead of an immediate follow-up patch.
 - Persist execution references and dated summaries, not duplicate business entities, a ledger, vault contents, or generated code graphs. Retrieve only the context needed for the task.
 
-### Skill Packaging Contract
+### Agent Packaging Contract
 
-- Every bundled skill folder contains `prompt.md`, `tools.py`, `requirements.txt`, and `.env.example`.
+`skill` in this document now means an Agent Skill (`SKILL.md` with optional scripts); the per-agent folder below is an agent package (paquete de agente). See Agentes por rol.
+
+- Every bundled agent-package folder contains `prompt.md`, `tools.py`, `requirements.txt`, and `.env.example`.
 - `openceo-core/requirements.txt` now contains only shared runtime dependencies. Agent-specific packages are declared in `openceo-core/agents/{name}/requirements.txt`.
 - Bundled local installs use `./scripts/install-agent-requirements.sh` after the shared requirements install.
 - For now, the core runtime still loads environment variables centrally from `openceo-core/.env` and `openceo-core/.env.finance.local`. The per-agent `.env.example` files are the source manifests for packaging and marketplace portability.
@@ -188,6 +190,8 @@ Code topology is read on demand and is not copied into the vault or MongoDB. Gra
 ---
 
 ## Discovery & Crystallization
+
+> **Partially retired (2026-10-11, TASK-2026-00187 / TASK-2026-00189).** Discovery that writes YAML — the Tier 1.5/2 flows below, the DeepSeek autodiscovery proposal/approval loop, and the blocked-discovery resume — is retired; removal is TASK-2026-00215. The deterministic executor for already-crystallized YAML workflows stays until its owning tickets migrate it. Learning now crystallizes into skills; see Agentes por rol.
 
 OpenCEO has two execution modes for any task:
 
@@ -500,6 +504,8 @@ def query_workflow_runs(filters: dict) -> list:
 ```
 
 The tool schema and deterministic validation constrain filters. Queries must use indexed fields, bounded results, and pagination when more results are needed. Reading execution history has no effect on workflow execution.
+
+> **Retired (2026-10-11, TASK-2026-00187 / TASK-2026-00189).** CEO Discovery fragmentation and Tier 0–1.5 matching are retired; every pedido goes through the single planner (TASK-2026-00204). Kept as history; superseded by Agentes por rol.
 
 ### CEO Discovery — Fragmentation & Matching
 
@@ -816,6 +822,8 @@ Existing browser-workflow compatibility:
 
 ---
 
+> **Retired (2026-10-11, TASK-2026-00187 / TASK-2026-00189).** Peer-to-peer agent communication and the Claim Model (never implemented) are retired; the agent returns hecho / bloqueado / no_aplica and the planner re-decides (TASK-2026-00202). Kept as history; superseded by Agentes por rol. Supersedes TASK-2026-00009 and TASK-2026-00011 (both Cancelled).
+
 ## Inter-Agent Communication: Peer-to-Peer
 
 OpenCEO uses **peer-to-peer** communication between agents during Tier 2 discovery — not lead-centric relay.
@@ -890,11 +898,11 @@ Inspired by OpenCode team functions:
 
 ## Proactive CEO — Autonomous Objectives
 
-The CEO acts autonomously under a company mandate approved once by the owner (2026-10-06, TASK-2026-00110): it creates company Objectives and tickets directly, without per-ticket approval. Doing nothing is a valid outcome. The owner steps in only where a human is required: new spend, a credential only they hold, an irreversible external action, a strategic replanning, a mandate change, or a policy-mandated human review. Autonomy never transfers ownership of business work from ERPNext and never authorizes an unrestricted stream of new tickets.
+The CEO acts autonomously under a company mandate approved once by the Owner (2026-10-06, TASK-2026-00110; epic closed, historical base): it creates company Objectives and tickets directly, without per-ticket approval. Doing nothing is a valid outcome. The Owner steps in only where a human is required: new spend, an irreversible external action, a strategic replanning, a mandate change, or a policy-mandated human review — never plans. Autonomy never transfers ownership of business work from ERPNext and never authorizes an unrestricted stream of new tickets. The governing contract for new work is Agentes por rol (epic TASK-2026-00187) below; this section keeps the 00110 machinery its tickets have not replaced yet.
 
 > **Single company Objective, single planner (amends "One engine, two scopes", 2026-10-06, TASK-2026-00111).** Identity lives in ERPNext: a group Task with real children (`parent_task`) and `depends_on`. Mongo `objectives` holds execution state only (capsule, cycles, replans, final review, telemetry) — never a business backlog. One global planner (Muse Code headless, one fresh run per cycle, `PlannerResult` validated with Pydantic + deterministic rules) is the only component that decides which tickets exist for an Objective. A deterministic dispatcher (0 tokens) launches ready tickets on events, with a single conditional backup trigger while tickets wait for a slot. Work is persisted with `next_run_at` and awakened reactively, never by per-minute database sweeps.
 
-Normative sources: vault decision `decisions/2026-10-06-objetivo-unico-ceo-autonomo` (why + history), `openceo-core/objectives/routing_policy.md` (runtime policy the planner reads; sole planner normative). Behaviour the code does not have yet is marked `pendiente: TASK-2026-00NNN` below.
+Normative sources: vault decision `decisions/2026-10-06-objetivo-unico-ceo-autonomo` (why + history), `openceo-core/objectives/routing_policy.md` (runtime policy the planner reads; sole planner normative until TASK-2026-00201 splits it), and Agentes por rol below with vault decision `decisions/2026-10-11-agentes-por-rol-planner-unico` (epic TASK-2026-00187 contract). Behaviour the code does not have yet is marked `pendiente: TASK-2026-00NNN` below.
 
 ### Glossary
 
@@ -986,6 +994,66 @@ Only if policy requires: Pending Review + tray + Horizon → OWNER
 ```
 
 The objective close notification fires once, after the terminal state is persisted: `run_task` notifies post-persist from the session's stashed close context (Tier S notifies inline and the funnel skips it, so no double replan), and the closing ticket itself never counts as open work (TASK-2026-00169). Corrective children created by the final close carry the same minimum delivery contract as planner children — dev agent hint, acceptance, and the anchored repro/fix artefacts — so the fixed child passes the next delivery check instead of parking it in data gaps (TASK-2026-00173). A Horizon-linked promotion stub is tierless by construction: the single objective planner adopts it with a `completes_task_id` entry (patch by task_id, promotion provenance preserved, never recreated), a planning failure degrades to the pre-adoption wait, and retrying the promotion re-drives the plan while the stub stays tierless (TASK-2026-00174).
+
+---
+
+## Agentes por rol — single planner, role agents
+
+Contract of epic TASK-2026-00187 (planner único, agentes por rol con skills y tools de frontera). It governs all new work; TASK-2026-00110 is closed and stays as the historical base. Normative sources: this section, vault decision `decisions/2026-10-11-agentes-por-rol-planner-unico` (why), and the epic's private design attachment. `openceo-core/objectives/routing_policy.md` stays the runtime policy the planner reads until TASK-2026-00201 splits it.
+
+### Vocabulary (epic wording, not reopened)
+
+- **Owner**: the person who owns the company (never "dueño" ni "presidente" in the system).
+- **el personal**: people with a role in a project (noun). Horizon's adjectival "personal" (contexto personal, objetivos personales, espacio personal) is private context and stays; qualify when one sentence could mix both.
+- **misión, objetivo, ticket**: mission (above objectives, chained by the CEO strategy), company objective, ticket.
+- **pedido**: work with no decided agent yet.
+- **agente**: a headless CLI engine plus a role profile.
+- **skill**: SKILL.md with optional scripts (Agent Skills standard).
+- **borrador**: an unconfirmed skill.
+- **workflow**: the exact part of a skill.
+- **playbook**: a ticket recipe across agents.
+- **tool de frontera**: a boundary tool.
+- **no_aplica**: the agent returns the work to the planner.
+
+### Single planner
+
+One planning function of the CEO decides every pedido, loose or objective child: ticket or objective, agent, suggested skill and, for dev, the tier. Explicit requests (Owner, approved playbook, validated plan) are validated against the catalog only. No separate router; no keyword routing; no silent reclassification. (TASK-2026-00204; result model TASK-2026-00198.)
+
+### Single catalog and role profile
+
+One catalog in git: agents, the Owner, staff, each agent's boundary tools and each role's skills. A short index always loads; each agent's detail loads on demand. Agent = headless CLI engine (Muse Code default, OpenCode second) + role profile (card, its skills, its tools, none of the engine's extras) + per-ticket folder. The role is defined once, engine-neutral; the executor translates it per engine. (TASK-2026-00191, TASK-2026-00195, TASK-2026-00197, TASK-2026-00200.)
+
+### Boundary tools
+
+A tool exists only if it meets at least one condition: (a) it uses a secret the agent must not hold; (b) it enforces a lock that does not depend on the LLM obeying; (c) it writes to the business record under its own rules. Everything else is terminal plus skills. Each agent sees all its role's tools on any ticket; the ticket token is a badge (which agent, on which ticket) enforced server-side; no anonymous access to MCP or REST; dangerous tools carry their lock inside; agents comment and attach on their ticket; code changes states. (TASK-2026-00196, TASK-2026-00199, TASK-2026-00208.)
+
+### Agent result
+
+The agent ends hecho, bloqueado or no_aplica, plus the reason. When it cannot, it describes the need (it never asks for tools it cannot see) and the work returns to the same planner once. No extra tool verifiers. (TASK-2026-00202.)
+
+### Skills, drafts and crystallization
+
+SKILL.md recipe always present; a script only where exactness or safe repetition is needed, never for a one-liner; the workflow is the exact part of a skill; each agent loads only its own skills. Internal crystallization without Owner approval: on ticket close the agent judges recurrence and leaves a draft; reusing the draft on another ticket turns it into a skill. The save step is code: everything new enters as a draft, a draft promotes only from another ticket, at most 10 drafts per role (oldest deleted), an agent touches only its role's skills, everything in git with the ticket number. (TASK-2026-00203, TASK-2026-00210.)
+
+### Playbooks
+
+Ticket recipes across agents, a reference for the planner, never rigid. On objective close, when the planner detects a recurrent process (or the Owner asks), it proposes the playbook and the Owner approves. One stage is one ticket when it has its own owner, deliverable, failure or approval; one step goes inside a workflow when it is mechanical. (TASK-2026-00217.)
+
+### Human channel
+
+The Owner only ever receives: the 5 mandate categories (new spend, irreversible action, strategic replanning, mandate change, policy-mandated review); questions only they can answer from their own data; the acceptance-criteria proposal when they gave none, without blocking work; playbook and new-boundary-tool approvals. Never plans. (TASK-2026-00206; mandate TASK-2026-00193; spend gate TASK-2026-00207.)
+
+### Missions over objectives
+
+The Owner or Horizon gives a mission; the CEO strategy chains objectives until it holds. Spend declared in a plan asks approval before launch. (TASK-2026-00218.)
+
+### What stays deterministic code
+
+Dispatch, quotas, dependencies, states, schema and deliverable validation, locks, mandate limits, privacy, exact scripts and dev gates. AI decides and does the work; code guards it.
+
+### Memory outside the engine
+
+Skills and playbooks in git; knowledge in the vault; work in ERPNext; execution in Mongo. Switching engines is one config line. Hermes is not an engine, CrewAI is not adopted, tmux stays for live sessions only.
 
 ---
 
@@ -1582,7 +1650,7 @@ This applies to OpenCEO's execution code. ERPNext and the engineering vault are 
 
 ### Agent Folder Structure
 
-Illustrative organization for growing skill packages; the concrete repository layout follows in the next section. Finance files contain adapter/policy functions, not a second accounting implementation.
+Illustrative organization for growing agent packages; the concrete repository layout follows in the next section. Finance files contain adapter/policy functions, not a second accounting implementation.
 
 ```
 openceo-core/agents/
@@ -1685,7 +1753,7 @@ openceo/
 │   │   ├── email_sender.py           # SMTP email sending
 │   │   └── __init__.py
 │   │
-│   ├── agents/                       # Each agent = self-contained skill package
+│   ├── agents/                       # Each agent = self-contained agent package
 │   │   ├── ceo/
 │   │   │   ├── prompt.md
 │   │   │   ├── tools.py
