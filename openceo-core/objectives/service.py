@@ -220,6 +220,11 @@ class ObjectiveService:
                     logger.warning("objective comment failed for %s",
                                    ref, exc_info=True)
 
+        try:
+            mandate = self._config.load_company_mandate()
+        except Exception:
+            mandate = None
+
         return ObjectiveEnv(
             objectives=(MongoObjectiveStore(repo) if repo is not None
                         else InMemoryObjectiveStore()),
@@ -259,6 +264,7 @@ class ObjectiveService:
             delivery_verifiers={},
             dispatcher_wake=(getattr(task_service, "wake_dispatcher", None)
                              if task_service is not None else None),
+            mandate=mandate,
         )
 
     @staticmethod
@@ -409,6 +415,37 @@ class ObjectiveService:
         return await engine_mod.plan_objective(
             env, objective_id,
             return_from=str(entry.get("task_id") or "") or None)
+
+    async def apply_spend_approval(
+        self,
+        objective_id: str,
+        question_task_id: str,
+    ) -> dict[str, Any]:
+        """Launch a spend-held plan after the Owner approved it.
+
+        Fail-closed: without the store, the objective, its project or
+        an approved question, nothing launches. The engine re-validates
+        the stored plan before applying it.
+        """
+        from owner_channel import owner_question_block, question_answered
+
+        if self._repo is None:
+            return {"ok": False, "reason": "no-store"}
+        objective = await self._repo.get_objective(objective_id)
+        if objective is None:
+            return {"ok": False, "reason": "no-objective"}
+        project = str(objective.get("project") or "")
+        if not project or not self._config.has_project(project):
+            return {"ok": False, "reason": "unknown-project"}
+        question = await self._repo.get_task(question_task_id)
+        if question is None or not question_answered(question):
+            return {"ok": False, "reason": "question-not-answered"}
+        decision = (owner_question_block(question).get("decision") or {}
+                    ).get("decision")
+        if decision != "approved":
+            return {"ok": False, "reason": "question-not-approved"}
+        return await engine_mod.apply_approved_plan(
+            self.env_for(project), objective_id)
 
     async def park_return_gap(
         self,

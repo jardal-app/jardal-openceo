@@ -1263,6 +1263,10 @@ class DevSessionManager:
         objectives_cfg = dict(wiring["objectives_cfg"])
         objectives_cfg["child_autorun"] = bool(
             self._settings.TIER_S_OBJECTIVE_CHILD_AUTORUN)
+        try:
+            mandate = self._config_loader.load_company_mandate()
+        except Exception:
+            mandate = None
 
         return ObjectiveEnv(
             objectives=(MongoObjectiveStore(repo) if repo is not None
@@ -1299,6 +1303,7 @@ class DevSessionManager:
             dispatcher_wake=(getattr(self._task_service, "wake_dispatcher",
                                      None)
                              if self._task_service is not None else None),
+            mandate=mandate,
         )
 
     async def _internal_create_ticket(

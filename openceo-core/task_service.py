@@ -29,6 +29,15 @@ from objectives.engine import (
     TicketCloseContext,
     on_ticket_closed,
 )
+from objectives.plan_spend import (
+    SPEND_WAITING_REASON,
+    PlanSpendError,
+    check_plan_spend,
+    loose_spend_source_id,
+    parse_costs,
+    spend_hold_objective,
+    spend_total_text,
+)
 from owner_channel import (
     OWNER_QUESTION_PHASE,
     build_owner_question,
@@ -896,7 +905,16 @@ class TaskService:
                 # El ticket puede existir en Mongo con el enlace de negocio pendiente:
                 # devolverlo sin repararlo lo dejaria invisible en ERPNext para siempre.
                 await self._enqueue_erpnext_registration(existing)
-                return existing
+                reheld = await self._rehold_loose_spend(existing)
+                return reheld or existing
+
+        declared_spend = self._loose_spend_entries(
+            payload.params, objective_id=payload.objective_id,
+            origin=payload.origin)
+        if declared_spend is not None:
+            # Malformed costs reject before anything persists: no
+            # business record, no execution (TASK-2026-00207).
+            parse_costs(declared_spend)
 
         doc = make_task_document(payload)
         await self._apply_default_phase_workflow_to_document(doc)
@@ -936,6 +954,14 @@ class TaskService:
             )
             return created
 
+        # Spend lock (TASK-2026-00207): a loose ticket declaring new
+        # spend parks for Owner approval before the dispatcher can see
+        # it. Like erpnext_pending above, this is a creation-time hold,
+        # not admission: the F3 single path below is untouched.
+        held = await self._hold_loose_spend(created, declared_spend)
+        if held is not None:
+            return held
+
         # The dispatcher (F3) owns admission: creation persists queued and
         # wakes it. No direct launch and no pre-gate here, so priority order,
         # per-project/per-objective limits and Tier S reserves apply to every
@@ -955,6 +981,124 @@ class TaskService:
             )
 
         return created
+
+    @staticmethod
+    def _loose_spend_entries(
+        params: dict[str, Any] | None,
+        *,
+        objective_id: str | None,
+        origin: Any,
+    ) -> list[Any] | None:
+        """Declared costs when the creation spend gate applies, else None.
+
+        Objective children are plan-gated, never creation-gated; tickets
+        targeting a YAML workflow keep their in-workflow gate until the
+        legacy flow migrates (TASK-2026-00214/00223). Shape errors stay
+        for ``parse_costs`` at the call sites.
+        """
+        if objective_id or str(origin or "") == "objective_planner":
+            return None
+        if not isinstance(params, dict):
+            return None
+        if any(params.get(key) for key in (
+                "workflow", "workflow_id", "workflow_ref", "use_workflow",
+                "discover_workflow", "workflow_discovery")):
+            return None
+        costs = params.get("costs")
+        if costs is None:
+            return None
+        return costs  # type: ignore[return-value]
+
+    async def _hold_loose_spend(
+        self,
+        created: dict[str, Any],
+        declared: list[Any] | None,
+    ) -> dict[str, Any] | None:
+        """Park a loose ticket with declared spend for Owner approval.
+
+        The ticket keeps autorun (the approval requeues it) and waits
+        operationally; the question carries the human action through
+        the single human channel. None when the ticket launches.
+        """
+        if not declared:
+            return None
+        if not self._task_allows_autorun(created):
+            return None
+        if str(created.get("status") or "") != TaskStatus.QUEUED.value:
+            return None
+        try:
+            spend = check_plan_spend(
+                costs=declared,
+                summary=str(created.get("title") or ""),
+                mandate=self._company_mandate(),
+            )
+        except PlanSpendError as exc:
+            # Unparseable declaration on a stored ticket (new
+            # creations reject earlier): escalate, never launch blind.
+            spend = {
+                "escalate": True,
+                "category": "gasto_nuevo",
+                "reason": f"malformed costs declaration: {exc}",
+                "human_action": (
+                    "Corregir params.costs o denegar: "
+                    f"{str(created.get('title') or '')}."
+                ),
+                "amount": "?",
+                "currency": "?",
+                "unknown": [],
+            }
+        if not spend["escalate"]:
+            return None
+        task_id = str(created.get("task_id") or "")
+        total = spend_total_text(spend)
+        question = await self.create_owner_question(
+            kind="question",
+            question=f"Autorizar el gasto declarado del ticket ({total})?",
+            human_action=str(spend.get("human_action")
+                             or "Autorizar o denegar"),
+            project=created.get("project"),
+            origin_task_id=task_id,
+            origin_title=str(created.get("title") or ""),
+            context=f"Motivo: {spend.get('reason')}",
+            source_id=loose_spend_source_id(task_id),
+        )
+        parked = await self.patch_task(task_id, {
+            "status": TaskStatus.WAITING.value,
+            "waiting_reason": SPEND_WAITING_REASON,
+            "params": {"owner_question_id": question.get("task_id")},
+        })
+        return parked or created
+
+    async def _rehold_loose_spend(
+        self, existing: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Re-hold a spend ticket whose park was lost (fail-closed).
+
+        A duplicate creation of a queued spend ticket with no linked
+        question re-runs the hold. An answered question means the flow
+        already ran its course and is left alone.
+        """
+        if str(existing.get("status") or "") != TaskStatus.QUEUED.value:
+            return None
+        params = existing.get("params")
+        if not isinstance(params, dict):
+            return None
+        if params.get("owner_question_id"):
+            return None
+        declared = self._loose_spend_entries(
+            params, objective_id=existing.get("objective_id"),
+            origin=existing.get("origin"))
+        if not declared:
+            return None
+        try:
+            prior = await self._repo.find_task_by_source(
+                "api", loose_spend_source_id(
+                    str(existing.get("task_id") or "")))
+        except Exception:
+            prior = None
+        if prior is not None and question_answered(prior):
+            return None
+        return await self._hold_loose_spend(existing, declared)
 
     def _task_params(self, task: dict[str, Any] | Any) -> dict[str, Any]:
         if isinstance(task, dict):
@@ -3702,6 +3846,7 @@ class TaskService:
             approve=approve,
             record=record,
             summary=summary,
+            question=task,
         )
         result: dict[str, Any] = {
             "applied": True, "route": route, "task": patched or task,
@@ -3807,14 +3952,23 @@ class TaskService:
         approve: bool,
         record: dict[str, Any],
         summary: str,
+        question: dict[str, Any] | None = None,
     ) -> str:
         """Resume (approve) or fail + return to planner (deny) the origin.
 
         A ``new_tool`` approval also fails the origin: it cannot proceed
         until the dev ticket builds the tool, so the planner replans.
-        Only a waiting origin moves; anything else (already relaunched,
-        terminal) is left alone and the question simply closes.
+        A spend-hold question has no origin ticket: the approval
+        launches the stored plan, the denial returns the motive to the
+        planner (TASK-2026-00207). Only a waiting origin moves;
+        anything else (already relaunched, terminal) is left alone and
+        the question simply closes.
         """
+        spend_objective = spend_hold_objective(question)
+        if spend_objective is not None:
+            return await self._apply_spend_decision(
+                question or {}, spend_objective, approve=approve,
+                summary=summary)
         if kind == "new_tool" and approve:
             await self._deny_origin_from_question(origin_id, kind, summary)
             return "owner_question_tool"
@@ -3884,6 +4038,42 @@ class TaskService:
             # replanning again (same one-return rule as the run funnel).
             fresh["returns_from"] = returns_from
         await self._trigger_objective_return(updated, fresh)
+
+    async def _apply_spend_decision(
+        self,
+        question: dict[str, Any],
+        objective_id: str,
+        *,
+        approve: bool,
+        summary: str,
+    ) -> str:
+        """Continue a spend-held plan: launch it or return the motive.
+
+        The approval launches exactly the stored plan; the denial
+        sends a bloqueado verdict with the Owner's motive back to the
+        planner through the single-return path (TASK-2026-00207).
+        """
+        service = getattr(self, "_objective_service", None)
+        question_id = str(question.get("task_id") or "")
+        if service is None:
+            logger.warning("spend decision on %s without objective wiring",
+                           question_id)
+            return "owner_question_spend_unwired"
+        if approve:
+            outcome = await service.apply_spend_approval(
+                objective_id, question_id)
+            if outcome.get("ok"):
+                return "owner_question_spend_approve"
+            return "owner_question_spend_held"
+        await service.plan_return(objective_id, {
+            "task_id": question_id,
+            "title": str(question.get("title") or ""),
+            "agent": "owner",
+            "resultado": "bloqueado",
+            "motivo": summary[:500],
+            "necesidad": "",
+        })
+        return "owner_question_spend_deny"
 
     async def _create_tool_ticket_from_question(
         self,
@@ -3965,6 +4155,7 @@ class TaskService:
             approve=approve,
             record=record,
             summary=summary,
+            question=question,
         )
         result: dict[str, Any] = {"continued": True, "route": route}
         if dev_task_id:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Collection, Literal, Mapping, Sequence
 
@@ -28,6 +29,7 @@ __all__ = [
     "Oracle",
     "OracleRef",
     "OracleType",
+    "PlannedCost",
     "PlannedTicket",
     "PlannerResult",
     "ProposedTool",
@@ -165,6 +167,42 @@ class ProposedTool(BaseModel):
         return value
 
 
+class PlannedCost(BaseModel):
+    """New spend the work declares, in the mandate currency.
+
+    ``amount`` is a decimal string or int; None means unknown, which
+    escalates to the Owner and is never treated as zero. Float and bool
+    are rejected: money is never binary (TASK-2026-00207).
+    """
+
+    label: str = Field(min_length=1)
+    amount: str | int | None = None
+
+    @field_validator("label")
+    @classmethod
+    def _label_nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("amount", mode="before")
+    @classmethod
+    def _amount_is_money(cls, value: Any) -> str | int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or isinstance(value, float):
+            raise ValueError("amount must be a decimal string or int, "
+                             f"got {type(value).__name__}")
+        try:
+            number = Decimal(str(value).strip())
+        except (InvalidOperation, ValueError, AttributeError) as exc:
+            raise ValueError(
+                f"amount is not a number: {value!r}") from exc
+        if number < 0:
+            raise ValueError("amount must not be negative")
+        return value
+
+
 class PlannedTicket(BaseModel):
     local_ref: str = Field(min_length=1)
     title: str = Field(min_length=1)
@@ -189,6 +227,11 @@ class PlannedTicket(BaseModel):
     # Suggested skill for any agent (TASK-2026-00198): a hint, the agent
     # decides. Checked against the real role skills by TASK-2026-00203.
     skill: str | None = None
+
+    # New spend this ticket declares, in the mandate currency
+    # (TASK-2026-00207). The engine checks it against the mandate
+    # before persisting or launching anything.
+    costs: list[PlannedCost] = Field(default_factory=list)
 
     # Required only when coding_tool == tier_s.
     why_consensus_is_needed: str | None = None
@@ -301,6 +344,10 @@ class PlannerResult(BaseModel):
     proposed_tools: list[ProposedTool] = Field(
         default_factory=list, max_length=PROPOSED_TOOLS_MAX
     )
+
+    # Objective-level spend this plan declares, in the mandate currency
+    # (TASK-2026-00207): shared costs no single ticket owns.
+    costs: list[PlannedCost] = Field(default_factory=list)
 
     @field_validator("state_summary")
     @classmethod
