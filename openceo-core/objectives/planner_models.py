@@ -150,6 +150,10 @@ class PlannedTicket(BaseModel):
     tier_reason: str | None = None
     oracle: Oracle | None = None
 
+    # Suggested skill for any agent (TASK-2026-00198): a hint, the agent
+    # decides. Checked against the real role skills by TASK-2026-00203.
+    skill: str | None = None
+
     # Required only when coding_tool == tier_s.
     why_consensus_is_needed: str | None = None
     why_single_session_is_insufficient: str | None = None
@@ -183,7 +187,7 @@ class PlannedTicket(BaseModel):
 
     @field_validator("tier_reason", "why_consensus_is_needed",
                      "why_single_session_is_insufficient", "why_not_c",
-                     "completes_task_id")
+                     "completes_task_id", "skill")
     @classmethod
     def _optional_fields_nonblank(cls, value: str | None) -> str | None:
         if value is not None and not value.strip():

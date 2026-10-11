@@ -45,7 +45,9 @@ __all__ = [
     "catalog_root",
     "check_catalog",
     "find_consumer_mismatches",
+    "is_staff_active",
     "load_catalog",
+    "planner_registry_view",
     "short_index",
 ]
 
@@ -419,6 +421,44 @@ def short_index(catalog: Catalog) -> str:
 #: ticket lands (TASK-2026-00209). The consistency check keeps them.
 LEGACY_LIVE_DISABLED = ("pm", "marketing", "sales", "media")
 
+#: Reason recorded when a staff member is outside their active period.
+STAFF_INACTIVE_REASON = "not in active period"
+
+
+def is_staff_active(entry: StaffEntry, today: date | None = None) -> bool:
+    """Is the staff member active on ``today`` (default: current date)?"""
+    day = today or date.today()
+    if entry.active_from > day:
+        return False
+    return entry.active_until is None or entry.active_until >= day
+
+
+def planner_registry_view(
+    catalog: Catalog, today: date | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Planner registry derived from the catalog (TASK-2026-00198).
+
+    AI agents plus humans: the owner and the staff roster addressed by
+    name. Shape kept (name → {"enabled": bool, "reason"?: str}) for the
+    planner prompt and ``validate_planner_result``.
+    """
+    view: dict[str, dict[str, Any]] = {}
+    for name, card in catalog.agents.items():
+        if card.type.value != "ai" and name != "owner":
+            continue
+        if card.enabled:
+            view[name] = {"enabled": True}
+        else:
+            view[name] = {"enabled": False,
+                          "reason": card.disabled_reason or "disabled"}
+    for entry in catalog.staff.roster:
+        if is_staff_active(entry, today):
+            view[entry.name] = {"enabled": True}
+        else:
+            view[entry.name] = {"enabled": False,
+                                "reason": STAFF_INACTIVE_REASON}
+    return view
+
 
 def find_consumer_mismatches(
     agent_names: Collection[str],
@@ -434,15 +474,15 @@ def find_consumer_mismatches(
 
     R1: every enum name except ``ceo`` is a catalog agent.
     R2: every router alias value is a catalog agent.
-    R3: the planner registry is exactly the catalog AI agents, with the
-    catalog enabled flags and reasons.
+    R3: the planner registry is exactly the catalog AI agents plus the
+    humans (owner and staff names), with the catalog enabled flags and
+    reasons.
     R4: every wired graph agent is a catalog agent.
     R5: the disabled-but-live legacy names stay in the enum until removal.
     """
     problems: list[str] = []
     names = set(catalog.agents)
-    ai_names = {name for name, card in catalog.agents.items()
-                if card.type.value == "ai"}
+    expected = planner_registry_view(catalog)
 
     for name in sorted(set(agent_names)):
         if name != "ceo" and name not in names:
@@ -453,24 +493,25 @@ def find_consumer_mismatches(
             problems.append(
                 f"R2: router alias value {value!r} is not in the catalog")
     registry_names = set(registry)
-    for name in sorted(registry_names - ai_names):
+    for name in sorted(registry_names - set(expected)):
         problems.append(
-            f"R3: planner registry agent {name!r} is not a catalog AI agent")
-    for name in sorted(ai_names - registry_names):
+            f"R3: planner registry agent {name!r} is not a catalog agent "
+            "or staff name")
+    for name in sorted(set(expected) - registry_names):
         problems.append(
-            f"R3: catalog AI agent {name!r} is missing from the planner "
+            f"R3: catalog agent {name!r} is missing from the planner "
             "registry")
-    for name in sorted(registry_names & ai_names):
+    for name in sorted(registry_names & set(expected)):
         spec = registry[name]
-        card = catalog.agents[name]
+        want = expected[name]
         enabled = bool(spec.get("enabled", False)) if isinstance(spec, Mapping) \
             else False
-        if enabled != card.enabled:
+        if enabled != want["enabled"]:
             problems.append(
                 f"R3: planner registry enabled={enabled!r} for {name!r} "
-                f"disagrees with the catalog ({card.enabled!r})")
-        elif not card.enabled and str(spec.get("reason") or "") != str(
-                card.disabled_reason or ""):
+                f"disagrees with the catalog ({want['enabled']!r})")
+        elif not want["enabled"] and str(spec.get("reason") or "") != str(
+                want.get("reason") or ""):
             problems.append(
                 f"R3: planner registry reason for {name!r} disagrees with "
                 "the catalog")
