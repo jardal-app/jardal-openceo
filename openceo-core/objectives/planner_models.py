@@ -30,6 +30,7 @@ __all__ = [
     "OracleType",
     "PlannedTicket",
     "PlannerResult",
+    "ProposedTool",
     "find_local_cycles",
     "load_policy_text",
     "parse_planner_result",
@@ -127,6 +128,41 @@ class OracleRef(BaseModel):
 class Oracle(BaseModel):
     type: OracleType
     refs: list[OracleRef] = Field(min_length=1)
+
+
+#: A planner cycle proposes at most two missing boundary tools (policy
+#: §16): each one opens an owner question, and the Owner approves them
+#: one by one.
+PROPOSED_TOOLS_MAX = 2
+
+
+class ProposedTool(BaseModel):
+    """A missing boundary tool the planner proposes (TASK-2026-00206).
+
+    The Owner approves through the single human channel; approval
+    creates the dev ticket that builds the tool. The planner proposes
+    only for a genuine boundary (a secret, a lock, or a business-record
+    write the agent cannot do itself) — never for technical failures.
+    """
+
+    name: str = Field(min_length=1, max_length=120)
+    need: str = Field(min_length=1, max_length=1000)
+    spec: str = Field(default="", max_length=2000)
+    origin_task_id: str | None = None
+
+    @field_validator("name", "need")
+    @classmethod
+    def _fields_nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("origin_task_id")
+    @classmethod
+    def _optional_fields_nonblank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("must not be blank")
+        return value
 
 
 class PlannedTicket(BaseModel):
@@ -262,6 +298,9 @@ class PlannerResult(BaseModel):
     information_gaps: list[InformationGap] = Field(default_factory=list)
     tickets: list[PlannedTicket] = Field(default_factory=list, max_length=3)
     roadmap_remaining: list[str] = Field(default_factory=list)
+    proposed_tools: list[ProposedTool] = Field(
+        default_factory=list, max_length=PROPOSED_TOOLS_MAX
+    )
 
     @field_validator("state_summary")
     @classmethod
@@ -405,6 +444,14 @@ async def validate_planner_result(
         return ["planner horizon is misconfigured "
                 "(global objective_planner.ticket_horizon)"]
     low, high = bounds
+    seen_tools: set[str] = set()
+    for proposal in result.proposed_tools:
+        lowered = proposal.name.strip().lower()
+        if lowered in seen_tools:
+            errors.append(
+                f"proposed_tools names must be unique, got "
+                f"{proposal.name!r} twice (policy §17)")
+        seen_tools.add(lowered)
     if result.objective_status != ObjectiveStatus.ACTIVE:
         return errors  # Pydantic already enforced no tickets.
     creations = [ticket for ticket in result.tickets

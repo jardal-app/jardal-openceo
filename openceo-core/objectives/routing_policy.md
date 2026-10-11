@@ -458,6 +458,8 @@ Do not use free-form YAML or Markdown as the persistence contract.
 
 The schema is defined outside this runtime prompt in `openceo-core/objectives/planner_models.py`.
 
+The optional `proposed_tools` field (at most 2 per cycle) names missing boundary tools: a secret the agent must not hold, a lock that must not depend on the model obeying, or a business-record write with its own rules. Each proposal opens one owner question through the single human channel; approval creates the dev ticket that builds the tool. Never propose for technical failures (broken tests, fallen reviewers, plan errors): replan those.
+
 There is no `planner_confidence`, `dev_mode`, `execution_runtime`, account, or model field.
 
 ## 17. Deterministic validation before persistence
@@ -479,6 +481,7 @@ required Tier-S justification
 why_not_c present for tier_a/tier_b, absent for tier_c
 oracle declaration shape (known oracle type, at least one ref)
 same-tier replan prohibition after material failure
+proposed_tools names unique (at most 2, Pydantic shape)
 ```
 
 Invalid output must not become durable tickets.

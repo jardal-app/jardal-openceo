@@ -47,6 +47,7 @@ from orchestration.live import (
     Executor,
     QuotaChecker,
 )
+from owner_channel import build_owner_question
 from agents.dev.tier_s.models import (
     BUDGETS_DEFAULTS,
     REVIEW_DEFAULTS,
@@ -1968,6 +1969,70 @@ class TierSCycle:
             status="failed", run_id=ctx.run_id, reason="cancelled",
             detail="ticket cancelled in ERPNext; close fenced",
             branch=None)
+
+    async def ask_owner(
+        self,
+        ctx: _Ctx,
+        *,
+        question: str,
+        human_action: str,
+        checkpoint: dict[str, Any] | None = None,
+        detail: str = "",
+    ) -> CycleOutcome:
+        """Park on an owner-data question and open its owner ticket (00206).
+
+        Only for questions only the Owner can answer from their own data;
+        technical parks keep using :meth:`_park` (they return to the
+        planner as verdicts, never as questions). Without a ticket hook
+        the park still lands and the question degrades to today's manual
+        resume. The Owner's answer requeues the origin from the cockpit,
+        by voice, or from the ERPNext desk.
+        """
+        outcome = await self._park(
+            ctx, "needs_owner", detail or question, patch_run=True)
+        if outcome.status != "waiting" or self._create_ticket is None:
+            return outcome
+        task_id = str(ctx.ticket.get("task_id", ""))
+        seq = int(ctx.metrics.get("owner_questions_asked", 0)) + 1
+        ctx.metrics["owner_questions_asked"] = seq
+        spec = build_owner_question(
+            kind="question",
+            question=question,
+            human_action=human_action,
+            origin_task_id=task_id,
+            origin_title=str(ctx.ticket.get("title") or ""),
+            checkpoint=checkpoint,
+            project=str(ctx.ticket.get("project") or "") or None,
+            source_id=f"owner-question:{task_id}:{ctx.run_id}:{seq}",
+        )
+        try:
+            created = await self._create_ticket({
+                "title": spec["title"],
+                "description": spec["description"],
+                "project": spec["project"],
+                "source": spec["source"],
+                "source_id": spec["source_id"],
+                "params": spec["params"],
+                "priority": spec["priority"],
+                "autorun": False,
+            })
+        except Exception as exc:
+            await self._say(ctx, f"owner question failed: {exc}")
+            return outcome
+        question_id = str((created or {}).get("task_id") or "")
+        if not question_id:
+            return outcome
+        await self._tasks.patch_task(question_id, {
+            "status": TaskStatus.WAITING.value,
+            "phase": spec["phase"],
+            "waiting_reason": spec["waiting_reason"],
+        })
+        # The cycle holds the repo lock: no one else writes the origin
+        # params mid-run, so merging from the context snapshot is safe.
+        params = dict(ctx.ticket.get("params") or {})
+        params["owner_question_id"] = question_id
+        await self._tasks.patch_task(task_id, {"params": params})
+        return outcome
 
     async def _park(
         self,
