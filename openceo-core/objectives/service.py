@@ -444,6 +444,12 @@ class ObjectiveService:
                     ).get("decision")
         if decision != "approved":
             return {"ok": False, "reason": "question-not-approved"}
+        pending = objective.get("pending_plan")
+        held_for = str((pending or {}).get("question_task_id") or "")
+        if held_for != str(question_task_id or ""):
+            # The approval belongs to another plan (an orphaned older
+            # question): never launch what the Owner did not see.
+            return {"ok": False, "reason": "approval-plan-mismatch"}
         return await engine_mod.apply_approved_plan(
             self.env_for(project), objective_id)
 

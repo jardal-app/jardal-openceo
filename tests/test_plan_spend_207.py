@@ -154,7 +154,6 @@ class ParseCostsTests(unittest.TestCase):
 
     def test_malformed_entries_raise(self) -> None:
         bad: list[Any] = [
-            "no-list",
             [{"label": "  ", "amount": "1"}],
             [{"label": "x", "amount": 1.5}],
             [{"label": "x", "amount": True}],
@@ -166,6 +165,21 @@ class ParseCostsTests(unittest.TestCase):
             with self.subTest(entries=entries):
                 with self.assertRaises(PlanSpendError):
                     parse_costs(entries)
+
+    def test_non_list_raises_plan_spend_error(self) -> None:
+        for entries in (5, "no-list", {"label": "x"}, b"bytes"):
+            with self.subTest(entries=entries):
+                with self.assertRaises(PlanSpendError):
+                    parse_costs(entries)  # type: ignore[arg-type]
+
+    def test_duplicate_labels_keep_both_details(self) -> None:
+        parsed = parse_costs([
+            {"label": "fee", "amount": "5"},
+            {"label": "fee", "amount": "7"},
+        ])
+        self.assertEqual(parsed["total"], Decimal("12"))
+        self.assertEqual(parsed["details"],
+                         {"fee": "5", "fee (2)": "7"})
 
 
 class CheckPlanSpendTests(unittest.TestCase):
@@ -881,6 +895,8 @@ class _FakeObjectiveService:
     def __init__(self) -> None:
         self.returns: list[dict[str, Any]] = []
         self.approvals: list[dict[str, Any]] = []
+        self.approval_result: dict[str, Any] = {"ok": True,
+                                                "tickets_created": 1}
 
     async def plan_return(
         self, objective_id: str, entry: Any
@@ -893,7 +909,7 @@ class _FakeObjectiveService:
     ) -> dict[str, Any]:
         self.approvals.append({"objective_id": objective_id,
                                "question_task_id": question_task_id})
-        return {"ok": True, "tickets_created": 1}
+        return dict(self.approval_result)
 
 
 def _make_service(repo: _SvcRepo, mandate: Any = "default"):
@@ -1220,6 +1236,271 @@ class SpendDecisionRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(outcome.get("applied"))
         self.assertEqual(len(objectives.approvals), 0)
         self.assertEqual(len(objectives.returns), 0)
+
+
+class PendingSpendReadErrorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_transient_read_keeps_the_hold(self) -> None:
+        from objectives.engine import _pending_spend_state
+
+        async def _boom(task_id: str) -> None:
+            raise RuntimeError("mongo blip")
+
+        env = SimpleNamespace(tasks=SimpleNamespace(get_task=_boom))
+
+        state, question = await _pending_spend_state(
+            env, {"question_task_id": "q-1"})
+
+        self.assertEqual(state, "wait")
+        self.assertIsNone(question)
+
+    async def test_cycle_keeps_pending_on_read_error(self) -> None:
+        repo = _scratch_repo(self)
+        payload = {
+            "objective_status": "active",
+            "state_summary": "needs a domain",
+            "tickets": [_dev_ticket(
+                "a", "Buy domain",
+                costs=[{"label": "domain", "amount": "12"}])],
+        }
+        env, planner, _created, _patches = _spend_env(self, repo, [payload])
+        _seed_objective(env)
+        held = await plan_objective(env, "OBJ-SPEND")
+        self.assertEqual(held.get("reason"), "spend_approval_pending")
+
+        async def _boom(task_id: str) -> None:
+            raise RuntimeError("mongo blip")
+
+        env.tasks.get_task = _boom  # type: ignore[method-assign]
+
+        again = await plan_objective(env, "OBJ-SPEND")
+
+        self.assertEqual(again.get("reason"), "spend_approval_pending")
+        self.assertEqual(planner.runs, 1)
+        stored = await env.objectives.get_objective("OBJ-SPEND")
+        assert stored is not None
+        self.assertTrue(stored.get("pending_plan"))
+
+
+class ApprovalPlanBindingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_approval_for_another_plan_does_not_launch(self) -> None:
+        from objectives.service import ObjectiveService
+
+        repo = _SvcRepo()
+        answered = _spend_question("q-old", "OBJ-SPEND", status="completed")
+        answered["params"]["owner_question"]["decision"] = {
+            "decision": "approved", "by": "owner", "at": "now", "comment": "",
+        }
+        repo.tasks["q-old"] = answered
+
+        async def _get_objective(objective_id: str) -> dict[str, Any]:
+            return {"objective_id": objective_id, "project": "proj",
+                    "status": "active",
+                    "pending_plan": {"question_task_id": "q-new"}}
+
+        repo.get_objective = _get_objective  # type: ignore[attr-defined]
+        service = ObjectiveService(
+            repo=repo,  # type: ignore[arg-type]
+            task_service=MagicMock(),
+            config_loader=SimpleNamespace(
+                has_project=MagicMock(return_value=True)),
+            settings=MagicMock(),
+        )
+
+        outcome = await service.apply_spend_approval("OBJ-SPEND", "q-old")
+
+        self.assertFalse(outcome.get("ok"))
+        self.assertEqual(outcome.get("reason"), "approval-plan-mismatch")
+
+
+class OrphanSpendApprovalTests(unittest.IsolatedAsyncioTestCase):
+    async def test_approve_without_plan_signals_instead_of_silence(
+        self,
+    ) -> None:
+        repo = _SvcRepo()
+        repo.tasks["q-spend"] = _spend_question("q-spend", "OBJ-SPEND")
+        service = _make_service(repo)
+        objectives = _FakeObjectiveService()
+        objectives.approval_result = {"ok": False,
+                                      "reason": "no-pending-plan"}
+        service.set_objective_service(objectives)
+
+        outcome = await service.apply_owner_decision(
+            "q-spend", approve=True, actor_id="owner", comment="dale")
+
+        self.assertTrue(outcome.get("applied"), outcome)
+        self.assertEqual(outcome.get("route"), "owner_question_spend_held")
+        question = await repo.get_task("q-spend")
+        assert question is not None
+        self.assertIn("sin plan retenido",
+                      str(question.get("last_response_summary") or ""))
+
+
+class PendingLinkSpendTests(unittest.IsolatedAsyncioTestCase):
+    async def _create(self, service, params: dict[str, Any] | None,
+                      **fields: Any) -> dict[str, Any]:
+        from state import TaskCreateRequest, TaskSource
+
+        return await service.create_task(TaskCreateRequest(
+            project="jardal-openceo",
+            source=TaskSource.API,
+            source_id=fields.pop("source_id", "loose-pending-1"),
+            title=fields.pop("title", "Loose with spend"),
+            description="body",
+            params=params,
+            **fields,
+        ))
+
+    async def test_spend_holds_even_with_link_pending(self) -> None:
+        repo = _SvcRepo()
+        service = _make_service(repo)
+        service._register_business_ticket = AsyncMock(  # type: ignore[method-assign]
+            return_value=(None, True))
+
+        created = await self._create(
+            service, {"costs": [{"label": "domain", "amount": "12"}]})
+
+        stored = await repo.get_task(created["task_id"])
+        assert stored is not None
+        self.assertEqual(stored["status"], "waiting")
+        self.assertEqual(stored["waiting_reason"], "spend_approval")
+        question_id = (stored.get("params") or {}).get("owner_question_id")
+        self.assertTrue(question_id)
+        question = await repo.get_task(str(question_id))
+        assert question is not None
+        self.assertEqual(question["status"], "waiting")
+
+    async def test_no_spend_pending_link_unchanged(self) -> None:
+        repo = _SvcRepo()
+        service = _make_service(repo)
+        service._register_business_ticket = AsyncMock(  # type: ignore[method-assign]
+            return_value=(None, True))
+
+        created = await self._create(service, {"target_agent": "dev"})
+
+        stored = await repo.get_task(created["task_id"])
+        assert stored is not None
+        self.assertEqual(stored["status"], "queued")
+        self.assertEqual(stored["waiting_reason"], "erpnext_pending")
+
+
+class PreParkTests(unittest.IsolatedAsyncioTestCase):
+    async def test_spend_ticket_never_persists_queued(self) -> None:
+        from state import TaskCreateRequest, TaskSource
+
+        repo = _SvcRepo()
+        seen: list[str] = []
+        raw_create = repo.create_task
+
+        async def _recording_create(doc: dict[str, Any]) -> dict[str, Any]:
+            if "spend-never-queued" in str(doc.get("source_id") or ""):
+                seen.append(str(doc.get("status")))
+            return await raw_create(doc)
+
+        repo.create_task = _recording_create  # type: ignore[method-assign]
+        service = _make_service(repo)
+
+        await service.create_task(TaskCreateRequest(
+            project="jardal-openceo",
+            source=TaskSource.API,
+            source_id="spend-never-queued-1",
+            title="Loose with spend",
+            description="body",
+            params={"costs": [{"label": "domain", "amount": "12"}]},
+        ))
+
+        self.assertTrue(seen)
+        for status in seen:
+            self.assertNotIn("queued", status.lower())
+
+    async def test_plain_ticket_still_persists_queued(self) -> None:
+        from state import TaskCreateRequest, TaskSource
+
+        repo = _SvcRepo()
+        seen: list[str] = []
+        raw_create = repo.create_task
+
+        async def _recording_create(doc: dict[str, Any]) -> dict[str, Any]:
+            if "plain-still-queued" in str(doc.get("source_id") or ""):
+                seen.append(str(doc.get("status")))
+            return await raw_create(doc)
+
+        repo.create_task = _recording_create  # type: ignore[method-assign]
+        service = _make_service(repo)
+
+        await service.create_task(TaskCreateRequest(
+            project="jardal-openceo",
+            source=TaskSource.API,
+            source_id="plain-still-queued-1",
+            title="Plain loose",
+            description="body",
+            params={"target_agent": "dev"},
+        ))
+
+        self.assertEqual(len(seen), 1)
+        self.assertIn("queued", seen[0].lower())
+
+
+class UnpauseSpendTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unpause_reholds(self) -> None:
+        from state import TaskCreateRequest, TaskSource
+
+        repo = _SvcRepo()
+        service = _make_service(repo)
+        created = await service.create_task(TaskCreateRequest(
+            project="jardal-openceo",
+            source=TaskSource.API,
+            source_id="loose-unpause-1",
+            title="Loose with spend",
+            description="body",
+            params={"costs": [{"label": "domain", "amount": "12"}]},
+            autorun=False,
+        ))
+        task_id = created["task_id"]
+        stored = await repo.get_task(task_id)
+        assert stored is not None
+        self.assertEqual(stored["status"], "queued")
+
+        await service.patch_task(task_id, {"autorun": True})
+
+        stored = await repo.get_task(task_id)
+        assert stored is not None
+        self.assertEqual(stored["status"], "waiting")
+        self.assertEqual(stored["waiting_reason"], "spend_approval")
+        self.assertTrue(
+            (stored.get("params") or {}).get("owner_question_id"))
+
+    async def test_unpause_without_costs_untouched(self) -> None:
+        from state import TaskCreateRequest, TaskSource
+
+        repo = _SvcRepo()
+        service = _make_service(repo)
+        created = await service.create_task(TaskCreateRequest(
+            project="jardal-openceo",
+            source=TaskSource.API,
+            source_id="loose-unpause-plain-1",
+            title="Plain loose",
+            description="body",
+            params={"target_agent": "dev"},
+            autorun=False,
+        ))
+
+        await service.patch_task(created["task_id"], {"autorun": True})
+
+        stored = await repo.get_task(created["task_id"])
+        assert stored is not None
+        self.assertEqual(stored["status"], "queued")
+        self.assertNotIn("owner_question_id", stored.get("params") or {})
+
+
+class ApiSpendErrorTests(unittest.TestCase):
+    def test_tasks_endpoint_maps_value_error_to_400(self) -> None:
+        source = (CORE / "main.py").read_text(encoding="utf-8")
+        start = source.index('@app.post("/api/tasks")')
+        end = source.index("# ------------------------- objectives",
+                           start)
+        endpoint = source[start:end]
+        self.assertIn("except ValueError as exc", endpoint)
+        self.assertIn("status_code=400", endpoint)
 
 
 if __name__ == "__main__":

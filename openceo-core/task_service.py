@@ -921,6 +921,12 @@ class TaskService:
         if doc.ticket_number is None:
             doc.ticket_number = await self._repo.get_next_ticket_number()
 
+        # Spend pre-park (review H3): the decision is sync and happens
+        # BEFORE persist, so the ticket is never visible as
+        # queued-with-spend to a concurrent dispatch cycle. The hold
+        # below reuses this same decision (no mandate re-read).
+        spend_hold = self._prepark_spend_hold(doc, declared_spend, payload)
+
         # El ticket de negocio se crea ANTES de persistir la ejecucion. Si ERPNext rechaza
         # los datos, esto lanza y no queda nada en Mongo: un ticket de ejecucion sin
         # contraparte de negocio es el "competing business record" que el contrato prohibe.
@@ -952,15 +958,22 @@ class TaskService:
                     "waiting_reason": ERPNEXT_PENDING_REASON,
                 },
             )
-            return created
+            if spend_hold is None:
+                return created
+            # Review H1: a declared spend holds even with the link
+            # pending (the dispatcher skips linkless tickets, and the
+            # link heals by mirror, not by waiting_reason).
 
         # Spend lock (TASK-2026-00207): a loose ticket declaring new
         # spend parks for Owner approval before the dispatcher can see
         # it. Like erpnext_pending above, this is a creation-time hold,
         # not admission: the F3 single path below is untouched.
-        held = await self._hold_loose_spend(created, declared_spend)
+        held = await self._hold_loose_spend(
+            created, declared_spend, spend=spend_hold)
         if held is not None:
             return held
+        if erpnext_pending:
+            return created
 
         # The dispatcher (F3) owns admission: creation persists queued and
         # wakes it. No direct launch and no pre-gate here, so priority order,
@@ -1009,44 +1022,83 @@ class TaskService:
             return None
         return costs  # type: ignore[return-value]
 
+    def _prepark_spend_hold(
+        self,
+        doc: Any,
+        declared: list[Any] | None,
+        payload: TaskCreateRequest,
+    ) -> dict[str, Any] | None:
+        """Spend decision before persist; pre-parks the doc when held.
+
+        Sync (the mandate read is local): with no declared spend, no
+        launch scheduled, or an automatic decision, the doc is
+        untouched and creation proceeds. A held doc persists already
+        waiting, so no dispatch cycle can admit it mid-creation.
+        """
+        if not declared:
+            return None
+        if not (self._settings.TASK_AUTORUN and payload.autorun):
+            return None
+        spend = check_plan_spend(
+            costs=declared,
+            summary=str(payload.title or ""),
+            mandate=self._company_mandate(),
+        )
+        if not spend["escalate"]:
+            return None
+        doc.status = TaskStatus.WAITING
+        doc.waiting_reason = SPEND_WAITING_REASON
+        return spend
+
     async def _hold_loose_spend(
         self,
         created: dict[str, Any],
         declared: list[Any] | None,
+        *,
+        spend: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Park a loose ticket with declared spend for Owner approval.
 
         The ticket keeps autorun (the approval requeues it) and waits
         operationally; the question carries the human action through
-        the single human channel. None when the ticket launches.
+        the single human channel. None when the ticket launches. The
+        creation path passes its pre-persist decision; the re-hold
+        path re-checks (a stored declaration may be unparseable).
         """
         if not declared:
             return None
         if not self._task_allows_autorun(created):
             return None
-        if str(created.get("status") or "") != TaskStatus.QUEUED.value:
+        status = str(created.get("status") or "")
+        if status == TaskStatus.WAITING.value and (
+                str(created.get("waiting_reason") or "")
+                != SPEND_WAITING_REASON
+                or (created.get("params") or {}).get("owner_question_id")):
             return None
-        try:
-            spend = check_plan_spend(
-                costs=declared,
-                summary=str(created.get("title") or ""),
-                mandate=self._company_mandate(),
-            )
-        except PlanSpendError as exc:
-            # Unparseable declaration on a stored ticket (new
-            # creations reject earlier): escalate, never launch blind.
-            spend = {
-                "escalate": True,
-                "category": "gasto_nuevo",
-                "reason": f"malformed costs declaration: {exc}",
-                "human_action": (
-                    "Corregir params.costs o denegar: "
-                    f"{str(created.get('title') or '')}."
-                ),
-                "amount": "?",
-                "currency": "?",
-                "unknown": [],
-            }
+        if status not in (TaskStatus.QUEUED.value, TaskStatus.WAITING.value):
+            return None
+        if spend is None:
+            try:
+                spend = check_plan_spend(
+                    costs=declared,
+                    summary=str(created.get("title") or ""),
+                    mandate=self._company_mandate(),
+                )
+            except PlanSpendError as exc:
+                # Unparseable declaration on a stored ticket (new
+                # creations reject earlier): escalate, never launch blind.
+                spend = {
+                    "escalate": True,
+                    "category": "gasto_nuevo",
+                    "reason": f"malformed costs declaration: {exc}",
+                    "human_action": (
+                        "Corregir params.costs o denegar: "
+                        f"{str(created.get('title') or '')}."
+                    ),
+                    "amount": "?",
+                    "currency": "?",
+                    "unknown": [],
+                }
         if not spend["escalate"]:
             return None
         task_id = str(created.get("task_id") or "")
@@ -4064,6 +4116,9 @@ class TaskService:
                 objective_id, question_id)
             if outcome.get("ok"):
                 return "owner_question_spend_approve"
+            if str(outcome.get("reason") or "") in {
+                    "no-pending-plan", "approval-plan-mismatch"}:
+                await self._signal_orphan_spend_approval(question)
             return "owner_question_spend_held"
         await service.plan_return(objective_id, {
             "task_id": question_id,
@@ -4074,6 +4129,31 @@ class TaskService:
             "necesidad": "",
         })
         return "owner_question_spend_deny"
+
+    async def _signal_orphan_spend_approval(
+        self, question: dict[str, Any],
+    ) -> None:
+        """Tell the Owner their approval launched nothing (orphan question).
+
+        A crash between question creation and plan persistence (or a
+        superseded hold) leaves an answerable question with no plan
+        behind it: approving it must say so instead of going silent.
+        Never breaks the answer path.
+        """
+        question_id = str(question.get("task_id") or "")
+        if not question_id:
+            return
+        summary = ("Aprobaste un gasto sin plan retenido detras: no se "
+                   "lanzo nada. Si el trabajo sigue pendiente, llegara "
+                   "una nueva pregunta.")
+        try:
+            await self.patch_task(
+                question_id, {"last_response_summary": summary})
+        except Exception:
+            logger.warning("orphan spend signal failed for %s", question_id,
+                           exc_info=True)
+            return
+        await self.comment_on_ticket(question_id, summary)
 
     async def _create_tool_ticket_from_question(
         self,
@@ -4256,6 +4336,29 @@ class TaskService:
                 # An operator unpaused the ticket: dispatch event. The
                 # dispatcher never writes `autorun`, so this cannot
                 # self-wake; no other field wakes here for the same reason.
+                # Review H4: an unpaused spend ticket re-holds BEFORE the
+                # wake; when the hold itself fails the ticket stays
+                # paused instead of launching without approval.
+                try:
+                    await self._rehold_loose_spend(updated)
+                except Exception:
+                    logger.warning(
+                        "spend re-hold failed on unpause for %s", task_id,
+                        exc_info=True)
+                    try:
+                        await self._repo.patch_task(task_id, {
+                            "autorun": False,
+                            "last_response_summary": (
+                                "Unpause reverted: the spend approval "
+                                "could not be requested. Fix and retry."),
+                        })
+                        updated = await self._repo.get_task(task_id) \
+                            or updated
+                    except Exception:
+                        logger.warning(
+                            "spend re-pause failed for %s", task_id,
+                            exc_info=True)
+                    return updated
                 self._wake_dispatcher()
             if any(key in updates for key in {"approval_required", "approval_state"}):
                 asyncio.create_task(self._fire_notion_approval_sync_back(updated))
