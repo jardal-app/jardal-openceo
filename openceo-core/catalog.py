@@ -1,0 +1,412 @@
+"""Single agent catalog: format, loader and validation (TASK-2026-00191).
+
+The catalog (``catalog/`` in git) is the only source of who exists in the
+company and what each one can do: a short index plus one card per agent,
+plus the staff roster. The loader validates with Pydantic and fails
+closed: :func:`load_catalog` raises :class:`CatalogError` naming every
+problem, and the service refuses to start on an invalid catalog
+(``main.py`` lifespan gate).
+
+Shape validated here; existence of future files is not: ``profile`` files
+(TASK-2026-00197), boundary tool names (TASK-2026-00199) and skill
+directories (TASK-2026-00203) do not exist yet, so only their form is
+checked. Consumers (TASK-2026-00195) validate at use.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from datetime import date
+from enum import Enum
+from pathlib import Path
+from typing import Any
+
+import yaml
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+
+__all__ = [
+    "CATALOG_VERSION",
+    "INDEX_SUMMARY_MAX_CHARS",
+    "OWNER_SKILLS",
+    "RESERVED_NAMES",
+    "AgentCard",
+    "AgentType",
+    "Catalog",
+    "CatalogError",
+    "CatalogStatus",
+    "IndexEntry",
+    "StaffEntry",
+    "StaffRoster",
+    "catalog_fingerprint",
+    "catalog_root",
+    "check_catalog",
+    "load_catalog",
+    "short_index",
+]
+
+#: The only index version this loader reads. A newer version fails closed
+#: instead of loading with unknown semantics.
+CATALOG_VERSION = 1
+
+#: One index line per agent: single line, bounded so the always-loaded
+#: short index stays short.
+INDEX_SUMMARY_MAX_CHARS = 280
+
+#: The Owner's skills (epic contract, TASK-2026-00191 scope).
+OWNER_SKILLS = ("decidir", "aprobar", "responder", "hacer")
+
+#: Never executors, never catalog names: the CEO strategy and the planner
+#: decide work, they do not run tickets.
+RESERVED_NAMES = ("ceo", "planner")
+
+_NAME_PATTERN = r"^[a-z][a-z0-9_]*$"
+_TICKET_PATTERN = r"^TASK-2026-\d+$"
+
+
+class CatalogError(Exception):
+    """The catalog tree is invalid; the message names every problem."""
+
+
+class AgentType(str, Enum):
+    AI = "ai"
+    HUMAN = "human"
+
+
+def _nonempty_unique(items: list[str], field: str) -> list[str]:
+    cleaned = [item.strip() for item in items]
+    if any(not item for item in cleaned):
+        raise ValueError(f"{field}: items must be non-empty strings")
+    if len(set(cleaned)) != len(cleaned):
+        raise ValueError(f"{field}: items must be unique")
+    return cleaned
+
+
+class IndexEntry(BaseModel):
+    """One line of the short index: what the agent does and does not do."""
+
+    name: str = Field(pattern=_NAME_PATTERN)
+    summary: str = Field(min_length=1, max_length=INDEX_SUMMARY_MAX_CHARS)
+    card: str
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_reserved(cls, value: str) -> str:
+        if value in RESERVED_NAMES:
+            raise ValueError(f"name: {value!r} is reserved, never an executor")
+        return value
+
+    @field_validator("summary")
+    @classmethod
+    def _summary_single_line(cls, value: str) -> str:
+        if "\n" in value or "\r" in value:
+            raise ValueError("summary: must be a single line")
+        return value.strip()
+
+    @field_validator("card")
+    @classmethod
+    def _card_relative_yaml(cls, value: str) -> str:
+        if not value or value.startswith("/") or ".." in Path(value).parts:
+            raise ValueError("card: must be a relative path inside the catalog")
+        if not value.endswith(".yaml"):
+            raise ValueError("card: must point to a .yaml file")
+        return value
+
+
+class AgentCard(BaseModel):
+    """One agent: type, engine and profile, tool box, skills, enablement."""
+
+    name: str = Field(pattern=_NAME_PATTERN)
+    type: AgentType
+    engine: str | None = None
+    profile: str | None = None
+    boundary_tools: list[str] = Field(default_factory=list)
+    skills_dir: str
+    skills: list[str] = Field(default_factory=list)
+    inputs: list[str] = Field(default_factory=list)
+    outputs: list[str] = Field(default_factory=list)
+    enabled: bool
+    disabled_reason: str | None = None
+    decided_by_ticket: str | None = Field(default=None, pattern=_TICKET_PATTERN)
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_reserved(cls, value: str) -> str:
+        if value in RESERVED_NAMES:
+            raise ValueError(f"name: {value!r} is reserved, never an executor")
+        return value
+
+    @field_validator("engine", "profile")
+    @classmethod
+    def _optional_nonempty(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("must be null or a non-empty string")
+        return cleaned
+
+    @field_validator("boundary_tools", "skills", "inputs", "outputs")
+    @classmethod
+    def _lists_clean(cls, value: list[str], info: Any) -> list[str]:
+        return _nonempty_unique(value, str(info.field_name))
+
+    @field_validator("skills_dir")
+    @classmethod
+    def _skills_dir_relative(cls, value: str) -> str:
+        if not value or value.startswith("/") or ".." in Path(value).parts:
+            raise ValueError(
+                "skills_dir: must be a relative path inside the repo")
+        return value
+
+    @model_validator(mode="after")
+    def _cross_rules(self) -> "AgentCard":
+        if self.type is AgentType.AI and not self.engine:
+            raise ValueError("engine: required for ai agents")
+        if self.type is AgentType.HUMAN and self.engine is not None:
+            raise ValueError("engine: must be null for human agents")
+        if self.enabled:
+            if self.disabled_reason is not None:
+                raise ValueError(
+                    "disabled_reason: must be null when enabled")
+            if self.decided_by_ticket is not None:
+                raise ValueError(
+                    "decided_by_ticket: must be null when enabled")
+        else:
+            if not (self.disabled_reason or "").strip():
+                raise ValueError(
+                    "disabled_reason: required when enabled is false")
+            if not self.decided_by_ticket:
+                raise ValueError(
+                    "decided_by_ticket: required when enabled is false")
+        if self.name == "owner":
+            if self.type is not AgentType.HUMAN:
+                raise ValueError("owner: type must be human")
+            if set(self.skills) != set(OWNER_SKILLS):
+                raise ValueError(
+                    f"skills: owner must list exactly {', '.join(OWNER_SKILLS)}")
+        return self
+
+
+class StaffEntry(BaseModel):
+    """One staff member: role, projects, active period."""
+
+    name: str = Field(min_length=1)
+    role: str = Field(min_length=1)
+    projects: list[str] = Field(min_length=1)
+    active_from: date
+    active_until: date | None = None
+
+    @field_validator("projects")
+    @classmethod
+    def _projects_clean(cls, value: list[str]) -> list[str]:
+        return _nonempty_unique(value, "projects")
+
+    @model_validator(mode="after")
+    def _period_ordered(self) -> "StaffEntry":
+        if self.active_until is not None and self.active_until < self.active_from:
+            raise ValueError("active_until: must not precede active_from")
+        return self
+
+
+class StaffRoster(BaseModel):
+    roster: list[StaffEntry] = Field(default_factory=list)
+
+
+class Catalog(BaseModel):
+    """A validated catalog: index order, cards by name, staff."""
+
+    version: int
+    entries: list[IndexEntry] = Field(min_length=1)
+    agents: dict[str, AgentCard]
+    staff: StaffRoster
+
+    @field_validator("version")
+    @classmethod
+    def _version_known(cls, value: int) -> int:
+        if value != CATALOG_VERSION:
+            raise ValueError(
+                f"version: this loader reads {CATALOG_VERSION}, got {value}")
+        return value
+
+
+def catalog_root(explicit: str | Path | None = None) -> Path:
+    """Catalog directory: ``catalog/`` at the repo root unless overridden."""
+    if explicit is not None:
+        return Path(explicit)
+    return Path(__file__).resolve().parent.parent / "catalog"
+
+
+def _read_yaml(path: Path) -> tuple[Any, str | None]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, f"unreadable ({exc})"
+    try:
+        return yaml.safe_load(text), None
+    except yaml.YAMLError as exc:
+        return None, f"invalid YAML ({exc})"
+
+
+def _format_pydantic(exc: ValidationError) -> str:
+    parts = []
+    for error in exc.errors():
+        loc = ".".join(str(bit) for bit in error["loc"])
+        prefix = f"{loc}: " if loc else ""
+        parts.append(f"{prefix}{error['msg']}")
+    return "; ".join(parts)
+
+
+def load_catalog(root: str | Path | None = None) -> Catalog:
+    """Load and validate the whole catalog tree.
+
+    Raises :class:`CatalogError` listing every problem found: no partial
+    catalog is ever returned.
+    """
+    base = catalog_root(root)
+    errors: list[str] = []
+
+    def rel(path: Path) -> str:
+        try:
+            return str(path.relative_to(base))
+        except ValueError:
+            return str(path)
+
+    index_path = base / "index.yaml"
+    index_data, index_problem = _read_yaml(index_path)
+    entries: list[IndexEntry] = []
+    if index_problem is not None:
+        errors.append(f"{rel(index_path)}: {index_problem}")
+        index_data = None
+    elif not isinstance(index_data, dict):
+        errors.append(f"{rel(index_path)}: top level must be a mapping")
+        index_data = None
+    else:
+        version = index_data.get("version")
+        if version != CATALOG_VERSION:
+            errors.append(
+                f"{rel(index_path)}: version: this loader reads "
+                f"{CATALOG_VERSION}, got {version!r}")
+        raw_entries = index_data.get("agents")
+        if not isinstance(raw_entries, list) or not raw_entries:
+            errors.append(f"{rel(index_path)}: agents: needs at least one entry")
+        else:
+            seen: set[str] = set()
+            for position, raw in enumerate(raw_entries):
+                where = f"{rel(index_path)} agents[{position}]"
+                if not isinstance(raw, dict):
+                    errors.append(f"{where}: must be a mapping")
+                    continue
+                try:
+                    entry = IndexEntry.model_validate(raw)
+                except ValidationError as exc:
+                    errors.append(f"{where}: {_format_pydantic(exc)}")
+                    continue
+                if entry.name in seen:
+                    errors.append(f"{where}: duplicate index entry "
+                                  f"{entry.name!r}")
+                    continue
+                seen.add(entry.name)
+                entries.append(entry)
+
+    agents: dict[str, AgentCard] = {}
+    referenced: set[str] = set()
+    base_resolved = base.resolve()
+    for entry in entries:
+        card_path = (base / entry.card).resolve()
+        if base_resolved not in card_path.parents:
+            errors.append(f"{rel(base / entry.card)}: escapes the catalog")
+            continue
+        if not card_path.is_file():
+            errors.append(f"{rel(base / entry.card)}: card file is missing")
+            continue
+        referenced.add(str(card_path.relative_to(base_resolved)))
+        card_data, card_problem = _read_yaml(card_path)
+        if card_problem is not None:
+            errors.append(f"{rel(card_path)}: {card_problem}")
+            continue
+        if not isinstance(card_data, dict):
+            errors.append(f"{rel(card_path)}: top level must be a mapping")
+            continue
+        try:
+            card = AgentCard.model_validate(card_data)
+        except ValidationError as exc:
+            errors.append(f"{rel(card_path)}: {_format_pydantic(exc)}")
+            continue
+        if card.name != entry.name or card_path.stem != entry.name:
+            errors.append(
+                f"{rel(card_path)}: card name {card.name!r} must match "
+                f"index entry {entry.name!r} and the file name")
+            continue
+        agents[entry.name] = card
+
+    agents_dir = base / "agents"
+    if agents_dir.is_dir():
+        for orphan in sorted(agents_dir.glob("*.yaml")):
+            if str(orphan.relative_to(base_resolved)) not in referenced:
+                errors.append(f"{rel(orphan)}: card file not listed in "
+                              "index.yaml")
+
+    staff_path = base / "staff.yaml"
+    staff = StaffRoster()
+    staff_data, staff_problem = _read_yaml(staff_path)
+    if staff_problem is not None:
+        errors.append(f"{rel(staff_path)}: {staff_problem}")
+    elif not isinstance(staff_data, dict):
+        errors.append(f"{rel(staff_path)}: top level must be a mapping")
+    else:
+        try:
+            staff = StaffRoster.model_validate(staff_data)
+        except ValidationError as exc:
+            errors.append(f"{rel(staff_path)}: {_format_pydantic(exc)}")
+
+    if errors:
+        raise CatalogError(
+            f"invalid agent catalog at {base}:\n"
+            + "\n".join(f"  {line}" for line in errors))
+
+    version_value = index_data.get("version")
+    return Catalog(version=version_value, entries=entries, agents=agents,
+                   staff=staff)
+
+
+@dataclass(frozen=True)
+class CatalogStatus:
+    """Health of the catalog tree (:func:`check_catalog`)."""
+
+    ok: bool
+    path: str
+    agents: int
+    sha: str
+    problem: str = ""
+
+
+def check_catalog(root: str | Path | None = None) -> CatalogStatus:
+    """Is the catalog tree valid? Never raises, never loads partial state."""
+    base = catalog_root(root)
+    try:
+        catalog = load_catalog(base)
+    except CatalogError as exc:
+        return CatalogStatus(False, str(base), 0, "", str(exc))
+    except Exception as exc:  # fail closed on anything unexpected too
+        return CatalogStatus(False, str(base), 0, "",
+                             f"unexpected loader failure ({exc})")
+    return CatalogStatus(True, str(base), len(catalog.agents),
+                         catalog_fingerprint(catalog))
+
+
+def catalog_fingerprint(catalog: Catalog) -> str:
+    """Short SHA-256 (12 hex) of the canonical catalog content.
+
+    Planning runs store it so a decision can be traced to the catalog the
+    planner actually saw. Plain hashing: no model call, never in the prompt.
+    """
+    canonical = json.dumps(catalog.model_dump(mode="json"), sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+def short_index(catalog: Catalog) -> str:
+    """Render the always-loaded short index: ``name: summary`` per line."""
+    return "\n".join(f"{entry.name}: {entry.summary}"
+                     for entry in catalog.entries)

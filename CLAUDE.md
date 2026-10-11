@@ -272,6 +272,7 @@ directly; prompts never paste it. This section is also served as
 - `openceo-react/` — dashboard (React 19 + Vite + Tailwind v4)
 - `openceo-voice/`, `openceo-voice-android/` — realtime voice + Android app
 - `workflows/` — deterministic Tier-0 YAML workflows
+- `catalog/` — single agent catalog (index + cards + staff); loader `openceo-core/catalog.py` (Pydantic, fail-closed, boot gate)
 - `projects/<project>/project.yaml` — per-project config (validated)
 - `docs/work/TASK-2026-000NN-tema.md` — temporary ticket research (delete after)
 

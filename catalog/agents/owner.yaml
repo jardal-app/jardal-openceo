@@ -1,0 +1,20 @@
+# Agent card: owner (enabled human).
+name: owner
+type: human
+engine: null
+profile: null
+boundary_tools: []
+skills_dir: skills/owner
+skills:
+  - decidir
+  - aprobar
+  - responder
+  - hacer
+inputs:
+  - escalation with a nameable human action
+  - playbook or boundary-tool proposal
+outputs:
+  - decision
+enabled: true
+disabled_reason: null
+decided_by_ticket: null

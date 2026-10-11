@@ -1,0 +1,16 @@
+# Agent card: dev (enabled).
+name: dev
+type: ai
+engine: muse-code
+profile: null
+boundary_tools: []
+skills_dir: skills/dev
+skills: []
+inputs:
+  - ticket with repository and acceptance criteria
+outputs:
+  - branch changes
+  - hecho / bloqueado / no_aplica result with reason
+enabled: true
+disabled_reason: null
+decided_by_ticket: null

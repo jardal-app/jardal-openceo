@@ -1,0 +1,16 @@
+# Agent card: finance (disabled until migrated).
+name: finance
+type: ai
+engine: muse-code
+profile: null
+boundary_tools: []
+skills_dir: skills/finance
+skills: []
+inputs:
+  - ticket with dated financial request
+outputs:
+  - ERPNext-backed answer or record
+  - hecho / bloqueado / no_aplica result with reason
+enabled: false
+disabled_reason: migrates to a catalog agent with its finance skills and explicit voice route
+decided_by_ticket: TASK-2026-00221
