@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from collections.abc import Collection, Mapping
 
 from langgraph.graph import END, START, StateGraph
 
@@ -9,9 +11,81 @@ from agents.dev.session import DevSessionManager
 from agents.finance.session import FinanceSessionManager
 from agents.pm.session import PMSessionManager
 from agents.secretary.session import SecretarySessionManager
+from catalog import Catalog, load_catalog
 from config_loader import ConfigLoader
 from router import CEORouter
 from state import AgentName, GraphState, TaskStatus
+
+#: Agents with a wired executor node below. Disabled-but-wired names stay
+#: alive on their legacy session until their removal ticket lands.
+WIRED_AGENTS = ("dev", "pm", "finance", "secretary")
+
+
+@dataclass(frozen=True)
+class AgentGateDecision:
+    """Result of :func:`resolve_agent_gate`.
+
+    ``proceed`` with ``hint`` routes by that name (never by text);
+    otherwise the ticket waits with ``reason`` (``routing_missing``).
+    """
+
+    proceed: bool
+    hint: str | None
+    reason: str
+
+
+def _normalize_agent_name(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def resolve_agent_gate(
+    agent_hint: Any,
+    params: Mapping[str, Any] | None,
+    coding_tool: Any,
+    catalog: Catalog,
+    wired: Collection[str] = WIRED_AGENTS,
+) -> AgentGateDecision:
+    """Gate agent dispatch against the single catalog (TASK-2026-00195).
+
+    A ticket-level ``coding_tool`` still forces dev (persisted routing
+    decision, F0 pilot 00097). Otherwise the explicit hint wins and the
+    planner target (``params.target_agent``) backs it up: a wired name
+    routes by name, never by text; unknown, disabled, human or ``ceo``
+    names wait with ``routing_missing`` and their reason. No hint and no
+    target means a loose ticket, classified as today.
+    """
+    if str(coding_tool or "").strip():
+        return AgentGateDecision(True, AgentName.DEV.value, "")
+    hint = _normalize_agent_name(agent_hint)
+    target = _normalize_agent_name((params or {}).get("target_agent"))
+    for name in (hint, target):
+        if not name:
+            continue
+        if name in wired:
+            return AgentGateDecision(True, name, "")
+        if name == AgentName.CEO.value:
+            return AgentGateDecision(
+                False, None,
+                "routing_missing: agent 'ceo' never executes tickets "
+                "(it decides work)")
+        entry = catalog.agents.get(name)
+        if entry is None:
+            return AgentGateDecision(
+                False, None,
+                f"routing_missing: agent {name!r} is unknown "
+                "(not in the catalog)")
+        if not entry.enabled:
+            ticket = f"; see {entry.decided_by_ticket}" \
+                if entry.decided_by_ticket else ""
+            return AgentGateDecision(
+                False, None,
+                f"routing_missing: agent {name!r} is disabled "
+                f"({entry.disabled_reason}{ticket})")
+        return AgentGateDecision(
+            False, None,
+            f"routing_missing: agent {name!r} is enabled but has no runner "
+            "yet")
+    return AgentGateDecision(True, None, "")
 
 
 class OpenCEOGraph:
@@ -64,6 +138,22 @@ class OpenCEOGraph:
         self._graph = builder.compile()
 
     async def execute(self, task: dict[str, Any], agent_hint: str | None = None) -> dict[str, Any]:
+        gate = resolve_agent_gate(
+            agent_hint, task.get("params"), task.get("coding_tool"),
+            load_catalog())
+        if not gate.proceed:
+            return {
+                "status": TaskStatus.WAITING.value,
+                "steps": [{
+                    "step": "agent_gate",
+                    "status": "waiting",
+                    "detail": gate.reason,
+                    "timestamp": datetime.now(timezone.utc),
+                }],
+                "waiting_reason": gate.reason,
+                "resume_at": None,
+            }
+        agent_hint = gate.hint
         initial_state: GraphState = {
             "task_id": task["task_id"],
             "ticket_number": task.get("ticket_number"),
@@ -281,15 +371,27 @@ class OpenCEOGraph:
         }
 
     async def _unsupported_agent_node(self, state: GraphState) -> GraphState:
-        selected = state.get("selected_agent", "unknown")
+        selected = str(state.get("selected_agent", "unknown"))
+        entry = load_catalog().agents.get(selected)
+        if entry is not None and not entry.enabled:
+            ticket = f"; see {entry.decided_by_ticket}" \
+                if entry.decided_by_ticket else ""
+            reason = (f"routing_missing: agent '{selected}' is disabled "
+                      f"({entry.disabled_reason}{ticket})")
+        else:
+            reason = (f"routing_missing: agent '{selected}' has no runner "
+                      "(not an executor)")
         step = {
             "step": "worker_dispatch",
-            "status": "failed",
-            "detail": f"Agent '{selected}' is not implemented yet in phase 2",
+            "status": "waiting",
+            "detail": reason,
             "timestamp": datetime.now(timezone.utc),
         }
         return {
-            "status": TaskStatus.ESCALATED.value,
+            "selected_agent": selected,
+            "status": TaskStatus.WAITING.value,
             "steps": [*(state.get("steps") or []), step],
-            "error": f"Agent '{selected}' pending implementation",
+            "waiting_reason": reason,
+            "resume_at": None,
+            "error": None,
         }

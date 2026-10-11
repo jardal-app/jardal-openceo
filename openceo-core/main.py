@@ -336,6 +336,25 @@ async def lifespan(_: FastAPI):
     _boot_log.info("Agent catalog: %s (%d agents, sha %s)",
                    _catalog_status.path, _catalog_status.agents,
                    _catalog_status.sha)
+    # Consumer consistency (TASK-2026-00195): the enum, the router aliases,
+    # the derived planner registry and the wired graph nodes must match the
+    # catalog. Fail closed like the catalog itself.
+    from catalog import find_consumer_mismatches as _find_mismatches
+    from catalog import load_catalog as _load_catalog
+    from graph import WIRED_AGENTS as _WIRED_AGENTS
+    _planner_agents = (config_loader.load_project(None)
+                       .get("objective_planner") or {}).get("agents", {})
+    _mismatches = _find_mismatches(
+        [member.value for member in AgentName],
+        [member.value for member in CEORouter.AGENT_ALIASES.values()],
+        _planner_agents, _WIRED_AGENTS, _load_catalog())
+    if _mismatches:
+        _boot_log.error("Agent consumer mismatch: %s. Refusing to start.",
+                        "; ".join(_mismatches))
+        raise RuntimeError(
+            f"agent views disagree with the catalog: {'; '.join(_mismatches)}")
+    _boot_log.info("Agent consumers match the catalog "
+                   "(enum, aliases, planner registry, graph).")
     async with AsyncExitStack() as stack:
         if internal_mcp is not None:
             await stack.enter_async_context(internal_mcp.lifespan())

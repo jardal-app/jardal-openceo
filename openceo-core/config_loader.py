@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from catalog import load_catalog
 from settings import Settings
 
 if TYPE_CHECKING:
@@ -544,15 +545,9 @@ class ConfigLoader:
                     "prompt_via": "argv",
                 },
                 # Authoritative agent registry for target_agent (policy
-                # §6): only real agents. dev executes objective children
-                # today; research is registered but disabled (no
-                # ticket->research bridge: research runs on its own
-                # scheduler/workflows with schedule identity).
-                "agents": {
-                    "dev": {"enabled": True},
-                    "research": {"enabled": False,
-                                 "reason": "no ticket execution bridge yet"},
-                },
+                # §6): derived from the single catalog (TASK-2026-00195),
+                # AI agents only — humans never execute tickets.
+                "agents": _planner_agents_from_catalog(),
             },
             # Company-level objectives (autonomy epic TASK-2026-00110, F2
             # TASK-2026-00117). The engine lives outside dev.tier_s, and so
@@ -731,6 +726,26 @@ class ConfigLoader:
             },
         }
         return _deep_merge(defaults, cfg)
+
+
+def _planner_agents_from_catalog() -> dict[str, dict[str, Any]]:
+    """Planner registry derived from the single catalog (AI agents only).
+
+    Shape kept: name → {"enabled": bool, "reason"?: str}, consumed by the
+    planner prompt and ``validate_planner_result``. Humans (owner) never
+    execute tickets, so they stay out of the planner registry.
+    """
+    catalog = load_catalog()
+    registry: dict[str, dict[str, Any]] = {}
+    for name, card in catalog.agents.items():
+        if card.type.value != "ai":
+            continue
+        if card.enabled:
+            registry[name] = {"enabled": True}
+        else:
+            registry[name] = {"enabled": False,
+                              "reason": card.disabled_reason or "disabled"}
+    return registry
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
