@@ -8,7 +8,7 @@ Trabajo temporal de tickets: `docs/work/TASK-2026-000NN-tema.md`.
 
 Instrucciones operativas del repo (F7a, los CLI del roster las cargan directamente): §10 de este archivo (también visible como `AGENTS.md`, symlink a este archivo).
 
-Continuar el roadmap de autonomía: el dueño escribe **`sigue`** y la sesión aplica la receta de §11.
+Continuar el roadmap vigente (épico **TASK-2026-00187**: planner único y agentes por rol): el Owner escribe **`sigue`** y la sesión aplica la receta de §11.
 
 ---
 
@@ -318,10 +318,12 @@ scripts/openceo-core-host.sh restart|status
   any work on a company project/repo goes to ERPNext first.
 - No secrets, credentials, or personal data in notes or temp docs.
 - Conventions over configuration: mirror sibling code, reuse its helpers.
-- Owner rule (2026-10-06): no token-spending live tests (Tier S pilots,
-  live planner/CEO/Muse runs, real ticket launches as tests) until epic
-  TASK-2026-00110 F0–F6 are complete. Validate with unit/contract tests
-  and simulated executors (§11).
+- Owner rule (2026-10-06, renewed 2026-10-11 for epic TASK-2026-00187):
+  no token-spending live tests (Tier S pilots, live planner/CEO/Muse runs,
+  real ticket launches as tests) except the epic's two pilots
+  (TASK-2026-00219 Pilot 1, TASK-2026-00224 Acceptance), each only once
+  all its dependencies are Completed. Validate with unit/contract tests,
+  simulated executors and `muse --provider echo` (§11).
 
 ---
 
@@ -329,19 +331,19 @@ scripts/openceo-core-host.sh restart|status
 
 Solo sesiones del dueño; los ejecutores Tier S lo ignoran (§10).
 
-Cuando el dueño escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el ticket), no preguntes: aplica esta receta. El roadmap vigente es el épico **TASK-2026-00110** (OpenCEO autónomo), incluidos sus ajustes pendientes. Descubre el trabajo actual en ERPNext; consulta el comentario «ROADMAP POR FASES» y sus ampliaciones, sin mantener aquí una lista fija de tickets. Una observación registrada es una hipótesis que se debe contrastar, no una orden de modificar código sin diagnóstico.
+Cuando el dueño escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el ticket), no preguntes: aplica esta receta. El roadmap vigente es el épico **TASK-2026-00187** (planner único, agentes por rol con skills y tools de frontera), con sus olas y ajustes. TASK-2026-00110 (OpenCEO autónomo) está completo y es la base; su cierre es decisión del Owner. Descubre el trabajo actual en ERPNext; consulta el comentario «ROADMAP POR OLAS» y sus ampliaciones, sin mantener aquí una lista fija de tickets. Una observación registrada es una hipótesis que se debe contrastar, no una orden de modificar código sin diagnóstico.
 
 1. **Situarse, sin barridos.**
-   - `openceo_get_ticket TASK-2026-00110`, con sus comentarios actuales y dependencias.
-   - `openceo_search_tickets` con `project=jardal-openceo`, por separado para `status=Open` y `status=Working`. Identificar los pendientes de esta épica por `parent_task`, sus dependencias y referencias explícitas del roadmap, aunque no tengan el prefijo `[Autonomía]`. Leer otros tickets solo si hacen falta para comprobar una dependencia o un posible duplicado.
+   - `openceo_get_ticket TASK-2026-00187`, con sus comentarios actuales y dependencias.
+   - `openceo_search_tickets` con `project=jardal-openceo`, por separado para `status=Open`, `status=Overdue` y `status=Working`. ERPNext marca como `Overdue` a los Open con la fecha estimada vencida, así que sin ese estado los pendientes no aparecen. Identificar los pendientes de esta épica por `parent_task`, sus dependencias y referencias explícitas del roadmap, aunque no tengan el prefijo `[Agentes]`. Leer otros tickets solo si hacen falta para comprobar una dependencia o un posible duplicado.
    - El primer párrafo de «Continuar aquí» en `STATUS.md`.
    - `git status`, actualizar las referencias remotas y revisar el log de `main` y `origin/main`, además de los diffs dirigidos que afecten al candidato. Si otra sesión tiene trabajo activo en el checkout, usar un worktree aislado; no cambiarle la rama ni incorporar sus cambios al propio ticket.
 2. **Elegir un ticket.** El indicado por el dueño. Si no hay, continuar el trabajo propio a medias; después elegir un pendiente de la épica con dependencias verificadas como `Completed`, según impacto, prioridad y desbloqueo del roadmap vigente. Un ticket `Working` de otra sesión no se toma ni se duplica: comprobar qué cubre y elegir otro independiente. No deducir que la épica está terminada de un traspaso antiguo o de que las fases originales estén cerradas. Si ningún pendiente puede avanzar, explicar el bloqueo concreto y parar.
 3. **Contexto mínimo.**
    - Descripción y comentarios del ticket.
    - El workfile del épico y el del ticket, si existen.
-   - La decisión del vault `decisions/2026-10-06-objetivo-unico-ceo-autonomo`, solo si hace falta el porqué.
-   - El contrato normativo: `docs/ARCHITECTURE_REFERENCE_2026.md` §Proactive CEO (+ `openceo-core/objectives/routing_policy.md`, único normativo del planner).
+   - El porqué, solo si hace falta: la decisión del vault del épico (la escribe TASK-2026-00189; mientras no exista, el adjunto de diseño del épico) y, como base, `decisions/2026-10-06-objetivo-unico-ceo-autonomo`.
+   - El contrato normativo: `docs/ARCHITECTURE_REFERENCE_2026.md` §Proactive CEO y la sección «Agentes por rol» cuando exista (+ `openceo-core/objectives/routing_policy.md`, normativo del planner hasta que TASK-2026-00201 lo reparta).
    - Código: búsqueda dirigida + LSP.
 4. **Contrastar la observación antes de corregir.** Aplicar criterio técnico riguroso a cada afirmación del ticket: comprobar el contrato vigente, seguir el flujo completo de productores y consumidores y buscar evidencia que confirme o refute el problema. Las líneas citadas, el diagnóstico y el estado del ticket pueden haberse quedado atrás respecto al código.
    - Buscar duplicados en este proyecto por causa y comportamiento, no solo por título. Revisar comentarios, commits, merges y diffs pertinentes de otras sesiones. No suponer que un fallo sigue presente ni que ya fue corregido: demostrar qué cubre el código actual y qué falta.
@@ -363,13 +365,19 @@ Cuando el dueño escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el ti
 
 Al dueño solo se le pregunta por la política de escalado del épico: gasto nuevo, acción irreversible, replanificación estratégica, cambio de mandato o revisión humana exigida por política. Lo demás se decide y se hace.
 
-**Consigna del dueño (2026-10-06): ninguna prueba que gaste tokens hasta completar la arquitectura.** Mientras F0–F6 del épico no estén `Completed`, queda prohibido:
+**Consigna del Owner (2026-10-06, renovada el 2026-10-11 para TASK-2026-00187): ninguna prueba que gaste tokens hasta completar la arquitectura.** Queda prohibido:
 
 - correr pilotos o ciclos Tier S reales;
 - invocar en vivo el planner, el CEO o Muse;
 - lanzar tickets reales como prueba;
 - usar `chat.sh` contra modelos.
 
-Se valida con tests unitarios y de contrato, ejecutores o modelos simulados y `py_compile`. La única prueba real completa es **TASK-2026-00122** (F7), al final.
+Se valida con tests unitarios y de contrato, ejecutores o modelos simulados, `muse --provider echo` (sin modelo) y `py_compile`. Las únicas pruebas reales son los dos pilotos del épico: **TASK-2026-00219** (Piloto 1) y **TASK-2026-00224** (Aceptación). Cada uno se corre solo cuando todas sus dependencias estén `Completed`.
 
-**Palabra clave `audita` (sesiones del dueño).** Cuando el dueño escriba **`audita`**, no preguntes: audita que `main` cumpla el rumbo del épico TASK-2026-00110. Fuentes de verdad, en este orden: la decisión del vault `decisions/2026-10-06-objetivo-unico-ceo-autonomo`, el contrato `docs/ARCHITECTURE_REFERENCE_2026.md` §Proactive CEO (más `openceo-core/objectives/routing_policy.md`, único normativo del planner) y el comentario ROADMAP del épico. Buscar fugas: código en carpetas que no le corresponden, referencias a archivos inexistentes, docs que afirman lo que el código no hace, reglas que contradicen el contrato o las reglas globales del dueño, y tickets viejos que chocan con el rumbo. No arreglar nada: buscar duplicados y crear tickets hijos del épico (batch con `parent_task`) con evidencia `archivo:línea`, y actualizar el comentario ROADMAP. Sin pruebas que gasten tokens; la suite unitaria sí vale.
+**Palabra clave `audita` (sesiones del dueño).** Cuando el dueño escriba **`audita`**, no preguntes: audita que `main` cumpla el rumbo del épico vigente, TASK-2026-00187. Fuentes de verdad, en este orden:
+1. El RUMBO de la descripción del épico.
+2. Su decisión del vault, cuando TASK-2026-00189 la escriba. Mientras tanto, `decisions/2026-10-06-objetivo-unico-ceo-autonomo` sigue como base.
+3. El contrato `docs/ARCHITECTURE_REFERENCE_2026.md` (§Proactive CEO y «Agentes por rol»), más `openceo-core/objectives/routing_policy.md`.
+4. El comentario ROADMAP del épico.
+
+Buscar fugas: código en carpetas que no le corresponden, referencias a archivos inexistentes, docs que afirman lo que el código no hace, reglas que contradicen el contrato o las reglas globales del dueño, y tickets viejos que chocan con el rumbo. No arreglar nada: buscar duplicados y crear tickets hijos del épico (batch con `parent_task`) con evidencia `archivo:línea`, y actualizar el comentario ROADMAP. Sin pruebas que gasten tokens; la suite unitaria sí vale.
