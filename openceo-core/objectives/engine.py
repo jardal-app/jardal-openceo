@@ -42,6 +42,11 @@ from orchestration import knowledge as knowledge_mod
 from orchestration import review as review_mod
 from orchestration.live import TIMEOUT_RETURNCODE
 from objectives import planner_models as planner_mod
+from owner_channel import (
+    build_owner_question,
+    question_answered,
+    tool_proposal_source_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -796,6 +801,15 @@ def _planner_prompt(
         "  ticket is expected to modify.",
         "- Quota never redefines the technical tier. Never choose",
         "  runtime, CLI account, or model.",
+        "- NEW BOUNDARY TOOL (rare; at most "
+        f"{planner_mod.PROPOSED_TOOLS_MAX} per cycle): when an agent need "
+        "names a missing boundary tool — a secret the agent must not "
+        "hold, a lock that must not depend on the model obeying, or a "
+        "business-record write with its own rules — list it in "
+        "proposed_tools. The Owner approves through the human channel; "
+        "approval creates the dev ticket that builds it. Never propose "
+        "for technical failures (broken tests, fallen reviewers, plan "
+        "errors): replan those. Omit the key when nothing is missing.",
     ])
     if (routing_guide or "").strip():
         lines.extend(["", routing_guide.strip()])
@@ -833,6 +847,10 @@ def _planner_prompt(
         '    "completes_task_id?": "<to COMPLETE a tierless child above '
         'instead of creating: its task_id>"',
         "  } ],",
+        '  "proposed_tools?": [{"name": "<missing boundary tool>",',
+        '    "need": "<what the agent needs, in words>",',
+        '    "spec?": "<how it should behave>",',
+        '    "origin_task_id?": "<blocked ticket, when known>"}],',
         '  "roadmap_remaining": ["<one line per foreseen next step: what, '
         'and what it depends on>"]',
         "}",
@@ -1405,6 +1423,8 @@ async def _plan_objective_inner(
     completed = await _apply_contract_completions(env, objective_id, result)
     created = await _create_planned_tickets(
         env, objective, result, return_from)
+    await create_tool_proposal_questions(
+        env, objective_id, str(objective.get("project") or ""), result)
     tele = dict((await env.objectives.get_objective(objective_id) or {}
                  ).get("planner_telemetry") or {})
     tele["tickets_created"] = int(tele.get("tickets_created", 0)) + len(created)
@@ -1611,6 +1631,63 @@ async def _apply_contract_completions(
             logger.warning("dispatcher wake after completion failed",
                            exc_info=True)
     return completed
+
+
+async def create_tool_proposal_questions(
+    env: ObjectiveEnv,
+    objective_id: str,
+    project: str,
+    result: planner_mod.PlannerResult,
+) -> list[str]:
+    """Open one owner question per proposed boundary tool (TASK-2026-00206).
+
+    Idempotent per proposal name: a re-proposed tool hits the same
+    ``source_id`` and is skipped when already answered, so a second
+    cycle never resurrects a decided question. Returns the parked
+    question task ids.
+    """
+    task_ids: list[str] = []
+    for proposal in result.proposed_tools or []:
+        source_id = tool_proposal_source_id(objective_id, proposal.name)
+        spec = build_owner_question(
+            kind="new_tool",
+            question=f"Crear la tool de frontera {proposal.name}?",
+            human_action="Aprobar la tool nueva o rechazarla",
+            origin_task_id=proposal.origin_task_id,
+            context=f"Necesidad: {proposal.need}"
+            + (f" Especificacion: {proposal.spec}" if proposal.spec else ""),
+            tool={
+                "name": proposal.name,
+                "need": proposal.need,
+                "spec": proposal.spec,
+            },
+            project=project,
+            source_id=source_id,
+        )
+        created = await env.create_ticket({
+            "title": spec["title"],
+            "description": spec["description"],
+            "project": spec["project"],
+            "source": spec["source"],
+            "source_id": spec["source_id"],
+            "params": spec["params"],
+            "priority": spec["priority"],
+            "autorun": False,
+        })
+        if not created:
+            continue
+        if question_answered(created):
+            continue
+        question_id = str(created.get("task_id") or "")
+        if not question_id:
+            continue
+        await env.patch_task(question_id, {
+            "status": "waiting",
+            "phase": spec["phase"],
+            "waiting_reason": spec["waiting_reason"],
+        })
+        task_ids.append(question_id)
+    return task_ids
 
 
 async def _create_planned_tickets(

@@ -43,6 +43,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from owner_channel import is_owner_question
 from settings import Settings
 from state import ApprovalState, QAReviewState
 from tools.erpnext_client import (
@@ -263,7 +264,8 @@ def waiting_needs_human_review(task: dict[str, Any] | None) -> bool:
 
     Solo estas esperas llegan a `Pending Review`: aprobaciones pendientes
     (pasos YAML `human_in_the_loop`, fases humanas, discovery), escalados al
-    dueño (fase o motivo `owner_escalation`) y esperas de fase (`phase:*`).
+    dueño (fase o motivo `owner_escalation`), preguntas al dueño
+    (TASK-2026-00206) y esperas de fase (`phase:*`).
     Las operativas (quota, transient, config, Tier S, `blocked_by`) no empujan:
     el negocio conserva Open/Working y el detalle queda en `waiting_reason`.
     Sin contexto o sin motivo clasificable se asume revision, que es el
@@ -276,6 +278,8 @@ def waiting_needs_human_review(task: dict[str, Any] | None) -> bool:
         == ApprovalState.PENDING.value
     )
     if approval_pending:
+        return True
+    if is_owner_question(task):
         return True
     if str(task.get("phase") or "").strip() == "owner_escalation":
         return True

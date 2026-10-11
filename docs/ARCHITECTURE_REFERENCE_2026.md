@@ -1045,7 +1045,7 @@ Ticket recipes across agents, a reference for the planner, never rigid. On objec
 
 ### Human channel
 
-The Owner only ever receives: the 5 mandate categories (new spend, irreversible action, strategic replanning, mandate change, policy-mandated review); questions only they can answer from their own data; the acceptance-criteria proposal when they gave none, without blocking work; playbook and new-boundary-tool approvals. Never plans. (TASK-2026-00206; mandate TASK-2026-00193; spend gate TASK-2026-00207.)
+The Owner only ever receives: the 5 mandate categories (new spend, irreversible action, strategic replanning, mandate change, policy-mandated review); questions only they can answer from their own data; the acceptance-criteria proposal when they gave none, without blocking work; playbook and new-boundary-tool approvals. Never plans. (TASK-2026-00206: every owner need is one owner-question ticket in waiting/owner_question → Pending Review with the exact human action, answered from the cockpit, by voice, or from the ERPNext desk; approve requeues the origin with the owner text, deny fails it with a bloqueado verdict that returns once to the planner, and new_tool approval creates the dev ticket first. Kinds question/lock/new_tool/playbook-reserved in `owner_channel.py`; Tier S asks via `cycle.ask_owner`; the planner proposes via `PlannerResult.proposed_tools`. Tests: `tests/test_owner_channel_206.py`. Mandate TASK-2026-00193; spend gate TASK-2026-00207.)
 
 ### Missions over objectives
 

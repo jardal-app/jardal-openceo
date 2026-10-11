@@ -982,6 +982,7 @@ class HorizonService:
         parques automaticos. Urgente primero; el resto agrupado. Lo personal
         nunca entra (el repo ya lo excluye y aqui se vuelve a comprobar).
         """
+        from owner_channel import is_owner_question
         from tools.erpnext_tickets import waiting_needs_human_review
 
         moment = now or _now()
@@ -1017,6 +1018,10 @@ class HorizonService:
                 or _has_human_phase(task)
                 or (
                     str(task.get("phase") or "") == "owner_escalation"
+                    and str(task.get("status") or "") == "waiting"
+                )
+                or (
+                    is_owner_question(task)
                     and str(task.get("status") or "") == "waiting"
                 )
             )

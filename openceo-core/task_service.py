@@ -29,6 +29,16 @@ from objectives.engine import (
     TicketCloseContext,
     on_ticket_closed,
 )
+from owner_channel import (
+    OWNER_QUESTION_PHASE,
+    build_owner_question,
+    build_tool_ticket,
+    denied_origin_verdict,
+    is_owner_question,
+    owner_answer_record,
+    owner_question_block,
+    question_answered,
+)
 from phase_workflows import (
     find_phase_index,
     first_executable_phase_index,
@@ -1506,6 +1516,26 @@ class TaskService:
             "task_id": task.get("task_id"),
             "task_status": target,
         }
+        # Desk answer to an owner question (TASK-2026-00206): closing the
+        # question approves, cancelling/deleting it denies. The status
+        # above already landed with its anti-echo guard; here the decision
+        # is recorded and the origin continues.
+        if is_owner_question(task) and target in {
+            TaskStatus.COMPLETED.value,
+            TaskStatus.CANCELLED.value,
+        }:
+            try:
+                result["owner_answer"] = await self._continue_answered_question(
+                    str(task.get("task_id") or ""),
+                    approve=target == TaskStatus.COMPLETED.value,
+                    actor_id="erpnext-desk",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Owner-answer continuation failed for %s",
+                    task.get("task_id"), exc_info=True)
+                result["owner_answer"] = {"continued": False,
+                                          "reason": str(exc)[:200]}
         # Inverse webhook on an objective parent (TASK-2026-00117): the group
         # decision reaches the objective. Children closing in ERP take the
         # plain ticket path above; only a converted parent propagates.
@@ -3337,6 +3367,73 @@ class TaskService:
         )
         return parked or created
 
+    async def create_owner_question(
+        self,
+        *,
+        kind: str,
+        question: str,
+        human_action: str,
+        project: str,
+        origin_task_id: str | None = None,
+        origin_title: str | None = None,
+        checkpoint: dict[str, Any] | None = None,
+        context: str | None = None,
+        tool: dict[str, Any] | None = None,
+        source_id: str | None = None,
+        priority: TaskPriority = TaskPriority.HIGH,
+    ) -> dict[str, Any]:
+        """Owner-question entry (single human channel, TASK-2026-00206).
+
+        Persists the question ERPNext-first through :meth:`create_task`
+        (autorun off, caller-provided ``source_id`` for idempotency), then
+        parks it in ``waiting``/``owner_question`` with any project phase
+        workflow cleared: the status observer pushes Pending Review, the
+        "Requiere humano" tray lists it, and the cockpit answers it. The
+        answer resumes the origin ticket from its checkpoint. Raises
+        OwnerChannelError when the kind is not for the Owner.
+        """
+        spec = build_owner_question(
+            kind=kind,
+            question=question,
+            human_action=human_action,
+            origin_task_id=origin_task_id,
+            origin_title=origin_title,
+            checkpoint=checkpoint,
+            context=context,
+            tool=tool,
+            project=project,
+            source_id=source_id,
+        )
+        payload = TaskCreateRequest(
+            project=project,
+            source=TaskSource.API,
+            source_id=spec["source_id"],
+            title=spec["title"],
+            description=spec["description"],
+            priority=priority,
+            params=spec["params"],
+            tags=spec["tags"],
+            created_by="owner-channel",
+            autorun=False,
+        )
+        created = await self.create_task(payload)
+        if question_answered(created):
+            # Idempotent hit on a decided question: never resurrect it.
+            return created
+        parked = await self.patch_task(
+            created["task_id"],
+            {
+                "status": TaskStatus.WAITING.value,
+                "phase": spec["phase"],
+                "waiting_reason": spec["waiting_reason"],
+                "workflow_key": None,
+                "workflow_phases": [],
+                "phase_index": 0,
+                "phase_assignments": {},
+            },
+        )
+        return parked or created
+
     async def apply_owner_decision(
         self,
         task_id: str,
@@ -3349,7 +3446,9 @@ class TaskService:
 
         Routes, in order: a YAML run blocked on a human resumes (approve) or
         fails (deny); an active human phase workflow goes through
-        :meth:`create_phase_action`; a standalone owner-escalation ticket
+        :meth:`create_phase_action`; an owner-question ticket (TASK-2026-00206)
+        records the decision and resumes (approve) or fails + returns to the
+        planner (deny) its origin; a standalone owner-escalation ticket
         records the decision and completes, so the status observer pushes
         Completed to ERPNext. Anything else (personal scope, no human wait,
         QA without phases, discovery) is rejected fail-closed with a reason.
@@ -3385,6 +3484,14 @@ class TaskService:
             except ValueError as exc:
                 return {"applied": False, "reason": "phase_action_rejected", "detail": str(exc)}
             return {"applied": True, "route": "phase_action", "task": result.get("task")}
+
+        if (
+            is_owner_question(task)
+            and str(task.get("status") or "") == TaskStatus.WAITING.value
+        ):
+            return await self._apply_decision_to_owner_question(
+                task, approve=approve, actor_id=actor_id, comment=note
+            )
 
         if (
             str(task.get("phase") or "") == ESCALATION_PHASE
@@ -3532,6 +3639,298 @@ class TaskService:
         review = await self._repo.create_task_review(review_doc.model_dump(mode="python"))
         await self._hub.broadcast("task_review_created", review)
         return {"applied": True, "route": "escalation_close", "task": patched or task}
+
+    async def _apply_decision_to_owner_question(
+        self,
+        task: dict[str, Any],
+        *,
+        approve: bool,
+        actor_id: str,
+        comment: str,
+    ) -> dict[str, Any]:
+        task_id = str(task.get("task_id") or "")
+        block = owner_question_block(task)
+        kind = str(block.get("kind") or "")
+        origin_id = str(block.get("origin_task_id") or "")
+        dev_task_id: str | None = None
+        if kind == "new_tool" and approve:
+            # The dev ticket first: creation may raise (ERPNext hard fail),
+            # and then the question must stay open for a retry.
+            dev_task_id = await self._create_tool_ticket_from_question(
+                task, block
+            )
+        record = owner_answer_record(
+            approve=approve,
+            actor_id=actor_id,
+            comment=comment,
+            decided_at=datetime.now(timezone.utc).isoformat(),
+        )
+        summary = self._owner_answer_summary(approve, comment)
+        if kind == "new_tool" and approve and dev_task_id:
+            tool = block.get("tool") if isinstance(block.get("tool"), dict) else {}
+            summary = (
+                f"Tool de frontera {tool.get('name')} aprobada; "
+                f"ticket de dev {dev_task_id} creado. "
+                "Replanificar cuando exista."
+                + (f" {comment}" if comment else "")
+            )
+        patched = await self._record_owner_answer(
+            task, block, record, approve=approve,
+            summary=summary, actor_id=actor_id, land_status=True,
+        )
+        await self._review_owner_answer(
+            task, approve=approve, actor_id=actor_id, comment=comment
+        )
+        route = await self._handle_answered_origin(
+            kind=kind,
+            origin_id=origin_id,
+            approve=approve,
+            record=record,
+            summary=summary,
+        )
+        result: dict[str, Any] = {
+            "applied": True, "route": route, "task": patched or task,
+        }
+        if dev_task_id:
+            result["dev_task_id"] = dev_task_id
+        return result
+
+    @staticmethod
+    def _owner_answer_summary(approve: bool, comment: str) -> str:
+        verdict = "aprobada" if approve else "denegada"
+        summary = f"Decisión del dueño: {verdict}."
+        if comment:
+            summary += f" {comment}"
+        return summary
+
+    async def _record_owner_answer(
+        self,
+        task: dict[str, Any],
+        block: dict[str, Any],
+        record: dict[str, Any],
+        *,
+        approve: bool,
+        summary: str,
+        actor_id: str,
+        land_status: bool,
+    ) -> dict[str, Any] | None:
+        """Store the decision on the question. With ``land_status`` the
+        question also completes (cockpit path); the desk path already
+        landed the status through the webhook and only records."""
+        task_id = str(task.get("task_id") or "")
+        params = dict(task.get("params") or {})
+        stored_block = dict(block)
+        stored_block["decision"] = record
+        params["owner_question"] = stored_block
+        updates: dict[str, Any] = {
+            "approval_state": (
+                ApprovalState.APPROVED.value if approve
+                else ApprovalState.REJECTED.value
+            ),
+            "waiting_reason": None,
+            "last_response_summary": summary,
+            "params": params,
+            "updated_by": actor_id,
+        }
+        if land_status:
+            updates["status"] = TaskStatus.COMPLETED.value
+            updates["completed_at"] = datetime.now(timezone.utc)
+        return await self.patch_task(task_id, updates)
+
+    async def _review_owner_answer(
+        self,
+        task: dict[str, Any],
+        *,
+        approve: bool,
+        actor_id: str,
+        comment: str,
+    ) -> None:
+        payload = TaskReviewCreateRequest(
+            actor_type=TaskReviewActorType.INTERNAL,
+            actor_id=actor_id,
+            action=TaskReviewAction.APPROVE if approve else TaskReviewAction.REJECT,
+            comment=comment,
+            metadata={"phase": OWNER_QUESTION_PHASE, "event": "owner_decision"},
+        )
+        review_doc = make_task_review_document(
+            task_id=str(task.get("task_id") or ""),
+            project=str(task.get("project") or ""),
+            payload=payload,
+            approval_state_after=(
+                ApprovalState.APPROVED if approve else ApprovalState.REJECTED
+            ),
+        )
+        review = await self._repo.create_task_review(review_doc.model_dump(mode="python"))
+        await self._hub.broadcast("task_review_created", review)
+
+    async def _handle_answered_origin(
+        self,
+        *,
+        kind: str,
+        origin_id: str,
+        approve: bool,
+        record: dict[str, Any],
+        summary: str,
+    ) -> str:
+        """Resume (approve) or fail + return to planner (deny) the origin.
+
+        A ``new_tool`` approval also fails the origin: it cannot proceed
+        until the dev ticket builds the tool, so the planner replans.
+        Only a waiting origin moves; anything else (already relaunched,
+        terminal) is left alone and the question simply closes.
+        """
+        if kind == "new_tool" and approve:
+            await self._deny_origin_from_question(origin_id, kind, summary)
+            return "owner_question_tool"
+        if not approve:
+            await self._deny_origin_from_question(origin_id, kind, summary)
+            return "owner_question_deny"
+        if await self._resume_origin_from_question(origin_id, record, summary):
+            return "owner_question_resume"
+        return "owner_question_close"
+
+    async def _resume_origin_from_question(
+        self,
+        origin_id: str,
+        record: dict[str, Any],
+        summary: str,
+    ) -> bool:
+        if not origin_id:
+            return False
+        origin = await self._repo.get_task(origin_id)
+        if origin is None:
+            return False
+        if str(origin.get("status") or "") != TaskStatus.WAITING.value:
+            return False
+        await self.patch_task(origin_id, {
+            "status": TaskStatus.QUEUED.value,
+            "waiting_reason": None,
+            "resume_at": None,
+            "params": {"owner_answer": record, "owner_question_id": None},
+            "last_response_summary": summary,
+        })
+        self._wake_dispatcher()
+        try:
+            await self.comment_on_ticket(origin_id, summary)
+        except Exception:
+            logger.warning("owner-answer comment failed for %s", origin_id,
+                           exc_info=True)
+        return True
+
+    async def _deny_origin_from_question(
+        self,
+        origin_id: str,
+        kind: str,
+        summary: str,
+    ) -> None:
+        if not origin_id:
+            return
+        origin = await self._repo.get_task(origin_id)
+        if origin is None:
+            return
+        if str(origin.get("status") or "") != TaskStatus.WAITING.value:
+            return
+        verdict = denied_origin_verdict(kind=kind, owner_text=summary)
+        updated = await self.patch_task(origin_id, {
+            "status": TaskStatus.FAILED.value,
+            "waiting_reason": None,
+            "resume_at": None,
+            "error": summary,
+            "last_response_summary": summary,
+            "params": {"agent_result": verdict, "owner_question_id": None},
+        })
+        if updated is None:
+            return
+        fresh: dict[str, Any] = {"agent_result": verdict}
+        returns_from = (origin.get("params") or {}).get("returns_from")
+        if returns_from:
+            # Second unresolved return parks capability_gap instead of
+            # replanning again (same one-return rule as the run funnel).
+            fresh["returns_from"] = returns_from
+        await self._trigger_objective_return(updated, fresh)
+
+    async def _create_tool_ticket_from_question(
+        self,
+        task: dict[str, Any],
+        block: dict[str, Any],
+    ) -> str | None:
+        tool = block.get("tool") if isinstance(block.get("tool"), dict) else {}
+        name = str(tool.get("name") or "").strip()
+        if not name:
+            return None
+        spec = build_tool_ticket(
+            name=name,
+            need=str(tool.get("need") or ""),
+            spec_text=str(tool.get("spec") or ""),
+            question_task_id=str(task.get("task_id") or ""),
+            origin_task_id=str(block.get("origin_task_id") or "") or None,
+            project=task.get("project"),
+        )
+        created = await self.create_task(TaskCreateRequest(
+            project=spec["project"],
+            source=TaskSource.API,
+            source_id=spec["source_id"],
+            title=spec["title"],
+            description=spec["description"],
+            priority=TaskPriority.HIGH,
+            params=spec["params"],
+            agent_hint=AgentName.DEV,
+            created_by="owner-channel",
+            autorun=True,
+        ))
+        return str(created.get("task_id") or "") or None
+
+    async def _continue_answered_question(
+        self,
+        task_id: str,
+        *,
+        approve: bool,
+        actor_id: str,
+        comment: str = "",
+    ) -> dict[str, Any]:
+        """Desk path: the webhook already landed the status; record the
+        decision and continue with the origin. Idempotent: an answered
+        question is left alone."""
+        question = await self._repo.get_task(task_id)
+        if question is None:
+            return {"continued": False, "reason": "task_not_found"}
+        if not is_owner_question(question):
+            return {"continued": False, "reason": "not_a_question"}
+        if question_answered(question):
+            return {"continued": False, "reason": "already_answered"}
+        block = owner_question_block(question)
+        kind = str(block.get("kind") or "")
+        origin_id = str(block.get("origin_task_id") or "")
+        dev_task_id: str | None = None
+        if kind == "new_tool" and approve:
+            dev_task_id = await self._create_tool_ticket_from_question(
+                question, block
+            )
+        record = owner_answer_record(
+            approve=approve,
+            actor_id=actor_id,
+            comment=comment,
+            decided_at=datetime.now(timezone.utc).isoformat(),
+        )
+        summary = self._owner_answer_summary(approve, comment)
+        await self._record_owner_answer(
+            question, block, record, approve=approve,
+            summary=summary, actor_id=actor_id, land_status=False,
+        )
+        await self._review_owner_answer(
+            question, approve=approve, actor_id=actor_id, comment=comment
+        )
+        route = await self._handle_answered_origin(
+            kind=kind,
+            origin_id=origin_id,
+            approve=approve,
+            record=record,
+            summary=summary,
+        )
+        result: dict[str, Any] = {"continued": True, "route": route}
+        if dev_task_id:
+            result["dev_task_id"] = dev_task_id
+        return result
 
     async def blockers_open(self, task: Mapping[str, Any]) -> bool:
         """True when any ``blocked_by`` dependency is not terminal (§9.5).
