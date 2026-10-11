@@ -57,6 +57,11 @@ from .tier_s.stores import (
     MongoRunStore,
     MongoTaskStore,
 )
+from objectives.agent_result import (
+    AGENT_RESULT_PROMPT,
+    SCHEMA_PATH as AGENT_RESULT_SCHEMA_PATH,
+    parse_agent_result,
+)
 from .tmux_runtime import TmuxRuntime
 from config_loader import ConfigLoader
 from rate_monitor import RateMonitor
@@ -391,6 +396,13 @@ class DevSessionManager:
                 output.error = code_result.error
             return output
 
+        verdict = (code_result.agent_result or {}).get("resultado")
+        if verdict in {"bloqueado", "no_aplica"}:
+            # The agent declined: no gates, no merge. The verdict rides
+            # in params for the post-persist return (TASK-2026-00202).
+            return self._return_agent_verdict(
+                task, tool, branch, code_result, output.params)
+
         if branch is None:
             output.status = TaskStatus.COMPLETED
             return output
@@ -410,6 +422,12 @@ class DevSessionManager:
             ["git", *args], cwd=repo, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, errors="replace",
             timeout=timeout)
+
+    def _reset_and_drop_branch(self, branch: _SimpleBranch) -> None:
+        """Reset the work branch to base and drop it (declined/failed)."""
+        self._simple_git(branch.repo, "reset", "--hard", "-q", branch.base_sha)
+        self._simple_git(branch.repo, "clean", "-fdq")
+        self._drop_simple_branch(branch)
 
     def _open_simple_branch(
         self,
@@ -881,6 +899,53 @@ class DevSessionManager:
                 and str(fresh.get("status") or "")
                 == TaskStatus.CANCELLED.value)
 
+    def _return_agent_verdict(
+        self,
+        task: dict[str, Any],
+        tool: CodingTool,
+        branch: _SimpleBranch | None,
+        code_result: CodingStepResult,
+        params_base: dict[str, Any] | None = None,
+    ) -> DevExecutionOutput:
+        """Agent-declined simple tier (bloqueado/no_aplica, 00202).
+
+        Drops the work branch without running gates or merging: the
+        verdict was the agent's, not the orchestrator's. The failed
+        ticket carries ``params.agent_result`` for the post-persist
+        return; without an objective the verdict is just recorded.
+        """
+        if branch is not None:
+            self._reset_and_drop_branch(branch)
+        verdict = dict(code_result.agent_result or {})
+        resultado = str(verdict.get("resultado") or "")
+        motivo = str(verdict.get("motivo") or "")
+        necesidad = str(verdict.get("necesidad") or "").strip()
+        tier_label = tool.value if isinstance(tool, CodingTool) else str(tool)
+        branch_note = "work branch dropped" if branch is not None \
+            else "no work branch"
+        evidence = (
+            f"Agent {tier_label} returned {resultado} on "
+            f"{self._simple_ref(task)}: {motivo}."
+            f"{' Necesidad: ' + necesidad[:300] if necesidad else ''} "
+            f"No gates ran; {branch_note}.")
+        if isinstance(params_base, dict):
+            params = dict(params_base)
+        else:
+            params = dict(task.get("params") or {}) \
+                if isinstance(task.get("params"), dict) else {}
+        params["agent_result"] = verdict
+        if code_result.executor_link:
+            params["executor_link"] = code_result.executor_link
+        return DevExecutionOutput(
+            status=TaskStatus.FAILED,
+            coding_tool=tool if isinstance(tool, CodingTool) else None,
+            error=evidence[:1500],
+            last_response_summary=evidence,
+            steps=[code_result.step,
+                   self._step("agent_return", "failed", evidence)],
+            params=params,
+        )
+
     async def _material_simple_failure(
         self,
         task: dict[str, Any],
@@ -901,9 +966,7 @@ class DevSessionManager:
         fails terminally with evidence, like a code-step error.
         ``prior_steps`` (oracle/gates rounds) lead the returned trail.
         """
-        self._simple_git(branch.repo, "reset", "--hard", "-q", branch.base_sha)
-        self._simple_git(branch.repo, "clean", "-fdq")
-        self._drop_simple_branch(branch)
+        self._reset_and_drop_branch(branch)
         task_id = str(task.get("task_id") or "")
         tier_label = tool.value if isinstance(tool, CodingTool) else str(tool)
         evidence = (
@@ -1306,12 +1369,15 @@ class DevSessionManager:
         text = output or "ok"
         review_links = extract_review_links(text, self._review_base_url(config))
         summary = self._truncate(text, 500)
+        verdict = parse_agent_result(output)
         return CodingStepResult(
             step=self._step("code", "ok", f"Coding CLI finished ({executor.label})"),
             prompt=prompt,
             summary=summary,
             executor_link=self._executor_link(executor),
             review_links=review_links,
+            agent_result=(verdict.model_dump(mode="json")
+                          if verdict is not None else None),
         )
 
     async def _resolve_tier_executor(
@@ -1368,7 +1434,9 @@ class DevSessionManager:
                 argv = self._as_argv(link_cfg.get("command")) or self._as_argv(
                     provider_cfg.get("command")) or ["musej", "exec"]
                 return TierExecutor(
-                    argv=argv + self._model_args(link_cfg), prompt_via="argv",
+                    argv=self._with_output_schema(
+                        argv + self._model_args(link_cfg)),
+                    prompt_via="argv",
                     cwd=self._provider_cwd(provider_cfg, repo_cwd),
                     env=self._provider_env(provider_cfg),
                     label="tier_c:muse",
@@ -1460,6 +1528,23 @@ class DevSessionManager:
         if any(token in ("-p", "--print") for token in argv):
             return list(argv)
         return [*argv, "--print"]
+
+    @staticmethod
+    def _with_output_schema(argv: list[str]) -> list[str]:
+        """Shape the muse answer with the agent-result schema (00202).
+
+        Only muse-family headless commands take ``--output-schema``;
+        anything else passes through unchanged. Idempotent. The flag
+        needs the meta provider (production default); echo runs reject
+        it loudly, so manual ``--provider echo`` probes must drop it.
+        """
+        if not argv or "--output-schema" in argv:
+            return list(argv)
+        if Path(argv[0]).name not in {"muse", "musej"}:
+            return list(argv)
+        if "exec" not in argv[1:]:
+            return list(argv)
+        return [*argv, "--output-schema", str(AGENT_RESULT_SCHEMA_PATH)]
 
     @staticmethod
     def _ensure_codex_exec(argv: list[str]) -> list[str]:
@@ -1556,6 +1641,7 @@ class DevSessionManager:
                 "REVIEW_LINKS_END",
             ]
         )
+        lines.extend(["", AGENT_RESULT_PROMPT])
 
         return with_preamble(
             "\n".join(lines), self._resolve_repo_path(config), "es")
@@ -1716,6 +1802,8 @@ class CodingStepResult:
     review_links: ReviewLinksExtraction = field(default_factory=lambda: ReviewLinksExtraction([], False))
     #: Tier C chain link that ran the step (policy §25/§32), None otherwise.
     executor_link: str | None = None
+    #: Parsed agent verdict (hecho/bloqueado/no_aplica), None when absent.
+    agent_result: dict[str, Any] | None = None
 
 
 @dataclass

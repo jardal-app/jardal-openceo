@@ -13,6 +13,7 @@ from agents.pm.session import PMSessionManager
 from agents.secretary.session import SecretarySessionManager
 from catalog import Catalog, load_catalog
 from config_loader import ConfigLoader
+from objectives.agent_result import legacy_blocked_result
 from router import CEORouter
 from state import AgentName, GraphState, TaskStatus
 
@@ -174,7 +175,41 @@ class OpenCEOGraph:
             "coding_tool": task.get("coding_tool"),
             "objective_id": task.get("objective_id"),
         }
-        return await self._graph.ainvoke(initial_state)
+        out = await self._graph.ainvoke(initial_state)
+        return self._attach_legacy_agent_result(task, out)
+
+    @staticmethod
+    def _attach_legacy_agent_result(
+        task: dict[str, Any], out: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Map a legacy non-dev FAILED to its agent verdict (00202).
+
+        Deterministic sessions (pm/finance/secretary) return a bare
+        status: their FAILED means the agent could not do it, recorded
+        as ``bloqueado`` with the session detail. Dev runs parse their
+        own verdict from the CLI output; completed and waiting runs
+        carry none. Total: never raises, never drops params.
+        """
+        if not isinstance(out, dict):
+            return out
+        if str(out.get("status") or "") != TaskStatus.FAILED.value:
+            return out
+        if str(out.get("selected_agent") or "") \
+                not in {"pm", "finance", "secretary"}:
+            return out
+        raw_params = out.get("params")
+        params = dict(raw_params) if isinstance(raw_params, dict) else {}
+        if not params and isinstance(task, dict):
+            task_params = task.get("params")
+            if isinstance(task_params, dict):
+                params = dict(task_params)
+        if isinstance(params.get("agent_result"), dict):
+            return out
+        motivo = str(out.get("error")
+                     or out.get("last_response_summary") or "").strip()
+        params["agent_result"] = legacy_blocked_result(motivo)
+        out["params"] = params
+        return out
 
     async def _ceo_router_node(self, state: GraphState) -> GraphState:
         project_cfg = self._config_loader.load_project(state.get("project"))

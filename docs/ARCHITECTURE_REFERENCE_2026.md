@@ -1033,7 +1033,7 @@ A tool exists only if it meets at least one condition: (a) it uses a secret the 
 
 ### Agent result
 
-The agent ends hecho, bloqueado or no_aplica, plus the reason. When it cannot, it describes the need (it never asks for tools it cannot see) and the work returns to the same planner once. No extra tool verifiers. (TASK-2026-00202.)
+The agent ends hecho, bloqueado or no_aplica, plus the reason. When it cannot, it describes the need (it never asks for tools it cannot see) and the work returns to the same planner once. No extra tool verifiers. (TASK-2026-00202: the verdict schema is `objectives/agent_result.schema.json`, parsed from the agent output with `muse` runs shaped by `--output-schema`; an objective child that ends bloqueado or no_aplica returns once to the same planner — code tags the relaunch with `params.returns_from` — and a second unresolved return parks the objective as `capability_gap` for the CEO review, reaching the Owner only through the mandate. Loose tickets record the verdict without returning, until TASK-2026-00204. Tests: `tests/test_agent_result_202.py`.)
 
 ### Skills, drafts and crystallization
 
