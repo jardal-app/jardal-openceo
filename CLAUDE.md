@@ -91,7 +91,7 @@ Solo puede correr UNA instancia de openceo-core por host. El lifespan de arranqu
 - Arranque canónico: `scripts/openceo-core-host.sh restart|start` — nunca `python main.py` directo (sin env bindea el puerto 8000 por defecto y convive como segundo cerebro en otro puerto).
 - El script verifica en cada `start`/`status`: pids coincidentes + dueño del puerto (`status` avisa con exit 2 si hay más de una); `stop` mata TODAS las coincidencias.
 - `main.py` toma un flock en `.runtime/openceo-core-host.lock` antes del lifespan; si está tomado, muere con FATAL + exit 3 sin tocar Mongo ni schedulers. El kernel lo libera ante cualquier muerte: no hay estado stale.
-- Pendiente del dueño (2026-10-05): launcher canónico — script vs unit systemd `openceo-core-host.service` (parada el 2026-10-05 tras 167 reinicios en churn; NO habilitar ambas a la vez).
+- Pendiente del Owner (2026-10-05): launcher canónico — script vs unit systemd `openceo-core-host.service` (parada el 2026-10-05 tras 167 reinicios en churn; NO habilitar ambas a la vez).
 
 ### Compilar APK Android
 ```bash
@@ -104,6 +104,8 @@ cd openceo-voice-android
 ---
 
 ## 5. Motor de Workflows, Autodiscovery y Dev Tier S
+
+Contrato vigente: épico TASK-2026-00187, sección «Agentes por rol» de `docs/ARCHITECTURE_REFERENCE_2026.md` y decisión `decisions/2026-10-11-agentes-por-rol-planner-unico` (vocabulario: Owner, el personal, pedido, no_aplica…). Lo que sigue describe la implementación actual; cada ticket del épico actualiza su parte.
 
 ### Workflows Deterministas (Tier 0 - 0 Tokens)
 - Almacenados en `workflows/<agente>/<nombre>.yaml`.
@@ -128,7 +130,7 @@ cd openceo-voice-android
 
 ### Dev Tier S (Consenso Crítico Multi-IA)
 - Se activa enviando `"coding_tool": "tier_s"` en la raíz del ticket o dentro de `params` (routing per-task; `dev.coding_tool` en `project.yaml` está obsoleto).
-- **Criterio de selección (dueño, 2026-10-09)**: S se elige cuando orquestar varios modelos independientes dará un resultado materialmente más correcto, en **cualquier dominio**. Dinero, pagos y auth son ejemplos, no la lista; un pedido explícito de máxima garantía, de casi cero fallas o de orquestación multi-modelo también basta. Sin cupo por porcentaje (política §19–§20).
+- **Criterio de selección (Owner, 2026-10-09)**: S se elige cuando orquestar varios modelos independientes dará un resultado materialmente más correcto, en **cualquier dominio**. Dinero, pagos y auth son ejemplos, no la lista; un pedido explícito de máxima garantía, de casi cero fallas o de orquestación multi-modelo también basta. Sin cupo por porcentaje (política §19–§20).
 - Orquesta: Planner (`claudej`), Plan Reviewer (`codexj` no bloqueante), Builder y Closer (procesos one-shot `musej`), árbitro (`claudej`), y pool de revisores con quorum por familias en 2 rondas (slots vigentes en `config_loader.py`).
 
 ---
@@ -140,12 +142,12 @@ Horizon **no es un agente separado** ni tiene runtime propio. Es la capacidad y 
 - **Implementación en Core**: [`openceo-core/horizon/`](file:///home/develop/development/Jardal/jardal-openceo/openceo-core/horizon/).
 - **Tracking operacional**: los tickets viven en ERPNext (`https://erp.jardal.app/app/task`); `STATUS.md` guarda el avance y los traspasos de sesión. `PENDINGS.md` es solo un puntero al backlog.
 
-### Horizon como cockpit del dueño (autonomía)
-- **Cockpit**: «qué sigue» y el brief diario combinan el plan personal, el status de lo que avanzó el CEO y las decisiones pendientes. Es la interfaz principal del dueño (TASK-2026-00120: `horizon/cockpit.py`, bandeja con la fuente de Requiere humano, respuesta por voz/móvil/API, entrega única, privacidad un solo sentido).
+### Horizon como cockpit del Owner (autonomía)
+- **Cockpit**: «qué sigue» y el brief diario combinan el plan personal, el status de lo que avanzó el CEO y las decisiones pendientes. Es la interfaz principal del Owner (TASK-2026-00120: `horizon/cockpit.py`, bandeja con la fuente de Requiere humano, respuesta por voz/móvil/API, entrega única, privacidad un solo sentido).
 - **Promoción automática**: si una acción toca un proyecto o repo de la empresa, es trabajo de empresa y entra sola al Objetivo o ticket por la API común (ERPNext primero); solo viaja la especificación del trabajo. Pregunta solo si implica costo, gasto o replanificación (TASK-2026-00121: `horizon/promotion.py` + `HorizonService.promote_action`, toque explícito por acción, `POST /api/horizon/promote`).
 - **Privacidad en un solo sentido**: lo de empresa entra a Horizon en solo lectura; lo personal (misión, finanzas, familia, salud) nunca sale. Sin interruptor general de exportación.
 - **Terminología**: los de Horizon son siempre «objetivos personales»; «Objetivo» a secas es objetivo de empresa (contrato: §Proactive CEO de `docs/ARCHITECTURE_REFERENCE_2026.md`; decisión del vault `decisions/2026-10-06-objetivo-unico-ceo-autonomo`).
-- Las tareas personales de Horizon no son tickets de empresa (excepción acotada en §10); la capacidad del dueño frena solo los escalados, no el trabajo autónomo; el plan del día sigue sin depender de un LLM.
+- Las tareas personales de Horizon no son tickets de empresa (excepción acotada en §10); la capacidad del Owner frena solo los escalados, no el trabajo autónomo; el plan del día sigue sin depender de un LLM.
 
 ### Fases de Implementación (Roadmap)
 1. **HZ-001 — Contexto personal del CEO** (Completada): Modelos de jerarquía (`models.py`), mandato (`mandate.py`), privacidad estricta (`privacy.py`), clasificador determinista antes de LLM (`classify.py`), colecciones Mongo `horizon_*` e importador idempotente (`importer.py`).
@@ -237,7 +239,7 @@ ignoran, para no crear un bucle.
 
 ---
 
-## 9. Cierre de sesión (regla del dueño, 2026-09-28)
+## 9. Cierre de sesión (regla del Owner, 2026-09-28)
 
 Una sesión de trabajo **no termina con el código listo**: termina cuando el ticket queda
 cerrado en su ciclo completo. No hay sesiones dedicadas solo a mergear; el merge es parte
@@ -245,7 +247,7 @@ del mismo trabajo. Al cerrar, en orden:
 
 1. **Merge a `main` + push** de la rama del ticket (`git checkout main && git merge --no-ff <rama> && git push origin main`).
 2. **Servicio reiniciado con el código nuevo** (`scripts/openceo-core-host.sh restart` + `status` + smoke del endpoint).
-3. **Ticket en ERPNext en su estado final** con `openceo_transition_ticket` (criterio global en el servidor; relee, verifica y deja el espejo coherente sin eco): `Completed` con `evidence` de la verificación si el agente terminó y verificó; `Pending Review` con `human_action` nombrable solo si queda una aprobación o decisión que únicamente el dueño puede tomar; `Working` con `reason` si sigue abierto el trabajo o una dependencia. Cancelar trabajo del dueño exige citar su orden (`owner_instruction`); sin ella la herramienta escala en vez de cancelar. Borrar la rama local (`-d`) y remota si existe una vez mergeada.
+3. **Ticket en ERPNext en su estado final** con `openceo_transition_ticket` (criterio global en el servidor; relee, verifica y deja el espejo coherente sin eco): `Completed` con `evidence` de la verificación si el agente terminó y verificó; `Pending Review` con `human_action` nombrable solo si queda una aprobación o decisión que únicamente el Owner puede tomar; `Working` con `reason` si sigue abierto el trabajo o una dependencia. Cancelar trabajo del Owner exige citar su orden (`owner_instruction`); sin ella la herramienta escala en vez de cancelar. Borrar la rama local (`-d`) y remota si existe una vez mergeada.
 4. **Docs temporales eliminados**: `docs/work/TASK-2026-000NN-tema.md` se borra al pasar el checklist (resultado en el ticket + vault actualizado o innecesario + original adjunto como privado si tiene valor futuro); informar en una línea.
 5. **Registro durable**: `STATUS.md` (traspaso), ticket ERPNext (resultado) y vault (solo hechos, decisiones, flujos y conclusiones reutilizables, con el número de ticket como evidencia).
 
@@ -331,29 +333,29 @@ scripts/openceo-core-host.sh restart|status
 
 ---
 
-## 11. Continuar el roadmap: palabra clave `sigue` (sesiones del dueño)
+## 11. Continuar el roadmap: palabra clave `sigue` (sesiones del Owner)
 
-Solo sesiones del dueño; los ejecutores Tier S lo ignoran (§10).
+Solo sesiones del Owner; los ejecutores Tier S lo ignoran (§10).
 
-Cuando el dueño escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el ticket), no preguntes: aplica esta receta. El roadmap vigente es el épico **TASK-2026-00187** (planner único, agentes por rol con skills y tools de frontera), con sus olas y ajustes. TASK-2026-00110 (OpenCEO autónomo) está completo y cerrado (2026-10-11, por orden del Owner); es la base histórica que este épico reconstruye. Descubre el trabajo actual en ERPNext; consulta el comentario «ROADMAP POR OLAS» y sus ampliaciones, sin mantener aquí una lista fija de tickets. Una observación registrada es una hipótesis que se debe contrastar, no una orden de modificar código sin diagnóstico.
+Cuando el Owner escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el ticket), no preguntes: aplica esta receta. El roadmap vigente es el épico **TASK-2026-00187** (planner único, agentes por rol con skills y tools de frontera), con sus olas y ajustes. TASK-2026-00110 (OpenCEO autónomo) está completo y cerrado (2026-10-11, por orden del Owner); es la base histórica que este épico reconstruye. Descubre el trabajo actual en ERPNext; consulta el comentario «ROADMAP POR OLAS» y sus ampliaciones, sin mantener aquí una lista fija de tickets. Una observación registrada es una hipótesis que se debe contrastar, no una orden de modificar código sin diagnóstico.
 
 1. **Situarse, sin barridos.**
    - `openceo_get_ticket TASK-2026-00187`, con sus comentarios actuales y dependencias.
    - `openceo_search_tickets` con `project=jardal-openceo`, por separado para `status=Open`, `status=Overdue` y `status=Working`. ERPNext marca como `Overdue` a los Open con la fecha estimada vencida, así que sin ese estado los pendientes no aparecen. Identificar los pendientes de esta épica por `parent_task`, sus dependencias y referencias explícitas del roadmap, aunque no tengan el prefijo `[Agentes]`. Leer otros tickets solo si hacen falta para comprobar una dependencia o un posible duplicado.
    - El primer párrafo de «Continuar aquí» en `STATUS.md`.
    - `git status`, actualizar las referencias remotas y revisar el log de `main` y `origin/main`, además de los diffs dirigidos que afecten al candidato. Si otra sesión tiene trabajo activo en el checkout, usar un worktree aislado; no cambiarle la rama ni incorporar sus cambios al propio ticket.
-2. **Elegir un ticket.** El indicado por el dueño. Si no hay, continuar el trabajo propio a medias; después elegir un pendiente de la épica con dependencias verificadas como `Completed`, según impacto, prioridad y desbloqueo del roadmap vigente. Un ticket `Working` de otra sesión no se toma ni se duplica: comprobar qué cubre y elegir otro independiente. No deducir que la épica está terminada de un traspaso antiguo o de que las fases originales estén cerradas. Si ningún pendiente puede avanzar, explicar el bloqueo concreto y parar.
+2. **Elegir un ticket.** El indicado por el Owner. Si no hay, continuar el trabajo propio a medias; después elegir un pendiente de la épica con dependencias verificadas como `Completed`, según impacto, prioridad y desbloqueo del roadmap vigente. Un ticket `Working` de otra sesión no se toma ni se duplica: comprobar qué cubre y elegir otro independiente. No deducir que la épica está terminada de un traspaso antiguo o de que las fases originales estén cerradas. Si ningún pendiente puede avanzar, explicar el bloqueo concreto y parar.
 3. **Contexto mínimo.**
    - Descripción y comentarios del ticket.
    - El workfile del épico y el del ticket, si existen.
-   - El porqué, solo si hace falta: la decisión del vault del épico (la escribe TASK-2026-00189; mientras no exista, el adjunto de diseño del épico) y, como base, `decisions/2026-10-06-objetivo-unico-ceo-autonomo`.
+   - El porqué, solo si hace falta: la decisión del vault del épico (`decisions/2026-10-11-agentes-por-rol-planner-unico`; adjunto de diseño del épico como acta) y, como base, `decisions/2026-10-06-objetivo-unico-ceo-autonomo`.
    - El contrato normativo: `docs/ARCHITECTURE_REFERENCE_2026.md` §Proactive CEO y la sección «Agentes por rol» cuando exista (+ `openceo-core/objectives/routing_policy.md`, normativo del planner hasta que TASK-2026-00201 lo reparta).
    - Código: búsqueda dirigida + LSP.
 4. **Contrastar la observación antes de corregir.** Aplicar criterio técnico riguroso a cada afirmación del ticket: comprobar el contrato vigente, seguir el flujo completo de productores y consumidores y buscar evidencia que confirme o refute el problema. Las líneas citadas, el diagnóstico y el estado del ticket pueden haberse quedado atrás respecto al código.
    - Buscar duplicados en este proyecto por causa y comportamiento, no solo por título. Revisar comentarios, commits, merges y diffs pertinentes de otras sesiones. No suponer que un fallo sigue presente ni que ya fue corregido: demostrar qué cubre el código actual y qué falta.
    - Cuando sea posible, reproducir con una prueba determinista o un ejecutor simulado, sin modelos en vivo. Si la evidencia es estática, dejar la ruta concreta que provoca el fallo y sus condiciones; no afirmar que se reprodujo. No reproducir un efecto externo irreversible. No poder reproducirlo todavía no demuestra que la observación sea falsa.
    - Decidir y registrar en el ticket: fallo real vigente, corrección parcial, ya resuelto y verificado, duplicado, observación incorrecta o diagnóstico inconcluso. Incluir evidencia y valorar si el ajuste propuesto es prudente, respeta el rumbo y resuelve la causa sin introducir regresiones ni complejidad innecesaria.
-   - Fallo real vigente o parcial: implementar solo el delta necesario. Ya resuelto: verificar la aceptación y cerrar con evidencia, sin atribuirse una corrección ajena. Observación incorrecta: explicar y demostrar por qué, resolver el ticket con el criterio global y no forzar un cambio para justificar su existencia. Duplicado: enlazar el ticket canónico y evitar una segunda implementación; si el trabajo canónico sigue pendiente, mantener `Working` con la dependencia y razón exactas. Diagnóstico inconcluso: seguir investigando o mantener `Working` con el impedimento concreto; no cerrar ni pedir revisión humana por falta de certeza. Cancelar trabajo fijado por el dueño sigue exigiendo su orden según el criterio global.
+   - Fallo real vigente o parcial: implementar solo el delta necesario. Ya resuelto: verificar la aceptación y cerrar con evidencia, sin atribuirse una corrección ajena. Observación incorrecta: explicar y demostrar por qué, resolver el ticket con el criterio global y no forzar un cambio para justificar su existencia. Duplicado: enlazar el ticket canónico y evitar una segunda implementación; si el trabajo canónico sigue pendiente, mantener `Working` con la dependencia y razón exactas. Diagnóstico inconcluso: seguir investigando o mantener `Working` con el impedimento concreto; no cerrar ni pedir revisión humana por falta de certeza. Cancelar trabajo fijado por el Owner sigue exigiendo su orden según el criterio global.
 5. **Implementar** en una rama `feat/<ticket>-<tema>` solo si el diagnóstico justifica una corrección. El tier marca el rigor: en `tier_s`, plan escrito en el workfile antes de codificar y una revisión independiente de solo lectura antes del merge. Coordinar cualquier solapamiento comprobado con otra sesión sin sobrescribir su trabajo.
 6. **Probar solo lo necesario**: `py_compile` de lo tocado, los tests del área y la suite de §10, respetando la consigna de abajo. Las regresiones deben comprobar el fallo y la conducta esperada, no convalidar automáticamente el comportamiento existente o el diagnóstico del ticket.
 7. **Cerrar según §9.**
@@ -367,7 +369,7 @@ Cuando el dueño escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el ti
    - Cuando el resultado sea verificado sin cambios de código, registrar ese resultado y su evidencia; no fabricar una rama, merge o restart para aparentar una corrección.
 8. **Seguir.** Si queda margen, refrescar los pendientes en ERPNext y volver al paso 2. Al terminar, una línea: qué se resolvió, si hubo fix o verificación sin cambios, y qué sigue según el estado actual.
 
-Al dueño solo se le pregunta por la política de escalado del épico: gasto nuevo, acción irreversible, replanificación estratégica, cambio de mandato o revisión humana exigida por política. Lo demás se decide y se hace.
+Al Owner solo se le pregunta por la política de escalado del épico: gasto nuevo, acción irreversible, replanificación estratégica, cambio de mandato o revisión humana exigida por política. Lo demás se decide y se hace.
 
 **Consigna del Owner (2026-10-06, revisada el 2026-10-11 para TASK-2026-00187): durante el épico se puede gastar tokens en pruebas de componentes, pero no en un flujo real completo de punta a punta.**
 
@@ -382,10 +384,10 @@ Prohibido hasta terminar todo el épico:
 
 Los únicos flujos reales completos son los dos pilotos del épico: **TASK-2026-00219** (Piloto 1) y **TASK-2026-00224** (Aceptación). Cada uno se corre solo cuando todas sus dependencias estén `Completed`.
 
-**Palabra clave `audita` (sesiones del dueño).** Cuando el dueño escriba **`audita`**, no preguntes: audita que `main` cumpla el rumbo del épico vigente, TASK-2026-00187. Fuentes de verdad, en este orden:
+**Palabra clave `audita` (sesiones del Owner).** Cuando el Owner escriba **`audita`**, no preguntes: audita que `main` cumpla el rumbo del épico vigente, TASK-2026-00187. Fuentes de verdad, en este orden:
 1. El RUMBO de la descripción del épico.
-2. Su decisión del vault, cuando TASK-2026-00189 la escriba. Mientras tanto, `decisions/2026-10-06-objetivo-unico-ceo-autonomo` sigue como base.
+2. Su decisión del vault, `decisions/2026-10-11-agentes-por-rol-planner-unico` (`decisions/2026-10-06-objetivo-unico-ceo-autonomo` queda como base histórica).
 3. El contrato `docs/ARCHITECTURE_REFERENCE_2026.md` (§Proactive CEO y «Agentes por rol»), más `openceo-core/objectives/routing_policy.md`.
 4. El comentario ROADMAP del épico.
 
-Buscar fugas: código en carpetas que no le corresponden, referencias a archivos inexistentes, docs que afirman lo que el código no hace, reglas que contradicen el contrato o las reglas globales del dueño, y tickets viejos que chocan con el rumbo. No arreglar nada: buscar duplicados y crear tickets hijos del épico (batch con `parent_task`) con evidencia `archivo:línea`, y actualizar el comentario ROADMAP. Sin pruebas que gasten tokens; la suite unitaria sí vale.
+Buscar fugas: código en carpetas que no le corresponden, referencias a archivos inexistentes, docs que afirman lo que el código no hace, reglas que contradicen el contrato o las reglas globales del Owner, y tickets viejos que chocan con el rumbo. No arreglar nada: buscar duplicados y crear tickets hijos del épico (batch con `parent_task`) con evidencia `archivo:línea`, y actualizar el comentario ROADMAP. Sin pruebas que gasten tokens; la suite unitaria sí vale.
