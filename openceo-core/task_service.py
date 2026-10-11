@@ -3487,8 +3487,19 @@ class TaskService:
 
         if (
             is_owner_question(task)
-            and str(task.get("status") or "") == TaskStatus.WAITING.value
+            and (
+                str(task.get("status") or "") == TaskStatus.WAITING.value
+                or await self._owner_question_retry_due(task)
+            )
         ):
+            # H3 (revisión 00206): una decisión ya grabada manda sobre el
+            # botón que pulse el reintento; así un fallo parcial (desk con
+            # ERPNext caído) no puede invertirse desde cockpit.
+            recorded = (
+                owner_question_block(task).get("decision") or {}
+            ).get("decision")
+            if recorded in {"approved", "denied"}:
+                approve = recorded == "approved"
             return await self._apply_decision_to_owner_question(
                 task, approve=approve, actor_id=actor_id, comment=note
             )
@@ -3676,7 +3687,11 @@ class TaskService:
             )
         patched = await self._record_owner_answer(
             task, block, record, approve=approve,
-            summary=summary, actor_id=actor_id, land_status=True,
+            summary=summary, actor_id=actor_id,
+            # H3 retry (already landed by the desk) only re-records: a
+            # desk-cancelled question must never flip to completed.
+            land_status=str(task.get("status") or "")
+            == TaskStatus.WAITING.value,
         )
         await self._review_owner_answer(
             task, approve=approve, actor_id=actor_id, comment=comment
@@ -3762,6 +3777,27 @@ class TaskService:
         )
         review = await self._repo.create_task_review(review_doc.model_dump(mode="python"))
         await self._hub.broadcast("task_review_created", review)
+
+    async def _owner_question_retry_due(self, task: dict[str, Any]) -> bool:
+        """True when a recorded answer still owes its origin work (H3).
+
+        A partial failure (desk landing before a failed dev-ticket
+        creation) leaves decision recorded + origin waiting: retryable
+        from the cockpit, honoring the recorded verdict. Anything else
+        (no decision, no origin, origin moved on) is not a retry.
+        """
+        if not question_answered(task):
+            return False
+        origin_id = str(
+            owner_question_block(task).get("origin_task_id") or ""
+        )
+        if not origin_id:
+            return False
+        origin = await self._repo.get_task(origin_id)
+        return (
+            origin is not None
+            and str(origin.get("status") or "") == TaskStatus.WAITING.value
+        )
 
     async def _handle_answered_origin(
         self,
@@ -3901,11 +3937,9 @@ class TaskService:
         block = owner_question_block(question)
         kind = str(block.get("kind") or "")
         origin_id = str(block.get("origin_task_id") or "")
-        dev_task_id: str | None = None
-        if kind == "new_tool" and approve:
-            dev_task_id = await self._create_tool_ticket_from_question(
-                question, block
-            )
+        # H3: the desk verdict is recorded BEFORE the fallible work, so a
+        # failed dev-ticket creation still leaves a retryable, uninverted
+        # decision behind.
         record = owner_answer_record(
             approve=approve,
             actor_id=actor_id,
@@ -3920,6 +3954,11 @@ class TaskService:
         await self._review_owner_answer(
             question, approve=approve, actor_id=actor_id, comment=comment
         )
+        dev_task_id: str | None = None
+        if kind == "new_tool" and approve:
+            dev_task_id = await self._create_tool_ticket_from_question(
+                question, block
+            )
         route = await self._handle_answered_origin(
             kind=kind,
             origin_id=origin_id,

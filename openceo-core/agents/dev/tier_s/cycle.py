@@ -2014,6 +2014,7 @@ class TierSCycle:
                 "source_id": spec["source_id"],
                 "params": spec["params"],
                 "priority": spec["priority"],
+                "tags": spec["tags"],
                 "autorun": False,
             })
         except Exception as exc:
@@ -2026,6 +2027,13 @@ class TierSCycle:
             "status": TaskStatus.WAITING.value,
             "phase": spec["phase"],
             "waiting_reason": spec["waiting_reason"],
+            # H4 (revisión 00206): same phase cleanup as
+            # TaskService.create_owner_question, so no project template
+            # can ever route the question away from the channel.
+            "workflow_key": None,
+            "workflow_phases": [],
+            "phase_index": 0,
+            "phase_assignments": {},
         })
         # The cycle holds the repo lock: no one else writes the origin
         # params mid-run, so merging from the context snapshot is safe.
@@ -2150,10 +2158,24 @@ class TierSCycle:
         if isinstance(acceptance, str):
             acceptance = [acceptance]
         criteria = "\n".join(f"- {line}" for line in acceptance)
+        answer = ((ticket.get("params") or {}).get("owner_answer") or {})
+        owner_note = ""
+        if isinstance(answer, dict):
+            comment = str(answer.get("comment") or "").strip()
+            decision = str(answer.get("decision") or "").strip()
+            if comment or decision:
+                # H1 (revisión 00206): el plan reanudado debe saber qué
+                # decidió el Owner; sin esto planea a ciegas.
+                owner_note = (
+                    f"\nOWNER ANSWER ({decision or 'no decision'}): "
+                    f"{comment or '(no text)'}\n"
+                    "Use it as a binding decision for this plan.\n"
+                )
         body = (
             f"You plan ticket {ctx.ref}: {ticket.get('title', '')}\n"
             f"{ticket.get('description', '')}\n"
             f"Acceptance:\n{criteria or '- (derive verifiable criteria in PLAN.md)'}\n"
+            f"{owner_note}"
             "First decide SIZE: if this cannot fit one session "
             f"(≤{ctx.budgets.get('files_per_ticket', 8)} files, "
             f"≤{ctx.budgets.get('lines_per_ticket', 400)} lines, tests excluded), "

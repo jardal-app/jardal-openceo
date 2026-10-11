@@ -1585,6 +1585,22 @@ class DevSessionManager:
         lines.append(f"Título: {task.get('title')}")
         lines.append(f"Descripción: {task.get('description')}")
 
+        answer = (task.get("params") or {}).get("owner_answer") or {}
+        if isinstance(answer, dict):
+            comment = str(answer.get("comment") or "").strip()
+            decision = str(answer.get("decision") or "").strip()
+            if comment or decision:
+                # H1 (revisión 00206): el trabajo reanudado debe saber qué
+                # decidió el Owner; sin esto planea a ciegas. Se sobrescribe
+                # con cada respuesta nueva, así que nunca acumula.
+                lines.append("")
+                lines.append(
+                    "Respuesta del dueño a la pregunta que bloqueó este "
+                    f"ticket ({decision or 'sin decisión'}): "
+                    f"{comment or '(sin texto)'}"
+                )
+                lines.append("Úsala como decisión vinculante para este trabajo.")
+
         module = pm.get("module")
         if module:
             lines.append(f"Módulo: {module}")
