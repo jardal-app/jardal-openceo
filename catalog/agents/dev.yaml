@@ -3,7 +3,11 @@ name: dev
 type: ai
 engine: muse-code
 profile: null
-boundary_tools: []
+boundary_tools:
+  - openceo_search_tickets
+  - openceo_get_ticket
+  - openceo_add_ticket_comment
+  - openceo_attach_ticket_file
 skills_dir: skills/dev
 skills: []
 inputs:

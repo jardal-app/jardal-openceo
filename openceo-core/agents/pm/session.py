@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -99,6 +100,31 @@ NO listes los tickets individuales en tu respuesta.
 # Subprocess timeout in seconds (10 minutes)
 _SUBPROCESS_TIMEOUT = 600
 
+# Env var carrying the run's MCP service token (TASK-2026-00196). Codex
+# reads it via a per-run bearer_token_env_var override; never persisted.
+_PM_MCP_TOKEN_ENV = "OPENCEO_PM_MCP_TOKEN"
+
+
+def _write_temp_mcp_config(mcp_config: dict[str, Any]) -> str:
+    """MCP config on a 0600 temp file: the token never travels on argv."""
+    fd, path = tempfile.mkstemp(prefix="pm-mcp-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(mcp_config, handle)
+    except BaseException:
+        _remove_quietly(path)
+        raise
+    return path
+
+
+def _remove_quietly(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
 
 @dataclass
 class PMExtractionResult:
@@ -139,6 +165,7 @@ class PMSessionManager:
         self._config_loader = config_loader
         self._llm: ChatOpenAI | None = None
         self._task_service: Any = None
+        self._token_issuer: Any | None = None
 
         if settings.DEEPSEEK_API_KEY:
             self._llm = ChatOpenAI(
@@ -151,6 +178,10 @@ class PMSessionManager:
     def set_task_service(self, task_service: Any) -> None:
         """Late-bind task service after construction (avoids circular dependency)."""
         self._task_service = task_service
+
+    def set_token_issuer(self, issuer: Any | None) -> None:
+        """Late-bind the MCP ticket-token issuer (TASK-2026-00196)."""
+        self._token_issuer = issuer
 
     # ---- DeepSeek direct extraction (langraph) ----
 
@@ -295,6 +326,12 @@ class PMSessionManager:
                 error="Task service not configured (call set_task_service first)",
             )
 
+        if tool not in ("claude", "codex"):
+            return PMExtractionResult(
+                status=TaskStatus.FAILED,
+                error=f"Unknown tool: {tool}",
+            )
+
         config = self._config_loader.load_project(project)
         dev_cfg = config.get("dev", {})
         providers_cfg = dev_cfg.get("providers", {})
@@ -306,20 +343,35 @@ class PMSessionManager:
         if not binary:
             if tool == "claude":
                 binary = self._settings.CLAUDE_CODE_PATH
-            elif tool == "codex":
-                binary = self._settings.CODEX_CLI_PATH
             else:
-                return PMExtractionResult(
-                    status=TaskStatus.FAILED,
-                    error=f"Unknown tool: {tool}",
-                )
+                binary = self._settings.CODEX_CLI_PATH
 
         cwd = provider_cfg.get("cwd") or None
         env_vars = dict(provider_cfg.get("env") or {})
         source_id = f"pm-{tool}-{uuid4().hex[:12]}"
 
+        pm_token: str | None = None
+        if self._settings.MCP_SERVER_ENABLED:
+            if self._token_issuer is None:
+                return PMExtractionResult(
+                    status=TaskStatus.FAILED,
+                    error="MCP token issuer not configured (call set_token_issuer first)",
+                )
+            try:
+                pm_token = await self._token_issuer.issue_service(
+                    f"pm-{tool}", project,
+                    ("openceo_create_pm_tickets_batch",))
+            except Exception as exc:
+                logger.error("PM token issuance failed: %s", exc)
+                return PMExtractionResult(
+                    status=TaskStatus.FAILED,
+                    error=f"MCP token issuance failed: {exc}",
+                )
+
+        mcp_config_path: str | None = None
         if tool == "claude":
-            mcp_config = build_mcp_provider_config(self._settings)
+            mcp_config = build_mcp_provider_config(
+                self._settings, bearer=pm_token)
             cmd = [
                 binary,
                 "-p",
@@ -328,9 +380,10 @@ class PMSessionManager:
                 "--effort", "high",
             ]
             if mcp_config is not None:
+                mcp_config_path = _write_temp_mcp_config(mcp_config)
                 cmd.extend([
                     "--mcp-config",
-                    json.dumps(mcp_config, separators=(",", ":")),
+                    mcp_config_path,
                     "--strict-mcp-config",
                 ])
         elif tool == "codex":
@@ -341,6 +394,11 @@ class PMSessionManager:
                 "-c", "model_reasoning_effort=xhigh",
                 "-",
             ]
+            if pm_token is not None:
+                cmd[-1:-1] = [
+                    "-c",
+                    f'mcp_servers.openceo-global.bearer_token_env_var="{_PM_MCP_TOKEN_ENV}"',
+                ]
         else:
             return PMExtractionResult(
                 status=TaskStatus.FAILED,
@@ -351,6 +409,8 @@ class PMSessionManager:
 
         full_env = dict(os.environ)
         full_env.update(build_mcp_provider_env(self._settings))
+        if pm_token is not None:
+            full_env[_PM_MCP_TOKEN_ENV] = pm_token
         full_env.update(env_vars)
 
         logger.info("PM subprocess: launching %s for project=%s (cwd=%s)", tool, project, cwd)
@@ -373,23 +433,27 @@ class PMSessionManager:
             if proc is not None:
                 proc.kill()
                 await proc.wait()
+            _remove_quietly(mcp_config_path)
             logger.error("PM subprocess timed out (%ds) for tool=%s project=%s", _SUBPROCESS_TIMEOUT, tool, project)
             return PMExtractionResult(
                 status=TaskStatus.FAILED,
                 error=f"CLI timeout ({_SUBPROCESS_TIMEOUT}s) with tool={tool}",
             )
         except FileNotFoundError:
+            _remove_quietly(mcp_config_path)
             logger.error("PM subprocess binary not found: %s", binary)
             return PMExtractionResult(
                 status=TaskStatus.FAILED,
                 error=f"Binary not found: {binary}",
             )
         except Exception as exc:
+            _remove_quietly(mcp_config_path)
             logger.error("PM subprocess error: %s", exc)
             return PMExtractionResult(
                 status=TaskStatus.FAILED,
                 error=f"Subprocess error: {exc}",
             )
+        _remove_quietly(mcp_config_path)
 
         output = stdout_bytes.decode(errors="replace").strip()
         err_output = stderr_bytes.decode(errors="replace").strip()

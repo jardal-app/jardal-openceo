@@ -3,7 +3,24 @@ name: owner
 type: human
 engine: null
 profile: null
-boundary_tools: []
+boundary_tools:
+  - manage_dns_check_or_create
+  - openceo_create_ticket
+  - openceo_create_tickets_batch
+  - openceo_create_pm_tickets_batch
+  - openceo_search_tickets
+  - openceo_get_ticket
+  - openceo_create_objective
+  - openceo_transition_ticket
+  - openceo_transition_tickets_batch
+  - openceo_update_ticket
+  - openceo_add_ticket_comment
+  - openceo_update_ticket_comment
+  - openceo_delete_ticket_comment
+  - openceo_attach_ticket_file
+  - openceo_get_ticket_attachment
+  - openceo_update_ticket_attachment
+  - openceo_delete_ticket_attachment
 skills_dir: skills/owner
 skills:
   - decidir

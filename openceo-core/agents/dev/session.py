@@ -1252,12 +1252,16 @@ class DevSessionManager:
         """Shared F6 env for Tier S cycles and simple-tier triggers."""
         dev_cfg = project_config.get("dev", {}) or {}
         repo = self._repo
+        task_service = self._task_service
         repos = project_config.get("project", {}).get("repos", []) or []
         base = str((repos[0].get("branch_base") if repos else None) or "main")
 
         async def patch_task(task_id: str, updates: dict[str, Any]) -> None:
             if repo is not None:
                 await repo.patch_task(task_id, updates)
+            revoke = getattr(task_service, "revoke_badges_for_patch", None)
+            if revoke is not None:
+                await revoke(task_id, str((updates or {}).get("status") or "") or None)
 
         wiring = objectives_wiring_config(project_config)
         objectives_cfg = dict(wiring["objectives_cfg"])
