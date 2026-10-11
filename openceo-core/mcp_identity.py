@@ -630,6 +630,13 @@ def _run_cli(argv: list[str]) -> int:
 
     async def _main() -> str | None:
         repo = MongoRepository(Settings())
+        await repo.connect()
+        try:
+            return await _run_command(args, repo)
+        finally:
+            await repo.close()
+
+    async def _run_command(args: Any, repo: Any) -> str | None:
         store = MongoTokenStore(repo.db)
         if args.command == "provision-owner":
             token = await provision_owner_token(
