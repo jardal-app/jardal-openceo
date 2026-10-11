@@ -383,7 +383,7 @@ class MiddlewareBoxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denied[0]["tool"], "openceo_transition_ticket")
         self.assertEqual(denied[0]["ticket"], DEV_TICKET)
 
-    async def test_non_tool_surfaces_denied(self) -> None:
+    async def test_non_tool_surfaces_hidden_or_denied(self) -> None:
         from fastmcp import Client  # noqa: PLC0415
 
         issuer, _ = _issuer()
@@ -395,17 +395,16 @@ class MiddlewareBoxTests(unittest.IsolatedAsyncioTestCase):
             with patch("mcp_identity.get_http_request") as req:
                 req.return_value.headers = {
                     "authorization": f"Bearer {token}"}
-                for probe in (
-                    lambda: client.list_resources(),
-                    lambda: client.list_resource_templates(),
-                    lambda: client.read_resource("mem://x"),
-                    lambda: client.list_prompts(),
-                    lambda: client.get_prompt("p", {}),
-                ):
-                    with self.assertRaises(Exception):
-                        await probe()
+                self.assertEqual(await client.list_resources(), [])
+                self.assertEqual(
+                    await client.list_resource_templates(), [])
+                self.assertEqual(await client.list_prompts(), [])
+                with self.assertRaises(Exception):
+                    await client.read_resource("mem://x")
+                with self.assertRaises(Exception):
+                    await client.get_prompt("p", {})
         denied = [e for e in audit.events if not e["ok"]]
-        self.assertEqual(len(denied), 5)
+        self.assertEqual(len(denied), 2)
 
 
 class _FakeTaskService:

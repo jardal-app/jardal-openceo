@@ -547,6 +547,17 @@ class MCPIdentityMiddleware(Middleware):  # type: ignore[misc]
         await self._record(grant, "tools/list", True)
         return [tool for tool in tools if tool.name in grant.tools]
 
+    async def _hide_surface(self, surface: str) -> Any:
+        # Lists answer empty: clients probe every surface at startup and
+        # treat an error as fatal, while an empty list leaks nothing.
+        try:
+            grant = await self._grant()
+        except McpAuthError as exc:
+            await self._record(None, surface, False, exc.detail)
+            raise _unauthenticated()
+        await self._record(grant, surface, True)
+        return []
+
     async def _deny_surface(self, surface: str) -> Any:
         try:
             grant = await self._grant()
@@ -559,18 +570,18 @@ class MCPIdentityMiddleware(Middleware):  # type: ignore[misc]
         raise ToolError(f"Denied: {surface} is not exposed")
 
     async def on_list_resources(self, context: Any, call_next: Any) -> Any:
-        return await self._deny_surface("resources/list")
+        return await self._hide_surface("resources/list")
 
     async def on_list_resource_templates(
         self, context: Any, call_next: Any,
     ) -> Any:
-        return await self._deny_surface("resources/templates/list")
+        return await self._hide_surface("resources/templates/list")
 
     async def on_read_resource(self, context: Any, call_next: Any) -> Any:
         return await self._deny_surface("resources/read")
 
     async def on_list_prompts(self, context: Any, call_next: Any) -> Any:
-        return await self._deny_surface("prompts/list")
+        return await self._hide_surface("prompts/list")
 
     async def on_get_prompt(self, context: Any, call_next: Any) -> Any:
         return await self._deny_surface("prompts/get")
