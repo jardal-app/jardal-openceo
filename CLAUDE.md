@@ -318,12 +318,16 @@ scripts/openceo-core-host.sh restart|status
   any work on a company project/repo goes to ERPNext first.
 - No secrets, credentials, or personal data in notes or temp docs.
 - Conventions over configuration: mirror sibling code, reuse its helpers.
-- Owner rule (2026-10-06, renewed 2026-10-11 for epic TASK-2026-00187):
-  no token-spending live tests (Tier S pilots, live planner/CEO/Muse runs,
-  real ticket launches as tests) except the epic's two pilots
-  (TASK-2026-00219 Pilot 1, TASK-2026-00224 Acceptance), each only once
-  all its dependencies are Completed. Validate with unit/contract tests,
-  simulated executors and `muse --provider echo` (§11).
+- Owner rule (2026-10-06; revised 2026-10-11 for epic TASK-2026-00187):
+  during the epic, component tests MAY spend tokens — prefer `musej`
+  (run as many as needed); `claudej` (Claude Code) and `dsh` (DeepSeek)
+  are allowed too, but only for minimal checks, never large flows. What
+  stays forbidden until the whole epic is done is a full token-spending
+  end-to-end run (a complete objective/mission, or a full Tier S cycle).
+  The only full real runs are the epic's two pilots, TASK-2026-00219
+  (Pilot 1) and TASK-2026-00224 (Acceptance), each only once all its
+  dependencies are Completed. Unit/contract and communication tests,
+  simulated executors and `muse --provider echo` stay the default (§11).
 
 ---
 
@@ -331,7 +335,7 @@ scripts/openceo-core-host.sh restart|status
 
 Solo sesiones del dueño; los ejecutores Tier S lo ignoran (§10).
 
-Cuando el dueño escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el ticket), no preguntes: aplica esta receta. El roadmap vigente es el épico **TASK-2026-00187** (planner único, agentes por rol con skills y tools de frontera), con sus olas y ajustes. TASK-2026-00110 (OpenCEO autónomo) está completo y es la base; su cierre es decisión del Owner. Descubre el trabajo actual en ERPNext; consulta el comentario «ROADMAP POR OLAS» y sus ampliaciones, sin mantener aquí una lista fija de tickets. Una observación registrada es una hipótesis que se debe contrastar, no una orden de modificar código sin diagnóstico.
+Cuando el dueño escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el ticket), no preguntes: aplica esta receta. El roadmap vigente es el épico **TASK-2026-00187** (planner único, agentes por rol con skills y tools de frontera), con sus olas y ajustes. TASK-2026-00110 (OpenCEO autónomo) está completo y cerrado (2026-10-11, por orden del Owner); es la base histórica que este épico reconstruye. Descubre el trabajo actual en ERPNext; consulta el comentario «ROADMAP POR OLAS» y sus ampliaciones, sin mantener aquí una lista fija de tickets. Una observación registrada es una hipótesis que se debe contrastar, no una orden de modificar código sin diagnóstico.
 
 1. **Situarse, sin barridos.**
    - `openceo_get_ticket TASK-2026-00187`, con sus comentarios actuales y dependencias.
@@ -365,14 +369,18 @@ Cuando el dueño escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el ti
 
 Al dueño solo se le pregunta por la política de escalado del épico: gasto nuevo, acción irreversible, replanificación estratégica, cambio de mandato o revisión humana exigida por política. Lo demás se decide y se hace.
 
-**Consigna del Owner (2026-10-06, renovada el 2026-10-11 para TASK-2026-00187): ninguna prueba que gaste tokens hasta completar la arquitectura.** Queda prohibido:
+**Consigna del Owner (2026-10-06, revisada el 2026-10-11 para TASK-2026-00187): durante el épico se puede gastar tokens en pruebas de componentes, pero no en un flujo real completo de punta a punta.**
 
-- correr pilotos o ciclos Tier S reales;
-- invocar en vivo el planner, el CEO o Muse;
-- lanzar tickets reales como prueba;
-- usar `chat.sh` contra modelos.
+Permitido:
+- pruebas de componente con modelo real, preferentemente en `musej` (las que hagan falta);
+- `claudej` (Claude Code) y `dsh` (DeepSeek) solo para pruebas mínimas, nunca flujos extensos;
+- siempre: tests unitarios y de contrato, pruebas de comunicación/integración, ejecutores o modelos simulados, `muse --provider echo` (sin modelo) y `py_compile`.
 
-Se valida con tests unitarios y de contrato, ejecutores o modelos simulados, `muse --provider echo` (sin modelo) y `py_compile`. Las únicas pruebas reales son los dos pilotos del épico: **TASK-2026-00219** (Piloto 1) y **TASK-2026-00224** (Aceptación). Cada uno se corre solo cuando todas sus dependencias estén `Completed`.
+Prohibido hasta terminar todo el épico:
+- un flujo real de punta a punta que gaste tokens: un objetivo o misión completos, o un ciclo Tier S real de principio a fin;
+- flujos extremadamente grandes en cualquier herramienta.
+
+Los únicos flujos reales completos son los dos pilotos del épico: **TASK-2026-00219** (Piloto 1) y **TASK-2026-00224** (Aceptación). Cada uno se corre solo cuando todas sus dependencias estén `Completed`.
 
 **Palabra clave `audita` (sesiones del dueño).** Cuando el dueño escriba **`audita`**, no preguntes: audita que `main` cumpla el rumbo del épico vigente, TASK-2026-00187. Fuentes de verdad, en este orden:
 1. El RUMBO de la descripción del épico.

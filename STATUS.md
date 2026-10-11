@@ -7,12 +7,12 @@ Resumen operativo corto del estado real del repo.
 **NUEVO ROADMAP: ÉPICO TASK-2026-00187 «Planner único, agentes por rol con skills y tools de frontera» (2026-10-11, sesión de diseño del Owner).**
 - **Qué se creó.** 37 hijos `[Agentes/…]`, sin autorun, en 11 olas (comentario «ROADMAP POR OLAS» del épico), más 2 futuros fuera del épico: 00225 personal y 00226 memoria de decisiones. El diseño completo con el porqué está adjunto, privado, al épico. Antes de crear los tickets, una revisión independiente de solo lectura corrigió el plan.
 - **Primero en `sigue` (ola 1, en paralelo):**
-  - 00188, seguridad REST: endpoints de escritura sin autenticación y el servicio escucha en 0.0.0.0:18765, incluido uno que envía teclas a tmux del host;
+  - 00188, seguridad REST: endpoints de escritura sin autenticación y el servicio escucha en 0.0.0.0:18765, incluido uno que envía teclas a tmux del host. Verificado 2026-10-11: el :18765 NO está expuesto a internet (UFW solo permite las redes Docker 172.19/172.20/172.23/172.31.240; los hostnames públicos dev/api.openceo devuelven el SPA de Vite o 404, no el API). El riesgo es lateral/interno (cualquier contenedor en esas redes), no una emergencia pública; 00188 sigue válido como endurecimiento;
   - 00189, contrato v2 + vault + backlog supersedido;
   - 00190, AGENTS.md propio.
-- **Pruebas.** Solo gastan tokens el Piloto 1 (00219) y la Aceptación (00224).
-- **Épico 00110.** Completo al 100%; su cierre es decisión del Owner.
-- **Supersedidos.** 00009/00010/00011/00012/00016/00019. Esperan la orden de cancelación del Owner, que 00189 pedirá.
+- **Pruebas (regla revisada 2026-10-11).** Durante el épico se puede gastar tokens en pruebas de componente, preferentemente en `musej` (claudej/dsh solo mínimas, sin flujos extensos). Prohibido hasta cerrar el épico: un flujo real completo de punta a punta. Los únicos flujos completos son el Piloto 1 (00219) y la Aceptación (00224). Detalle en CLAUDE.md §10/§11.
+- **Épico 00110.** Cerrado (Completed) el 2026-10-11 por orden del Owner; el roadmap activo es 00187.
+- **Supersedidos.** 00009/00010/00011/00012/00016/00019 cancelados el 2026-10-11 por orden del Owner, con comentario de supersesión en cada uno.
 - **Receta `sigue` (CLAUDE.md §11).** Ahora apunta al épico nuevo. Su búsqueda incluye `status=Overdue`, porque ERPNext marca así los Open con la fecha estimada vencida.
 
 **ÉPICO 00110 VERIFICADO SIN PENDIENTES (2026-10-09, `sigue 110`, verificación sin código).** El dueño indicó "aun tiene hijos": contrastado en vivo en ERPNext — los 45 hijos estructurales (44 `[Autonomía]` + 00013, lft/rgt 209/300 cuadra) están todos Completed en negocio y ejecución; las 45 filas depends_on del épico coinciden con esos hijos; roadmap-enlazados 00161/00162 y 00185 también Completed; barridos completos Open (37) + Working (3) + Pending Review (7) + Cancelled (3) sin ningún hijo pendiente. Épico al 100% pero Open: su cierre sigue siendo decisión del dueño (falta orden explícita "cierra", `sigue` no la sustituye). Sin rama/merge/restart, sin nota vault.
