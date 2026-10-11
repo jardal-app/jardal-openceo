@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AgentResult",
+  "type": "object",
+  "required": [
+    "resultado",
+    "motivo"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "resultado": {
+      "type": "string",
+      "enum": [
+        "hecho",
+        "bloqueado",
+        "no_aplica"
+      ]
+    },
+    "motivo": {
+      "type": "string",
+      "minLength": 1
+    },
+    "necesidad": {
+      "type": "string"
+    },
+    "entregables": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidencia": {
+      "type": "string"
+    }
+  }
+}

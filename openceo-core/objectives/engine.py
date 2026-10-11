@@ -687,6 +687,15 @@ def _planner_prompt(
         return (f"- {item.get('title')} [{item.get('tier')}]: "
                 f"{str(item.get('cause') or '')[:300]}")
 
+    def _return_line(item: Any) -> str:
+        if not isinstance(item, Mapping):
+            return "- (unreadable return entry)"
+        need = str(item.get("necesidad") or "").strip() or "-"
+        return (f"- {item.get('title')} [{item.get('agent')}/"
+                f"{item.get('resultado')}]: "
+                f"{str(item.get('motivo') or '')[:300]} | "
+                f"Necesidad: {need[:200]}")
+
     opened = [_ticket_line(item) for item in open_tickets] or ["- (none)"]
     blocked = [_ticket_line(item) for item in blocked_tickets] or ["- (none)"]
     bare = [f"- {item.get('task_id')}: {item.get('title')} :: "
@@ -694,6 +703,8 @@ def _planner_prompt(
             for item in tierless]
     failures = [_failure_line(item)
                 for item in list(objective.get("material_failures") or [])[-3:]]
+    returns = [_return_line(item)
+               for item in list(objective.get("planner_returns") or [])[-3:]]
     lines = [
         "You are the global OpenCEO Objective Planner and Agent Router.",
         "This is one fresh headless planning cycle: reason from the durable",
@@ -723,6 +734,10 @@ def _planner_prompt(
         "MATERIAL FAILURES (latest last; never retry one unchanged "
         "in the same tier):",
         *(failures or ["- (none)"]),
+        "",
+        "AGENT RETURNS (latest last; relaunch with guidance in the ticket",
+        "description, reassign, split, or return capability_gap):",
+        *(returns or ["- (none)"]),
         "",
         "INBOX (pre-existing findings touching objective files, "
         "claim via includes_findings):",
@@ -959,6 +974,44 @@ async def record_material_failure(
     return entry
 
 
+async def record_planner_return(
+    objectives: ObjectiveStore,
+    objective_id: str,
+    *,
+    task_id: str = "",
+    title: str = "",
+    agent: str = "",
+    resultado: str = "",
+    motivo: str = "",
+    necesidad: str = "",
+) -> dict[str, Any]:
+    """Record an agent verdict returned to the planner (TASK-2026-00202).
+
+    Appends ``{task_id, title, agent, resultado, motivo, necesidad, at}``
+    to ``planner_returns``: the prompt shows the latest entries so the
+    planner relaunches with guidance, reassigns, splits or returns
+    capability_gap. Unlike material failures this feeds no retry rule:
+    the single return is enforced by the ``returns_from`` tag on the
+    relaunched tickets. Returns the entry ({} when missing).
+    """
+    objective = await objectives.get_objective(objective_id)
+    if objective is None:
+        return {}
+    entry = {
+        "task_id": str(task_id or ""),
+        "title": str(title or "").strip()[:300],
+        "agent": str(agent or ""),
+        "resultado": str(resultado or ""),
+        "motivo": str(motivo or "")[:500],
+        "necesidad": str(necesidad or "")[:500],
+        "at": _utcnow_iso(),
+    }
+    returns = list(objective.get("planner_returns") or [])
+    returns.append(entry)
+    await objectives.patch_objective(objective_id, {"planner_returns": returns})
+    return entry
+
+
 async def record_tier_c(
     objectives: ObjectiveStore,
     objective_id: str,
@@ -1117,7 +1170,11 @@ class _PlanFlight:
 _PLAN_FLIGHTS: dict[str, _PlanFlight] = {}
 
 
-async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]:
+async def plan_objective(
+    env: ObjectiveEnv, objective_id: str,
+    *,
+    return_from: str | None = None,
+) -> dict[str, Any]:
     """Run the single global planner, coalescing concurrent triggers (§9.3).
 
     One logical planner with fresh runs: triggers for DIFFERENT
@@ -1129,6 +1186,12 @@ async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]
     inline. The leader completes even if its caller goes away (a
     detached plan beats a half-planned objective); its exception, if
     any, reaches every attached trigger like their own run failing.
+
+    ``return_from`` tags this run as an agent-return replan
+    (TASK-2026-00202): created tickets carry
+    ``params.returns_from`` with the returned ticket id, so a second
+    unresolved return parks capability_gap instead of looping. The
+    leader's tag wins when triggers coalesce.
     """
     flight = _PLAN_FLIGHTS.get(objective_id)
     if flight is not None and not flight.task.done():
@@ -1141,11 +1204,11 @@ async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]
 
     async def _leader() -> dict[str, Any]:
         assert rec is not None  # assigned below before any await
-        result = await _plan_objective_inner(env, objective_id)
+        result = await _plan_objective_inner(env, objective_id, return_from)
         while _PLAN_FLIGHTS.get(objective_id) is rec \
                 and rec.rerun_requested:
             rec.rerun_requested = False
-            result = await _plan_objective_inner(env, objective_id)
+            result = await _plan_objective_inner(env, objective_id, return_from)
         return result
 
     # Check-then-set without an await between: atomic, a single leader.
@@ -1161,6 +1224,7 @@ async def plan_objective(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]
 
 async def _plan_objective_inner(
     env: ObjectiveEnv, objective_id: str,
+    return_from: str | None = None,
 ) -> dict[str, Any]:
     """Run the single global planner once (§9.3). Returns a result summary."""
     objective = await env.objectives.get_objective(objective_id)
@@ -1339,7 +1403,8 @@ async def _plan_objective_inner(
         return await _objective_park(
             env, objective, "capability_gap", result.state_summary[:300])
     completed = await _apply_contract_completions(env, objective_id, result)
-    created = await _create_planned_tickets(env, objective, result)
+    created = await _create_planned_tickets(
+        env, objective, result, return_from)
     tele = dict((await env.objectives.get_objective(objective_id) or {}
                  ).get("planner_telemetry") or {})
     tele["tickets_created"] = int(tele.get("tickets_created", 0)) + len(created)
@@ -1383,6 +1448,45 @@ async def _objective_park(
         except Exception:
             pass
     return {"ok": False, "reason": reason, "detail": detail}
+
+
+async def park_return_gap(
+    env: ObjectiveEnv,
+    objective_id: str,
+    entry: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Park the objective: a return replan stayed unresolved (00202).
+
+    Same ``capability_gap`` shape the planner-declared and evidence
+    parks use, so the CEO review reads it as one signal; the Owner is
+    reached only through the mandate, never from here.
+    """
+    title = str(entry.get("title") or "").strip() or "(untitled)"
+    agent = str(entry.get("agent") or "").strip() or "?"
+    resultado = str(entry.get("resultado") or "").strip() or "?"
+    motivo = str(entry.get("motivo") or "").strip()
+    necesidad = str(entry.get("necesidad") or "").strip()
+    summary = (f"agent return unresolved after one replan: {title} "
+               f"[{agent}/{resultado}]: {motivo}")
+    if necesidad:
+        summary += f" Necesidad: {necesidad}"
+    await env.objectives.patch_objective(objective_id, {
+        "capability_gap": {
+            "declared_at": _utcnow_iso(),
+            "summary": summary[:2000],
+            "gaps": [{
+                "task_id": str(entry.get("task_id") or ""),
+                "agent": agent,
+                "resultado": resultado,
+                "motivo": motivo[:500],
+                "necesidad": necesidad[:500],
+            }],
+        },
+    })
+    objective = await env.objectives.get_objective(objective_id) or {
+        "objective_id": objective_id}
+    return await _objective_park(
+        env, objective, "capability_gap", summary[:300])
 
 
 def _planned_description(ticket: planner_mod.PlannedTicket) -> str:
@@ -1513,8 +1617,13 @@ async def _create_planned_tickets(
     env: ObjectiveEnv,
     objective: Mapping[str, Any],
     result: planner_mod.PlannerResult,
+    return_from: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Create every validated ticket in topological order (§9.3)."""
+    """Create every validated ticket in topological order (§9.3).
+
+    On a return replan, created tickets carry ``params.returns_from``
+    with the returned ticket id (TASK-2026-00202 single-return limit).
+    """
     tickets = [item for item in result.tickets
                if not item.completes_task_id]
     keys = [ticket.local_ref for ticket in tickets]
@@ -1542,6 +1651,11 @@ async def _create_planned_tickets(
     for key in order:
         item = by_key[key]
         blocked = [key_to_task.get(dep, dep) for dep in item.blocked_by]
+        params = _planned_params(item)
+        if return_from:
+            # Single-return limit: this ticket IS the return's resolution
+            # attempt; an unresolved verdict on it parks capability_gap.
+            params["returns_from"] = return_from
         payload = {
             "title": item.title,
             "description": _planned_description(item),
@@ -1549,7 +1663,7 @@ async def _create_planned_tickets(
             "coding_tool": (item.coding_tool.value
                             if item.coding_tool is not None else None),
             "agent_hint": item.target_agent,
-            "params": _planned_params(item),
+            "params": params,
             "blocked_by": blocked,
             "objective_id": str(objective.get("objective_id")),
             "origin": "objective_planner",

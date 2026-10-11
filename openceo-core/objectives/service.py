@@ -374,3 +374,62 @@ class ObjectiveService:
             return {"ok": False, "reason": "unknown-project"}
         return await engine_mod.plan_objective(
             self.env_for(project), objective_id)
+
+    async def plan_return(
+        self,
+        objective_id: str,
+        entry: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Replan after an agent verdict returned once (TASK-2026-00202).
+
+        Records the return in the ledger, then plans with ``return_from``
+        so created tickets carry the tag. A non-active objective keeps
+        the ledger entry but is not replanned (first park wins).
+        """
+        if self._repo is None:
+            return {"ok": False, "reason": "no-store"}
+        objective = await self._repo.get_objective(objective_id)
+        if objective is None:
+            return {"ok": False, "reason": "no-objective"}
+        project = str(objective.get("project") or "")
+        if not project or not self._config.has_project(project):
+            return {"ok": False, "reason": "unknown-project"}
+        env = self.env_for(project)
+        await engine_mod.record_planner_return(
+            env.objectives, objective_id,
+            task_id=str(entry.get("task_id") or ""),
+            title=str(entry.get("title") or ""),
+            agent=str(entry.get("agent") or ""),
+            resultado=str(entry.get("resultado") or ""),
+            motivo=str(entry.get("motivo") or ""),
+            necesidad=str(entry.get("necesidad") or ""))
+        if str(objective.get("status") or "") != "active":
+            return {"ok": False, "reason": "objective-not-active"}
+        return await engine_mod.plan_objective(
+            env, objective_id,
+            return_from=str(entry.get("task_id") or "") or None)
+
+    async def park_return_gap(
+        self,
+        objective_id: str,
+        entry: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Park capability_gap: the return replan stayed unresolved."""
+        if self._repo is None:
+            return {"ok": False, "reason": "no-store"}
+        objective = await self._repo.get_objective(objective_id)
+        if objective is None:
+            return {"ok": False, "reason": "no-objective"}
+        project = str(objective.get("project") or "")
+        if not project or not self._config.has_project(project):
+            return {"ok": False, "reason": "unknown-project"}
+        env = self.env_for(project)
+        await engine_mod.record_planner_return(
+            env.objectives, objective_id,
+            task_id=str(entry.get("task_id") or ""),
+            title=str(entry.get("title") or ""),
+            agent=str(entry.get("agent") or ""),
+            resultado=str(entry.get("resultado") or ""),
+            motivo=str(entry.get("motivo") or ""),
+            necesidad=str(entry.get("necesidad") or ""))
+        return await engine_mod.park_return_gap(env, objective_id, entry)

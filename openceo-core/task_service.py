@@ -3173,6 +3173,12 @@ class TaskService:
                     # covered by it.
                     await self._trigger_objective_close(
                         updated, graph_out.get("params"))
+                if (final_status == TaskStatus.FAILED.value
+                        and updated.get("objective_id")):
+                    # Single post-persist agent return (TASK-2026-00202):
+                    # the hook no-ops without a verdict.
+                    await self._trigger_objective_return(
+                        updated, graph_out.get("params"))
                 # Any finished run frees its slot: dispatch event.
                 self._wake_dispatcher()
             return updated
@@ -4017,6 +4023,85 @@ class TaskService:
             await on_ticket_closed(env, ticket, close)
         except Exception:
             logger.warning("objective close trigger failed for %s",
+                           ticket.get("task_id"), exc_info=True)
+
+    async def _trigger_objective_return(
+        self,
+        ticket: dict[str, Any],
+        session_params: Any,
+    ) -> None:
+        """Return a persisted FAILED verdict to the planner (00202).
+
+        Single post-persist return, mirroring the §9.4 close: the run's
+        fresh ``agent_result`` (parsed or legacy-mapped) decides. A
+        first bloqueado/no_aplica replans once with ``return_from``; a
+        verdict on a relaunched ticket (``returns_from`` tag) parks
+        capability_gap instead. Skipped without a verdict, after a dev
+        material failure (§29 already replanned), on cancellation, on
+        loose tickets (their return arrives with TASK-2026-00204) and
+        without objective wiring. Never fails the run.
+        """
+        try:
+            fresh = session_params \
+                if isinstance(session_params, dict) else {}
+            verdict = fresh.get("agent_result")
+            if not isinstance(verdict, dict):
+                return
+            resultado = str(verdict.get("resultado") or "")
+            if resultado not in {"bloqueado", "no_aplica"}:
+                return
+            if fresh.get("material_failure") is not None:
+                return  # dev §29 already replanned this failure
+            task_id = str(ticket.get("task_id") or "")
+            if self._repo is not None and task_id:
+                try:
+                    current = await self._repo.get_task(task_id)
+                except Exception:
+                    current = None
+                if current is not None and str(
+                        current.get("status") or "") == \
+                        TaskStatus.CANCELLED.value:
+                    return
+            objective_id = str(ticket.get("objective_id") or "")
+            if not objective_id:
+                return
+            service = getattr(self, "_objective_service", None)
+            if service is None:
+                return
+            entry = {
+                "task_id": task_id,
+                "title": str(ticket.get("title") or ""),
+                "agent": str(ticket.get("agent") or ""),
+                "resultado": resultado,
+                "motivo": str(verdict.get("motivo") or "")[:500],
+                "necesidad": str(verdict.get("necesidad") or "")[:500],
+            }
+            if fresh.get("returns_from"):
+                outcome = await service.park_return_gap(
+                    objective_id, entry)
+                note = (f"Agent {resultado} after one replan: parked "
+                        f"capability_gap ({outcome.get('reason')}). "
+                        f"Motivo: {entry['motivo']}")
+            else:
+                outcome = await service.plan_return(objective_id, entry)
+                if outcome.get("ok"):
+                    note = (f"Agent {resultado}: returned once to the "
+                            f"planner "
+                            f"({outcome.get('tickets_created', 0)} "
+                            f"ticket(s)). Motivo: {entry['motivo']}")
+                else:
+                    detail = str(outcome.get("detail") or "").strip()
+                    note = (f"Agent {resultado}: return replan parked "
+                            f"({outcome.get('reason')}"
+                            f"{': ' + detail[:200] if detail else ''}). "
+                            f"Motivo: {entry['motivo']}")
+            try:
+                await self.comment_on_ticket(task_id, note)
+            except Exception:
+                logger.warning("return comment failed for %s", task_id,
+                               exc_info=True)
+        except Exception:
+            logger.warning("objective return trigger failed for %s",
                            ticket.get("task_id"), exc_info=True)
 
     async def _on_ticket_done(self, ticket: dict[str, Any]) -> None:

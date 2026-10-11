@@ -776,6 +776,14 @@ Same-tier execution is allowed only if the ticket was materially split or its co
 
 Material failure/replanning counts against Objective anti-loop limits.
 
+An agent ends hecho, bloqueado or no_aplica with its reason
+(TASK-2026-00202). A bloqueado or no_aplica objective child
+returns once to this planner carrying motivo and necesidad in
+words, never tool names: relaunch it with guidance in the ticket
+description, reassign it, split it, or return capability_gap. A
+second unresolved return parks capability_gap (code enforces the
+single return); the motivo is never checked against the catalog.
+
 ## 30. Tier-S ticket that is too large
 
 Tier S still fits one bounded Tier-S cycle.
