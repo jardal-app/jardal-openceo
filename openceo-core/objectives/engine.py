@@ -1630,14 +1630,21 @@ async def _hold_plan_for_spend(
 async def _pending_spend_state(
     env: ObjectiveEnv, pending: Mapping[str, Any],
 ) -> tuple[str, dict[str, Any] | None]:
-    """Held-plan question state: wait, apply, denied or gone."""
+    """Held-plan question state: wait, apply, denied or gone.
+
+    A read failure is not a missing question: the hold stays for the
+    next trigger instead of discarding the plan (and a given approval)
+    on a transient store error.
+    """
     question_id = str(pending.get("question_task_id") or "")
     if not question_id:
         return "gone", None
     try:
         question = await env.tasks.get_task(question_id)
     except Exception:
-        question = None
+        logger.warning("spend-hold question %s unreadable; keeping the hold",
+                       question_id)
+        return "wait", None
     if question is None:
         return "gone", None
     if not question_answered(question):

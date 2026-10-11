@@ -45,16 +45,24 @@ def parse_costs(entries: Sequence[Mapping[str, Any]] | None) -> dict[str, Any]:
     total = Decimal("0")
     unknown: list[str] = []
     details: dict[str, str | None] = {}
-    for index, cost in enumerate(entries or []):
+    items = entries or []
+    if not isinstance(items, (list, tuple)):
+        raise PlanSpendError("costs must be a list of {label, amount}")
+    for index, cost in enumerate(items):
         if not isinstance(cost, Mapping):
             raise PlanSpendError(f"costs[{index}] must be an object")
         label = str(cost.get("label") or "").strip()
         if not label:
             raise PlanSpendError(f"costs[{index}].label must not be blank")
+        key = label
+        suffix = 2
+        while key in details:
+            key = f"{label} ({suffix})"
+            suffix += 1
         raw = cost.get("amount")
         if raw is None:
             unknown.append(label)
-            details[label] = None
+            details[key] = None
             continue
         if isinstance(raw, bool) or isinstance(raw, float):
             raise PlanSpendError(
@@ -71,7 +79,7 @@ def parse_costs(entries: Sequence[Mapping[str, Any]] | None) -> dict[str, Any]:
             raise PlanSpendError(
                 f"costs[{index}].amount must not be negative")
         total += amount
-        details[label] = str(amount)
+        details[key] = str(amount)
     return {"total": total, "unknown": unknown, "details": details}
 
 

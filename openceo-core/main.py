@@ -1082,7 +1082,12 @@ async def create_task(
     # converja al mismo ticket en Mongo y en ERPNext.
     if idempotency_key and not str(data.get("source_id") or "").strip():
         data["source_id"] = idempotency_key.strip()
-    return await task_service.create_task(TaskCreateRequest(**data))
+    try:
+        return await task_service.create_task(TaskCreateRequest(**data))
+    except ValueError as exc:
+        # Malformed input (e.g. params.costs): the caller's data is
+        # wrong, not the server.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # ------------------------- objectives (company-level) -------------------------
