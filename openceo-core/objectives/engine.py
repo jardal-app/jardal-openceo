@@ -42,8 +42,10 @@ from orchestration import knowledge as knowledge_mod
 from orchestration import review as review_mod
 from orchestration.live import TIMEOUT_RETURNCODE
 from objectives import planner_models as planner_mod
+from objectives import plan_spend as spend_mod
 from owner_channel import (
     build_owner_question,
+    owner_question_block,
     question_answered,
     tool_proposal_source_id,
 )
@@ -159,6 +161,11 @@ class ObjectiveEnv:
     # work parks as capability_gap.
     delivery_verifiers: dict[str, DeliveryVerifier] = field(
         default_factory=dict)
+    # Company mandate for the spend gate (TASK-2026-00207): declared
+    # plan spend is checked against it before anything persists or
+    # launches. None in bare unit envs and when the file is unreadable;
+    # then any declared spend escalates, while spend-free plans launch.
+    mandate: Any | None = None
 
 
 class InMemoryObjectiveStore:
@@ -669,6 +676,7 @@ def _planner_prompt(
     roadmap: Sequence[str] = (),
     repo: Path | str | None = None,
     routing_guide: str = "",
+    spend_guide: str = "",
 ) -> str:
     """Planner prompt: bounded state + JSON contract (self-contained).
 
@@ -801,6 +809,11 @@ def _planner_prompt(
         "  ticket is expected to modify.",
         "- Quota never redefines the technical tier. Never choose",
         "  runtime, CLI account, or model.",
+        "- SPEND: declare every new cost in `costs` (per ticket, or",
+        "  result-level for shared costs): `label` plus `amount` as a",
+        "  decimal string in the mandate currency, or null when unknown.",
+        "  Unknown cost is never zero: it waits for the Owner. Omit the",
+        "  key when the work spends nothing.",
         "- NEW BOUNDARY TOOL (rare; at most "
         f"{planner_mod.PROPOSED_TOOLS_MAX} per cycle): when an agent need "
         "names a missing boundary tool — a secret the agent must not "
@@ -813,6 +826,8 @@ def _planner_prompt(
     ])
     if (routing_guide or "").strip():
         lines.extend(["", routing_guide.strip()])
+    if (spend_guide or "").strip():
+        lines.extend(["", spend_guide.strip()])
     lines.extend([
         "",
         f"OUTPUT: write {SCRATCH_DIRNAME}/objectives/"
@@ -845,8 +860,13 @@ def _planner_prompt(
         'omit for tier_s and tier_c>",',
         '    "includes_findings?": ["<inbox fingerprints claimed>"],',
         '    "completes_task_id?": "<to COMPLETE a tierless child above '
-        'instead of creating: its task_id>"',
+        'instead of creating: its task_id>",',
+        '    "costs?": [{"label": "<what it buys>",',
+        '      "amount": "<decimal string in the mandate currency, '
+        'or null when unknown>"}]',
         "  } ],",
+        '  "costs?": [{"label": "<objective-level cost>",',
+        '    "amount": "<decimal string, or null when unknown>"}],',
         '  "proposed_tools?": [{"name": "<missing boundary tool>",',
         '    "need": "<what the agent needs, in words>",',
         '    "spec?": "<how it should behave>",',
@@ -1248,6 +1268,21 @@ async def _plan_objective_inner(
     objective = await env.objectives.get_objective(objective_id)
     if objective is None:
         return {"ok": False, "reason": "objective not found"}
+    pending = objective.get("pending_plan")
+    if isinstance(pending, dict) and pending:
+        state, question = await _pending_spend_state(env, pending)
+        if state == "wait":
+            return {"ok": False, "reason": "spend_approval_pending",
+                    "question_task_id": pending.get("question_task_id")}
+        if state == "apply":
+            return await apply_approved_plan(env, objective_id)
+        if state == "denied":
+            await _ledger_missing_spend_deny(
+                env, objective, objective_id, pending, question)
+        await env.objectives.patch_objective(
+            objective_id, {"pending_plan": None})
+        objective = await env.objectives.get_objective(objective_id) \
+            or objective
     cfg = env.objectives_cfg
     planner_cfg = env.planner_cfg
     tickets = await env.tasks.list_by_objective(objective_id)
@@ -1328,7 +1363,8 @@ async def _plan_objective_inner(
         repo=env.repo,
         routing_guide=routing_guide_section(
             str(objective.get("project") or ""),
-            env.project_routing))
+            env.project_routing),
+        spend_guide=spend_mod.spend_guide_section(env.mandate))
     scratch = objective_scratch(env.repo, objective_id)
     scratch.mkdir(parents=True, exist_ok=True)
     (scratch / "OBJECTIVE_CAPSULE.md").write_text(
@@ -1386,10 +1422,56 @@ async def _plan_objective_inner(
             env, objective, "planner_error",
             f"invalid {PLANNER_RESULT_FILE} after retry: "
             f"{'; '.join(errors)}")
+    spend = spend_mod.check_plan_spend(
+        costs=spend_mod.collect_plan_costs(result),
+        summary=f"Plan for objective {objective_id}: "
+                f"{result.state_summary[:160]}",
+        mandate=env.mandate,
+    )
+    if spend["escalate"]:
+        return await _hold_plan_for_spend(
+            env, objective, objective_id, result, spend,
+            return_from=return_from, closed_before=closed_before,
+            policy_text=policy_text)
+    return await _record_and_apply_plan(
+        env, objective, objective_id, result, return_from=return_from,
+        closed_before=closed_before,
+        policy_sha=planner_mod.policy_fingerprint(policy_text))
+
+
+async def _record_and_apply_plan(
+    env: ObjectiveEnv,
+    objective: Mapping[str, Any],
+    objective_id: str,
+    result: planner_mod.PlannerResult,
+    *,
+    return_from: str | None = None,
+    closed_before: int | None = None,
+    policy_sha: str | None = None,
+    run_tag: str | None = None,
+) -> dict[str, Any]:
+    """Record a valid plan and apply it: completions, tickets, tools.
+
+    Shared by the planning cycle and by the spend-approval apply path
+    (TASK-2026-00207): an approved plan launches exactly what the
+    planner decided, with the run entry describing the run that
+    decided it. ``closed_before``/``policy_sha``/``run_tag`` ride
+    along from the held cycle; the live cycle computes them.
+    """
+    runs = list(objective.get("planning_runs") or [])
     status = result.objective_status.value
+    if closed_before is None:
+        tickets = await env.tasks.list_by_objective(objective_id)
+        closed_before = sum(
+            1 for item in tickets
+            if str(item.get("status")) in TERMINAL_TICKET_STATUS)
+    if policy_sha is None:
+        policy_sha = planner_mod.policy_fingerprint(
+            planner_mod.load_policy_text(
+                env.planner_cfg.get("policy_path")))
     runs.append({"at": _utcnow_iso(), "status": status,
                  # Which policy text this decision saw (TASK-2026-00184).
-                 "policy_sha": planner_mod.policy_fingerprint(policy_text),
+                 "policy_sha": policy_sha,
                  "tickets_created": len(
                      [item for item in result.tickets
                       if not item.completes_task_id]),
@@ -1422,7 +1504,7 @@ async def _plan_objective_inner(
             env, objective, "capability_gap", result.state_summary[:300])
     completed = await _apply_contract_completions(env, objective_id, result)
     created = await _create_planned_tickets(
-        env, objective, result, return_from)
+        env, objective, result, return_from, run_tag=run_tag)
     await create_tool_proposal_questions(
         env, objective_id, str(objective.get("project") or ""), result)
     tele = dict((await env.objectives.get_objective(objective_id) or {}
@@ -1444,6 +1526,243 @@ async def _plan_objective_inner(
     return {"ok": True, "tickets_created": len(created),
             "task_ids": [item["task_id"] for item in created],
             "contracts_completed": completed}
+
+
+async def create_spend_approval_question(
+    env: ObjectiveEnv,
+    objective_id: str,
+    project: str,
+    spend: Mapping[str, Any],
+    state_summary: str,
+    run_tag: str,
+) -> str | None:
+    """Open the Owner question for a spend-held plan (TASK-2026-00207).
+
+    Kind ``question``, no origin ticket: the approval launches the
+    stored plan, the denial returns the motive to the planner. Returns
+    the question task id, None when the ticket service is unbound.
+    """
+    total = spend_mod.spend_total_text(spend)
+    spec = build_owner_question(
+        kind="question",
+        question=f"Autorizar el gasto declarado del plan ({total})?",
+        human_action=str(spend.get("human_action") or "Autorizar o denegar"),
+        checkpoint=spend_mod.spend_hold_checkpoint(objective_id),
+        context=f"Plan: {state_summary[:300]} Motivo: "
+                f"{spend.get('reason')}",
+        project=project,
+        source_id=f"spend-plan:{objective_id}:{run_tag}",
+    )
+    created = await env.create_ticket({
+        "title": spec["title"],
+        "description": spec["description"],
+        "project": spec["project"],
+        "source": spec["source"],
+        "source_id": spec["source_id"],
+        "params": spec["params"],
+        "priority": spec["priority"],
+        "tags": spec["tags"],
+        "autorun": False,
+    })
+    if not created:
+        return None
+    if question_answered(created):
+        return None
+    question_id = str(created.get("task_id") or "")
+    if not question_id:
+        return None
+    await env.patch_task(question_id, {
+        "status": "waiting",
+        "phase": spec["phase"],
+        "waiting_reason": spec["waiting_reason"],
+        "workflow_key": None,
+        "workflow_phases": [],
+        "phase_index": 0,
+        "phase_assignments": {},
+    })
+    return question_id
+
+
+async def _hold_plan_for_spend(
+    env: ObjectiveEnv,
+    objective: Mapping[str, Any],
+    objective_id: str,
+    result: planner_mod.PlannerResult,
+    spend: Mapping[str, Any],
+    *,
+    return_from: str | None,
+    closed_before: int,
+    policy_text: str,
+) -> dict[str, Any]:
+    """Store a valid plan and wait for the Owner's spend approval."""
+    run_tag = uuid.uuid4().hex[:8]
+    question_id = await create_spend_approval_question(
+        env, objective_id, str(objective.get("project") or ""), spend,
+        result.state_summary, run_tag)
+    if not question_id:
+        return {"ok": False, "reason": "spend_approval_unasked",
+                "detail": "the owner question could not be created; "
+                          "the plan launches on no path without approval"}
+    await env.objectives.patch_objective(objective_id, {
+        "pending_plan": {
+            "result": result.model_dump(mode="json"),
+            "return_from": return_from,
+            "closed_before": closed_before,
+            "policy_sha": planner_mod.policy_fingerprint(policy_text),
+            "run_tag": run_tag,
+            "spend": {
+                "amount": str(spend.get("amount") or "0"),
+                "currency": str(spend.get("currency") or "?"),
+                "category": spend.get("category"),
+                "reason": str(spend.get("reason") or ""),
+                "unknown": [str(item) for item in spend.get("unknown") or []],
+            },
+            "question_task_id": question_id,
+            "held_at": _utcnow_iso(),
+        },
+    })
+    return {"ok": False, "reason": "spend_approval_pending",
+            "question_task_id": question_id,
+            "amount": str(spend.get("amount") or "0"),
+            "currency": str(spend.get("currency") or "?")}
+
+
+async def _pending_spend_state(
+    env: ObjectiveEnv, pending: Mapping[str, Any],
+) -> tuple[str, dict[str, Any] | None]:
+    """Held-plan question state: wait, apply, denied or gone."""
+    question_id = str(pending.get("question_task_id") or "")
+    if not question_id:
+        return "gone", None
+    try:
+        question = await env.tasks.get_task(question_id)
+    except Exception:
+        question = None
+    if question is None:
+        return "gone", None
+    if not question_answered(question):
+        return "wait", question
+    decision = (owner_question_block(question).get("decision") or {}
+                ).get("decision")
+    if decision == "approved":
+        return "apply", question
+    return "denied", question
+
+
+async def _ledger_missing_spend_deny(
+    env: ObjectiveEnv, objective: Mapping[str, Any], objective_id: str,
+    pending: Mapping[str, Any], question: Mapping[str, Any] | None,
+) -> None:
+    """Record a denial motive the planner has not seen yet.
+
+    The normal deny path records through ``plan_return``; this covers
+    the crash window (decision recorded, return lost): the next cycle
+    ledgers the motive so its planner still receives it, once.
+    """
+    question_id = str(pending.get("question_task_id") or "")
+    seen = [str(entry.get("task_id") or "")
+            for entry in (objective.get("planner_returns") or [])
+            if isinstance(entry, Mapping)]
+    if question_id in seen:
+        return
+    block = owner_question_block(question)
+    record = block.get("decision") if isinstance(
+        block.get("decision"), Mapping) else {}
+    motive = str(record.get("comment") or "").strip() \
+        or str(block.get("question") or "")
+    await record_planner_return(
+        env.objectives, objective_id,
+        task_id=question_id,
+        title=str((question or {}).get("title") or "")[:300],
+        agent="owner",
+        resultado="bloqueado",
+        motivo=motive,
+        necesidad="")
+
+
+async def apply_approved_plan(
+    env: ObjectiveEnv, objective_id: str,
+) -> dict[str, Any]:
+    """Launch a spend-held plan after Owner approval (TASK-2026-00207).
+
+    Re-validates the stored plan and the admission limits: a stale
+    plan or a non-active objective drops the hold, a full objective
+    keeps it for the next trigger. A retried apply reuses the held
+    idempotency keys, so it never duplicates tickets.
+    """
+    objective = await env.objectives.get_objective(objective_id)
+    if objective is None:
+        return {"ok": False, "reason": "objective not found"}
+    pending = objective.get("pending_plan")
+    if not isinstance(pending, dict) or not pending:
+        return {"ok": False, "reason": "no-pending-plan"}
+    question_id = str(pending.get("question_task_id") or "")
+    if str(objective.get("status") or "") != "active":
+        await env.objectives.patch_objective(
+            objective_id, {"pending_plan": None})
+        if env.notify is not None and question_id:
+            await env.notify(
+                question_id,
+                "Plan aprobado pero el objetivo ya no esta activo: "
+                "no se lanza.")
+        return {"ok": False, "reason": "objective-not-active"}
+    try:
+        result = planner_mod.PlannerResult.model_validate(
+            pending.get("result") or {})
+    except ValueError as exc:
+        await env.objectives.patch_objective(
+            objective_id, {"pending_plan": None})
+        return {"ok": False, "reason": "plan-stale",
+                "detail": str(exc)[:300]}
+    cfg = env.objectives_cfg
+    tickets = await env.tasks.list_by_objective(objective_id)
+    active = [item for item in tickets
+              if str(item.get("status")) not in TERMINAL_TICKET_STATUS
+              and str(item.get("status")) != "converted"]
+    if len(tickets) >= int(cfg.get("max_tickets", 20)):
+        await env.objectives.patch_objective(
+            objective_id, {"pending_plan": None})
+        return {"ok": False, "reason": "max_tickets_reached",
+                "detail": "the held plan no longer fits the ticket budget"}
+    if len(active) >= int(cfg.get("max_active_tickets_per_objective", 6)):
+        return {"ok": False, "reason": "objective-full",
+                "detail": "the hold stays for the next trigger"}
+    open_titles = [str(item.get("title") or "") for item in tickets
+                   if str(item.get("status")) not in TERMINAL_TICKET_STATUS]
+    errors = await planner_mod.validate_planner_result(
+        result,
+        agents=env.planner_cfg.get("agents", {}) or {},
+        open_titles=open_titles,
+        task_exists=lambda dep: _task_exists(env, dep),
+        material_failures=(objective.get("material_failures") or []),
+        horizon=env.planner_cfg.get("ticket_horizon"),
+    )
+    if errors:
+        await env.objectives.patch_objective(
+            objective_id, {"pending_plan": None})
+        if env.notify is not None and question_id:
+            await env.notify(
+                question_id,
+                "El plan retenido quedo obsoleto y no se lanza: "
+                f"{'; '.join(errors)[:300]}")
+        return {"ok": False, "reason": "plan-stale",
+                "detail": "; ".join(errors)[:300]}
+    outcome = await _record_and_apply_plan(
+        env, objective, objective_id, result,
+        return_from=pending.get("return_from"),
+        closed_before=pending.get("closed_before"),
+        policy_sha=pending.get("policy_sha"),
+        run_tag=pending.get("run_tag"),
+    )
+    await env.objectives.patch_objective(
+        objective_id, {"pending_plan": None})
+    if env.notify is not None and question_id and outcome.get("ok"):
+        await env.notify(
+            question_id,
+            f"Gasto aprobado: plan lanzado "
+            f"({outcome.get('tickets_created', 0)} ticket(s)).")
+    outcome["spend_approved"] = True
+    return outcome
 
 
 async def _objective_park(
@@ -1702,11 +2021,15 @@ async def _create_planned_tickets(
     objective: Mapping[str, Any],
     result: planner_mod.PlannerResult,
     return_from: str | None = None,
+    *,
+    run_tag: str | None = None,
 ) -> list[dict[str, Any]]:
     """Create every validated ticket in topological order (§9.3).
 
     On a return replan, created tickets carry ``params.returns_from``
     with the returned ticket id (TASK-2026-00202 single-return limit).
+    A spend-approved plan reuses its held ``run_tag`` (TASK-2026-00207)
+    so a retried apply hits the same idempotency keys.
     """
     tickets = [item for item in result.tickets
                if not item.completes_task_id]
@@ -1730,7 +2053,7 @@ async def _create_planned_tickets(
     by_key = {ticket.local_ref: ticket for ticket in tickets}
     created: list[dict[str, Any]] = []
     key_to_task: dict[str, str] = {}
-    run_tag = uuid.uuid4().hex[:8]
+    run_tag = run_tag or uuid.uuid4().hex[:8]
     group = str(objective.get("erp_group_ref") or "").strip()
     for key in order:
         item = by_key[key]

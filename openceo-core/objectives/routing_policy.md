@@ -460,6 +460,8 @@ The schema is defined outside this runtime prompt in `openceo-core/objectives/pl
 
 The optional `proposed_tools` field (at most 2 per cycle) names missing boundary tools: a secret the agent must not hold, a lock that must not depend on the model obeying, or a business-record write with its own rules. Each proposal opens one owner question through the single human channel; approval creates the dev ticket that builds the tool. Never propose for technical failures (broken tests, fallen reviewers, plan errors): replan those.
 
+The optional `costs` field declares new spend: per ticket, or result-level for shared costs no single ticket owns. Each entry carries a `label` and an `amount` (a decimal string or int in the mandate currency, or null when unknown). Unknown cost is never zero: the plan waits for the Owner. Omit the key when the work spends nothing.
+
 There is no `planner_confidence`, `dev_mode`, `execution_runtime`, account, or model field.
 
 ## 17. Deterministic validation before persistence
@@ -482,9 +484,12 @@ why_not_c present for tier_a/tier_b, absent for tier_c
 oracle declaration shape (known oracle type, at least one ref)
 same-tier replan prohibition after material failure
 proposed_tools names unique (at most 2, Pydantic shape)
+costs declaration shape (label, decimal-string or int amount, null when unknown)
 ```
 
 Invalid output must not become durable tickets.
+
+The mandate comparison (declared spend vs the threshold, unknown cost escalates) runs in the engine before persistence, not in the validator: a plan that needs approval is valid, it waits.
 
 Not validated deterministically at this point (prompt and policy only): that an oracle ref is a file the ticket does not modify (§24), and that its type qualifies for freezing (§23: only qualifying types are frozen, at branch time).
 
@@ -1142,4 +1147,8 @@ You run as one fresh Muse Code / Muse Spark 1.3 Contributor headless planning cy
     It never directly completes the Objective.
 
 17. Return JSON conforming to the Pydantic schema and terminate.
+
+18. Declare every new cost in `costs` (per ticket, or result-level
+    for shared costs). Unknown cost is never zero: it waits for
+    the Owner, like any spend over the mandate threshold.
 ```
