@@ -94,7 +94,7 @@ def _issuer(store: MemoryTokenStore | None = None) -> tuple[TokenIssuer, MemoryT
     cards = {
         "dev": _dev_card(),
         "owner": _owner_card({"openceo_create_ticket",
-                              "manage_dns_check_or_create"}),
+                              "manage_dns_record"}),
     }
     return TokenIssuer(store, cards), store
 
@@ -198,7 +198,7 @@ class IssuerTests(unittest.IsolatedAsyncioTestCase):
         grant = await issuer.authenticate(await issuer.issue_owner())
         self.assertEqual(grant.kind, TokenKind.OWNER)
         grant.check("openceo_create_ticket", {"title": "x"})
-        grant.check("manage_dns_check_or_create", {"hostname": "h.example"})
+        grant.check("manage_dns_record", {"hostname": "h.example"})
         with self.assertRaises(McpAuthError):
             grant.check("openceo_transition_ticket", {"ticket": "t"})
 
@@ -304,7 +304,7 @@ class AgentScopingTests(unittest.IsolatedAsyncioTestCase):
             ("openceo_update_ticket", {"ticket": DEV_TICKET}),
             ("openceo_delete_ticket_comment",
              {"comment_id": "c", "ticket": DEV_TICKET}),
-            ("manage_dns_check_or_create", {"hostname": "h.example"}),
+            ("manage_dns_record", {"hostname": "h.example"}),
         ]:
             with self.assertRaises(McpAuthError, msg=tool):
                 self.grant.check(tool, args)
@@ -602,7 +602,7 @@ class CatalogBoxConsistencyTests(unittest.TestCase):
         names = _register_all_tools(
             server, settings, _FakeTaskService(), _FakeErpnext())
         registered = set(names)
-        self.assertEqual(len(registered), 17)
+        self.assertEqual(len(registered), 24)
         owner_box = set(catalog.agents["owner"].boundary_tools)
         self.assertEqual(owner_box, registered)
         dev_box = set(catalog.agents["dev"].boundary_tools)
