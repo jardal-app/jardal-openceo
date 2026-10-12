@@ -170,7 +170,8 @@ def role_extra_mounts(agent_name: str, *, has_skills: bool,
     Skilled runs read the repo (skill sources plus the service modules
     the skill scripts import); only creation agents write the creation
     roots. Same absolute paths inside and outside, so skill defaults
-    just work.
+    just work — both sides resolve from the same Settings, and the
+    service .env must not override these three keys (review 00007).
     """
     read: list[str] = []
     write: list[str] = []
@@ -441,6 +442,8 @@ async def _run_llm(
                         "config: agent badges bind to the ERPNext mirror "
                         "ticket and this task has none", params)
     factory = wiring.executor_factory or default_executor_factory
+    # Injected factories are test-only (production wires none and waited
+    # above); the fallback keeps scripted runs working without a mirror.
     provider = badge_factory(agent_name, badge_ticket or task_id,
                              str(task.get("project") or ""))
     executor = factory(agent_name, spec, provider)

@@ -27,9 +27,10 @@ Run from the ticket folder. The skill runs staged there:
 
 ```bash
 SKILL=$(readlink -f .codex/skills/crear-proyecto)
-REPO=$(dirname $(dirname $(dirname $(dirname $SKILL))))
+REPO=$(dirname $(dirname $(dirname $SKILL)))
 PY=$REPO/.venv/bin/python
 CLI="$PY $SKILL/scripts/crear_proyecto.py"
+REPOS=$(echo "$($CLI roots)" | $PY -c 'import json,sys; print(json.load(sys.stdin)["result"]["repos"])')
 ```
 
 Effective roots (flags override them; the rehearsal passes doubles):
@@ -42,7 +43,7 @@ $CLI roots
 
 1. ERPNext identity (boundary tool, holds the business record):
    `openceo_ensure_erpnext_project(project_key, display_name)`.
-2. Local repo, one recipe line (`REPOS` from `$CLI roots`):
+2. Local repo, one recipe line (`REPOS` from Setup):
    `mkdir -p $REPOS/<repo> && { test -e $REPOS/<repo>/.git || git -C $REPOS/<repo> init -b main -q; } && (git -C $REPOS/<repo> remote add origin <remote_url> 2>/dev/null || git -C $REPOS/<repo> remote set-url origin <remote_url>)`.
 3. Templates (exact script, never by hand):
    `$CLI templates --project-key <key> --repo <repo> --display-name "<name>" --org <org> --description "<text>" --remote-url <url>`.
