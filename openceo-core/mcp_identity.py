@@ -1,12 +1,11 @@
-"""Ticket-token identity for the internal MCP mounts (TASK-2026-00196).
+"""Ticket-token identity for the internal MCP mount (TASK-2026-00196).
 
 Every MCP caller authenticates with an opaque token that works as a badge:
 which agent, on which ticket. The server filters ``tools/list`` to the
 grant's box — taken from the agent's catalog card — and rejects
 out-of-box calls. Calls with no badge get the default
 project-management box (``ANONYMOUS_BOX``); a present but invalid badge
-still fails closed with 401 on ``/internal/mcp`` and
-``/internal/mcp-global``.
+still fails closed with 401 on ``/internal/mcp``.
 
 Token kinds: ``owner`` (every tool, every ticket), ``agent`` (its card
 box, scoped to its own ticket and project), ``readonly`` (the ``planner``

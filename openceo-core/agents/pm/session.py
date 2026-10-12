@@ -412,7 +412,7 @@ class PMSessionManager:
             if pm_token is not None:
                 cmd[-1:-1] = [
                     "-c",
-                    f'mcp_servers.openceo-global.bearer_token_env_var="{_PM_MCP_TOKEN_ENV}"',
+                    f'mcp_servers.openceo-internal.bearer_token_env_var="{_PM_MCP_TOKEN_ENV}"',
                 ]
         else:
             return PMExtractionResult(

@@ -1041,9 +1041,9 @@ No agent sees secrets or leaves its folder. Env is an allowlist (`child_env`: lo
 
 A tool exists only if it meets at least one condition: (a) it uses a secret the agent must not hold; (b) it enforces a lock that does not depend on the LLM obeying; (c) it writes to the business record under its own rules. Everything else is terminal plus skills. Each agent sees all its role's tools on any ticket; the ticket token is a badge (which agent, on which ticket) enforced server-side; no anonymous access to MCP or REST; dangerous tools carry their lock inside; agents comment and attach on their ticket; code changes states. (TASK-2026-00196, TASK-2026-00199, TASK-2026-00208.)
 
-Identity (TASK-2026-00196): `openceo-core/mcp_identity.py` issues opaque ticket tokens (SHA-256 stored, kinds owner/agent/readonly/service; planner and ceo are read-only principals, never catalog agents) and a FastMCP middleware filters `tools/list` to the grant's box and blocks out-of-box calls; calls with no badge get the default project-management box (`ANONYMOUS_BOX`: ticket tools, DNS, ERPNext project — the agent-specific tools need a badge), while a present but invalid badge answers 401 on every method of both `/internal/mcp` and `/internal/mcp-global` (logged with client host, never the token), and every call lands in the `mcp_calls` audit log. The box resolves from the agent's catalog card (`boundary_tools`; dev reads its ticket and comments/attaches on it, owner sees all 24, creation and state changes stay owner-only); badges die on terminal execution (funnel hook, best-effort) plus a TTL backstop. The shared `MCP_SERVER_API_KEY` is retired on the internal mounts; the research broker keeps its own bearer and consumers. PM extraction keeps working through a per-run service badge (single tool, project-scoped, sunset in TASK-2026-00209); interactive dev sessions run under the dev role profile with a project-scoped service badge (TASK-2026-00197). Tests: `tests/test_mcp_identity_196.py`.
+Identity (TASK-2026-00196): `openceo-core/mcp_identity.py` issues opaque ticket tokens (SHA-256 stored, kinds owner/agent/readonly/service; planner and ceo are read-only principals, never catalog agents) and a FastMCP middleware filters `tools/list` to the grant's box and blocks out-of-box calls; calls with no badge get the default project-management box (`ANONYMOUS_BOX`: ticket tools, DNS, ERPNext project — the agent-specific tools need a badge), while a present but invalid badge answers 401 on every method of `/internal/mcp` (logged with client host, never the token), and every call lands in the `mcp_calls` audit log. The box resolves from the agent's catalog card (`boundary_tools`; dev reads its ticket and comments/attaches on it, owner sees all 24, badge-bearing calls enforce their catalog box and ticket scope); badges die on terminal execution (funnel hook, best-effort) plus a TTL backstop. The shared `MCP_SERVER_API_KEY` is retired on the internal mount; the research broker keeps its own bearer and consumers. PM extraction keeps working through a per-run service badge (single tool, project-scoped, sunset in TASK-2026-00209); interactive dev sessions run under the dev role profile with a project-scoped service badge (TASK-2026-00197). Tests: `tests/test_mcp_identity_196.py`.
 
-Registry and surface (TASK-2026-00199): the YAML registry keeps 26 builtin tools plus the 3 conditional research ticks (`pm.*`, `core.check_registry` and `cloudflare.*` removed; `ops.*` stays until TASK-2026-00223, secretary notes until TASK-2026-00220). Both mounts expose the same 24 boundary tools: the ticket/objective set, one DNS tool (`manage_dns_record`, create/delete), email with the sender list in its description, the ERPNext project ensure, and the five finance tools (practice-only Elfec). Each description documents its criterion; `catalog.MCP_BOUNDARY_TOOLS` is the canonical set — unknown card boxes fail the load and unknown registrations fail the mount build. `openceo_create_pm_tickets_batch` answers only to owner and service badges (the service exception retires with TASK-2026-00209). Tests: `tests/test_boundary_tools_199.py`.
+Registry and surface (TASK-2026-00199): the YAML registry keeps 26 builtin tools plus the 3 conditional research ticks (`pm.*`, `core.check_registry` and `cloudflare.*` removed; `ops.*` stays until TASK-2026-00223, secretary notes until TASK-2026-00220). The internal mount exposes 24 boundary tools: the ticket/objective set, one DNS tool (`manage_dns_record`, create/delete), email with the sender list in its description, the ERPNext project ensure, and the five finance tools (practice-only Elfec). Each description documents its criterion; `catalog.MCP_BOUNDARY_TOOLS` is the canonical set — unknown card boxes fail the load and unknown registrations fail the mount build. `openceo_create_pm_tickets_batch` answers only to owner and service badges (the service exception retires with TASK-2026-00209). Tests: `tests/test_boundary_tools_199.py`.
 
 REST half (TASK-2026-00188): every write route except the login-flow trio (login/logout/refresh, allowlisted in the test) carries session, permission, admin (`require_admin`, tmux/dev/voice only), API-key (`/v1`) or webhook-secret auth — the inventory test fails on any new anonymous write route or mount. The port binds 0.0.0.0 for the Docker networks and UFW restricts it to those plus localhost (verified in the ticket with ss + ufw, not internet-reachable). Tests: `tests/test_rest_auth_inventory_188.py`.
 
@@ -1292,32 +1292,20 @@ RATE_STATUS_STALE_SECONDS=300
 
 ---
 
-## MCP Server — Three Types
+## MCP Server — Internal and External
 
-OpenCEO has three MCP scopes:
+OpenCEO has two MCP surfaces:
 
 | Type | Scope | Consumer | Example |
 |---|---|---|---|
-| **MCP Internal** | Inside OpenCEO | Agents during coding sessions | Coding agents use curated DNS and OpenCEO ticket capabilities |
-| **MCP Global** | Entire VM | Any project on this machine | Infrastructure tools (DNS) available everywhere |
+| **MCP Internal** | Local host | Managed coding agents and manual CLI sessions | Curated DNS and OpenCEO ticket capabilities |
 | **MCP External** | Outside OpenCEO | External clients (ChatGPT, other LLMs) | ChatGPT selects a registered workflow and calls `execute_workflow` |
 
-MCP exposes a curated capability surface backed by shared services and the workflow registry, not an automatic export of every primitive. Internal registry names follow `agent.tool_name`; the external connector preserves `get_company_context`, `get_user_context`, `execute_workflow`, and `get_task_status`. ERPNext adapters fit behind those contracts. Vault access and qmd remain direct filesystem/command access outside all three MCP scopes.
+MCP exposes a curated capability surface backed by shared services and the workflow registry, not an automatic export of every primitive. Internal registry names follow `agent.tool_name`; the external connector preserves `get_company_context`, `get_user_context`, `execute_workflow`, and `get_task_status`. Vault access and qmd remain direct filesystem/command access outside MCP.
 
-### Internal + Global: Coding Agent Infrastructure Tools
+### Internal: Coding Agent Infrastructure Tools
 
-OpenCEO exposes two MCP mount points **inside `openceo-core`** (same process, same port) for Claude Code and Codex CLI to use during coding sessions. The split keeps infrastructure tools universally available while scoping project-specific tools to OpenCEO sessions only.
-
-### Dual Mount Architecture
-
-| Mount point | Default path | Scope | Tools |
-|---|---|---|---|
-| **Global MCP** | `/internal/mcp-global` | Entire VM — any project on this machine | Infrastructure only (DNS) |
-| **Internal MCP** | `/internal/mcp` | OpenCEO-managed coding runtimes only | Infrastructure + OpenCEO ticket capabilities |
-
-**Why two endpoints?** Both mounts expose the same tool set; the difference is who receives them, not what they contain: the internal MCP is injected into OpenCEO-managed coding runtimes through `build_mcp_provider_env()` or explicit MCP config, and the global MCP is opt-in for manual host sessions (Claude Code / Codex CLI). Changing the business backend does not require exposing its full API globally.
-
-Both endpoints share the same security layer (loopback IP restriction + optional Bearer token), the same FastMCP transport, and the same `mcp_server.py` registration functions.
+One stateless HTTP mount at `/internal/mcp/` serves both managed runtimes and manual host CLIs (TASK-2026-00231). The redundant global mount has been removed. Loopback IP restrictions remain; without a badge the server advertises the 17-tool `ANONYMOUS_BOX`, while an explicit valid badge selects its own box and an invalid badge answers 401.
 
 ### Design Principles
 
@@ -1327,14 +1315,14 @@ Both endpoints share the same security layer (loopback IP restriction + optional
 
 ### Exposed Tools
 
-Both mounts (`/internal/mcp`, `/internal/mcp-global`) expose the same 24 boundary tools (`catalog.MCP_BOUNDARY_TOOLS`; TASK-2026-00199). Each description documents the criterion that justifies it: (a) secret, (b) lock, (c) business record. (Defensive fallback, never hit in production: a global mount built without a `task_service` exposes DNS only.)
+The internal mount registers 24 boundary tools (`catalog.MCP_BOUNDARY_TOOLS`; TASK-2026-00199), of which 17 are available without a token. Each description documents the criterion that justifies it: (a) secret, (b) lock, (c) business record.
 
 | Tool | Purpose |
 |---|---|
 | `manage_dns_record(hostname, action)` | Cloudflare DNS: create (idempotent) or delete an A record. Required before Traefik deploy. |
 | `openceo_create_ticket(title, ...)` | Register a ticket through `TaskService`, with source identity and runtime policy. |
 | `openceo_create_tickets_batch(tickets)` | Register a structured JSON batch through the same service. |
-| `openceo_create_pm_tickets_batch(project, source_id, tickets, ...)` | Register a PM batch with explicit project and source context. Owner token only. |
+| `openceo_create_pm_tickets_batch(project, source_id, tickets, ...)` | Register a PM batch with explicit project and source context. Owner or scoped service badge. |
 | `openceo_search_tickets(query, project, status, limit)` | Read business tickets in ERPNext before creating new ones. |
 | `openceo_get_ticket(identifier, limit)` | Read one ticket in full: fields, execution status, comments and attachments. |
 | `openceo_create_objective(project, goal, ...)` | Create a company objective whose children the planner creates. |
@@ -1375,12 +1363,26 @@ Verified against the live site (Frappe 16.35.0 / ERPNext 16.36.0, compañía Jar
 
 ### What is NOT exposed
 
-Email, CRM, payments, and other business actions remain registered workflows/capabilities with their own policies, not raw coding-infrastructure APIs. No unrestricted ERPNext DocType access, Mongo write interface, Obsidian MCP, or Graphify MCP is exposed. A new operational capability must call the owning OpenCEO service and be explicitly registered; it must not create a bypass around approval or idempotency.
+The curated email and finance tools require an explicit badge and invoke their owning services. No unrestricted ERPNext DocType access, Mongo write interface, Obsidian MCP, or Graphify MCP is exposed. A new capability must be explicitly registered and preserve its approval and idempotency policies.
 
 ### How coding agents connect
 
-- **Global MCP:** Claude Code and Codex CLI are configured in their per-user settings (e.g., `~/.claude/settings.json`) to connect to `http://127.0.0.1:{port}/internal/mcp-global/`. Available in every project on the VM.
-- **Internal MCP:** Injected automatically into OpenCEO-managed coding runtimes via environment variables (`OPENCEO_INTERNAL_MCP_URL`, `OPENCEO_INTERNAL_MCP_BEARER_TOKEN`) or explicit MCP config. No manual configuration needed — `build_mcp_provider_env()` / `build_mcp_provider_config()` handle it.
+`scripts/sync-mcp-config.py` synchronizes installed user profiles on backend startup, preserving unrelated providers and MCP servers. Every manual profile uses `openceo-internal` at `http://127.0.0.1:{port}/internal/mcp/` with no default MCP token or authorization headers. Active project overrides in Claude are removed so its user configuration also works in isolated worktrees.
+
+| CLI profiles | User configuration | HTTP URL field |
+|---|---|---|
+| `clauded` / `claude` | `~/.claude.json` | `url` |
+| `claudej` | `~/.claude-j/.claude.json` | `url` |
+| `claudep` / `claudeg` | `~/.claude-deepseek/.claude.json` | `url` |
+| `musej` / `muse` | `~/.config/muse/settings.json` | `url` |
+| `codexf` / `codex` | `~/.codex/config.toml` | `url` |
+| `codexj` | `~/.codex-j/config.toml` | `url` |
+| `opencode` | `~/.config/opencode/opencode.json` | `url` (`oauth = false`) |
+| `qwen` | `~/.qwen/settings.json` | `httpUrl` |
+| `agyd` / `agy` | `~/.gemini/config/mcp_config.json` | `serverUrl` |
+| Gemini CLI, when configured | `~/.gemini/settings.json` | `httpUrl` |
+
+Managed runs continue to receive explicit per-run service or agent badges through their role profile or provider configuration. `build_mcp_provider_env()` carries location only; `build_mcp_provider_config()` is anonymous unless an explicit badge is supplied. The retiring PM Codex path overrides `mcp_servers.openceo-internal.bearer_token_env_var` for its own service badge.
 
 ---
 
@@ -1934,7 +1936,6 @@ RATE_STATUS_STALE_SECONDS=300
 # Internal MCP
 MCP_SERVER_ENABLED=true
 MCP_SERVER_PATH=/internal/mcp
-MCP_GLOBAL_PATH=/internal/mcp-global
 MCP_SERVER_TRANSPORT=streamable-http
 MCP_SERVER_INTERNAL_HOST=127.0.0.1
 MCP_SERVER_ALLOWED_IPS=127.0.0.1/32,::1/128

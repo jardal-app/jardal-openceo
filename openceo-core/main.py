@@ -47,7 +47,7 @@ from integrations.openwebui_compat import (
     parse_agent_hint,
 )
 from mcp_identity import MongoAuditSink, MongoTokenStore, TokenIssuer
-from mcp_server import build_global_mcp_mount, build_internal_mcp_mount
+from mcp_server import build_internal_mcp_mount
 from objectives.engine import (
     ObjectiveDuplicate,
     ObjectiveErpError,
@@ -245,9 +245,6 @@ objective_service.set_ceo_wake(ceo_loop.wake)
 internal_mcp = build_internal_mcp_mount(
     settings, task_service, erpnext_adapter,
     issuer=mcp_token_issuer, audit=mcp_audit_sink)
-global_mcp = build_global_mcp_mount(
-    settings, task_service, erpnext_adapter,
-    issuer=mcp_token_issuer, audit=mcp_audit_sink)
 horizon_service = HorizonService(settings=settings, repo=repo)
 # El timer unico de Horizon: duerme hasta el proximo vencimiento y lo despierta
 # cada encolado. No es un barrido (reglas permanentes de AGENTS.md).
@@ -374,8 +371,6 @@ async def lifespan(_: FastAPI):
     async with AsyncExitStack() as stack:
         if internal_mcp is not None:
             await stack.enter_async_context(internal_mcp.lifespan())
-        if global_mcp is not None:
-            await stack.enter_async_context(global_mcp.lifespan())
 
         await repo.connect()
         # Planner policy: say at boot (not at the first planning cycle) if it
@@ -510,16 +505,14 @@ async def lifespan(_: FastAPI):
         research_schedules_started = await research_coordinator.start()
         logger.info("Research scheduler %s", "habilitado" if research_schedules_started else "deshabilitado")
 
-        for label, mcp in [("Internal", internal_mcp), ("Global", global_mcp)]:
-            if mcp is not None:
-                logger.info(
-                    "%s MCP enabled at %s (transport=%s, tools=%s, auth=%s)",
-                    label,
-                    mcp.internal_url,
-                    mcp.transport,
-                    ",".join(mcp.tool_names),
-                    "on" if mcp.auth_enabled else "off",
-                )
+        if internal_mcp is not None:
+            logger.info(
+                "Internal MCP enabled at %s (transport=%s, tools=%s, auth=%s)",
+                internal_mcp.internal_url,
+                internal_mcp.transport,
+                ",".join(internal_mcp.tool_names),
+                "on" if internal_mcp.auth_enabled else "off",
+            )
 
         yield
 
@@ -633,8 +626,6 @@ def get_auth_db():
 
 if internal_mcp is not None:
     app.mount(internal_mcp.path, internal_mcp.app, name="internal-mcp")
-if global_mcp is not None:
-    app.mount(global_mcp.path, global_mcp.app, name="global-mcp")
 
 
 async def verify_api_key(authorization: str = Header(default="")) -> None:

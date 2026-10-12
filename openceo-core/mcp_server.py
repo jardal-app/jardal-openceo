@@ -38,7 +38,6 @@ else:
     _FASTMCP_IMPORT_ERROR = None
 
 _DEFAULT_MCP_PATH = "/internal/mcp"
-_DEFAULT_GLOBAL_PATH = "/internal/mcp-global"
 _DEFAULT_ALLOWED_IPS = "127.0.0.1/32,::1/128"
 _SUPPORTED_TRANSPORTS = {"http", "streamable-http", "sse"}
 
@@ -83,10 +82,7 @@ def build_internal_mcp_mount(
     issuer: Any | None = None,
     audit: Any | None = None,
 ) -> MountedMCPServer | None:
-    """Build the internal MCP — all tools (infra + OpenCEO-specific). Used by OpenCEO tmux sessions.
-
-    Stateless HTTP fits one-shot managed runs; the global mount below stays
-    stateful for long-lived manual sessions."""
+    """Build the shared internal MCP for managed runs and manual CLI sessions."""
     if not settings.MCP_SERVER_ENABLED:
         return None
     return _build_mcp(
@@ -95,48 +91,6 @@ def build_internal_mcp_mount(
         name="OpenCEO Internal MCP",
         register_fn=lambda s, st: _register_all_tools(s, st, task_service, erpnext),
         stateless_http=True,
-        json_response=True,
-        issuer=issuer,
-        audit=audit,
-    )
-
-
-def build_global_mcp_mount(
-    settings: Settings,
-    task_service: "TaskService | None" = None,
-    erpnext: Any | None = None,
-    issuer: Any | None = None,
-    audit: Any | None = None,
-) -> MountedMCPServer | None:
-    """Build the global MCP — infra + tickets. Used by manual Claude/Codex on any project.
-
-    Originalmente exponia solo infraestructura (DNS). Se le agregaron los tools de tickets
-    porque es la unica superficie que ven las sesiones manuales de Codex CLI
-    (`~/.codex/config.toml` apunta aqui), y sin ellos un agente fuera de OpenCEO no puede
-    ni buscar ni registrar trabajo.
-
-    Los dos mounts exponen lo mismo; la diferencia es **quien los recibe**, no que
-    contienen: el interno se inyecta por configuracion en las sesiones que OpenCEO
-    gestiona, y el global es opt-in para sesiones manuales del host. Sin
-    task_service el global degrada a solo DNS (rama defensiva; main.py siempre
-    lo pasa).
-
-    Superficie de seguridad: `MCP_SERVER_ALLOWED_IPS` es loopback-only por defecto y el
-    mount no se publica en Traefik, asi que solo alcanzable desde esta maquina.
-    """
-    if not settings.MCP_SERVER_ENABLED:
-        return None
-    if task_service is None:
-        register_fn = _register_infra_tools
-    else:
-        register_fn = lambda s, st: _register_all_tools(s, st, task_service, erpnext)
-    return _build_mcp(
-        settings=settings,
-        path=_normalize_path(settings.MCP_GLOBAL_PATH),
-        name="OpenCEO Global MCP",
-        register_fn=register_fn,
-        transport="streamable-http",
-        stateless_http=False,
         json_response=True,
         issuer=issuer,
         audit=audit,
@@ -250,8 +204,7 @@ def build_mounted_mcp_server(
 def build_mcp_provider_env(settings: Settings) -> dict[str, str]:
     """Env vars injected into OpenCEO tmux sessions — points to internal MCP (all tools).
 
-    Location only, never credentials: each caller authenticates with its own
-    ticket token (TASK-2026-00196).
+    Managed callers receive their own explicit ticket badge separately.
     """
     if not settings.MCP_SERVER_ENABLED:
         return {}
@@ -268,8 +221,7 @@ def build_mcp_provider_config(
 ) -> dict[str, Any] | None:
     """Serializable MCP config for headless provider CLIs such as Claude Code.
 
-    `bearer` is the caller's own ticket token; without one the config carries
-    no credentials and every call answers 401.
+    `bearer` is an explicit caller badge; otherwise the anonymous box applies.
     """
     if not settings.MCP_SERVER_ENABLED:
         return None
@@ -284,12 +236,7 @@ def build_mcp_provider_config(
     return {"mcpServers": {"openceo-internal": server}}
 
 
-# ---------------------------------------------------------------------------
-# Tool registration — split into infra (global) and all (internal)
-# ---------------------------------------------------------------------------
-
 def _register_infra_tools(server: FastMCP, settings: Settings) -> tuple[str, ...]:
-    """Infrastructure tools available globally (DNS)."""
     manager = CloudflareDNSManager(settings)
 
     def manage_dns_record(
@@ -315,7 +262,6 @@ def _register_openceo_tools(
     task_service: "TaskService",
     erpnext: Any | None = None,
 ) -> tuple[str, ...]:
-    """OpenCEO-specific tools (ticket CRUD via ERPNext + MongoDB). Never exposed globally."""
 
     async def _enrich_with_execution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Añade el estado de EJECUCION de Mongo a los tickets de negocio de ERPNext.
