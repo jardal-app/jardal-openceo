@@ -272,8 +272,7 @@ class GenericRoutingTest(unittest.TestCase):
         self.router = CEORouter(settings)
 
     def test_hinted_operations_selects_operations(self) -> None:
-        selected = asyncio.run(self.router.select_agent(
-            "anything", "any text at all", agent_hint="operations"))
+        selected = self.router.resolve_explicit("operations", None)
         self.assertEqual(AgentName.OPERATIONS, selected)
 
     def test_after_route_maps_operations_to_generic(self) -> None:
@@ -758,8 +757,12 @@ class _FakeHub:
 
 
 class ResultCommentTest(unittest.TestCase):
-    def _service(self, graph_out: dict[str, Any]):
+    def _service(self, graph_out: dict[str, Any], hint: str = "operations"):
         task = generic_task(status=TaskStatus.QUEUED.value)
+        # Explicit agent: these tests cover result comments, and since
+        # TASK-2026-00204 an undecided ticket on an unwired service
+        # fails fast instead of running.
+        task["agent_hint"] = hint
         task["params"] = {"_mirrors": {"erpnext": {"name": "TASK-2026-09999"}}}
         repo = _DictRepo({"task-205": task})
         service = TaskService(

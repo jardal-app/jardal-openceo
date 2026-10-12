@@ -17,6 +17,7 @@ from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, Query, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
 
 from agents.dev.session import DevSessionManager
 from agents.finance.session import FinanceSessionManager
@@ -59,7 +60,7 @@ from phase_workflows import merge_workflow_templates
 from project_service import ProjectService
 from qa_review_service import QAReviewService
 from rate_monitor import RateMonitor
-from router import CEORouter
+from router import CEORouter, resolve_explicit_name
 from dispatcher import Dispatcher, execution_repo_for_project_config
 from settings import get_settings
 from storage_r2 import delete_files_sync, delete_file_sync, upload_file_sync
@@ -2560,7 +2561,9 @@ def _strip_agent_prefix(text: str) -> str:
     return cleaned or stripped
 
 
-def _build_task_dispatch_text(agent: AgentName | str) -> str:
+def _build_task_dispatch_text(agent: AgentName | str | None) -> str:
+    if agent is None:
+        return "Registrado; el planner decide quién lo hace."
     value = agent.value if isinstance(agent, AgentName) else str(agent or "").strip().lower()
     mapping = {
         AgentName.PM.value: "Te paso con PM.",
@@ -2723,7 +2726,7 @@ async def _handle_openceo_dev_direct(
             _build_dev_capabilities_text(
                 selected_project=project,
                 sessions=open_sessions,
-                llm_fallback_enabled=getattr(router, "_llm", None) is not None,
+                llm_fallback_enabled=bool(settings.DEEPSEEK_API_KEY),
             ),
         )
 
@@ -3037,9 +3040,12 @@ async def _handle_openceo_ceo_model(
     user_id: str,
     message: str,
 ) -> dict:
-    """CEO model routing: classify intent/agent first, then dispatch.
+    """CEO model routing: explicit @-hints dispatch, the rest is a pedido.
 
-    Important: this path should not force-create dev sessions.
+    Only an Owner @-prefix names an agent here; anything without one is
+    registered undecided and the single planner decides it
+    (TASK-2026-00204). Important: this path should not force-create dev
+    sessions.
     """
     hint = parse_agent_hint(message)
     hint_text = hint.value if hint else None
@@ -3047,13 +3053,7 @@ async def _handle_openceo_ceo_model(
         project = await project_service.resolve_project(user_id=user_id, explicit_project=payload.project)
     except ValueError:
         project = settings.DEFAULT_PROJECT
-    project_config = config_loader.load_project(project)
-    selected = await router.select_agent(
-        title=message.splitlines()[0][:120] if message else "",
-        description=message,
-        agent_hint=hint_text,
-        project_config=project_config,
-    )
+    selected = resolve_explicit_name(hint_text, None)
 
     if selected == AgentName.DEV and _is_explicit_dev_session_intent(message):
         return await _handle_openceo_dev_direct(payload, user_id, message)
@@ -4149,13 +4149,29 @@ def _build_dev_conversation_fallback(
     )
 
 
+_dev_intent_llm: Any | None = None
+
+
+def _dev_intent_client() -> Any | None:
+    """DeepSeek client for dev-session intent chat (None without a key)."""
+    global _dev_intent_llm
+    if _dev_intent_llm is None and settings.DEEPSEEK_API_KEY:
+        _dev_intent_llm = ChatOpenAI(
+            model=settings.CEO_LLM_MODEL,
+            api_key=settings.DEEPSEEK_API_KEY,
+            base_url=settings.CEO_LLM_BASE_URL,
+            temperature=0,
+        )
+    return _dev_intent_llm
+
+
 async def _infer_dev_intent_with_llm(
     message: str,
     project_names: list[str],
     open_sessions: list[dict[str, object]],
     has_active_session: bool,
 ) -> dict[str, Any] | None:
-    llm = getattr(router, "_llm", None)
+    llm = _dev_intent_client()
     if llm is None:
         return None
 

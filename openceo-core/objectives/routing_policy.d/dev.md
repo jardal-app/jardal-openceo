@@ -314,6 +314,13 @@ description, reassign it, split it, or return capability_gap. A
 second unresolved return parks capability_gap (code enforces the
 single return); the motivo is never checked against the catalog.
 
+A loose ticket returns the same single way (TASK-2026-00204): its
+first bloqueado or no_aplica replans the pedido with the return
+as context, and the relaunched ticket carries the new decision.
+A second unresolved return has no objective to park on, so the
+ticket stays failed with its return history; the CEO reactive
+review picks failed company executions up.
+
 ## 30. Tier-S ticket that is too large
 
 Tier S still fits one bounded Tier-S cycle.
@@ -381,13 +388,15 @@ attributed to the model that built the work.
 
 Pay special attention to `planner_executable_spec` because Muse planner and Muse builder are model-correlated.
 
-Tier mix (planner + classifier) is recorded alongside, as information
-only: per objective, count planned tickets by tier (`tier_mix`); per
-loose-ticket assignment, record the classifier decision (tier, reason,
-signals, classifier version). No threshold, alert or quota derives
-from the mix: a really complex ticket is never forced into C, and the
-owner's estimate (~85 % future C) is a reference to compare against,
-not an approval gate (§33).
+Tier mix (planner decisions only, TASK-2026-00204) is recorded
+alongside, as information only: per objective, count planned tickets
+by tier (`tier_mix`); per decided pedido, the ticket keeps its
+provenance (`decided_by`, `tier_reason`, `planner_policy_sha`). The
+keyword classifier and its per-assignment records are retired. No
+threshold, alert or quota derives from the mix: a really complex
+ticket is never forced into C, and the owner's estimate (~85 %
+future C) is a reference to compare against, not an approval gate
+(§33).
 
 ## 33. No automatic C/B policy drift
 

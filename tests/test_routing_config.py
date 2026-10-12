@@ -17,132 +17,77 @@ from settings import Settings
 from state import AgentName, ChatCompletionRequest, OpenAIMessage
 
 
-class RouterConfigTests(unittest.IsolatedAsyncioTestCase):
+class RouterExplicitTests(unittest.TestCase):
+    """The router resolves explicit names only (TASK-2026-00204).
+
+    Config triggers, requirement heuristics, default agents and the LLM
+    fallback were retired with the single planner: ticket text never
+    selects an agent anymore.
+    """
+
     def setUp(self) -> None:
         self.settings = Settings(DEEPSEEK_API_KEY="", PROJECTS_DIR="projects", DEFAULT_PROJECT="jardal-openceo")
         self.router = CEORouter(self.settings)
 
-    async def test_routes_from_project_config_cases(self) -> None:
-        project_config = {
-            "routing": {
-                "llm_fallback": False,
-                "default_agent": "dev",
-                "agents": {
-                    "pm": {
-                        "triggers": ["entrevista"],
-                        "patterns": [r"\bcrear\s+tickets?\b"],
-                    },
-                    "secretary": {
-                        "triggers": ["correo"],
-                        "patterns": [r"\benviar\s+correo\b"],
-                    },
-                    "finance": {
-                        "triggers": ["factura"],
-                        "patterns": [],
-                    },
-                },
-            }
-        }
-
+    def test_hint_resolves_through_aliases(self) -> None:
         cases = [
-            ("tengo una entrevista", AgentName.PM),
-            ("puedes crear tickets para esto", AgentName.PM),
-            ("necesito enviar correo al cliente", AgentName.SECRETARY),
-            ("quiero pagar una factura", AgentName.FINANCE),
+            ("dev", AgentName.DEV),
+            ("developer", AgentName.DEV),
+            ("PM", AgentName.PM),
+            ("operations", AgentName.OPERATIONS),
+            ("secretary", AgentName.SECRETARY),
         ]
+        for hint, expected in cases:
+            with self.subTest(hint=hint):
+                self.assertEqual(
+                    self.router.resolve_explicit(hint, None), expected)
 
-        for message, expected in cases:
-            with self.subTest(message=message):
-                selected = await self.router.select_agent(
-                    title=message,
-                    description=message,
-                    project_config=project_config,
-                )
-                self.assertEqual(selected, expected)
+    def test_unknown_hint_resolves_to_none(self) -> None:
+        for hint in ("nope", "", "   ", None):
+            with self.subTest(hint=hint):
+                self.assertIsNone(self.router.resolve_explicit(hint, None))
 
-    async def test_uses_default_agent_from_config_when_no_rule_matches(self) -> None:
-        project_config = {
-            "routing": {
-                "llm_fallback": False,
-                "default_agent": "secretary",
-                "agents": {},
-            }
-        }
-
-        selected = await self.router.select_agent(
-            title="mensaje ambiguo",
-            description="mensaje ambiguo",
-            project_config=project_config,
-        )
-
-        self.assertEqual(selected, AgentName.SECRETARY)
-
-    async def test_routes_requirement_like_payload_to_pm_without_keyword_trigger(self) -> None:
-        project_config = {
-            "routing": {
-                "llm_fallback": False,
-                "default_agent": "dev",
-                "agents": {
-                    "pm": {
-                        "triggers": [],
-                        "patterns": [],
-                    }
-                },
-            }
-        }
-
-        message = "El cliente quiere login con Google, roles admin y dashboard de auditoría."
-
-        selected = await self.router.select_agent(
-            title=message,
-            description=message,
-            project_config=project_config,
-        )
-
-        self.assertEqual(selected, AgentName.PM)
-
-    async def test_coding_tool_forces_dev_over_pm_text_and_hint(self) -> None:
+    def test_coding_tool_forces_dev_over_hint(self) -> None:
         # F0 pilot 00097 misrouted to pm: a persisted coding_tool is a dev
-        # executor by definition and wins over text classification and hints.
-        message = "El cliente quiere login con Google, roles admin y dashboard de auditoría."
-        project_config = {"routing": {"llm_fallback": False}}
-
-        for tool in ("tier_s", "codex", "claude", "muse", "opencode", "kimi", "gemini", "glm"):
+        # executor by definition and wins over any hint.
+        for tool in ("tier_s", "tier_c", "codex", "muse"):
             with self.subTest(tool=tool):
-                selected = await self.router.select_agent(
-                    title=message,
-                    description=message,
-                    agent_hint="pm",
-                    project_config=project_config,
-                    coding_tool=tool,
-                )
-                self.assertEqual(selected, AgentName.DEV)
+                self.assertEqual(
+                    self.router.resolve_explicit("pm", tool), AgentName.DEV)
 
-    async def test_no_coding_tool_keeps_previous_behavior(self) -> None:
-        message = "El cliente quiere login con Google, roles admin y dashboard de auditoría."
-        project_config = {"routing": {"llm_fallback": False}}
-
+    def test_blank_coding_tool_defers_to_hint(self) -> None:
         for tool in (None, "", "   "):
             with self.subTest(tool=tool):
-                selected = await self.router.select_agent(
-                    title=message,
-                    description=message,
-                    project_config=project_config,
-                    coding_tool=tool,
-                )
-                self.assertEqual(selected, AgentName.PM)
+                self.assertEqual(
+                    self.router.resolve_explicit("pm", tool), AgentName.PM)
+                self.assertIsNone(self.router.resolve_explicit(None, tool))
 
 
 class RoutingConfigLoaderTests(unittest.TestCase):
-    def test_project_defaults_include_routing_schema(self) -> None:
+    def test_project_defaults_carry_no_routing_block(self) -> None:
+        # Deliberate contract change (TASK-2026-00204): the keyword
+        # routing block (triggers/patterns/default_agent/llm_fallback)
+        # retired with the classifying router. dev.routing (the 00161
+        # money guide) lives on, tested in test_routing_money_sensitive.
         loader = ConfigLoader(Settings(DEEPSEEK_API_KEY="", PROJECTS_DIR="projects", DEFAULT_PROJECT="jardal-openceo"))
 
         config = loader.load_project("jardal-openceo")
 
-        self.assertIn("routing", config)
-        self.assertEqual(config["routing"]["default_agent"], "dev")
-        self.assertIn("pm", config["routing"]["agents"])
-        self.assertIn("entrevista", config["routing"]["agents"]["pm"]["triggers"])
+        self.assertNotIn("routing", config)
+
+    def test_top_level_routing_block_is_rejected(self) -> None:
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            root.mkdir(parents=True)
+            (root / "project.yaml").write_text(
+                "routing:\n  default_agent: dev\n", encoding="utf-8")
+            loader = ConfigLoader(Settings(_env_file=None,
+                                            PROJECTS_DIR=str(tmp)))
+            errors = loader.validate_project("proj")
+        self.assertTrue(any("routing is obsolete" in err for err in errors),
+                        errors)
 
 
 class PMStateRoutingTests(unittest.IsolatedAsyncioTestCase):

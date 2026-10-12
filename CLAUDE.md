@@ -122,14 +122,14 @@ Contrato vigente: épico TASK-2026-00187, sección «Agentes por rol» de `docs/
 - El ticket se marca en `status: waiting` con `phase: <permission>` (ej. `qa_review`).
 - Al aprobar la acción desde la UI/API (`create_phase_action`), el motor reanuda el workflow automáticamente ejecutando los pasos restantes sin reiniciar.
 
-### Planner único de objetivos (global)
-- El único que decide qué tickets deben existir para un Objetivo: Muse Code headless, un run fresco por ciclo, salida `PlannerResult` validada (Pydantic + validación determinista).
+### Planner único (global)
+- El único que decide todo el trabajo: para un Objetivo, qué tickets deben existir; para un pedido (ticket suelto sin decisión explícita), si es ticket u objetivo, el agente, la skill sugerida y, para dev, el tier. Muse Code headless, un run fresco por ciclo, salida `PlannerResult` validada (Pydantic + validación determinista). Las peticiones explícitas solo se validan contra el catálogo.
 - Normativo único: `openceo-core/objectives/routing_policy.md` (núcleo; el detalle por agente vive en `openceo-core/objectives/routing_policy.d/`). El porqué vive en el vault (`decisions/2026-10-06-objetivo-unico-ceo-autonomo`).
 - Sustituye a `claudej`/`TICKETS.yaml` (TASK-2026-00112; motor en `openceo-core/objectives/`, TASK-2026-00117).
 - El plan Claude/Codex de un ticket Tier S planifica cómo implementar ese ticket, no es un segundo planner; tampoco lo es el orden determinista del día en Horizon.
 
 ### Dev Tier S (Consenso Crítico Multi-IA)
-- Se activa enviando `"coding_tool": "tier_s"` en la raíz del ticket o dentro de `params` (routing per-task; `dev.coding_tool` en `project.yaml` está obsoleto).
+- Se activa enviando `"coding_tool": "tier_s"` en la raíz del ticket o dentro de `params` (routing per-task; `dev.coding_tool` en `project.yaml` está obsoleto), o cuando el planner único lo decide para un pedido.
 - **Criterio de selección (Owner, 2026-10-09)**: S se elige cuando orquestar varios modelos independientes dará un resultado materialmente más correcto, en **cualquier dominio**. Dinero, pagos y auth son ejemplos, no la lista; un pedido explícito de máxima garantía, de casi cero fallas o de orquestación multi-modelo también basta. Sin cupo por porcentaje (política §19–§20).
 - Orquesta: Planner (`claudej`), Plan Reviewer (`codexj` no bloqueante), Builder y Closer (procesos one-shot `musej`), árbitro (`claudej`), y pool de revisores con quorum por familias en 2 rondas (slots vigentes en `config_loader.py`).
 

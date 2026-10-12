@@ -10,7 +10,8 @@ promote): the numeric tiers, the pre-v2 provider values and the
 ``params``/``project``/``tier`` fallback sources, together with the ingest
 normalization and the one-shot migration. New code must never write them;
 stale values resolve to ``None`` so the caller waits with
-``routing_missing`` (or the loose classifier assigns a tier at dispatch).
+``routing_missing`` (or explicit dev takes the safe C default at
+dispatch, TASK-2026-00204).
 """
 
 from __future__ import annotations
@@ -48,8 +49,8 @@ class RoutingDecision:
     """Result of :func:`resolve_coding_tool`.
 
     ``source`` is ``root`` (top-level field, the only source),
-    ``loose_classifier`` (built by the dispatcher, not the resolver) or
-    ``none``.
+    ``explicit_default`` (built by the dev session for explicit dev
+    without a tier, not the resolver) or ``none``.
     """
 
     tool: CodingTool | None

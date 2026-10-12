@@ -508,8 +508,8 @@ def _ceo_prompt(
             "without a measurable KPI yields a report, never new work.",
             "- Unknown is null: never invent readings, tickets, or "
             "owners. An unreadable source narrows what you may decide.",
-            "- No tier field anywhere: loose tickets self-classify at "
-            "dispatch; the planner tiers objective children.",
+            "- No tier field anywhere: the single planner decides loose "
+            "tickets before dispatch and tiers objective children.",
             "- create_project only carries key/display/description: the "
             "project workflow resolves spend (it escalates by itself "
             "when the mandate says so).",

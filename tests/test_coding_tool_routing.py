@@ -137,9 +137,6 @@ class DispatcherRoutingTests(unittest.IsolatedAsyncioTestCase):
         return DevSessionManager(settings, loader, repo=repo)
 
     async def test_objective_child_without_tier_waits_without_dispatch(self) -> None:
-        # Deliberate contract change (TASK-2026-00137): loose tickets without
-        # a tier self-classify at dispatch instead of parking; only objective
-        # children (which must arrive with the planner tier) still wait.
         manager = self._manager()
         manager._step_code = AsyncMock()
         output = await manager.run(_task(objective_id="OBJ-1"), {})
@@ -148,17 +145,29 @@ class DispatcherRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(output.waiting_reason.startswith(ROUTING_MISSING_REASON))
         manager._step_code.assert_not_called()
 
-    async def test_loose_ticket_without_tier_is_classified(self) -> None:
+    async def test_explicit_dev_without_tier_runs_default_c(self) -> None:
+        # Deliberate contract change (TASK-2026-00204): the keyword
+        # classifier is gone. Explicit dev without a tier runs the safe
+        # C default (§25); undecided work waits fail-closed (below) —
+        # the run pre-stage plans every pedido before dispatch.
         manager = self._manager()
         manager._step_code = AsyncMock(return_value=CodingStepResult(
             step={"step": "code", "status": "ok"}, prompt="p", summary="s"))
-        output = await manager.run(_task(), {})
+        output = await manager.run(_task(agent_hint="dev"), {})
         self.assertEqual(output.status, TaskStatus.COMPLETED)
-        # Classifier default is tier_c since TASK-2026-00148.
         self.assertEqual(output.coding_tool, CodingTool.TIER_C)
         assert output.params is not None
         self.assertIn("tier_reason", output.params)
         manager._step_code.assert_awaited_once()
+
+    async def test_loose_ticket_without_decision_waits(self) -> None:
+        manager = self._manager()
+        manager._step_code = AsyncMock()
+        output = await manager.run(_task(), {})
+        self.assertEqual(output.status, TaskStatus.WAITING)
+        assert output.waiting_reason is not None
+        self.assertTrue(output.waiting_reason.startswith(ROUTING_MISSING_REASON))
+        manager._step_code.assert_not_called()
 
     async def test_root_tier_reaches_code_step(self) -> None:
         manager = self._manager()
@@ -171,17 +180,16 @@ class DispatcherRoutingTests(unittest.IsolatedAsyncioTestCase):
         tool_arg = manager._step_code.await_args.args[2]
         self.assertEqual(tool_arg, CodingTool.TIER_B)
 
-    async def test_retired_root_value_self_classifies_as_loose(self) -> None:
-        # Retired values (TASK-2026-00138) do not resolve; on a loose ticket
-        # the dispatch classifier assigns a tier instead of parking.
+    async def test_retired_root_value_waits_without_decision(self) -> None:
+        # Retired values (TASK-2026-00138) do not resolve; without any
+        # other decision the ticket waits fail-closed (TASK-2026-00204).
         manager = self._manager()
-        manager._step_code = AsyncMock(return_value=CodingStepResult(
-            step={"step": "code", "status": "ok"}, prompt="p", summary="s"))
+        manager._step_code = AsyncMock()
         output = await manager.run(_task(coding_tool="opencode"), {})
-        self.assertEqual(output.status, TaskStatus.COMPLETED)
-        self.assertEqual(output.coding_tool, CodingTool.TIER_C)
-        assert output.params is not None
-        self.assertIn("tier_reason", output.params)
+        self.assertEqual(output.status, TaskStatus.WAITING)
+        assert output.waiting_reason is not None
+        self.assertTrue(output.waiting_reason.startswith(ROUTING_MISSING_REASON))
+        manager._step_code.assert_not_called()
 
     async def test_stale_numeric_tier_is_ignored(self) -> None:
         manager = self._manager()

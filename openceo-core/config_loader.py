@@ -94,8 +94,10 @@ class ConfigLoader:
         is top-level ``objectives`` (TASK-2026-00117). The shared review
         machinery is global too: top-level ``review`` content is invalid
         (TASK-2026-00141), and so is the company-wide CEO reviewer:
-        top-level ``ceo`` content is invalid (TASK-2026-00119). The optional
-        ``dev.routing`` tier guide (TASK-2026-00161) is shape-checked.
+        top-level ``ceo`` content is invalid (TASK-2026-00119). The
+        keyword ``routing`` block is obsolete (the single planner
+        decides, TASK-2026-00204). The optional ``dev.routing`` tier
+        guide (TASK-2026-00161) is shape-checked.
         Callers park the project's tickets in ``waiting(config)`` when
         this is non-empty; other projects are unaffected.
         """
@@ -200,6 +202,13 @@ class ConfigLoader:
                             "'secretary.allowed_recipients' entries run at "
                             "most 254 characters."
                         )
+        if "routing" in data:
+            errors.append(
+                "routing is obsolete: the single planner decides every "
+                "pedido (TASK-2026-00204); keyword triggers, patterns, "
+                "default_agent and llm_fallback no longer route anything. "
+                f"Remove it from {project}/project.yaml."
+            )
         dev = data.get("dev")
         if dev is None:
             return errors
@@ -631,101 +640,6 @@ class ConfigLoader:
             },
             "pm": {
                 "default_tool": "langraph",
-            },
-            "routing": {
-                "llm_fallback": True,
-                "default_agent": "dev",
-                "agents": {
-                    "pm": {
-                        "triggers": [
-                            "entrevista",
-                            "requerimiento",
-                            "requerimientos",
-                            "requirements",
-                            "historias de usuario",
-                            "user stories",
-                            "crear tickets",
-                            "genera tickets",
-                            "extrae tickets",
-                        ],
-                        "patterns": [
-                            r"\b(?:crear|generar|extraer)\s+tickets?\b",
-                            r"\bhistorias?\s+de\s+usuario\b",
-                        ],
-                    },
-                    "finance": {
-                        "triggers": [
-                            "invoice",
-                            "bank",
-                            "reconcile",
-                            "transaction",
-                            "payment",
-                            "pago",
-                            "pagar",
-                            "factura",
-                            "finanzas",
-                            "elfec",
-                            "luz",
-                            "gasto",
-                            "gastos",
-                            "registra",
-                            "registrar",
-                            "anota",
-                            "anotar",
-                            "bs",
-                            "bolivianos",
-                            "boliviano",
-                        ],
-                        "patterns": [],
-                    },
-                    "secretary": {
-                        "triggers": [
-                            "email",
-                            "correo",
-                            "calendar",
-                            "calendario",
-                            "meeting",
-                            "reunion",
-                            "reunión",
-                            "follow-up",
-                            "seguimiento",
-                            "outreach",
-                        ],
-                        "patterns": [],
-                    },
-                    "sales": {
-                        "triggers": [
-                            "lead",
-                            "crm",
-                            "quotation",
-                            "cotizacion",
-                            "cotización",
-                            "whatsapp",
-                            "prospect",
-                        ],
-                        "patterns": [],
-                    },
-                    "marketing": {
-                        "triggers": [
-                            "campaign",
-                            "ad",
-                            "social",
-                            "seo",
-                            "content calendar",
-                        ],
-                        "patterns": [],
-                    },
-                    "media": {
-                        "triggers": [
-                            "video",
-                            "image",
-                            "music",
-                            "publish",
-                            "creative",
-                        ],
-                        "patterns": [],
-                    },
-                },
             },
             "finance": {
                 "workflows": [],
