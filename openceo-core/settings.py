@@ -167,7 +167,6 @@ class Settings(BaseSettings):
     WEBSOCKET_PATH: str = "/ws"
     MCP_SERVER_ENABLED: bool = True
     MCP_SERVER_PATH: str = "/internal/mcp"
-    MCP_GLOBAL_PATH: str = "/internal/mcp-global"
     MCP_SERVER_TRANSPORT: str = "streamable-http"
     MCP_SERVER_INTERNAL_HOST: str = "127.0.0.1"
     MCP_SERVER_ALLOWED_IPS: str = "127.0.0.1/32,::1/128"

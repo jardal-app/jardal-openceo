@@ -629,18 +629,6 @@ class NewToolBudgetTests(unittest.TestCase):
 
 
 @unittest.skipUnless(FAST_MCP_AVAILABLE, "FastMCP is required")
-class GlobalFallbackTests(unittest.TestCase):
-    def test_global_without_task_service_is_dns_only(self) -> None:
-        from mcp_server import build_global_mcp_mount  # noqa: PLC0415
-
-        settings = Settings(_env_file=None,  # type: ignore[call-arg]
-                            MCP_SERVER_ENABLED=True)
-        mount = build_global_mcp_mount(settings, None)
-        assert mount is not None
-        self.assertEqual(mount.tool_names, ("manage_dns_record",))
-
-
-@unittest.skipUnless(FAST_MCP_AVAILABLE, "FastMCP is required")
 class AnonymousBoxTests(unittest.IsolatedAsyncioTestCase):
     """No token, no badge: the default project-management box (Owner order).
 

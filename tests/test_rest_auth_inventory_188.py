@@ -37,7 +37,7 @@ ALLOWLIST: dict[str, str] = {
 }
 
 # Mounted sub-apps pin: a new mount needs an explicit auth review.
-KNOWN_MOUNTS = frozenset({"/internal/mcp", "/internal/mcp-global"})
+KNOWN_MOUNTS = frozenset({"/internal/mcp"})
 
 # Host-level surface: every method on these prefixes, plus the pinned voice
 # route, must be admin-only. Prefix matching (not a fixed list) so a future

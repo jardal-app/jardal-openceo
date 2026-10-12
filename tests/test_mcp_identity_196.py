@@ -704,6 +704,7 @@ class PMTokenWiringTests(unittest.IsolatedAsyncioTestCase):
         args = list(captured["args"])  # type: ignore[arg-type]
         override = next(
             a for a in args if "bearer_token_env_var" in str(a))
+        self.assertTrue(override.startswith("mcp_servers.openceo-internal."))
         env = captured["kwargs"]["env"]  # type: ignore[index]
         var = override.split("=", 1)[1].strip().strip('"')
         grant = await issuer.authenticate(env[var])
