@@ -172,11 +172,11 @@ class PlanAgentTests(unittest.TestCase):
         plan = self._plan()
         argv = plan.argv
         blob = "\n".join(argv)
-        for mounted in (".codex", ".config", ".local/bin/muse",
+        for mounted in (".codex", ".config/muse", ".local/bin/muse",
                         ".claude.json"):
             self.assertIn(str(self.home / mounted), blob)
         for hidden in ("api_alibaba.txt", "development/org/sibling",
-                       ".ssh/id_ed25519"):
+                       ".ssh/id_ed25519", ".config/gh"):
             self.assertNotIn(hidden, blob)
 
     def test_symlinked_motor_resolves(self) -> None:
@@ -192,7 +192,7 @@ class PlanAgentTests(unittest.TestCase):
     def test_secret_dirs_shadowed(self) -> None:
         plan = self._plan()
         argv = plan.argv
-        for shadowed in (".dsh/sessions", ".config/gh",
+        for shadowed in (".dsh/sessions",
                          ".local/share/opencode", ".local/share/muse",
                          ".cache", ".npm", ".ssh"):
             target = str(self.home / shadowed)
@@ -287,6 +287,70 @@ class PlanAgentTests(unittest.TestCase):
         self.assertTrue(argv[idx - 1].endswith("dsh-headless"))
         mirror = Path(argv[idx - 1]) / "cordis.yml"
         self.assertEqual(mirror.read_text(), "boot: 1\n")
+
+    def test_nested_env_masked_examples_readable(self) -> None:
+        nested = self.ws / "openceo-core"
+        nested.mkdir()
+        (nested / ".env").write_text("K=V")
+        (nested / ".env.example").write_text("K=")
+        (nested / ".env.finance.local").write_text("K=V")
+        pruned = self.ws / ".venv" / "lib"
+        pruned.mkdir(parents=True)
+        (pruned / ".env").write_text("K=V")
+        deep_rt = self.ws / "sub" / ".runtime"
+        deep_rt.mkdir(parents=True)
+        plan = self._plan()
+        blob = "\n".join(plan.argv)
+        self.assertIn(str(nested / ".env"), blob)
+        self.assertIn(str(nested / ".env.finance.local"), blob)
+        self.assertIn(str(deep_rt), blob)
+        self.assertNotIn(".env.example", blob)
+        self.assertNotIn(str(pruned / ".env"), blob)
+
+    def test_config_root_inside_workspace_skipped(self) -> None:
+        tool = self.ws / "tool.sh"
+        tool.write_text("#!/bin/sh\n")
+        plan = self._plan(config_args=[str(tool)])
+        blob = "\n".join(plan.argv)
+        self.assertNotIn("tool.sh", blob)
+
+    def test_config_root_ancestor_of_workspace_skipped(self) -> None:
+        plan = self._plan(config_args=[str(self.root)])
+        blob = "\n".join(plan.argv)
+        self.assertNotIn(f"--ro-bind\n{self.root}\n{self.root}", blob)
+
+    def test_config_symlink_motor_recreated(self) -> None:
+        link = self.home / ".local" / "bin" / "codex"
+        plan = self._plan(config_args=[str(link)])
+        argv = plan.argv
+        real = str(self.home / ".local" / "bin" / "codex-real")
+        self.assertIn(real, argv)
+        idx = argv.index("--symlink")
+        self.assertEqual(argv[idx + 1], real)
+        self.assertEqual(argv[idx + 2], str(link))
+
+    def test_config_symlink_outside_home_not_recreated(self) -> None:
+        target = self.root / "tool-real"
+        target.write_text("x")
+        link = self.root / "tool-link"
+        link.symlink_to(target)
+        plan = self._plan(config_args=[str(link)])
+        argv = plan.argv
+        self.assertIn(str(target), argv)
+        self.assertNotIn(str(link), argv)
+
+    def test_gemini_state_only_for_agy(self) -> None:
+        gemini = self.home / ".gemini"
+        (gemini / "history").mkdir(parents=True)
+        (gemini / "state.json").write_text("{}")
+        (gemini / "google_accounts.json").write_text("{}")
+        plain = self._plan(argv=["muse", "exec"])
+        self.assertNotIn("gemini-state.json", "\n".join(plain.argv))
+        agy = self._plan(argv=["agyd", "--print", "hi"])
+        blob = "\n".join(agy.argv)
+        self.assertIn(str(gemini / "history"), blob)
+        self.assertIn("gemini-state.json", blob)
+        self.assertIn("gemini-google_accounts.json", blob)
 
     def test_bad_extra_op_fails_closed(self) -> None:
         from research.runtimes.isolation import BubblewrapBackend
@@ -405,6 +469,24 @@ class SandboxComponentTests(unittest.TestCase):
         self.assertIn("WS-WRITABLE", out)
         self.assertIn("42", out)
 
+    def test_nested_env_unreadable_in_checkout_like_workspace(self) -> None:
+        import os
+        import tempfile
+        home = Path(os.path.expanduser("~"))
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp) / "ws"
+            core = ws / "openceo-core"
+            core.mkdir(parents=True)
+            (core / ".env").write_text("K=secret\n")
+            (core / ".env.example").write_text("K=\n")
+            proc = self._run(
+                ["sh", "-c",
+                 "echo NESTED-BEGIN; cat openceo-core/.env 2>/dev/null; "
+                 "echo NESTED-END; cat openceo-core/.env.example 2>/dev/null"],
+                ws, {"PATH": "/usr/bin:/bin", "HOME": str(home)})
+        self.assertNotIn("K=secret", proc.stdout)
+        self.assertIn("K=", proc.stdout)
+
     def test_dns_resolves_inside(self) -> None:
         import os
         import tempfile
@@ -440,7 +522,9 @@ class SandboxComponentTests(unittest.TestCase):
         for binary, args in (("codex", ["--version"]),
                              ("claude", ["--version"]),
                              ("qwen", ["--version"]),
-                             ("opencode", ["--version"])):
+                             ("opencode", ["--version"]),
+                             ("agy", ["--version"]),
+                             ("kimi", ["--version"])):
             if shutil.which(binary) is not None:
                 cases.append(([binary, *args], {}))
         harness = (home / "development/Jardal/jardal-deepseek-harness"
@@ -586,6 +670,32 @@ class PMFenceTests(unittest.IsolatedAsyncioTestCase):
         leftovers = list((runtime_base_dir() / "agent-work").glob("pm-*"))
         self.assertEqual(leftovers, [])
 
+    async def test_ticket_dir_failure_is_envelope(self) -> None:
+        from unittest.mock import patch
+        from config_loader import ConfigLoader
+        from settings import Settings
+        from state import TaskStatus
+        from agents.pm.session import PMSessionManager
+        settings = Settings(PROJECTS_DIR="projects",
+                            DEFAULT_PROJECT="jardal-openceo",
+                            MCP_SERVER_ENABLED=True)
+        manager = PMSessionManager(settings,
+                                   config_loader=ConfigLoader(settings))
+
+        class FakeTaskService:
+            async def create_task(self, req):
+                return {"task_id": "task-1", "status": "queued"}
+
+        from mcp_identity import MemoryTokenStore, TokenIssuer
+        manager.set_task_service(FakeTaskService())
+        manager.set_token_issuer(TokenIssuer(MemoryTokenStore(), {}))
+        with patch("orchestration.agent_sandbox.ensure_ticket_dir",
+                   side_effect=OSError("disk full")):
+            result = await manager.extract_tickets_subprocess(
+                interview_text="hola", project="melanyryr", tool="codex")
+        self.assertEqual(result.status, TaskStatus.FAILED)
+        self.assertIn("ticket dir refused", result.error)
+
 
 @unittest.skipUnless(BWRAP_AVAILABLE, "bwrap required (host capability)")
 class TmuxRestartFenceTests(unittest.TestCase):
@@ -601,6 +711,114 @@ class TmuxRestartFenceTests(unittest.TestCase):
         self.assertIn("env -i ", line)
         self.assertIn(" bwrap ", line)
         self.assertIn("MUSE_NO_AUTO_UPDATE=1", line)
+
+
+class TmuxShellDefaultsTests(unittest.TestCase):
+    def test_term_lang_default_when_missing(self) -> None:
+        import tempfile
+        from unittest.mock import patch
+        from orchestration import agent_sandbox
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = _fake_home(root)
+            ws = root / "ws"
+            ws.mkdir()
+            with patch.object(agent_sandbox.BubblewrapBackend,
+                              "available", True):
+                bare = agent_sandbox.sandboxed_shell_command(
+                    command=["muse"], workspace=ws,
+                    base={"PATH": "/bin", "HOME": str(home)}, home=home)
+                kept = agent_sandbox.sandboxed_shell_command(
+                    command=["muse"], workspace=ws,
+                    base={"PATH": "/bin", "HOME": str(home),
+                          "TERM": "xterm", "LANG": "en_US.UTF-8"},
+                    home=home)
+        self.assertIn("TERM=tmux-256color", bare)
+        self.assertIn("LANG=C.UTF-8", bare)
+        self.assertIn("TERM=xterm", kept)
+        self.assertIn("LANG=en_US.UTF-8", kept)
+
+    def test_start_failure_orphans_no_session(self) -> None:
+        import tempfile
+        from unittest.mock import MagicMock, patch
+        from agents.dev.tmux_runtime import TmuxRuntime
+        from settings import Settings
+        from state import DevProvider
+        runtime = TmuxRuntime(Settings())
+        from research.runtimes.base import IsolationUnavailable
+        with tempfile.TemporaryDirectory() as tmp:
+            server = MagicMock()
+            runtime._server = server
+            with patch.object(
+                    TmuxRuntime, "has_session_name", return_value=False):
+                from orchestration import agent_sandbox
+                with patch.object(agent_sandbox.BubblewrapBackend,
+                                  "available", False):
+                    with self.assertRaises(IsolationUnavailable):
+                        runtime.start_session(
+                            project="p", provider=DevProvider.MUSE,
+                            command=["muse"], cwd=tmp)
+        server.new_session.assert_not_called()
+
+
+class RateMonitorFenceTests(unittest.TestCase):
+    def _monitor(self, server):
+        from unittest.mock import patch
+        from settings import Settings
+        import rate_monitor
+        monitor = rate_monitor.RateMonitor(Settings(
+            CODEXJ_CLI_PATH="/bin/echo-codex",
+            CLAUDE_CODE_PATH="/bin/echo-claude",
+            MUSE_CLI_PATH="/bin/echo-muse"))
+        monitor._server = server
+        return monitor
+
+    def test_create_types_fenced_line(self) -> None:
+        import tempfile
+        from unittest.mock import MagicMock, patch
+        from orchestration import agent_sandbox
+        server = MagicMock()
+        server.sessions.get.return_value = None
+        pane = MagicMock()
+        session = MagicMock()
+        session.active_window.active_pane = pane
+        server.new_session.return_value = session
+        monitor = self._monitor(server)
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "work"
+            with patch.object(agent_sandbox.BubblewrapBackend,
+                              "available", True), \
+                 patch.object(agent_sandbox, "runtime_base_dir",
+                              return_value=base), \
+                 patch("rate_monitor.time.sleep"):
+                got = monitor._get_or_create_monitor_session("muse")
+        self.assertIs(got, session)
+        line = pane.send_keys.call_args[0][0]
+        self.assertIn("env -i ", line)
+        self.assertIn(" bwrap ", line)
+        self.assertIn("dev-monitor-muse", monitor._owned_sessions)
+
+    def test_prefence_session_reaped_once(self) -> None:
+        from unittest.mock import MagicMock, patch
+        from orchestration import agent_sandbox
+        stale = MagicMock()
+        server = MagicMock()
+        server.sessions.get.return_value = stale
+        fresh = MagicMock()
+        server.new_session.return_value = fresh
+        monitor = self._monitor(server)
+        with patch.object(agent_sandbox.BubblewrapBackend,
+                          "available", True), \
+             patch.object(agent_sandbox, "ensure_ticket_dir") as ensured, \
+             patch.object(agent_sandbox, "sandboxed_shell_command",
+                          return_value="env -i bwrap x"), \
+             patch("rate_monitor.time.sleep"):
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmp:
+                ensured.return_value = Path(tmp)
+                monitor._get_or_create_monitor_session("codex")
+        stale.kill_session.assert_called_once_with()
+        self.assertIn("dev-monitor-codex", monitor._owned_sessions)
 
 
 if __name__ == "__main__":

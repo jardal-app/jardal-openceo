@@ -122,6 +122,17 @@ class TmuxRuntime:
         # Create tmux session with a plain shell first (survives if command exits)
         start_dir = cwd or os.getcwd()
 
+        # Fence first: a plan failure must not orphan a live session.
+        if command:
+            from orchestration.agent_sandbox import sandboxed_shell_command
+            shell_cmd = sandboxed_shell_command(
+                command=[str(token) for token in command],
+                workspace=start_dir, base=os.environ,
+                overlay=dict(env or {}),
+                config_args=[str(token) for token in command])
+        else:
+            shell_cmd = ""
+
         session = self.server.new_session(
             session_name=name,
             start_directory=start_dir,
@@ -137,16 +148,10 @@ class TmuxRuntime:
         # Launch the interactive provider command inside the shell,
         # fenced: clean env + bwrap (CLI shell escapes inherit the fence).
         pane = session.active_window.active_pane
-        if command:
-            from orchestration.agent_sandbox import sandboxed_shell_command
-            shell_cmd = sandboxed_shell_command(
-                command=[str(token) for token in command],
-                workspace=start_dir, base=os.environ,
-                overlay=dict(env or {}),
-                config_args=[str(token) for token in command])
+        if shell_cmd:
+            # No scratch cleanup here: the pane execs async, so sources
+            # must outlive this call (review H7 stays bytes on disk).
             pane.send_keys(shell_cmd, enter=True)
-        else:
-            shell_cmd = ""
 
         self._sessions[project] = _SessionInfo(
             project=project,
