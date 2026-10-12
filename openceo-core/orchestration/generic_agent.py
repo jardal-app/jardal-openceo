@@ -7,6 +7,9 @@ Two paths, no silent reclassification:
   runs it, the LLM is never invoked;
 * LLM: one fenced Muse run with the role profile (card, skills, tool
   box badge), the ticket folder and the structured verdict schema.
+  Skilled runs stage their skill links into the ticket folder and mount
+  the repo read-only; creation agents also mount the creation roots
+  writable (TASK-2026-00214).
 
 Verdict semantics belong to TASK-2026-00202: hecho completes, bloqueado
 and no_aplica fail with the verdict stored (objective children return
@@ -22,6 +25,7 @@ ERPNext; the agent never changes ticket states.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,7 +49,11 @@ from objectives.agent_result import (
 )
 from orchestration.agent_sandbox import ensure_ticket_dir
 from orchestration.live import ProcessExecutor
-from orchestration.role_muse import TicketBadgeProvider, issuer_for_repo
+from orchestration.role_muse import (
+    TicketBadgeProvider,
+    badge_ticket_for_task,
+    issuer_for_repo,
+)
 from state import TaskStatus
 
 logger = logging.getLogger(__name__)
@@ -59,7 +67,9 @@ __all__ = [
     "default_executor_factory",
     "muse_role_spec",
     "resolve_exact_skill_path",
+    "role_extra_mounts",
     "run_generic_agent",
+    "stage_skill_links",
 ]
 
 #: The exact part of a skill: when present, the skill runs deterministically.
@@ -110,6 +120,69 @@ def resolve_exact_skill_path(
     skill_dir = base if base.is_absolute() else root / base
     candidate = skill_dir / EXACT_SKILL_WORKFLOW_FILENAME
     return candidate if candidate.is_file() else None
+
+
+#: Agents allowed writable creation roots (operations creates projects;
+#: later migrations extend the map in their own ticket).
+_WRITABLE_ROOT_AGENTS = frozenset({"operations"})
+
+
+def stage_skill_links(ticket_dir: str | Path,
+                      skills: Mapping[str, Any]) -> list[str]:
+    """Expose the agent's skills where the run discovers them.
+
+    Muse discovers project skills under ``.codex/skills/`` from the cwd,
+    so each skill source links there (host side, before the fence; the
+    repo mounts read-only and the links resolve inside). A stale link is
+    replaced; a real file or dir blocking the name is left alone, never
+    deleted. Returns the staged skill names.
+    """
+    base = Path(ticket_dir) / ".codex" / "skills"
+    staged: list[str] = []
+    for name, skill in skills.items():
+        source = Path(str(getattr(skill, "source", "")))
+        if not name or not source.is_absolute() or not source.is_dir():
+            continue
+        link = base / name
+        try:
+            if link.is_symlink():
+                if os.path.realpath(link) == os.path.realpath(source):
+                    staged.append(name)
+                    continue
+                link.unlink()
+            elif link.exists():
+                logger.warning("skill link %s blocked by a real path",
+                               link)
+                continue
+            base.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(source)
+        except OSError as exc:
+            logger.warning("skill link %s failed: %s", link, exc)
+            continue
+        staged.append(name)
+    return staged
+
+
+def role_extra_mounts(agent_name: str, *, has_skills: bool,
+                      settings: Any) -> tuple[list[str], list[str]]:
+    """Fence mounts for one generic run: ``(read_roots, write_roots)``.
+
+    Skilled runs read the repo (skill sources plus the service modules
+    the skill scripts import); only creation agents write the creation
+    roots. Same absolute paths inside and outside, so skill defaults
+    just work.
+    """
+    read: list[str] = []
+    write: list[str] = []
+    if has_skills:
+        read.append(str(catalog_root().parent))
+    if agent_name in _WRITABLE_ROOT_AGENTS:
+        from config_loader import ConfigLoader
+        repos = Path(str(settings.PROJECT_REPOS_ROOT)).expanduser()
+        vault = Path(str(settings.VAULT_ROOT)).expanduser()
+        projects = ConfigLoader(settings).projects_root()
+        write.extend([str(repos), str(projects), str(vault)])
+    return read, write
 
 
 def muse_role_spec(profile: RoleProfile, label: str) -> dict[str, Any]:
@@ -232,7 +305,7 @@ async def run_generic_agent(
             agent_name, task, params, profile, skill_name or "", exact,
             wiring)
     return await _run_llm(agent_name, task, params, profile, skill_name,
-                          wiring)
+                          wiring, skills)
 
 
 async def _run_exact_skill(
@@ -324,6 +397,7 @@ async def _run_llm(
     agent_name: str, task: dict[str, Any], params: dict[str, Any],
     profile: RoleProfile, skill_name: str | None,
     wiring: GenericAgentWiring,
+    skills: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One fenced Muse run with profile, badge, folder and verdict schema."""
     if wiring.settings is None:
@@ -354,8 +428,20 @@ async def _run_llm(
                                               is not None else None))
     except ValueError as exc:
         return _waiting(agent_name, f"config: {exc}", params)
+    stage_skill_links(workdir, skills or {})
+    read_roots, write_roots = role_extra_mounts(
+        agent_name, has_skills=bool(skills), settings=wiring.settings)
+    if read_roots:
+        spec["extra_read_roots"] = read_roots
+    if write_roots:
+        spec["extra_write_roots"] = write_roots
+    badge_ticket = badge_ticket_for_task(task)
+    if badge_ticket is None and wiring.badge_provider_factory is None:
+        return _waiting(agent_name,
+                        "config: agent badges bind to the ERPNext mirror "
+                        "ticket and this task has none", params)
     factory = wiring.executor_factory or default_executor_factory
-    provider = badge_factory(agent_name, task_id,
+    provider = badge_factory(agent_name, badge_ticket or task_id,
                              str(task.get("project") or ""))
     executor = factory(agent_name, spec, provider)
     prompt = build_agent_prompt(profile, task, skill=skill_name)

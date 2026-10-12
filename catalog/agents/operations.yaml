@@ -1,15 +1,22 @@
-# Agent card: operations (disabled until executor + skill).
+# Agent card: operations (enabled with the create-project skill).
 name: operations
 type: ai
 engine: muse-code
 profile: profiles/operations.yaml
-boundary_tools: []
+boundary_tools:
+  - openceo_search_tickets
+  - openceo_get_ticket
+  - openceo_add_ticket_comment
+  - openceo_attach_ticket_file
+  - openceo_ensure_erpnext_project
+  - manage_dns_record
 skills_dir: skills/operations
-skills: []
+skills:
+  - crear-proyecto
 inputs:
   - ticket with project spec
 outputs:
   - created project (ERPNext, repo, config, vault, DNS)
-enabled: false
-disabled_reason: enabled once it has a generic executor (TASK-2026-00205) and the create-project skill (TASK-2026-00214)
-decided_by_ticket: TASK-2026-00214
+enabled: true
+disabled_reason: null
+decided_by_ticket: null

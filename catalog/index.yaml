@@ -9,7 +9,7 @@ agents:
     summary: Decides, approves, answers and does. Never receives plans.
     card: agents/owner.yaml
   - name: operations
-    summary: Creates company projects end to end. Disabled until it has an executor and a skill.
+    summary: Creates company projects end to end.
     card: agents/operations.yaml
   - name: secretary
     summary: Sends email and coordinates lightly. Disabled until migrated.

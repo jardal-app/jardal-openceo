@@ -38,6 +38,7 @@ from orchestration.role_muse import (
     ObjectiveBadgeProvider,
     RoleProfileError,
     TicketBadgeProvider,
+    badge_ticket_for_task,
     issuer_for_repo,
     render_argv_extras,
     render_card_argv,
@@ -729,7 +730,8 @@ class DevSessionManager:
                 "keep HANDOFF.md truthful. Never edit the frozen oracle "
                 "files: fix the code under test.",
                 task_id=str(task.get("task_id") or ""),
-                project=str(task.get("project") or ""))
+                project=str(task.get("project") or ""),
+                badge_ticket=badge_ticket_for_task(task) or "")
             # The retry saw the failing oracle's output: re-verify its hashes
             # before running the gates again (a "fix" by editing the test is
             # the oracle being redefined).
@@ -762,7 +764,8 @@ class DevSessionManager:
                 "Write .tier-s/HANDOFF.md (executor sections ≤300 words). "
                 "Do not touch code.",
                 task_id=str(task.get("task_id") or ""),
-                project=str(task.get("project") or ""))
+                project=str(task.get("project") or ""),
+                badge_ticket=badge_ticket_for_task(task) or "")
             try:
                 handoff = handoff_path.read_text(
                     encoding="utf-8", errors="replace")
@@ -880,6 +883,7 @@ class DevSessionManager:
         *,
         task_id: str = "",
         project: str = "",
+        badge_ticket: str = "",
     ) -> None:
         """One follow-up turn on the work branch (gate/handoff fixes)."""
         prompt = with_preamble(prompt, repo, detect_prompt_lang(prompt))
@@ -897,7 +901,8 @@ class DevSessionManager:
         badge: str | None = None
         badge_provider: TicketBadgeProvider | None = None
         if executor.label == "tier_c:muse":
-            badge_provider = self._ticket_badge_provider(task_id, project)
+            badge_provider = self._ticket_badge_provider(
+                badge_ticket, project)
             if badge_provider is None:
                 logger.error("follow-up refused without repository: %s",
                              task_id or "unknown task")
@@ -1210,9 +1215,10 @@ class DevSessionManager:
         project = str(task.get("project") or "")
         badge_provider: TicketBadgeProvider | None = None
         cycle_issuer = issuer_for_repo(self._repo)
-        if cycle_issuer is not None and task_id and project:
+        badge_ticket = badge_ticket_for_task(task)
+        if cycle_issuer is not None and badge_ticket and project:
             badge_provider = TicketBadgeProvider(
-                cycle_issuer, self._settings, "dev", task_id, project)
+                cycle_issuer, self._settings, "dev", badge_ticket, project)
         executor = ProcessExecutor(
             roles=cycle_cfg["roles"], pool=cycle_cfg["reviewers"],
             badge_provider=badge_provider)
@@ -1231,9 +1237,10 @@ class DevSessionManager:
         repo = self._repo
         obj_provider: ObjectiveBadgeProvider | None = None
         obj_issuer = issuer_for_repo(repo)
-        if obj_issuer is not None and task_id and project:
+        if obj_issuer is not None and project:
             obj_provider = ObjectiveBadgeProvider(
-                obj_issuer, self._settings, project, ticket=task_id)
+                obj_issuer, self._settings, project,
+                ticket=badge_ticket_for_task(task))
         obj_env = self._objective_env_for(
             project_config, Path(repo_path),
             objectives_process_executor(
@@ -1390,14 +1397,22 @@ class DevSessionManager:
         return await create_internal_ticket(self._task_service, payload)
 
     def _ticket_badge_provider(
-        self, task_id: str, project: str,
+        self, badge_ticket: str, project: str,
     ) -> TicketBadgeProvider | None:
-        """Ticket badge provider, None when the manager is unbound."""
+        """Ticket badge provider; None when unbound or ticketless.
+
+        The badge binds to the business ticket (``TASK-2026-NNNNN``),
+        never to the Mongo uuid: the issuer refuses anything else
+        (TASK-2026-00214). Callers resolve it with
+        :func:`badge_ticket_for_task`.
+        """
         issuer = issuer_for_repo(self._repo)
         if issuer is None:
             return None
+        if not (badge_ticket or "").strip() or not (project or "").strip():
+            return None
         return TicketBadgeProvider(
-            issuer, self._settings, "dev", task_id, project)
+            issuer, self._settings, "dev", badge_ticket.strip(), project)
 
     async def _muse_role_overlays(
         self,
@@ -1465,9 +1480,9 @@ class DevSessionManager:
         badge: str | None = None
         badge_provider: TicketBadgeProvider | None = None
         if executor.label == "tier_c:muse":
-            task_id = str(task.get("task_id") or "")
             project = str(task.get("project") or "")
-            badge_provider = self._ticket_badge_provider(task_id, project)
+            badge_provider = self._ticket_badge_provider(
+                badge_ticket_for_task(task) or "", project)
             if badge_provider is None:
                 detail = "role badge needs a bound repository"
                 return CodingStepResult(

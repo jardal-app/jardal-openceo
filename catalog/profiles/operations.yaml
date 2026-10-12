@@ -13,4 +13,5 @@ card:
 rules: AGENTS.md
 skills:
   - create-skill
+  - crear-proyecto
 output_schema: openceo-core/objectives/agent_result.schema.json

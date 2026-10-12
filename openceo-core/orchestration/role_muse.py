@@ -40,6 +40,7 @@ __all__ = [
     "ServiceBadgeProvider",
     "SessionMeasure",
     "TicketBadgeProvider",
+    "badge_ticket_for_task",
     "check_pinned_version",
     "dev_box_tools",
     "enumerate_skills",
@@ -462,6 +463,21 @@ def _provider_servers(settings: Any, badge: str) -> dict[str, Any]:
     if not config:
         return {}
     return dict(config.get("mcpServers") or {})
+
+
+def badge_ticket_for_task(task: Mapping[str, Any]) -> str | None:
+    """ERPNext ticket name for an agent badge, None without a mirror.
+
+    Agent badges bind to the business ticket (``TASK-2026-NNNNN``), never
+    to the Mongo ``task_id`` uuid: the issuer refuses anything else, and
+    only the business name matches the ticket params agents call with.
+    """
+    params = task.get("params")
+    mirrors = params.get("_mirrors") if isinstance(params, dict) else None
+    mirror = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
+    name = str(mirror.get("name") or "").strip() \
+        if isinstance(mirror, dict) else ""
+    return name or None
 
 
 class TicketBadgeProvider:

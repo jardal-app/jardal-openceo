@@ -122,7 +122,7 @@ def valid_cards() -> dict[str, dict[str, Any]]:
 
 
 class RealCatalogTest(unittest.TestCase):
-    """The shipped catalog loads and matches the epic's initial state."""
+    """The shipped catalog loads; the enabled set grows per migration."""
 
     def test_loads(self):
         catalog = load_catalog()
@@ -132,11 +132,11 @@ class RealCatalogTest(unittest.TestCase):
              "research", "pm", "marketing", "sales", "media"},
             set(catalog.agents))
 
-    def test_initial_enabled_set(self):
+    def test_enabled_set(self):
         catalog = load_catalog()
         enabled = {name for name, card in catalog.agents.items()
                    if card.enabled}
-        self.assertEqual({"dev", "owner"}, enabled)
+        self.assertEqual({"dev", "owner", "operations"}, enabled)
 
     def test_owner_card(self):
         owner = load_catalog().agents["owner"]

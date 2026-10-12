@@ -7,7 +7,10 @@ opencode QA, live tmux panes) runs inside this fence:
 * files: bubblewrap over :class:`BubblewrapBackend` with an agent profile —
   system read-only, motor/toolchain paths read-only, the ticket workspace
   read-write, private /tmp, own pid namespace, shared network (motors and
-  the local MCP need it);
+  the local MCP need it). Declared extra roots (the repo read-only for
+  skilled runs, writable creation roots for operations) mount
+  depth-ordered with the same secret masking, and the workspace rebinds
+  read-write when an extra root covers it;
 * secrets: anything not allowlisted is simply not mounted (ssh keys, gh/aws
   credentials, pasted token files, sibling checkouts, the vault, foreign
   /tmp, the service ``.env``/``.runtime``).
@@ -379,6 +382,34 @@ def _home_ops(home: Path, opencode_state_rw: bool) -> list[list[str]]:
     return ops
 
 
+def _checked_extra_root(raw: str | Path, home: Path, kind: str) -> Path:
+    """One declared extra root, resolved. Refuses anything unusable."""
+    try:
+        resolved = Path(str(raw)).expanduser().resolve()
+    except OSError as exc:
+        raise ValueError(
+            f"extra {kind} root {raw!r} is unusable: {exc}") from exc
+    if not resolved.is_dir():
+        raise ValueError(f"extra {kind} root is not a dir: {resolved}")
+    try:
+        home_dir = home.resolve()
+    except OSError:
+        home_dir = home
+    if resolved == Path("/") or resolved == home_dir:
+        raise ValueError(f"extra {kind} root {resolved} is too broad")
+    return resolved
+
+
+def _prune_contained(roots: list[Path]) -> list[Path]:
+    """Drop roots another root already covers (walk each tree once)."""
+    pruned: list[Path] = []
+    for root in sorted(roots, key=lambda path: len(path.parts)):
+        if any(root == kept or kept in root.parents for kept in pruned):
+            continue
+        pruned.append(root)
+    return pruned
+
+
 def plan_agent(
     *,
     argv: Sequence[str],
@@ -389,6 +420,8 @@ def plan_agent(
     home: Path | None = None,
     opencode_state_rw: bool = False,
     home_file_overlays: Mapping[str, bytes | str] | None = None,
+    extra_read_roots: Sequence[str | Path] = (),
+    extra_write_roots: Sequence[str | Path] = (),
 ) -> IsolationPlan:
     """Fenced argv/env/cwd for one agent run. Raises IsolationUnavailable.
 
@@ -396,6 +429,11 @@ def plan_agent(
     home-relative paths (role settings, TASK-2026-00197): each value is
     written 0600 into the run scratch (cleaned with it) and bound
     read-only after the home mounts, so it shadows them per run.
+
+    ``extra_read_roots``/``extra_write_roots`` mount declared trees
+    (TASK-2026-00214): shallow first so narrow mounts shadow broad ones,
+    the workspace rebound read-write when one covers it, secret masks
+    over every extra root. A missing or too-broad root refuses the run.
     """
     backend = BubblewrapBackend()
     if not backend.available:
@@ -419,12 +457,30 @@ def plan_agent(
     common = _git_common_dir(workdir)
     if common is not None:
         ops.append(["--ro-bind", str(common), str(common)])
+    extras = [(_checked_extra_root(raw, host_home, "read"), False)
+              for raw in extra_read_roots]
+    extras += [(_checked_extra_root(raw, host_home, "write"), True)
+               for raw in extra_write_roots]
+    extras.sort(key=lambda item: len(item[0].parts))
+    for path, writable in extras:
+        ops.append(["--bind" if writable else "--ro-bind",
+                    str(path), str(path)])
+    # The backend binds the workspace before extra_ops: a covering extra
+    # mount would shadow it back to read-only, so rebind it last.
+    try:
+        work_resolved = workdir.resolve()
+    except OSError:
+        work_resolved = workdir
+    if any(path == work_resolved or path in work_resolved.parents
+           for path, _writable in extras):
+        ops.append(["--bind", str(workdir), str(workdir)])
     mask_roots = [workdir]
     for op in config_ops:
         if op[0] == "--ro-bind":
             candidate = Path(op[2])
             if candidate.is_dir():
                 mask_roots.append(candidate)
+    mask_roots.extend(_prune_contained([path for path, _ in extras]))
     for masked in mask_roots:
         for path, is_dir in _iter_nested_secrets(masked):
             if is_dir:
