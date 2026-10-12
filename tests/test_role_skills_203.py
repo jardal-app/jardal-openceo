@@ -41,9 +41,10 @@ from catalog import (  # noqa: E402
     parse_role_skill,
     skills_index_for_planner,
     suggestable_skills,
+    sync_skill_links,
 )
 from objectives import planner_models as planner_mod  # noqa: E402
-from objectives.engine import _agents_section  # noqa: E402
+from objectives.engine import _agents_section, _planner_skills  # noqa: E402
 from objectives.planner_models import (  # noqa: E402
     DevTier,
     ObjectiveStatus,
@@ -350,6 +351,19 @@ class CatalogSkillsCrossCheckTest(unittest.TestCase):
             with self.assertRaisesRegex(CatalogError, "not on the card"):
                 load_catalog(base)
 
+    def test_card_skill_missing_from_profile_rejected(self) -> None:
+        """Review 00005/F2: the profile must load every card skill."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_skill(root / "skills" / "dev", "triage")
+            link_skill(root, "dev", "triage")
+            base = write_catalog(
+                root, {"dev": {"skills": ["triage"],
+                               "profile": "profiles/dev.yaml"}},
+                {"dev": dev_profile(["create-skill"])})
+            with self.assertRaisesRegex(CatalogError, "not loaded"):
+                load_catalog(base)
+
     def test_unlinked_profile_limited_to_engine_skills(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -458,6 +472,49 @@ class SkillLinksTest(unittest.TestCase):
                 [], check_skill_links(self._by_agent(root), root))
 
 
+class SyncSkillLinksTest(unittest.TestCase):
+    """Review 00005/F1: exposure links are local state, recreated by sync."""
+
+    def test_creates_missing_link_with_relative_target(self) -> None:
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_skill(root / "skills" / "dev", "triage")
+            by_agent = {"dev": load_role_skills("dev", "skills/dev", root)}
+            created = sync_skill_links(by_agent, root)
+            link = root / ".codex" / "skills" / "triage"
+            self.assertEqual([".codex/skills/triage"], created)
+            self.assertTrue(link.is_symlink())
+            self.assertFalse(Path(os.readlink(link)).is_absolute())
+            self.assertEqual([], check_skill_links(by_agent, root))
+
+    def test_leaves_existing_link_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_skill(root / "skills" / "dev", "triage")
+            link_skill(root, "dev", "triage")
+            by_agent = {"dev": load_role_skills("dev", "skills/dev", root)}
+            self.assertEqual([], sync_skill_links(by_agent, root))
+            self.assertEqual([], check_skill_links(by_agent, root))
+
+    def test_leaves_dangling_link_for_the_checker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_skill(root / "skills" / "dev", "triage")
+            exposed = root / ".codex" / "skills"
+            exposed.mkdir(parents=True)
+            (exposed / "triage").symlink_to("../../skills/dev/gone")
+            by_agent = {"dev": load_role_skills("dev", "skills/dev", root)}
+            self.assertEqual([], sync_skill_links(by_agent, root))
+            self.assertTrue(check_skill_links(by_agent, root))
+
+    def test_empty_map_creates_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual([], sync_skill_links({}, root))
+            self.assertFalse((root / ".codex").exists())
+
+
 class SkillsIndexTest(unittest.TestCase):
     def test_empty_index_is_empty(self) -> None:
         self.assertEqual("", skills_index_for_planner({}))
@@ -536,6 +593,27 @@ class SuggestSkillValidationTest(unittest.TestCase):
         self.assertEqual(["triage"], mapping["dev"])
         self.assertEqual(["decidir", "aprobar", "responder", "hacer"],
                          mapping["owner"])
+
+
+class PlannerSkillsLoadTest(unittest.TestCase):
+    """Review 00005/F3: fresh load per cycle, logged fail-open."""
+
+    def test_loads_real_catalog_without_skills(self) -> None:
+        block, mapping = _planner_skills()
+        self.assertEqual("", block)
+        self.assertEqual([], mapping["dev"])
+        self.assertEqual(["decidir", "aprobar", "responder", "hacer"],
+                         mapping["owner"])
+
+    def test_load_failure_warns_and_skips(self) -> None:
+        from unittest import mock
+        from catalog import CatalogError
+        with mock.patch("objectives.engine.load_catalog",
+                        side_effect=CatalogError("boom")):
+            with self.assertLogs("objectives.engine", level="WARNING") as logs:
+                self.assertEqual(("", {}), _planner_skills())
+        self.assertTrue(any("skipping skill check" in line
+                            for line in logs.output))
 
 
 class AgentsSectionTest(unittest.TestCase):
