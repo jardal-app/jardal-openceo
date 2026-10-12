@@ -659,7 +659,9 @@ def _planner_skills() -> tuple[str, dict[str, list[str]]]:
         catalog = load_catalog()
         by_agent = load_all_role_skills(catalog)
         index = skills_index_for_planner(by_agent)
-    except Exception:
+    except Exception as exc:
+        logger.warning("planner skills unavailable, skipping skill "
+                       "check this cycle: %s", exc)
         return "", {}
     block = ("AGENT SKILLS (suggest `skill` only from the target "
              "agent's list; the agent decides):\n" + index) if index else ""

@@ -30,6 +30,14 @@ date: 2026-10-12
 - Each skill is exposed once as a `.codex/skills/<skill>` symlink to its
   source dir: Muse discovers project skills only there, and role
   activation keeps every non-role skill off. Never commit a second copy.
+- The exposure dir is local (`.codex/` is gitignored), so a fresh clone
+  has no links: after adding a skill, recreate them with
+  `catalog.sync_skill_links`. The crystallization save step calls it in
+  code (TASK-2026-00210); until then, from `openceo-core/` run:
+
+  ```bash
+  ../.venv/bin/python -c "from catalog import load_catalog, load_all_role_skills, sync_skill_links; c = load_catalog(); print(sync_skill_links(load_all_role_skills(c)))"
+  ```
 
 ## Checks
 

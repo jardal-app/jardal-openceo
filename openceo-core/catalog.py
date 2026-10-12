@@ -72,6 +72,7 @@ __all__ = [
     "short_index",
     "skills_index_for_planner",
     "suggestable_skills",
+    "sync_skill_links",
 ]
 
 #: The only index version this loader reads. A newer version fails closed
@@ -638,6 +639,38 @@ def check_skill_links(
     return problems
 
 
+def sync_skill_links(
+    by_agent: Mapping[str, Collection[RoleSkill]],
+    repo_root: str | Path | None = None,
+) -> list[str]:
+    """Create missing exposure symlinks; return what was created.
+
+    The exposure dir is local runtime state (``.codex/`` is gitignored),
+    so a fresh clone has no links: run this after adding a skill (the
+    crystallization save step calls it, TASK-2026-00210). Only missing
+    links are created, with repo-relative targets; anything already
+    there — right, dangling or foreign — is left for
+    :func:`check_skill_links` to judge, never silently replaced.
+    """
+    root = Path(repo_root) if repo_root is not None \
+        else catalog_root().parent
+    exposed = root / PROJECT_SKILLS_DIR
+    created: list[str] = []
+    for agent in sorted(by_agent):
+        for skill in sorted(by_agent[agent], key=lambda item: item.name):
+            link = exposed / skill.name
+            if os.path.lexists(link):
+                continue
+            src = Path(skill.source)
+            if not src.is_absolute():
+                src = root / src
+            exposed.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(os.path.relpath(os.path.realpath(src),
+                                             os.path.realpath(exposed)))
+            created.append(f"{PROJECT_SKILLS_DIR}/{skill.name}")
+    return created
+
+
 def skills_index_for_planner(
     by_agent: Mapping[str, Collection[RoleSkill]],
 ) -> str:
@@ -831,6 +864,13 @@ def load_catalog(root: str | Path | None = None) -> Catalog:
                 errors.append(
                     f"{rel(target)}: skills {foreign!r} are not on the "
                     f"card {entry.name!r} or a muse engine skill")
+            uncovered = [skill for skill in card.skills
+                         if skill not in linked.skills]
+            if uncovered:
+                errors.append(
+                    f"{rel(target)}: card skills {uncovered!r} are not "
+                    f"loaded by the profile: the run would suggest them "
+                    "but never see them")
     linked_paths = {card.profile for card in agents.values()
                     if card.profile}
     for relpath in sorted(parsed_profiles):
