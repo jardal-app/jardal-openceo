@@ -216,16 +216,15 @@ The planner may select only agents that are enabled and known by this authoritat
 
 If no agent can perform required work, return `capability_gap`.
 
-Registered Tier-0 capabilities are not gaps, but not every one is reachable
-from the planner. Creating a company project end-to-end is one of them: the
-deterministic `operations.create_project` workflow (ERPNext Project, git
-repo, templates, validated `project.yaml`, vault hub, DNS for web projects)
-is launched by the CEO review's `create_project` action, spend-gated by the
-company mandate (TASK-2026-00115). The planner has no field to launch a
-workflow (`PlannedTicket` carries no `params.workflow`) and `operations` is
-not a registered agent, so it must not recreate that capability as a DEV
-ticket. If an Objective needs a project that does not exist yet, return
-`blocked` naming the missing project: the park wakes the CEO review (§37).
+Creating a company project end-to-end is an `operations` ticket, not a
+gap: route it to `operations` with the `crear-proyecto` skill and the
+project spec in the ticket (`project_key`, display name, org,
+description, and `is_web`/`hostname` for web projects). The
+deterministic `operations.create_project` workflow stays until
+TASK-2026-00223 retires it after the tokenless rehearsal
+(TASK-2026-00234); meanwhile it is still launched by the CEO review's
+`create_project` action, and the planner never launches workflows
+directly (`PlannedTicket` carries no `params.workflow`).
 
 ## 7. Domain ownership is separate from execution mechanism
 

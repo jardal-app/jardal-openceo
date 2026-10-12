@@ -501,9 +501,12 @@ class LiveExecutorProfileTests(unittest.IsolatedAsyncioTestCase):
         seen: dict[str, object] = {}
 
         def fake_plan(*, argv, workspace, base, overlay, config_args,
-                      home_file_overlays=None):
+                      home_file_overlays=None, extra_read_roots=(),
+                      extra_write_roots=()):
             seen["config_args"] = list(config_args)
             seen["overlays"] = home_file_overlays
+            seen["extra_read_roots"] = tuple(extra_read_roots)
+            seen["extra_write_roots"] = tuple(extra_write_roots)
             raise IsolationUnavailable("no bwrap here")
 
         executor = ProcessExecutor(roles=self._roles(),
@@ -527,6 +530,8 @@ class LiveExecutorProfileTests(unittest.IsolatedAsyncioTestCase):
         overlays = seen["overlays"]
         assert isinstance(overlays, dict)
         self.assertEqual(overlays, {SETTINGS_OVERLAY_RELPATH: b"{}"})
+        self.assertEqual((), seen["extra_read_roots"])
+        self.assertEqual((), seen["extra_write_roots"])
 
 
 class SandboxOverlayTests(unittest.TestCase):
@@ -803,11 +808,11 @@ def _mcp_server_reachable() -> bool:
         return False
 
 
-async def _mint_smoke_badge(kind: str) -> str | None:
+async def _mint_smoke_badge(kind: str, agent: str = "dev") -> str | None:
     """Real badge for the smoke run (None when Mongo is down).
 
-    ``kind`` is ``agent`` (dev ticket badge), ``readonly`` (planner)
-    or ``none`` (disabled agents have no box yet: no badge minted).
+    ``kind`` is ``agent`` (ticket badge for the role), ``readonly``
+    (planner) or ``none`` (disabled agents have no box yet).
     """
     if kind == "none":
         return None
@@ -828,7 +833,7 @@ async def _mint_smoke_badge(kind: str) -> str | None:
             if kind == "readonly":
                 return await issuer.issue_readonly("planner")
             return await issuer.issue_agent(
-                "dev", "TASK-2026-00197", "jardal-openceo",
+                agent, "TASK-2026-00197", "jardal-openceo",
                 timedelta(minutes=15))
         finally:
             client.close()
@@ -924,10 +929,12 @@ class RoleProfileSmokeTests(unittest.IsolatedAsyncioTestCase):
                       f"baseline echo failed: {proc.stderr[:500]}")
         baseline = measure_session_log(_session_log(Path.home(),
                                                     baseline_id))
+        operations_box = set(load_catalog(
+        ).agents["operations"].boundary_tools)
         matrix = (("dev", "agent", set(dev_box_tools())),
                   ("planner", "readonly", set(READONLY_BOX)),
                   ("ceo", "readonly", set(READONLY_BOX)),
-                  ("operations", "none", None),
+                  ("operations", "agent", operations_box),
                   ("secretary", "none", None),
                   ("finance", "none", None),
                   ("research", "none", None))
@@ -942,7 +949,7 @@ class RoleProfileSmokeTests(unittest.IsolatedAsyncioTestCase):
                                  settings, base_argv: list[str],
                                  baseline_lanes: int) -> None:
         from mcp_server import build_mcp_provider_config
-        badge = await _mint_smoke_badge(kind)
+        badge = await _mint_smoke_badge(kind, name)
         if kind != "none" and not badge:
             self.skipTest("no local Mongo for a smoke badge")
         try:

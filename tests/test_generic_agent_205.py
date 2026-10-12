@@ -230,11 +230,11 @@ class GenericGateTest(unittest.TestCase):
         self.assertFalse(decision.proceed)
         self.assertIn("disabled", decision.reason)
 
-    def test_real_operations_still_waits_for_its_skill(self) -> None:
+    def test_real_operations_proceeds_with_its_skill(self) -> None:
         decision = resolve_agent_gate(
             "operations", {}, None, load_catalog())
-        self.assertFalse(decision.proceed)
-        self.assertIn("TASK-2026-00214", decision.reason)
+        self.assertTrue(decision.proceed)
+        self.assertEqual("operations", decision.hint)
 
     def test_human_agent_never_runs(self) -> None:
         catalog = tiny_catalog({"owner": {"enabled": True, "type": "human"}})
@@ -671,13 +671,14 @@ class LegacyNodesUnchangedTest(unittest.TestCase):
         self.assertEqual("dev", out["selected_agent"])
         self.assertEqual(TaskStatus.COMPLETED.value, out["status"])
 
-    def test_disabled_operations_waits_through_execute(self) -> None:
+    def test_enabled_operations_without_wiring_waits_through_execute(
+            self) -> None:
         graph, dev_session = self._legacy_graph()
         out = asyncio.run(graph.execute(
             generic_task(), agent_hint="operations"))
         dev_session.run.assert_not_called()
         self.assertEqual(TaskStatus.WAITING.value, out["status"])
-        self.assertIn("routing_missing", out["waiting_reason"])
+        self.assertIn("config:", out["waiting_reason"])
 
     def test_generic_node_without_wiring_waits(self) -> None:
         graph = OpenCEOGraph(None, None, None, None, None)

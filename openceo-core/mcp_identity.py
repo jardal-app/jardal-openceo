@@ -175,6 +175,11 @@ class TicketGrant:
             if params.get("project") != self.project:
                 raise McpDenied("Agents only search their own project")
             return
+        if tool in ("openceo_ensure_erpnext_project", "manage_dns_record"):
+            # Creation tools carry no ticket/project params to bind, so the
+            # box on the token is the whole rule. DNS deletion gets its
+            # Owner lock inside the tool (TASK-2026-00208).
+            return
         raise McpDenied(f"Tool {tool} has no agent scoping rule")
 
 

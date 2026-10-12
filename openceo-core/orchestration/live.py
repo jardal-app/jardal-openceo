@@ -191,7 +191,11 @@ class ProcessExecutor:
             plan = plan_agent(argv=full_argv, workspace=workdir,
                               base=os.environ, overlay=overlay,
                               config_args=config_argv,
-                              home_file_overlays=file_overlays)
+                              home_file_overlays=file_overlays,
+                              extra_read_roots=spec.get(
+                                  "extra_read_roots") or (),
+                              extra_write_roots=spec.get(
+                                  "extra_write_roots") or ())
         except (IsolationUnavailable, ValueError, OSError) as exc:
             if badge is not None and self._badge_provider is not None:
                 await self._badge_provider.revoke(badge)

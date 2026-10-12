@@ -631,9 +631,10 @@ class SuggestSkillValidationTest(unittest.TestCase):
 class PlannerSkillsLoadTest(unittest.TestCase):
     """Review 00005/F3: fresh load per cycle, logged fail-open."""
 
-    def test_loads_real_catalog_without_skills(self) -> None:
+    def test_loads_real_catalog_with_first_skill(self) -> None:
         block, mapping = _planner_skills()
-        self.assertEqual("", block)
+        self.assertIn("crear-proyecto", block)
+        self.assertEqual(["crear-proyecto"], mapping["operations"])
         self.assertEqual([], mapping["dev"])
         self.assertEqual(["decidir", "aprobar", "responder", "hacer"],
                          mapping["owner"])
@@ -663,7 +664,7 @@ class AgentsSectionTest(unittest.TestCase):
 
 
 class RealRepoTest(unittest.TestCase):
-    """The shipped tree honors the contract (no role skills yet)."""
+    """The shipped tree honors the contract (first skill live)."""
 
     def test_real_catalog_loads(self) -> None:
         catalog = load_catalog()
@@ -679,12 +680,14 @@ class RealRepoTest(unittest.TestCase):
         dev = load_role_profile("dev")
         self.assertIn("git", dev.skills)
 
-    def test_real_skills_index_empty(self) -> None:
+    def test_real_skills_index_has_first_skill(self) -> None:
         catalog = load_catalog()
         by_agent = load_all_role_skills(catalog)
-        self.assertEqual({}, {key: value for key, value in by_agent.items()
-                              if value})
-        self.assertEqual("", skills_index_for_planner(by_agent))
+        self.assertEqual({"operations": ["crear-proyecto"]},
+                         {key: [skill.name for skill in value]
+                          for key, value in by_agent.items() if value})
+        self.assertIn("crear-proyecto",
+                      skills_index_for_planner(by_agent))
 
     def test_real_skills_pass_muse_validate(self) -> None:
         import os
