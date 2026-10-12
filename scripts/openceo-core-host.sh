@@ -91,6 +91,7 @@ start() {
     echo "Run: scripts/setup.sh"
     return 1
   fi
+  "$VENV_PY" "$ROOT_DIR/scripts/sync-mcp-config.py" || echo "WARN: MCP config sync failed"
   (
     cd "$APP_DIR"
     # setsid: detach into a new session so agent/tool shells reaping their
