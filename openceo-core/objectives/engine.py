@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shutil
 import subprocess
 import uuid
 from dataclasses import dataclass, field
@@ -657,9 +658,11 @@ def _stage_policy_details(
     objective scratch; the paths ride the prompt index.
     """
     staged: list[tuple[str, str]] = []
+    folder = scratch / "policy"
+    # Purge first: a detail deleted upstream must not linger unindexed.
+    shutil.rmtree(folder, ignore_errors=True)
     if not details:
         return staged
-    folder = scratch / "policy"
     folder.mkdir(parents=True, exist_ok=True)
     for name, text in details:
         target = folder / f"{name}.md"
@@ -1380,11 +1383,16 @@ async def _plan_objective_inner(
             "planner agent registry is empty "
             "(global objective_planner.agents)")
     policy_path = planner_cfg.get("policy_path")
-    policy_text = planner_mod.load_policy_text(policy_path)
-    if not policy_text:
+    policy_core = planner_mod.load_policy_core(policy_path)
+    policy_details = planner_mod.load_policy_details(policy_path)
+    if not policy_core or policy_details is None:
         return await _objective_park(
             env, objective, "config",
-            "planner routing policy unreadable; refusing to plan blind")
+            f"planner routing policy unreadable "
+            f"({planner_mod.check_policy(policy_path).problem}); "
+            "refusing to plan blind")
+    policy_text = planner_mod.compose_policy(
+        policy_core, [text for _, text in policy_details])
     open_tickets = [item for item in tickets
                     if str(item.get("status")) not in TERMINAL_TICKET_STATUS]
     blocked: list[Mapping[str, Any]] = []
@@ -1410,8 +1418,7 @@ async def _plan_objective_inner(
         encoding="utf-8")
     (scratch / "INBOX.md").write_text(inbox_md or "INBOX\n(none)\n",
                                       encoding="utf-8")
-    staged = _stage_policy_details(
-        scratch, planner_mod.load_policy_details(policy_path) or [])
+    staged = _stage_policy_details(scratch, policy_details)
     prompt = _planner_prompt(
         objective, (objective.get("capsule") or {}).get("text", ""),
         ready, inbox_md or "INBOX\n(none)\n", deferred,
@@ -1420,7 +1427,7 @@ async def _plan_objective_inner(
         tierless=[item for item in open_tickets
                   if not item.get("coding_tool")],
         agents_md=_agents_section(agents, skills_md),
-        policy_text=planner_mod.load_policy_core(policy_path),
+        policy_text=policy_core,
         policy_index=planner_mod.policy_detail_index(staged),
         handoffs=handoffs,
         roadmap=[str(item) for item in

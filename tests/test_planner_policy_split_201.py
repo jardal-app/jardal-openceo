@@ -340,6 +340,41 @@ class CycleStagingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             (objective_scratch(repo, "OBJ-1") / "policy").exists())
 
+    async def test_deleted_detail_purges_the_staged_copy(self) -> None:
+        repo = _scratch_repo(self)
+        first_payload = {"objective_status": "active", "state_summary": "ok",
+                         "tickets": [_dev_ticket("a", "Child")],
+                         "roadmap_remaining": []}
+        second_payload = {"objective_status": "active", "state_summary": "ok",
+                          "tickets": [_dev_ticket("b", "Second")],
+                          "roadmap_remaining": []}
+        env, planner = _env(repo, [first_payload, second_payload],
+                            "POLICY CORE\n", {"dev": "DEV v1\n"})
+        await _objective(env)
+        first = await plan_objective(env, "OBJ-1")
+        self.assertTrue(first.get("ok"), first)
+        staged = objective_scratch(repo, "OBJ-1") / "policy" / "dev.md"
+        self.assertTrue(staged.is_file())
+        (repo / "policy.d" / "dev.md").unlink()
+        second = await plan_objective(env, "OBJ-1")
+        self.assertTrue(second.get("ok"), second)
+        self.assertFalse(staged.exists())
+        self.assertNotIn("AGENT POLICY DETAIL", planner.prompts[1])
+
+    async def test_broken_detail_parks_naming_it(self) -> None:
+        repo = _scratch_repo(self)
+        payload = {"objective_status": "active", "state_summary": "ok",
+                   "tickets": [_dev_ticket("a", "Child")],
+                   "roadmap_remaining": []}
+        env, planner = _env(repo, [payload], "POLICY CORE\n",
+                            {"dev": "  \n"})
+        await _objective(env)
+        result = await plan_objective(env, "OBJ-1")
+        self.assertFalse(result.get("ok"), result)
+        self.assertEqual(result.get("reason"), "config")
+        self.assertIn("dev", str(result.get("detail") or ""))
+        self.assertEqual(planner.prompts, [])
+
     async def test_detail_change_moves_the_sha(self) -> None:
         repo = _scratch_repo(self)
         first_payload = {"objective_status": "active", "state_summary": "ok",
