@@ -7,9 +7,12 @@ closed: :func:`load_catalog` raises :class:`CatalogError` naming every
 problem, and the service refuses to start on an invalid catalog
 (``main.py`` lifespan gate).
 
-Shape validated here; existence of future files is not: boundary tool
-names (TASK-2026-00199) and skill directories (TASK-2026-00203) do not
-exist yet, so only their form is checked. Role ``profile`` files
+Shape validated here; boundary tool names resolve against
+``MCP_BOUNDARY_TOOLS`` (TASK-2026-00199). Role skills (TASK-2026-00203)
+live under each card's ``skills_dir`` (``skills/<role>/<skill>/SKILL.md``)
+and are loaded and cross-checked: an AI card lists exactly what is on
+disk, profiles add only Muse engine skills beyond their card, and every
+skill is exposed once via ``.codex/skills/``. Role ``profile`` files
 (TASK-2026-00197) exist under ``catalog/profiles/``: a card pointing at
 one loads and cross-checks it, and every file in that directory must
 parse. Consumers (TASK-2026-00195) validate at use.
@@ -19,21 +22,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import date
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 __all__ = [
     "CATALOG_VERSION",
+    "ENGINE_SKILLS",
     "INDEX_SUMMARY_MAX_CHARS",
     "MCP_BOUNDARY_TOOLS",
     "OWNER_SKILLS",
+    "PROJECT_SKILLS_DIR",
     "RESERVED_NAMES",
     "AgentCard",
     "AgentType",
@@ -45,19 +51,27 @@ __all__ = [
     "LEGACY_LIVE_DISABLED",
     "RoleCard",
     "RoleProfile",
+    "RoleSkill",
     "StaffEntry",
     "StaffRoster",
     "TICKET_PATTERN",
     "catalog_fingerprint",
     "catalog_root",
     "check_catalog",
+    "check_skill_links",
+    "check_skill_names_unique",
     "find_consumer_mismatches",
     "is_staff_active",
+    "load_all_role_skills",
     "load_catalog",
     "load_role_profile",
+    "load_role_skills",
+    "parse_role_skill",
     "planner_registry_view",
     "profiles_root",
     "short_index",
+    "skills_index_for_planner",
+    "suggestable_skills",
 ]
 
 #: The only index version this loader reads. A newer version fails closed
@@ -70,6 +84,16 @@ INDEX_SUMMARY_MAX_CHARS = 280
 
 #: The Owner's skills (epic contract, TASK-2026-00191 scope).
 OWNER_SKILLS = ("decidir", "aprobar", "responder", "hacer")
+
+#: Muse engine skills a role profile may allow beyond its card skills
+#: (TASK-2026-00203): skill authoring everywhere, git knowledge for dev.
+ENGINE_SKILLS = ("create-skill", "git")
+
+#: Project skill exposure dir, relative to the repo root. Muse discovers
+#: project skills only under ``.codex/skills/`` (``.claude/skills/`` is the
+#: lower-priority twin), so each role skill is exposed there as one
+#: symlink to its source dir under ``skills/<role>/``.
+PROJECT_SKILLS_DIR = ".codex/skills"
 
 #: Never executors, never catalog names: the CEO strategy and the planner
 #: decide work, they do not run tickets.
@@ -110,6 +134,8 @@ MCP_BOUNDARY_TOOLS = frozenset({
 })
 
 _NAME_PATTERN = r"^[a-z][a-z0-9_]*$"
+#: Skill slugs accept hyphens (``notion-api-local``), agent names do not.
+_SKILL_NAME_PATTERN = r"^[a-z][a-z0-9_-]*$"
 TICKET_PATTERN = r"^TASK-2026-\d+$"
 _TICKET_PATTERN = TICKET_PATTERN
 
@@ -305,6 +331,41 @@ class RoleProfile(BaseModel):
         return self
 
 
+class RoleSkill(BaseModel):
+    """One versioned role skill (TASK-2026-00203).
+
+    Source: ``skills/<role>/<skill>/SKILL.md`` (Agent Skills standard
+    plus the OpenCEO header: ``status``, creation ``ticket``, ``date``).
+    ``source`` is the skill directory as loaded; the catalog resolves it
+    against the ``.codex/skills/`` exposure symlink.
+    """
+
+    role: str = Field(pattern=_NAME_PATTERN)
+    name: str = Field(pattern=_SKILL_NAME_PATTERN)
+    description: str = Field(min_length=1)
+    status: Literal["borrador", "activa"]
+    ticket: str = Field(pattern=_TICKET_PATTERN)
+    date: date
+    source: str = Field(min_length=1)
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_engine(cls, value: str) -> str:
+        if value in ENGINE_SKILLS:
+            raise ValueError(
+                f"name: {value!r} is a muse engine skill, never a role skill "
+                "(activation matches by short id across scopes)")
+        return value
+
+    @field_validator("description")
+    @classmethod
+    def _description_nonblank(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("description: must not be blank")
+        return cleaned
+
+
 class StaffEntry(BaseModel):
     """One staff member: role, projects, active period."""
 
@@ -410,6 +471,204 @@ def _format_pydantic(exc: ValidationError) -> str:
     return "; ".join(parts)
 
 
+def _read_frontmatter(skill_file: Path) -> tuple[dict[str, Any], str | None]:
+    """Parse the YAML frontmatter of one SKILL.md (error text or None)."""
+    try:
+        text = skill_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {}, f"unreadable ({exc})"
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return {}, "missing frontmatter (SKILL.md must open with ---)"
+    closing = next(
+        (index for index, line in enumerate(lines[1:], start=1)
+         if line.strip() == "---"),
+        None)
+    if closing is None:
+        return {}, "missing frontmatter (no closing ---)"
+    try:
+        data = yaml.safe_load("".join(lines[1:closing]))
+    except yaml.YAMLError as exc:
+        return {}, f"invalid frontmatter YAML ({exc})"
+    if not isinstance(data, dict):
+        return {}, "frontmatter must be a mapping"
+    return data, None
+
+
+def parse_role_skill(path: str | Path, role: str) -> RoleSkill:
+    """Parse one ``SKILL.md`` with its OpenCEO header. Fail-closed."""
+    skill_file = Path(path)
+    header, problem = _read_frontmatter(skill_file)
+    if problem is not None:
+        raise CatalogError(f"{skill_file}: {problem}")
+    try:
+        skill = RoleSkill.model_validate(
+            {"role": role, "source": str(skill_file.parent), **header})
+    except ValidationError as exc:
+        raise CatalogError(
+            f"{skill_file}: {_format_pydantic(exc)}") from exc
+    if skill.name != skill_file.parent.name:
+        raise CatalogError(
+            f"{skill_file}: skill name {skill.name!r} must match "
+            f"the directory {skill_file.parent.name!r}")
+    return skill
+
+
+def _skill_script_problems(skill_dir: Path) -> list[str]:
+    """Every script needs its sibling test (mirror of the vault example).
+
+    Each ``scripts/**/*.py`` that is not itself a test requires a
+    ``test_<stem>.py`` somewhere under the skill dir.
+    """
+    scripts = skill_dir / "scripts"
+    if not scripts.is_dir():
+        return []
+    tests = {path.name for path in skill_dir.rglob("test_*.py")
+             if path.is_file()}
+    problems = []
+    for script in sorted(scripts.rglob("*.py")):
+        if not script.is_file() or script.name.startswith("test_"):
+            continue
+        want = f"test_{script.stem}.py"
+        if want not in tests:
+            problems.append(
+                f"{script}: script without its test (add {want} "
+                "under the skill dir)")
+    return problems
+
+
+def load_role_skills(role: str, skills_dir: str,
+                     repo_root: str | Path | None = None) -> list[RoleSkill]:
+    """Load one role's skills, sorted by name. Fail-closed, all named.
+
+    A missing role dir means no skills yet, never an error: only real
+    source dirs (never stray files or symlinks) are read.
+    """
+    root = Path(repo_root) if repo_root is not None \
+        else catalog_root().parent
+    target = root / skills_dir
+    if not target.exists():
+        return []
+    if not target.is_dir():
+        raise CatalogError(f"{target}: skills_dir is not a directory")
+    errors: list[str] = []
+    found: list[RoleSkill] = []
+    for entry in sorted(target.iterdir(), key=lambda item: item.name):
+        if entry.name.startswith(".") or entry.is_symlink() \
+                or not entry.is_dir():
+            continue
+        try:
+            found.append(parse_role_skill(entry / "SKILL.md", role))
+        except CatalogError as exc:
+            errors.append(str(exc))
+            continue
+        errors.extend(_skill_script_problems(entry))
+    if errors:
+        raise CatalogError(
+            f"invalid role skills for {role}:\n"
+            + "\n".join(f"  {line}" for line in errors))
+    return sorted(found, key=lambda skill: skill.name)
+
+
+def load_all_role_skills(
+    catalog: Catalog,
+    repo_root: str | Path | None = None,
+) -> dict[str, list[RoleSkill]]:
+    """Every AI agent's on-disk skills (humans are exempt)."""
+    root = Path(repo_root) if repo_root is not None \
+        else catalog_root().parent
+    return {name: load_role_skills(name, card.skills_dir, root)
+            for name, card in catalog.agents.items()
+            if card.type is AgentType.AI}
+
+
+def check_skill_names_unique(
+    by_agent: Mapping[str, Collection[RoleSkill]],
+) -> list[str]:
+    """Skill names share one flat exposure namespace: no duplicates."""
+    seen: dict[str, str] = {}
+    problems: list[str] = []
+    for agent in sorted(by_agent):
+        for skill in by_agent[agent]:
+            owner = seen.get(skill.name)
+            if owner is None:
+                seen[skill.name] = agent
+            else:
+                problems.append(
+                    f"skill {skill.name!r} is owned by {owner!r} and "
+                    f"{agent!r}: skill names share the flat "
+                    f"{PROJECT_SKILLS_DIR}/ exposure namespace")
+    return problems
+
+
+def check_skill_links(
+    by_agent: Mapping[str, Collection[RoleSkill]],
+    repo_root: str | Path | None = None,
+) -> list[str]:
+    """Each role skill is exposed once via ``.codex/skills/``.
+
+    The symlink is the exposure, ``skills/<role>/`` stays the single
+    source. Real directories there (legacy ``notion-api-local``) are not
+    role skills and stay untouched.
+    """
+    root = Path(repo_root) if repo_root is not None \
+        else catalog_root().parent
+    exposed = root / PROJECT_SKILLS_DIR
+    sources = {skill.name: os.path.realpath(skill.source)
+               for items in by_agent.values() for skill in items}
+    problems: list[str] = []
+    for name in sorted(sources):
+        link = exposed / name
+        if not os.path.lexists(link):
+            problems.append(
+                f"{PROJECT_SKILLS_DIR}/{name}: missing exposure symlink "
+                f"to {sources[name]}")
+        elif not link.is_symlink() or os.path.realpath(link) != sources[name]:
+            problems.append(
+                f"{PROJECT_SKILLS_DIR}/{name}: must be a symlink to "
+                f"{sources[name]}")
+    if exposed.is_dir():
+        for entry in sorted(exposed.iterdir(), key=lambda item: item.name):
+            if entry.name.startswith(".") or not entry.is_symlink():
+                continue
+            if os.path.realpath(entry) not in set(sources.values()):
+                problems.append(
+                    f"{PROJECT_SKILLS_DIR}/{entry.name}: symlink points "
+                    "outside the role skills")
+    return problems
+
+
+def skills_index_for_planner(
+    by_agent: Mapping[str, Collection[RoleSkill]],
+) -> str:
+    """Name + description + status per skill, for the planner prompt.
+
+    Agents without skills are omitted; no skills at all renders empty
+    (the prompt carries no block then).
+    """
+    lines = []
+    for agent in sorted(by_agent):
+        for skill in sorted(by_agent[agent], key=lambda item: item.name):
+            lines.append(f"- {agent}: {skill.name} — "
+                         f"{skill.description} ({skill.status})")
+    return "\n".join(lines)
+
+
+def suggestable_skills(
+    catalog: Catalog,
+    by_agent: Mapping[str, Collection[RoleSkill]],
+) -> dict[str, list[str]]:
+    """Skills the planner may suggest per agent: on-disk for AI agents
+    (active or draft), the card skills for the owner."""
+    mapping: dict[str, list[str]] = {}
+    for name, card in catalog.agents.items():
+        if card.type is AgentType.AI:
+            mapping[name] = [skill.name for skill in by_agent.get(name, ())]
+        elif name == "owner":
+            mapping[name] = list(card.skills)
+    return mapping
+
+
 def load_catalog(root: str | Path | None = None) -> Catalog:
     """Load and validate the whole catalog tree.
 
@@ -506,6 +765,7 @@ def load_catalog(root: str | Path | None = None) -> Catalog:
                               "index.yaml")
 
     profiles_dir = base / "profiles"
+    parsed_profiles: dict[str, RoleProfile] = {}
     if profiles_dir.is_dir():
         for profile_file in sorted(profiles_dir.glob("*.yaml")):
             data, problem = _read_yaml(profile_file)
@@ -526,6 +786,8 @@ def load_catalog(root: str | Path | None = None) -> Catalog:
                 errors.append(
                     f"{rel(profile_file)}: profile name {parsed.name!r} "
                     f"must match the file name {profile_file.stem!r}")
+                continue
+            parsed_profiles[rel(profile_file)] = parsed
     for entry in entries:
         card = agents.get(entry.name)
         if card is None or card.profile is None:
@@ -563,11 +825,47 @@ def load_catalog(root: str | Path | None = None) -> Catalog:
                 f"the card engine {card.engine!r}")
         else:
             foreign = [skill for skill in linked.skills
-                       if skill not in card.skills]
+                       if skill not in card.skills
+                       and skill not in ENGINE_SKILLS]
             if foreign:
                 errors.append(
                     f"{rel(target)}: skills {foreign!r} are not on the "
-                    f"card {entry.name!r}")
+                    f"card {entry.name!r} or a muse engine skill")
+    linked_paths = {card.profile for card in agents.values()
+                    if card.profile}
+    for relpath in sorted(parsed_profiles):
+        if relpath in linked_paths:
+            continue
+        outsiders = [skill for skill in parsed_profiles[relpath].skills
+                     if skill not in ENGINE_SKILLS]
+        if outsiders:
+            errors.append(
+                f"{relpath}: skills {outsiders!r} are not a muse engine "
+                "skill: profiles without a card load engine skills only")
+
+    repo = base.parent
+    role_skills: dict[str, list[RoleSkill]] = {}
+    for entry in entries:
+        card = agents.get(entry.name)
+        if card is None or card.type is not AgentType.AI:
+            continue
+        try:
+            found = load_role_skills(entry.name, card.skills_dir, repo)
+        except CatalogError as exc:
+            errors.append(f"skills for {entry.name}: {exc}")
+            continue
+        role_skills[entry.name] = found
+        on_disk = {skill.name for skill in found}
+        for missing in sorted(set(card.skills) - on_disk):
+            errors.append(
+                f"agents/{entry.name}.yaml: skills: {missing!r} is not "
+                f"on disk under {card.skills_dir}")
+        for unlisted in sorted(on_disk - set(card.skills)):
+            errors.append(
+                f"{card.skills_dir}/{unlisted}: skill is on disk but not "
+                f"on the card {entry.name!r}")
+    errors.extend(check_skill_names_unique(role_skills))
+    errors.extend(check_skill_links(role_skills, repo))
 
     staff_path = base / "staff.yaml"
     staff = StaffRoster()

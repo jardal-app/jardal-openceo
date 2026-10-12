@@ -485,6 +485,7 @@ oracle declaration shape (known oracle type, at least one ref)
 same-tier replan prohibition after material failure
 proposed_tools names unique (at most 2, Pydantic shape)
 costs declaration shape (label, decimal-string or int amount, null when unknown)
+suggested skill names a real skill of the target_agent (active or draft)
 ```
 
 Invalid output must not become durable tickets.

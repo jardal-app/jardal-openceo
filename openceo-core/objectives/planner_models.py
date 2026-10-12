@@ -475,6 +475,7 @@ async def validate_planner_result(
     task_exists: Callable[[str], Awaitable[bool]],
     material_failures: Sequence[Any] | None = None,
     horizon: Any = None,
+    skills: Mapping[str, Collection[str]] | None = None,
 ) -> list[str]:
     """Deterministic validation (routing policy §17). Returns errors.
 
@@ -483,7 +484,10 @@ async def validate_planner_result(
     non-local ``blocked_by`` targets; ``material_failures`` lists
     ``{title, tier}`` pairs recorded by earlier material failures (fed by
     TASK-2026-00116) for the same-tier-retry rule; ``horizon`` is the
-    configured [min, max] ticket horizon (default [1, 3]).
+    configured [min, max] ticket horizon (default [1, 3]); ``skills``
+    maps each agent to its suggestable skill names (TASK-2026-00203):
+    a suggested skill must name one of its target's (active or draft).
+    Agents missing from the map, or no map at all, skip the skill check.
     """
     errors: list[str] = []
     bounds = _effective_horizon(horizon)
@@ -537,6 +541,13 @@ async def validate_planner_result(
             reason = str(spec.get("reason") or "agent disabled").strip()
             errors.append(f"{where}: target_agent "
                           f"{ticket.target_agent!r} is disabled ({reason})")
+        if ticket.skill and skills is not None \
+                and ticket.target_agent in skills:
+            known = set(skills[ticket.target_agent] or [])
+            if ticket.skill not in known:
+                errors.append(
+                    f"{where}: skill {ticket.skill!r} is not a skill of "
+                    f"agent {ticket.target_agent!r} (active or draft)")
         if ticket.completes_task_id:
             await _validate_completion(
                 errors, where, ticket, task_exists)

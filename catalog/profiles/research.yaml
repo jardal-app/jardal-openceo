@@ -11,5 +11,6 @@ card:
     - decide business work
     - change ticket states
 rules: AGENTS.md
-skills: []
+skills:
+  - create-skill
 output_schema: openceo-core/objectives/agent_result.schema.json

@@ -36,6 +36,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
 from agents.dev.loose_tier import routing_guide_section
+from catalog import (load_all_role_skills, load_catalog,
+                     skills_index_for_planner, suggestable_skills)
 from orchestration import findings as findings_mod
 from orchestration import inbox as inbox_mod
 from orchestration import knowledge as knowledge_mod
@@ -644,7 +646,28 @@ def objective_scratch(repo: Path, objective_id: str) -> Path:
     return scratch_root(repo) / "objectives" / objective_id
 
 
-def _agents_section(agents: Mapping[str, Any]) -> str:
+def _planner_skills() -> tuple[str, dict[str, list[str]]]:
+    """Skills index block + suggestable map for one planning cycle.
+
+    Loaded fresh from the catalog so a newly crystallized skill is
+    suggestable without a restart. Fail-open: the boot gate already
+    refuses an invalid catalog, and a suggestion is only a hint, so a
+    mid-run load failure skips the skill check instead of breaking the
+    whole planning cycle.
+    """
+    try:
+        catalog = load_catalog()
+        by_agent = load_all_role_skills(catalog)
+        index = skills_index_for_planner(by_agent)
+    except Exception:
+        return "", {}
+    block = ("AGENT SKILLS (suggest `skill` only from the target "
+             "agent's list; the agent decides):\n" + index) if index else ""
+    return block, suggestable_skills(catalog, by_agent)
+
+
+def _agents_section(agents: Mapping[str, Any],
+                    skills_md: str = "") -> str:
     """Authoritative registry rendered for the planner prompt."""
     lines = ["REGISTERED AGENTS (select target_agent ONLY from enabled):"]
     for name in sorted(agents):
@@ -658,6 +681,8 @@ def _agents_section(agents: Mapping[str, Any]) -> str:
             lines.append(f"- {name}: DISABLED ({reason}) — never route here")
     lines.append("Never invent an agent. If no enabled agent can do required "
                  "work, return capability_gap with no tickets.")
+    if skills_md.strip():
+        lines.extend(["", skills_md.strip()])
     return "\n".join(lines)
 
 
@@ -1349,6 +1374,7 @@ async def _plan_objective_inner(
     handoffs = [str(entry.get("handoff_excerpt") or "").strip()
                 for entry in (objective.get("tickets_log") or [])[-3:]]
     handoffs = [item for item in reversed(handoffs) if item]
+    skills_md, skill_map = _planner_skills()
     prompt = _planner_prompt(
         objective, (objective.get("capsule") or {}).get("text", ""),
         ready, inbox_md or "INBOX\n(none)\n", deferred,
@@ -1356,7 +1382,7 @@ async def _plan_objective_inner(
         blocked_tickets=blocked,
         tierless=[item for item in open_tickets
                   if not item.get("coding_tool")],
-        agents_md=_agents_section(agents),
+        agents_md=_agents_section(agents, skills_md),
         policy_text=policy_text, handoffs=handoffs,
         roadmap=[str(item) for item in
                  objective.get("roadmap_remaining") or []],
@@ -1407,6 +1433,7 @@ async def _plan_objective_inner(
                     material_failures=(objective.get("material_failures")
                                        or []),
                     horizon=planner_cfg.get("ticket_horizon"),
+                    skills=skill_map,
                 )
                 if not errors:
                     result = candidate
@@ -1736,6 +1763,7 @@ async def apply_approved_plan(
                 "detail": "the hold stays for the next trigger"}
     open_titles = [str(item.get("title") or "") for item in tickets
                    if str(item.get("status")) not in TERMINAL_TICKET_STATUS]
+    _, skill_map = _planner_skills()
     errors = await planner_mod.validate_planner_result(
         result,
         agents=env.planner_cfg.get("agents", {}) or {},
@@ -1743,6 +1771,7 @@ async def apply_approved_plan(
         task_exists=lambda dep: _task_exists(env, dep),
         material_failures=(objective.get("material_failures") or []),
         horizon=env.planner_cfg.get("ticket_horizon"),
+        skills=skill_map,
     )
     if errors:
         await env.objectives.patch_objective(
