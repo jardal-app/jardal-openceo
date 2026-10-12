@@ -8,7 +8,7 @@ Trabajo temporal de tickets: `docs/work/TASK-2026-000NN-tema.md`.
 
 Instrucciones operativas del repo (F7a): `AGENTS.md` — los CLI del roster lo cargan directamente; las sesiones del Owner leen este archivo, que lo importa en §10.
 
-Continuar el roadmap vigente (épico **TASK-2026-00187**: planner único y agentes por rol): el Owner escribe **`sigue`** y la sesión aplica la receta de §11.
+Continuar el roadmap vigente (épico **TASK-2026-00187**: planner único y agentes por rol): el Owner escribe **`sigue`** y la sesión aplica la receta de §11. Sus pruebas reales viven aparte, en el épico **TASK-2026-00233**, y se corren con **`valida`** (§11).
 
 ---
 
@@ -267,12 +267,19 @@ Solo sesiones del Owner; los ejecutores Tier S lo ignoran (§10).
 
 Cuando el Owner escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el ticket), no preguntes: aplica esta receta. El roadmap vigente es el épico **TASK-2026-00187** (planner único, agentes por rol con skills y tools de frontera), con sus olas y ajustes. TASK-2026-00110 (OpenCEO autónomo) está completo y cerrado (2026-10-11, por orden del Owner); es la base histórica que este épico reconstruye. Descubre el trabajo actual en ERPNext; consulta el comentario «ROADMAP POR OLAS» y sus ampliaciones, sin mantener aquí una lista fija de tickets. Una observación registrada es una hipótesis que se debe contrastar, no una orden de modificar código sin diagnóstico.
 
+**Alcance de `sigue` (orden del Owner, 2026-10-12).** TASK-2026-00187 es solo codificación y preparación de entorno, para que corra en ciclos automáticos (`automatico.py`) sin esperar a nadie. Sus pruebas reales y todo lo que necesite al Owner viven en el épico de validación **TASK-2026-00233**; `sigue` nunca toma sus tickets.
+- Dentro de 00187 ningún ticket espera al Owner ni usa `Pending Review`. Si una parte necesita su decisión, una credencial o una corrida real, se registra como hijo de 00233, con la evidencia y la acción exacta, y la parte de código se cierra `Completed` con lo verificable.
+- Si falta una decisión del Owner para poder codificar, se elige la opción reversible más prudente, se anota en el ticket como reabrible y la pregunta va a 00233.
+
 1. **Situarse, sin barridos.**
    - `openceo_get_ticket TASK-2026-00187`, con sus comentarios actuales y dependencias.
    - `openceo_search_tickets` con `project=jardal-openceo`, por separado para `status=Open`, `status=Overdue` y `status=Working`. ERPNext marca como `Overdue` a los Open con la fecha estimada vencida, así que sin ese estado los pendientes no aparecen. Identificar los pendientes de esta épica por `parent_task`, sus dependencias y referencias explícitas del roadmap, aunque no tengan el prefijo `[Agentes]`. Leer otros tickets solo si hacen falta para comprobar una dependencia o un posible duplicado.
    - El primer párrafo de «Continuar aquí» en `STATUS.md`.
    - `git status`, actualizar las referencias remotas y revisar el log de `main` y `origin/main`, además de los diffs dirigidos que afecten al candidato. Si otra sesión tiene trabajo activo en el checkout, usar un worktree aislado; no cambiarle la rama ni incorporar sus cambios al propio ticket.
-2. **Elegir un ticket.** El indicado por el Owner. Si no hay, continuar el trabajo propio a medias; después elegir un pendiente de la épica con dependencias verificadas como `Completed`, según impacto, prioridad y desbloqueo del roadmap vigente. Un ticket `Working` de otra sesión no se toma ni se duplica: comprobar qué cubre y elegir otro independiente. No deducir que la épica está terminada de un traspaso antiguo o de que las fases originales estén cerradas. Si ningún pendiente puede avanzar, explicar el bloqueo concreto y parar.
+2. **Elegir un ticket.** El indicado por el Owner. Si no hay, continuar el trabajo propio a medias; después elegir un pendiente de la épica con dependencias verificadas como `Completed`, según impacto, prioridad y desbloqueo del roadmap vigente. Un ticket `Working` de otra sesión no se toma ni se duplica: comprobar qué cubre y elegir otro independiente. No deducir que la épica está terminada de un traspaso antiguo o de que las fases originales estén cerradas.
+   - Si TASK-2026-00187 ya está `Completed` en ERPNext, el épico está finalizado: confirmarlo y terminar sin tomar ningún ticket, tampoco de 00233.
+   - Si todos sus hijos están `Completed` o `Cancelled` y el épico sigue abierto, ir al paso 9.
+   - Si ningún pendiente puede avanzar, explicar el bloqueo concreto y parar.
 3. **Contexto mínimo.**
    - Descripción y comentarios del ticket.
    - El workfile del épico y el del ticket, si existen.
@@ -296,8 +303,14 @@ Cuando el Owner escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el tic
    - Vault solo si hay una decisión o un hecho durable nuevo.
    - Cuando el resultado sea verificado sin cambios de código, registrar ese resultado y su evidencia; no fabricar una rama, merge o restart para aparentar una corrección.
 8. **Seguir.** Si queda margen, refrescar los pendientes en ERPNext y volver al paso 2. Al terminar, una línea: qué se resolvió, si hubo fix o verificación sin cambios, y qué sigue según el estado actual.
+9. **Cerrar el épico** cuando no le quede ningún hijo pendiente:
+   - suite completa en verde (un rojo ajeno al épico, demostrado en `main` limpio, queda registrado como ticket aparte y no bloquea);
+   - `main` igual a `origin/main`, y el servicio reiniciado con `main`, con status y smoke;
+   - `openceo_transition_ticket` de TASK-2026-00187 a `Completed`, con esa evidencia;
+   - un comentario en TASK-2026-00233: sus pruebas quedan desbloqueadas;
+   - un párrafo al inicio de «Continuar aquí».
 
-Al Owner solo se le pregunta por la política de escalado del épico: gasto nuevo, acción irreversible, replanificación estratégica, cambio de mandato o revisión humana exigida por política. Lo demás se decide y se hace.
+Al Owner solo se le pregunta por la política de escalado del épico: gasto nuevo, acción irreversible, replanificación estratégica, cambio de mandato o revisión humana exigida por política. En `sigue` no se le pregunta en el momento: la pregunta se registra en TASK-2026-00233, según el alcance de arriba, y el ciclo sigue. Lo demás se decide y se hace.
 
 **Consigna del Owner (2026-10-06, revisada el 2026-10-11 para TASK-2026-00187): durante el épico se puede gastar tokens en pruebas de componentes, pero no en un flujo real completo de punta a punta.**
 
@@ -310,7 +323,15 @@ Prohibido hasta terminar todo el épico:
 - un flujo real de punta a punta que gaste tokens: un objetivo o misión completos, o un ciclo Tier S real de principio a fin;
 - flujos extremadamente grandes en cualquier herramienta.
 
-Los únicos flujos reales completos son los dos pilotos del épico: **TASK-2026-00219** (Piloto 1) y **TASK-2026-00224** (Aceptación). Cada uno se corre solo cuando todas sus dependencias estén `Completed`.
+Los únicos flujos reales completos son los dos pilotos, que desde el 2026-10-12 están en el épico de validación TASK-2026-00233: **TASK-2026-00219** (Piloto 1) y **TASK-2026-00224** (Aceptación). Cada uno se corre solo cuando todas sus dependencias estén `Completed`, y solo con `valida`; nunca con `sigue` ni con `automatico.py`.
+
+**Palabra clave `valida` (sesiones del Owner, con el Owner disponible).** Cuando el Owner escriba **`valida`**, corre las pruebas reales de **TASK-2026-00233**. No preguntes, salvo lo que la propia prueba le pida al Owner.
+1. **Situarse.** `openceo_get_ticket TASK-2026-00233` y sus hijos. Arrancar solo si TASK-2026-00187 está `Completed`, salvo una orden explícita del Owner para una prueba concreta.
+2. **Elegir** el siguiente hijo con dependencias `Completed`: primero los `[Validación/Fix]` abiertos, luego 00219 (Piloto 1) y después 00224 (Aceptación). Una pregunta pendiente del Owner se le presenta en ese momento.
+3. **Preflight sin tokens** (el comando que deja TASK-2026-00234). Si no está listo, corregir el entorno o registrar en el ticket lo que falta, y parar.
+4. **Prueba real** según el runbook del ticket, vigilada en vivo (logs, ERPNext, cockpit). No intervenir, salvo en lo que el flujo le pida al Owner; registrar cada intervención.
+5. **Informe** de métricas en el ticket (el comando de 00234) y conclusiones en el vault.
+6. **Fallos.** Cada uno, un hijo `[Validación/Fix]` de 00233 con evidencia. Se corrige con el rigor de `sigue` (pasos 4 a 7) y la prueba se repite. Una prueba cierra `Completed` solo si su aceptación se cumplió de verdad; 00233 cierra cuando todos sus hijos están `Completed`.
 
 **Palabra clave `audita` (sesiones del Owner).** Cuando el Owner escriba **`audita`**, no preguntes: audita que `main` cumpla el rumbo del épico vigente, TASK-2026-00187. Fuentes de verdad, en este orden:
 1. El RUMBO de la descripción del épico.

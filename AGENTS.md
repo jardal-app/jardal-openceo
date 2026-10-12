@@ -73,7 +73,9 @@ scripts/openceo-core-host.sh restart|status
   are allowed too, but only for minimal checks, never large flows. What
   stays forbidden until the whole epic is done is a full token-spending
   end-to-end run (a complete objective/mission, or a full Tier S cycle).
-  The only full real runs are the epic's two pilots, TASK-2026-00219
-  (Pilot 1) and TASK-2026-00224 (Acceptance), each only once all its
-  dependencies are Completed. Unit/contract and communication tests,
+  The only full real runs are the two pilots, moved on 2026-10-12 to the
+  validation epic TASK-2026-00233: TASK-2026-00219 (Pilot 1) and
+  TASK-2026-00224 (Acceptance), each only once all its dependencies are
+  Completed, and only in a dedicated Owner validation session (never in
+  the coding loop). Unit/contract and communication tests,
   simulated executors and `muse --provider echo` stay the default (CLAUDE.md §11).
