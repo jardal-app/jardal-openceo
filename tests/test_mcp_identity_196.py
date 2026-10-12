@@ -3,7 +3,8 @@
 Every MCP caller authenticates with an opaque ticket token (the badge:
 which agent, on which ticket). The server filters tools/list to the
 grant's box — taken from the agent's catalog card — and rejects
-out-of-box calls. No anonymous access. No tokens.
+out-of-box calls. Calls with no badge get the default project-management
+box; a present but invalid badge still fails closed. No tokens.
 """
 
 from __future__ import annotations
@@ -457,12 +458,18 @@ class HttpEnforcementTests(unittest.IsolatedAsyncioTestCase):
                     transport=transport, base_url="http://t") as client:
                 return await client.post("/", json=payload, headers=headers)
 
-    async def test_list_without_token_is_401(self) -> None:
+    async def test_list_without_token_shows_default_box(self) -> None:
         mount, _, _ = _mounted()
         response = await self._post(
             mount, {"jsonrpc": "2.0", "id": 1, "method": "tools/list",
                     "params": {}}, None)
-        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.status_code, 200)
+        body = response.text
+        self.assertIn("openceo_search_tickets", body)
+        self.assertIn("manage_dns_record", body)
+        self.assertNotIn("openceo_send_email", body)
+        self.assertNotIn("openceo_register_expense", body)
+        self.assertNotIn("openceo_create_pm_tickets_batch", body)
 
     async def test_list_with_bad_token_is_401(self) -> None:
         mount, _, _ = _mounted()
@@ -523,7 +530,7 @@ class HttpEnforcementTests(unittest.IsolatedAsyncioTestCase):
         denied = [e for e in audit.events if not e["ok"]]
         self.assertEqual(len(denied), 1)
 
-    async def test_get_stream_without_token_is_401(self) -> None:
+    async def test_get_stream_without_token_reaches_app(self) -> None:
         mount, _, _ = _mounted()
         transport = httpx.ASGITransport(app=mount.app)  # type: ignore[arg-type]
         async with mount.lifespan():
@@ -531,7 +538,7 @@ class HttpEnforcementTests(unittest.IsolatedAsyncioTestCase):
                     transport=transport, base_url="http://t") as client:
                 response = await client.get(
                     "/", headers={"Accept": "text/event-stream"})
-        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.status_code, 405)
 
     async def test_get_with_token_passes_auth(self) -> None:
         mount, issuer, _ = _mounted()
@@ -545,14 +552,14 @@ class HttpEnforcementTests(unittest.IsolatedAsyncioTestCase):
                                   "Authorization": f"Bearer {token}"})
         self.assertNotEqual(response.status_code, 401)
 
-    async def test_delete_without_token_is_401(self) -> None:
+    async def test_delete_without_token_reaches_app(self) -> None:
         mount, _, _ = _mounted()
         transport = httpx.ASGITransport(app=mount.app)  # type: ignore[arg-type]
         async with mount.lifespan():
             async with httpx.AsyncClient(
                     transport=transport, base_url="http://t") as client:
                 response = await client.delete("/")
-        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.status_code, 405)
 
     async def test_readonly_list_over_http(self) -> None:
         mount, issuer, _ = _mounted()

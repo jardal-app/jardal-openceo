@@ -641,6 +641,97 @@ class GlobalFallbackTests(unittest.TestCase):
 
 
 @unittest.skipUnless(FAST_MCP_AVAILABLE, "FastMCP is required")
+class AnonymousBoxTests(unittest.IsolatedAsyncioTestCase):
+    """No token, no badge: the default project-management box (Owner order).
+
+    Ticket tools, DNS and the ERPNext project stay open so the Owner keeps
+    working from anywhere; the agent-specific tools (PM batch, email,
+    finance) need a badge. A forged/unknown token still fails closed.
+    """
+
+    EXPECTED_ANONYMOUS = frozenset({
+        "manage_dns_record",
+        "openceo_create_ticket",
+        "openceo_create_tickets_batch",
+        "openceo_search_tickets",
+        "openceo_get_ticket",
+        "openceo_create_objective",
+        "openceo_transition_ticket",
+        "openceo_transition_tickets_batch",
+        "openceo_update_ticket",
+        "openceo_add_ticket_comment",
+        "openceo_update_ticket_comment",
+        "openceo_delete_ticket_comment",
+        "openceo_attach_ticket_file",
+        "openceo_get_ticket_attachment",
+        "openceo_update_ticket_attachment",
+        "openceo_delete_ticket_attachment",
+        "openceo_ensure_erpnext_project",
+    })
+
+    def _server(self) -> Any:
+        from mcp_identity import (  # noqa: PLC0415
+            MCPIdentityMiddleware,
+            MemoryAuditSink,
+            MemoryTokenStore,
+            TokenIssuer,
+        )
+
+        server: Any = FastMCP("boundary-anonymous-test")
+        _register_all_tools(
+            server, _settings(), _FakeTaskService(), _FakeErpnext())
+        issuer = TokenIssuer(MemoryTokenStore(), load_catalog().agents)
+        server.add_middleware(MCPIdentityMiddleware(issuer, MemoryAuditSink()))
+        return server
+
+    async def test_anonymous_list_is_default_box(self) -> None:
+        from fastmcp import Client  # noqa: PLC0415
+
+        async with Client(self._server()) as client:
+            with patch("mcp_identity.get_http_request") as req:
+                req.return_value.headers = {}
+                tools = await client.list_tools()
+        self.assertEqual(
+            {tool.name for tool in tools}, set(self.EXPECTED_ANONYMOUS))
+
+    async def test_anonymous_ticket_call_ok(self) -> None:
+        from fastmcp import Client  # noqa: PLC0415
+
+        async with Client(self._server()) as client:
+            with patch("mcp_identity.get_http_request") as req:
+                req.return_value.headers = {}
+                result = await client.call_tool(
+                    "openceo_search_tickets", {"limit": 5})
+        self.assertTrue(result.data["ok"])
+
+    async def test_anonymous_agent_tools_denied(self) -> None:
+        from fastmcp import Client  # noqa: PLC0415
+        from fastmcp.exceptions import ToolError  # noqa: PLC0415
+
+        async with Client(self._server()) as client:
+            for tool in ("openceo_create_pm_tickets_batch",
+                         "openceo_send_email",
+                         "openceo_register_expense"):
+                with self.subTest(tool=tool):
+                    with patch("mcp_identity.get_http_request") as req:
+                        req.return_value.headers = {}
+                        with self.assertRaises(ToolError) as raised:
+                            await client.call_tool(tool, {})
+        self.assertIn("badge", str(raised.exception).lower())
+
+    async def test_invalid_token_still_rejected(self) -> None:
+        from fastmcp import Client  # noqa: PLC0415
+        from mcp.shared.exceptions import McpError  # noqa: PLC0415
+
+        async with Client(self._server()) as client:
+            with patch("mcp_identity.get_http_request") as req:
+                req.return_value.headers = {
+                    "authorization": "Bearer bogus"}
+                with self.assertRaises(McpError):
+                    await client.list_tools()
+
+
+@unittest.skipUnless(FAST_MCP_AVAILABLE, "FastMCP is required")
 class BoxAcceptanceTests(unittest.IsolatedAsyncioTestCase):
     async def _names(self, token: str) -> set[str]:
         from fastmcp import Client  # noqa: PLC0415

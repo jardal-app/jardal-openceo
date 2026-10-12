@@ -3,7 +3,9 @@
 Every MCP caller authenticates with an opaque token that works as a badge:
 which agent, on which ticket. The server filters ``tools/list`` to the
 grant's box — taken from the agent's catalog card — and rejects
-out-of-box calls. No anonymous access to ``/internal/mcp`` or
+out-of-box calls. Calls with no badge get the default
+project-management box (``ANONYMOUS_BOX``); a present but invalid badge
+still fails closed with 401 on ``/internal/mcp`` and
 ``/internal/mcp-global``.
 
 Token kinds: ``owner`` (every tool, every ticket), ``agent`` (its card
@@ -44,6 +46,7 @@ from catalog import TICKET_PATTERN, AgentCard
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "ANONYMOUS_BOX",
     "READONLY_BOX",
     "READONLY_PRINCIPALS",
     "McpAuthError",
@@ -63,6 +66,30 @@ __all__ = [
 
 READONLY_BOX = frozenset({"openceo_search_tickets", "openceo_get_ticket"})
 READONLY_PRINCIPALS = ("planner", "ceo")
+
+#: Calls with no token get this box (Owner order: keep working everywhere
+#: without a badge; the agent-specific tools need one). A present but
+#: unknown/invalid token still fails closed. The owner-token-sees-all flow
+#: is a pending ticket, outside the agents epic.
+ANONYMOUS_BOX = frozenset({
+    "manage_dns_record",
+    "openceo_create_ticket",
+    "openceo_create_tickets_batch",
+    "openceo_search_tickets",
+    "openceo_get_ticket",
+    "openceo_create_objective",
+    "openceo_transition_ticket",
+    "openceo_transition_tickets_batch",
+    "openceo_update_ticket",
+    "openceo_add_ticket_comment",
+    "openceo_update_ticket_comment",
+    "openceo_delete_ticket_comment",
+    "openceo_attach_ticket_file",
+    "openceo_get_ticket_attachment",
+    "openceo_update_ticket_attachment",
+    "openceo_delete_ticket_attachment",
+    "openceo_ensure_erpnext_project",
+})
 
 AGENT_TOKEN_TTL = timedelta(days=7)
 OWNER_TOKEN_TTL = timedelta(days=90)
@@ -520,12 +547,14 @@ class MCPIdentityMiddleware(Middleware):  # type: ignore[misc]
         self._issuer = issuer
         self._audit = audit
 
-    async def _grant(self) -> TicketGrant:
+    async def _grant(self) -> TicketGrant | None:
         try:
             request = get_http_request()
             headers = dict(getattr(request, "headers", {}) or {})
         except Exception as exc:
             raise McpAuthError(f"No request to authenticate ({exc})")
+        if bearer_from_headers(headers) is None:
+            return None
         return await self._issuer.authenticate(bearer_from_headers(headers))
 
     async def _record(self, grant: TicketGrant | None, tool: str,
@@ -551,7 +580,8 @@ class MCPIdentityMiddleware(Middleware):  # type: ignore[misc]
             raise _unauthenticated()
         tools = await call_next(context)
         await self._record(grant, "tools/list", True)
-        return [tool for tool in tools if tool.name in grant.tools]
+        box = grant.tools if grant is not None else ANONYMOUS_BOX
+        return [tool for tool in tools if tool.name in box]
 
     async def _hide_surface(self, surface: str) -> Any:
         # Lists answer empty: clients probe every surface at startup and
@@ -601,7 +631,12 @@ class MCPIdentityMiddleware(Middleware):  # type: ignore[misc]
         name = str(getattr(context.message, "name", "") or "")
         args = getattr(context.message, "arguments", None) or {}
         try:
-            grant.check(name, args)
+            if grant is None:
+                if name not in ANONYMOUS_BOX:
+                    raise McpAuthError(
+                        f"{name} needs an Owner or agent badge")
+            else:
+                grant.check(name, args)
         except McpAuthError as exc:
             await self._record(grant, name, False, exc.detail)
             if ToolError is None:  # pragma: no cover - FastMCP is installed
