@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -9,11 +8,11 @@ from agents.finance import contribution as contribution_flow
 from agents.finance import scope_summary as scope_flow
 from agents.finance import voice_expense as expense_flow
 from agents.finance import voice_income as income_flow
-from agents.finance.elfec import run_elfec_house_payment_practice
 from agents.finance.intent import BALANCE, CONTRIBUTION, EXPENSE, INCOME, classify
 from agents.finance.money_text import MissingExchangeRateError
 from settings import Settings
 from state import TaskStatus
+from tool_locks import is_lock_pending
 
 
 @dataclass
@@ -22,6 +21,8 @@ class FinanceExecutionOutput:
     steps: list[dict[str, Any]] = field(default_factory=list)
     last_response_summary: str | None = None
     error: str | None = None
+    waiting_reason: str | None = None
+    owner_question_id: str | None = None
 
 
 class FinanceSessionManager:
@@ -34,6 +35,11 @@ class FinanceSessionManager:
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        self._task_service: Any | None = None
+
+    def set_task_service(self, task_service: Any) -> None:
+        """Late-bound TaskService for the Elfec lock (TASK-2026-00208)."""
+        self._task_service = task_service
 
     async def run(
         self,
@@ -91,16 +97,42 @@ class FinanceSessionManager:
             output.error = detail
             return output
 
+        if self._task_service is None:
+            detail = "Candado sin TaskService: Elfec no se ejecuta."
+            output.steps.append(self._step("execute_finance_workflow", "failed", detail))
+            output.status = TaskStatus.FAILED
+            output.error = detail
+            return output
+
         try:
-            result = await asyncio.to_thread(
-                run_elfec_house_payment_practice,
-                self._settings,
-                workflow,
+            result = await self._task_service.tool_elfec_pay(
+                workflow=workflow,
+                project=task.get("project"),
+                origin_task_id=task.get("task_id"),
             )
         except Exception as exc:
             output.steps.append(self._step("execute_finance_workflow", "failed", str(exc)))
             output.status = TaskStatus.FAILED
             output.error = str(exc)
+            return output
+
+        if is_lock_pending(result):
+            detail = (
+                "Candado: pago Elfec pendiente de aprobacion del dueno "
+                f"({result.get('question_task_id') or 'sin pregunta'})."
+            )
+            output.steps.append(self._step("execute_finance_workflow", "waiting_approval", detail))
+            output.status = TaskStatus.WAITING
+            output.waiting_reason = str(result.get("waiting_reason") or "tool_lock:elfec")
+            output.owner_question_id = result.get("question_task_id")
+            output.last_response_summary = detail
+            return output
+
+        if str(result.get("status") or "") == "denied":
+            detail = str(result.get("reason") or "El dueno denego el pago Elfec.")
+            output.steps.append(self._step("execute_finance_workflow", "failed", detail))
+            output.status = TaskStatus.FAILED
+            output.error = detail
             return output
 
         summary = str(result.get("summary") or "").strip()

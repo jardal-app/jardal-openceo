@@ -193,6 +193,8 @@ pm_step_manager.set_token_issuer(mcp_token_issuer)
 pm_step_manager.set_task_service(task_service)
 workflow_service.set_task_service(task_service)
 dev_step_manager.set_task_service(task_service)  # Tier S notices + internal tickets (F3–F6)
+secretary_step_manager.set_task_service(task_service)  # email lock (00208)
+finance_step_manager.set_task_service(task_service)  # Elfec lock (00208)
 # Company-level objectives (F2): top-down entries + inverse group propagation.
 objective_service = ObjectiveService(
     repo=repo,
@@ -3129,7 +3131,8 @@ async def _direct_agent_session(
             "attachments": [],
             "priority": TaskPriority.MEDIUM.value,
         }
-        result = await secretary_step_manager.run(task)
+        result = await secretary_step_manager.run(
+            task, config_loader.load_project(project))
         if result.last_response_summary:
             return _maybe_stream(payload, result.last_response_summary)
         if result.error:

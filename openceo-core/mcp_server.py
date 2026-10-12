@@ -236,22 +236,33 @@ def build_mcp_provider_config(
     return {"mcpServers": {"openceo-internal": server}}
 
 
-def _register_infra_tools(server: FastMCP, settings: Settings) -> tuple[str, ...]:
+def _register_infra_tools(
+    server: FastMCP, settings: Settings, task_service: "TaskService | None" = None,
+) -> tuple[str, ...]:
     manager = CloudflareDNSManager(settings)
 
-    def manage_dns_record(
+    async def manage_dns_record(
         hostname: str, action: Literal["create", "delete"] = "create",
+        project: str | None = None, ticket: str | None = None,
     ) -> dict[str, Any]:
-        if action == "delete":
-            return manager.delete(hostname=hostname)
-        return manager.check_or_create(hostname=hostname)
+        if action != "delete":
+            return manager.check_or_create(hostname=hostname)
+        if task_service is None:
+            return {"ok": False, "status": "unavailable",
+                    "message": "DNS deletion needs the Owner lock; TaskService is not wired."}
+        try:
+            return await task_service.tool_dns_delete(
+                hostname=hostname, project=project, ticket=ticket)
+        except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
+            return {"ok": False, "status": "error", "message": str(exc)}
 
     server.tool(
         manage_dns_record,
         name="manage_dns_record",
-        description="DNS: create (idempotent) or delete an A record in Cloudflare. "
-        "Use create before deploying with Traefik. "
-        "Boundary (a): holds the Cloudflare token.",
+        description="DNS: create (idempotent) or delete a Cloudflare A record; "
+        "create before Traefik deploy. "
+        "Delete needs Owner approval (pass project, ticket). "
+        "Boundary (a): token. Boundary (b): delete lock.",
     )
     return ("manage_dns_record",)
 
@@ -819,12 +830,14 @@ def _register_openceo_tools(
         body_html: str | None = None,
         cc: str | list[str] | None = None,
         bcc: str | list[str] | None = None,
+        project: str | None = None,
+        ticket: str | None = None,
     ) -> dict[str, Any]:
-        from agents.secretary.tools import send_email
+        if task_service is None:
+            return {"ok": False, "status": "not_configured",
+                    "message": "Sin TaskService."}
         try:
-            # Sync SMTP leaf: off the event loop on purpose.
-            return await asyncio.to_thread(
-                send_email,
+            return await task_service.tool_send_email(
                 from_email=from_email,
                 to=to,
                 subject=subject,
@@ -832,6 +845,8 @@ def _register_openceo_tools(
                 body_html=body_html,
                 cc=cc,
                 bcc=bcc,
+                project=project,
+                ticket=ticket,
             )
         except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
             return _classify(exc)
@@ -930,26 +945,28 @@ def _register_openceo_tools(
 
     async def openceo_elfec_house_payment(
         expected_row_label: str = "",
+        project: str | None = None,
+        ticket: str | None = None,
     ) -> dict[str, Any]:
+        if task_service is None:
+            return {"ok": False, "status": "not_configured",
+                    "message": "Sin TaskService."}
         try:
-            # Sync Playwright leaf: off the event loop on purpose.
-            result = await asyncio.to_thread(
-                WorkflowToolRegistry._finance_pago_elfec_house,
+            return await task_service.tool_elfec_pay(
                 expected_row_label=expected_row_label,
+                project=project,
+                ticket=ticket,
             )
         except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
             return _classify(exc)
-        if not isinstance(result, dict) or result.get("practice_mode") is not True:
-            return {"ok": False, "status": "refused",
-                    "message": "Elfec over MCP runs practice mode only."}
-        return result
 
     server.tool(
         openceo_send_email,
         name="openceo_send_email",
-        description="Send an operational email from one of: "
-        f"{_senders_text()}. Unknown senders are rejected. "
-        "Boundary (a): holds the SMTP credentials.",
+        description="Send email from: "
+        f"{_senders_text()}. Unknown senders rejected. "
+        "Off-list recipients need Owner approval (pass project, ticket). "
+        "Boundary (a): SMTP. Boundary (b): recipient lock.",
     )
     server.tool(
         openceo_ensure_erpnext_project,
@@ -987,8 +1004,9 @@ def _register_openceo_tools(
         openceo_elfec_house_payment,
         name="openceo_elfec_house_payment",
         description="Elfec house payment in practice mode: drives the portal to "
-        "the card form and stops, never pays. "
-        "Boundary (a): holds the Elfec credentials.",
+        "card form and stops, never pays. "
+        "Needs Owner approval (pass project, ticket). "
+        "Boundary (a): Elfec credentials. Boundary (b): payment lock.",
     )
     return (
         "openceo_create_ticket",
@@ -1024,7 +1042,7 @@ def _register_all_tools(
     erpnext: Any | None = None,
 ) -> tuple[str, ...]:
     """Internal MCP: infra + OpenCEO-specific tools."""
-    infra = _register_infra_tools(server, settings)
+    infra = _register_infra_tools(server, settings, task_service)
     openceo = _register_openceo_tools(server, settings, task_service, erpnext)
     return infra + openceo
 

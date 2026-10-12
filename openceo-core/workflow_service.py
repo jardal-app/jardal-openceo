@@ -20,6 +20,11 @@ from events import RealtimeHub
 from horizon import privacy as privacy_module
 from settings import Settings, get_settings
 from state import DiscoveryRunStatus, TaskStatus, WorkflowRunStatus
+from tool_locks import (
+    LOCK_WAITING_PREFIX,
+    ToolLockError,
+    is_lock_pending,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -386,11 +391,31 @@ class WorkflowToolRegistry:
             for r in runs
         ]
 
-    @staticmethod
-    def _secretary_send_email(**params: Any) -> dict[str, Any]:
-        """Boundary (a): sends through the SMTP credentials agents never hold."""
-        from agents.secretary.tools import send_email
-        return send_email(**params)
+    async def _secretary_send_email(
+        self,
+        context: dict[str, Any] | None = None,
+        **params: Any,
+    ) -> dict[str, Any]:
+        """Boundary (a)+(b): SMTP send with the Owner lock inside (00208)."""
+        task = (context or {}).get("task") or {}
+        if self._task_service is None:
+            return {"ok": False, "status": "unavailable",
+                    "message": "Email needs the Owner lock; "
+                             "TaskService is not wired."}
+        return await self._task_service.tool_send_email(
+            from_email=params.get("from_email"),
+            to=params.get("to"),
+            subject=params.get("subject") or "",
+            body_text=params.get("body_text") or "",
+            body_html=params.get("body_html"),
+            cc=params.get("cc"),
+            bcc=params.get("bcc"),
+            reply_to=params.get("reply_to"),
+            attachments=params.get("attachments"),
+            language=params.get("language"),
+            project=task.get("project"),
+            origin_task_id=task.get("task_id"),
+        )
 
     @staticmethod
     def _secretary_list_sender_accounts(**_: Any) -> dict[str, Any]:
@@ -447,15 +472,26 @@ class WorkflowToolRegistry:
             notes.append(doc)
         return notes
 
-    @staticmethod
-    def _finance_pago_elfec_house(**params: Any) -> dict[str, Any]:
-        """Boundary (a): Elfec portal run in practice mode, never pays."""
-        from agents.finance.elfec import run_elfec_house_payment_practice
-
+    async def _finance_pago_elfec_house(
+        self,
+        context: dict[str, Any] | None = None,
+        **params: Any,
+    ) -> dict[str, Any]:
+        """Boundary (a)+(b): Elfec run with the Owner lock inside (00208)."""
+        task = (context or {}).get("task") or {}
+        if self._task_service is None:
+            return {"ok": False, "status": "unavailable",
+                    "message": "Elfec needs the Owner lock; "
+                             "TaskService is not wired."}
         workflow_cfg = params.get("workflow")
         if not isinstance(workflow_cfg, dict):
             workflow_cfg = dict(params)
-        return run_elfec_house_payment_practice(get_settings(), workflow_cfg)
+        return await self._task_service.tool_elfec_pay(
+            workflow=dict(workflow_cfg),
+            expected_row_label=str(params.get("expected_row_label") or ""),
+            project=task.get("project"),
+            origin_task_id=task.get("task_id"),
+        )
 
     @staticmethod
     def _operation_ref(
@@ -1245,6 +1281,35 @@ class WorkflowService:
 
         if result.get("blocked"):
             blocked_reason = result.get("blocked_reason")
+            if blocked_reason == "tool_lock":
+                pending = result.get("pending") \
+                    if isinstance(result.get("pending"), dict) else {}
+                params = dict((run.get("context") or {}).get("params") or {})
+                params["_workflow"] = {
+                    "run_id": run.get("run_id"),
+                    "workflow": workflow.get("workflow"),
+                    "status": WorkflowRunStatus.BLOCKED_TOOL.value,
+                }
+                if pending.get("question_task_id"):
+                    params["owner_question_id"] = pending.get(
+                        "question_task_id")
+                reason = str(pending.get("waiting_reason") or "")
+                if not reason.startswith(LOCK_WAITING_PREFIX):
+                    reason = f"{LOCK_WAITING_PREFIX}tool"
+                return WorkflowExecutionOutcome(
+                    selected_agent=str(workflow.get("agent") or _agent_from_workflow_id(str(workflow.get("workflow") or ""))),
+                    status=TaskStatus.WAITING.value,
+                    steps=[
+                        _task_step(str(item.get("id") or "workflow_step"), str(item.get("status") or ""), item.get("detail"))
+                        for item in (result.get("events") or [])
+                    ],
+                    last_response_summary=(
+                        f"Candado ({pending.get('tool') or result.get('tool') or 'tool'}): "
+                        "pendiente de aprobacion del dueno."
+                    ),
+                    waiting_reason=reason,
+                    params=params,
+                )
             if blocked_reason == "human_in_the_loop":
                 perm = str(result.get("permission") or "qa_review")
                 prompt = str(result.get("prompt") or "")
@@ -1389,6 +1454,39 @@ class WorkflowService:
             result = await self._tools.call(tool_name, resolved_params, context)
             outputs[step_id] = result
             _sync_context_outputs(context, outputs)
+            if isinstance(result, dict) and result.get("status") in {
+                    "denied", "invalid_input", "unavailable"}:
+                # A lock terminal state fails the run like the sessions
+                # do: later steps must never act as if the send, delete
+                # or payment had happened.
+                raise ToolLockError(
+                    f"{tool_name} lock ended: "
+                    f"{result.get('status')}: "
+                    f"{result.get('reason') or result.get('message') or ''}"
+                    .strip())
+            if is_lock_pending(result):
+                detail = (f"Candado ({result.get('tool') or tool_name}): "
+                          f"pendiente de aprobacion del dueno.")
+                events.append(_run_event(step_id, "waiting_approval", detail))
+                await self._repo.patch_workflow_run(
+                    str(run["run_id"]),
+                    {
+                        "status": WorkflowRunStatus.BLOCKED_TOOL.value,
+                        "current_step_index": index,
+                        "current_step_id": step_id,
+                        "steps": events,
+                        "outputs": outputs,
+                        "context": context,
+                    },
+                )
+                return {
+                    "blocked": True,
+                    "blocked_reason": "tool_lock",
+                    "tool": tool_name,
+                    "pending": result,
+                    "events": events,
+                    "outputs": outputs,
+                }
             events.append(_run_event(step_id, "ok", f"Tool executed: {tool_name}", result))
             await self._repo.patch_workflow_run(
                 str(run["run_id"]),

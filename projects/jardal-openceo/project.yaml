@@ -84,6 +84,12 @@ finance:
       expected_row_label: House
       stop_before_card: true
 
+secretary:
+  # Recipients the secretary may mail without the Owner (TASK-2026-00208):
+  # exact addresses or @domain suffixes. Anything else locks.
+  allowed_recipients:
+    - "@jardal.app"
+
 notifications: []
 
 presets:

@@ -168,6 +168,38 @@ class ConfigLoader:
                     f"ceo in {project}/project.yaml must be "
                     "a mapping or absent."
                 )
+        # Email allowlist (TASK-2026-00208): recipients the secretary may
+        # mail without the Owner. Malformed shape parks the project's
+        # tickets; absent means nothing is pre-approved (fail-closed).
+        secretary = data.get("secretary")
+        if secretary is not None:
+            if not isinstance(secretary, dict):
+                errors.append(
+                    f"{project}/project.yaml: 'secretary' must be a mapping."
+                )
+            else:
+                recipients = secretary.get("allowed_recipients")
+                if recipients is not None:
+                    if not isinstance(recipients, list) or any(
+                            not isinstance(entry, str) or not entry.strip()
+                            for entry in recipients):
+                        errors.append(
+                            f"{project}/project.yaml: "
+                            "'secretary.allowed_recipients' must be a list "
+                            "of non-empty strings."
+                        )
+                    elif len(recipients) > 128:
+                        errors.append(
+                            f"{project}/project.yaml: "
+                            "'secretary.allowed_recipients' carries at most "
+                            "128 entries."
+                        )
+                    elif any(len(entry.strip()) > 254 for entry in recipients):
+                        errors.append(
+                            f"{project}/project.yaml: "
+                            "'secretary.allowed_recipients' entries run at "
+                            "most 254 characters."
+                        )
         dev = data.get("dev")
         if dev is None:
             return errors

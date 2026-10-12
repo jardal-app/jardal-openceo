@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "ANONYMOUS_BOX",
+    "LOCKABLE_MCP_TOOLS",
     "READONLY_BOX",
     "READONLY_PRINCIPALS",
     "McpAuthError",
@@ -159,6 +160,13 @@ class TicketGrant:
         if self.kind is TokenKind.SERVICE:
             if params.get("project") != self.project:
                 raise McpDenied("Service token is bound to its project")
+            # Service badges carry no ticket, so they can never own the
+            # origin a lock parks: lockables stay agent/owner-only
+            # (TASK-2026-00208). No live service badge holds them.
+            if tool in LOCKABLE_MCP_TOOLS and (
+                    tool != "manage_dns_record"
+                    or params.get("action") == "delete"):
+                raise McpDenied("Service tokens cannot call lockable tools")
             return
         raise McpDenied(f"Unknown token kind {self.kind}")  # fail closed
 
@@ -175,10 +183,21 @@ class TicketGrant:
             if params.get("project") != self.project:
                 raise McpDenied("Agents only search their own project")
             return
-        if tool in ("openceo_ensure_erpnext_project", "manage_dns_record"):
+        if tool == "openceo_ensure_erpnext_project":
             # Creation tools carry no ticket/project params to bind, so the
-            # box on the token is the whole rule. DNS deletion gets its
-            # Owner lock inside the tool (TASK-2026-00208).
+            # box on the token is the whole rule.
+            return
+        if tool in LOCKABLE_MCP_TOOLS:
+            # The dangerous action locks through the Owner (TASK-2026-00208)
+            # and parks the caller's ticket: the params must name exactly
+            # this grant, never another ticket. DNS creation keeps the box
+            # rule alone (no lock, idempotent).
+            if tool == "manage_dns_record" and params.get("action") != "delete":
+                return
+            if params.get("ticket") != self.ticket:
+                raise McpDenied("Lockable tools need your own ticket")
+            if params.get("project") != self.project:
+                raise McpDenied("Lockable tools need your own project")
             return
         raise McpDenied(f"Tool {tool} has no agent scoping rule")
 
@@ -213,6 +232,16 @@ class _StoredToken:
     grant: TicketGrant
     revoked: bool = False
     revoked_reason: str = ""
+
+
+#: Tools whose dangerous action carries an Owner lock inside
+#: (TASK-2026-00208). Agent callers bind their ticket/project params to
+#: the grant; anonymous callers may never name an origin ticket.
+LOCKABLE_MCP_TOOLS = frozenset({
+    "manage_dns_record",
+    "openceo_send_email",
+    "openceo_elfec_house_payment",
+})
 
 
 def _grant_to_doc(grant: TicketGrant) -> dict[str, Any]:
@@ -639,6 +668,9 @@ class MCPIdentityMiddleware(Middleware):  # type: ignore[misc]
                 if name not in ANONYMOUS_BOX:
                     raise McpAuthError(
                         f"{name} needs an Owner or agent badge")
+                if name in LOCKABLE_MCP_TOOLS and args.get("ticket"):
+                    raise McpAuthError(
+                        "anonymous calls cannot name an origin ticket")
             else:
                 grant.check(name, args)
         except McpAuthError as exc:
