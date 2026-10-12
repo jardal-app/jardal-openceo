@@ -309,7 +309,12 @@ class PMBatchOwnerOnlyTests(unittest.TestCase):
             "openceo_create_pm_tickets_batch",
             {"project": "other", "source_id": "s", "tickets": "[]"})
 
-    def test_service_may_call_with_project(self) -> None:
+    def test_service_may_call_until_00209_sunset(self) -> None:
+        """The SERVICE exception is the retiring PM subprocess path.
+
+        TASK-2026-00209 removes it; that ticket deletes this test and
+        narrows the rule to OWNER alone.
+        """
         self._grant(TokenKind.SERVICE).check(
             "openceo_create_pm_tickets_batch",
             {"project": DEV_PROJECT, "source_id": "s", "tickets": "[]"})
@@ -425,17 +430,10 @@ class EmailDescriptionTests(unittest.TestCase):
 
 @unittest.skipUnless(FAST_MCP_AVAILABLE, "FastMCP is required")
 class BoundaryDelegationTests(unittest.IsolatedAsyncioTestCase):
-    async def _server(
-        self,
-        overrides: dict[str, Any] | None = None,
-    ) -> Any:
+    def _server(self) -> Any:
         server: Any = FastMCP("boundary-delegation-test")
-        registry = WorkflowToolRegistry(settings=_settings())
-        for name, fn in (overrides or {}).items():
-            registry.register(name, fn)
         _register_all_tools(
-            server, _settings(), _FakeTaskService(), _FakeErpnext(),
-            tool_registry=registry)
+            server, _settings(), _FakeTaskService(), _FakeErpnext())
         return server
 
     async def test_expense_delegates_to_registry(self) -> None:
@@ -457,31 +455,54 @@ class BoundaryDelegationTests(unittest.IsolatedAsyncioTestCase):
             })
             return {"ok": True}
 
-        server = await self._server({"finance.register_expense": fake_expense})
-        async with Client(server) as client:
-            result = await client.call_tool(
-                "openceo_register_expense", {"text": "x"})
+        with patch.object(WorkflowToolRegistry, "_finance_register_expense",
+                          new=staticmethod(fake_expense)):
+            server = self._server()
+            async with Client(server) as client:
+                result = await client.call_tool(
+                    "openceo_register_expense",
+                    {"text": "x", "openceo_ref": "r1"})
         self.assertTrue(result.data["ok"])
         self.assertEqual(calls, [{
-            "text": "x", "openceo_ref": None, "submit": True,
+            "text": "x", "openceo_ref": "r1", "submit": True,
             "exchange_rate": None, "context": {},
         }])
+
+    async def test_money_without_ref_rejected(self) -> None:
+        from fastmcp import Client  # noqa: PLC0415
+
+        server = self._server()
+        async with Client(server) as client:
+            for tool in ("openceo_register_expense",
+                         "openceo_register_income"):
+                with self.subTest(tool=tool):
+                    result = await client.call_tool(tool, {"text": "x"})
+                    self.assertFalse(result.data["ok"])
+                    self.assertEqual(result.data["status"], "invalid_input")
+                    blank = await client.call_tool(
+                        tool, {"text": "x", "openceo_ref": "  "})
+                    self.assertFalse(blank.data["ok"])
+                    self.assertEqual(blank.data["status"], "invalid_input")
 
     async def test_tool_error_maps_to_not_ok(self) -> None:
         from fastmcp import Client  # noqa: PLC0415
 
-        server = await self._server({
-            "finance.register_expense":
-                AsyncMock(side_effect=RuntimeError("boom"))})
-        async with Client(server) as client:
-            result = await client.call_tool(
-                "openceo_register_expense", {"text": "x"})
+        with patch.object(
+                WorkflowToolRegistry, "_finance_register_expense",
+                new=AsyncMock(side_effect=RuntimeError("boom"))):
+            server = self._server()
+            async with Client(server) as client:
+                result = await client.call_tool(
+                    "openceo_register_expense",
+                    {"text": "x", "openceo_ref": "r1"})
         self.assertFalse(result.data["ok"])
 
     async def test_project_uses_adapter(self) -> None:
         from fastmcp import Client  # noqa: PLC0415
 
-        erpnext = AsyncMock()
+        from tools.erpnext_tickets import ERPNextTicketAdapter  # noqa: PLC0415
+
+        erpnext = AsyncMock(spec=ERPNextTicketAdapter)
         erpnext.is_enabled = True
         erpnext.find_project.return_value = None
         erpnext.ensure_project.return_value = "PROJ-x"
@@ -511,34 +532,112 @@ class BoundaryDelegationTests(unittest.IsolatedAsyncioTestCase):
         from fastmcp import Client  # noqa: PLC0415
         from unittest.mock import Mock  # noqa: PLC0415
 
-        server = await self._server({
-            "finance.pago_elfec_house":
-                Mock(return_value={"ok": True, "practice_mode": True})})
-        async with Client(server) as client:
-            result = await client.call_tool(
-                "openceo_elfec_house_payment", {})
+        server = self._server()
+        with patch.object(
+                WorkflowToolRegistry, "_finance_pago_elfec_house",
+                new=staticmethod(Mock(return_value={
+                    "ok": True, "practice_mode": True}))):
+            async with Client(server) as client:
+                result = await client.call_tool(
+                    "openceo_elfec_house_payment", {})
         self.assertTrue(result.data["practice_mode"])
 
-    async def test_email_delegates_to_registry(self) -> None:
+    async def test_elfec_refuses_non_practice(self) -> None:
+        from fastmcp import Client  # noqa: PLC0415
+        from unittest.mock import Mock  # noqa: PLC0415
+
+        server = self._server()
+        with patch.object(
+                WorkflowToolRegistry, "_finance_pago_elfec_house",
+                new=staticmethod(Mock(return_value={
+                    "ok": True, "practice_mode": False}))):
+            async with Client(server) as client:
+                result = await client.call_tool(
+                    "openceo_elfec_house_payment", {})
+        self.assertFalse(result.data["ok"])
+        self.assertEqual(result.data["status"], "refused")
+
+    async def test_email_sends_off_loop(self) -> None:
+        from fastmcp import Client  # noqa: PLC0415
+        from unittest.mock import Mock  # noqa: PLC0415
+
+        server = self._server()
+        sender = Mock(return_value={"ok": True})
+        with patch("agents.secretary.tools.send_email", sender):
+            async with Client(server) as client:
+                result = await client.call_tool(
+                    "openceo_send_email",
+                    {"to": "t@example.com", "subject": "s",
+                     "body_text": "b"})
+        self.assertTrue(result.data["ok"])
+        sender.assert_called_once_with(
+            from_email=None, to="t@example.com", subject="s",
+            body_text="b", body_html=None, cc=None, bcc=None)
+
+
+@unittest.skipUnless(FAST_MCP_AVAILABLE, "FastMCP is required")
+class NewToolBudgetTests(unittest.TestCase):
+    """The 8 non-thread tools keep the same description budget as the rest.
+
+    Every description word travels in each session request, so growth is a
+    visible decision, not drift. The email sender list is representative (2
+    accounts); production grows with its SMTP accounts.
+    """
+
+    BUDGETED = (
+        "manage_dns_record",
+        "openceo_send_email",
+        "openceo_ensure_erpnext_project",
+        "openceo_register_expense",
+        "openceo_register_income",
+        "openceo_scope_summary",
+        "openceo_contribution_10_status",
+        "openceo_elfec_house_payment",
+    )
+
+    def test_new_tools_fit_budget(self) -> None:
+        import asyncio
+
         from fastmcp import Client  # noqa: PLC0415
 
-        calls: list[dict[str, Any]] = []
+        class _FakeSender:
+            def __init__(self, settings: Settings) -> None:
+                pass
 
-        async def fake_send(**kwargs: Any) -> dict[str, bool]:
-            calls.append(kwargs)
-            return {"ok": True}
+            def list_accounts(self) -> list[dict[str, str]]:
+                return [{"email": "a@jardal.app", "display_name": "A",
+                         "header_name": "A"},
+                        {"email": "b@jardal.app", "display_name": "B",
+                         "header_name": "B"}]
 
-        server = await self._server({"secretary.send_email": fake_send})
-        async with Client(server) as client:
-            result = await client.call_tool(
-                "openceo_send_email",
-                {"to": "t@example.com", "subject": "s",
-                 "body_text": "b"})
-        self.assertTrue(result.data["ok"])
-        self.assertEqual(calls, [{
-            "from_email": None, "to": "t@example.com", "subject": "s",
-            "body_text": "b", "body_html": None, "cc": None, "bcc": None,
-        }])
+        async def _descriptions() -> dict[str, str]:
+            server: Any = FastMCP("boundary-budget-test")
+            with patch("mcp_server.SMTPEmailSender", _FakeSender):
+                _register_all_tools(
+                    server, _settings(), _FakeTaskService(),
+                    _FakeErpnext())
+            async with Client(server) as client:
+                tools = await client.list_tools()
+            return {tool.name: tool.description or "" for tool in tools}
+
+        descriptions = asyncio.run(_descriptions())
+        for name in self.BUDGETED:
+            with self.subTest(tool=name):
+                description = descriptions[name]
+                self.assertLessEqual(len(description), 220)
+                self.assertLessEqual(len(description.split()), 32)
+
+
+@unittest.skipUnless(FAST_MCP_AVAILABLE, "FastMCP is required")
+class GlobalFallbackTests(unittest.TestCase):
+    def test_global_without_task_service_is_dns_only(self) -> None:
+        from mcp_server import build_global_mcp_mount  # noqa: PLC0415
+
+        settings = Settings(_env_file=None,  # type: ignore[call-arg]
+                            MCP_SERVER_ENABLED=True)
+        mount = build_global_mcp_mount(settings, None)
+        assert mount is not None
+        self.assertEqual(mount.tool_names, ("manage_dns_record",))
 
 
 @unittest.skipUnless(FAST_MCP_AVAILABLE, "FastMCP is required")
@@ -563,6 +662,8 @@ class BoxAcceptanceTests(unittest.IsolatedAsyncioTestCase):
                 "dev", DEV_TICKET, DEV_PROJECT)
         elif token == "owner":
             issued = await issuer.issue_owner()
+        elif token == "readonly":
+            issued = await issuer.issue_readonly("planner")
         async with Client(server) as client:
             with patch("mcp_identity.get_http_request") as req:
                 req.return_value.headers = {
@@ -575,6 +676,11 @@ class BoxAcceptanceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_owner_list_tools_is_full_set(self) -> None:
         self.assertEqual(await self._names("owner"), set(EXPECTED_MCP))
+
+    async def test_readonly_list_tools_is_readonly_box(self) -> None:
+        self.assertEqual(
+            await self._names("readonly"),
+            {"openceo_search_tickets", "openceo_get_ticket"})
 
 
 if __name__ == "__main__":

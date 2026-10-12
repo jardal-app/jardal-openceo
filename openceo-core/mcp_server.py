@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import logging
@@ -82,7 +83,10 @@ def build_internal_mcp_mount(
     issuer: Any | None = None,
     audit: Any | None = None,
 ) -> MountedMCPServer | None:
-    """Build the internal MCP — all tools (infra + OpenCEO-specific). Used by OpenCEO tmux sessions."""
+    """Build the internal MCP — all tools (infra + OpenCEO-specific). Used by OpenCEO tmux sessions.
+
+    Stateless HTTP fits one-shot managed runs; the global mount below stays
+    stateful for long-lived manual sessions."""
     if not settings.MCP_SERVER_ENABLED:
         return None
     return _build_mcp(
@@ -113,7 +117,9 @@ def build_global_mcp_mount(
 
     Los dos mounts exponen lo mismo; la diferencia es **quien los recibe**, no que
     contienen: el interno se inyecta por configuracion en las sesiones que OpenCEO
-    gestiona, y el global es opt-in para sesiones manuales del host.
+    gestiona, y el global es opt-in para sesiones manuales del host. Sin
+    task_service el global degrada a solo DNS (rama defensiva; main.py siempre
+    lo pasa).
 
     Superficie de seguridad: `MCP_SERVER_ALLOWED_IPS` es loopback-only por defecto y el
     mount no se publica en Traefik, asi que solo alcanzable desde esta maquina.
@@ -308,7 +314,6 @@ def _register_openceo_tools(
     settings: Settings,
     task_service: "TaskService",
     erpnext: Any | None = None,
-    tool_registry: WorkflowToolRegistry | None = None,
 ) -> tuple[str, ...]:
     """OpenCEO-specific tools (ticket CRUD via ERPNext + MongoDB). Never exposed globally."""
 
@@ -848,12 +853,13 @@ def _register_openceo_tools(
     # One implementation, two access paths: the YAML registry owns the logic
     # and these wrappers expose it to agents. Each description documents the
     # criterion that justifies it: (a) secret, (b) lock, (c) business record.
-    boundary = tool_registry or WorkflowToolRegistry(settings=settings)
+    boundary = WorkflowToolRegistry(settings=settings)
 
     def _senders_text() -> str:
         try:
             accounts = SMTPEmailSender(settings).list_accounts()
-        except Exception:  # noqa: BLE001 - description fallback; calls report the real error
+        except Exception as exc:  # noqa: BLE001 - config surface varies; logged, then fallback
+            logger.warning("SMTP sender list unavailable: %s", exc)
             return "no sender account configured"
         emails = [str(item.get("email") or "") for item in accounts
                   if str(item.get("email") or "").strip()]
@@ -868,16 +874,19 @@ def _register_openceo_tools(
         cc: str | list[str] | None = None,
         bcc: str | list[str] | None = None,
     ) -> dict[str, Any]:
+        from agents.secretary.tools import send_email
         try:
-            return await boundary.call("secretary.send_email", {
-                "from_email": from_email,
-                "to": to,
-                "subject": subject,
-                "body_text": body_text,
-                "body_html": body_html,
-                "cc": cc,
-                "bcc": bcc,
-            }, {})
+            # Sync SMTP leaf: off the event loop on purpose.
+            return await asyncio.to_thread(
+                send_email,
+                from_email=from_email,
+                to=to,
+                subject=subject,
+                body_text=body_text,
+                body_html=body_html,
+                cc=cc,
+                bcc=bcc,
+            )
         except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
             return _classify(exc)
 
@@ -896,16 +905,28 @@ def _register_openceo_tools(
         except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
             return _classify(exc)
 
+    def _money_ref(openceo_ref: str | None) -> str | None:
+        # Money over MCP has no task context to derive a stable ref from, so
+        # the caller supplies one: without it a retried call would double-post
+        # (review follow-up O1).
+        ref = (openceo_ref or "").strip()
+        return ref or None
+
     async def openceo_register_expense(
         text: str = "",
         openceo_ref: str | None = None,
         submit: bool = True,
         exchange_rate: str | None = None,
     ) -> dict[str, Any]:
+        ref = _money_ref(openceo_ref)
+        if ref is None:
+            return {"ok": False, "status": "invalid_input",
+                    "message": "openceo_ref is required: a stable key you "
+                    "reuse when retrying, so a retry never double-posts."}
         try:
             return await boundary.call("finance.register_expense", {
                 "text": text,
-                "openceo_ref": openceo_ref,
+                "openceo_ref": ref,
                 "submit": submit,
                 "exchange_rate": exchange_rate,
             }, {})
@@ -918,10 +939,15 @@ def _register_openceo_tools(
         submit: bool = True,
         exchange_rate: str | None = None,
     ) -> dict[str, Any]:
+        ref = _money_ref(openceo_ref)
+        if ref is None:
+            return {"ok": False, "status": "invalid_input",
+                    "message": "openceo_ref is required: a stable key you "
+                    "reuse when retrying, so a retry never double-posts."}
         try:
             return await boundary.call("finance.register_income", {
                 "text": text,
-                "openceo_ref": openceo_ref,
+                "openceo_ref": ref,
                 "submit": submit,
                 "exchange_rate": exchange_rate,
             }, {})
@@ -960,11 +986,17 @@ def _register_openceo_tools(
         expected_row_label: str = "",
     ) -> dict[str, Any]:
         try:
-            return await boundary.call("finance.pago_elfec_house", {
-                "expected_row_label": expected_row_label,
-            }, {})
+            # Sync Playwright leaf: off the event loop on purpose.
+            result = await asyncio.to_thread(
+                WorkflowToolRegistry._finance_pago_elfec_house,
+                expected_row_label=expected_row_label,
+            )
         except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
             return _classify(exc)
+        if not isinstance(result, dict) or result.get("practice_mode") is not True:
+            return {"ok": False, "status": "refused",
+                    "message": "Elfec over MCP runs practice mode only."}
+        return result
 
     server.tool(
         openceo_send_email,
@@ -983,14 +1015,14 @@ def _register_openceo_tools(
         openceo_register_expense,
         name="openceo_register_expense",
         description="Register an occasional expense in ERPNext from free text "
-        "(Journal Entry, idempotent by openceo_ref). "
+        "(Journal Entry; openceo_ref is required and makes retries idempotent). "
         "Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_register_income,
         name="openceo_register_income",
         description="Register collected income in ERPNext from free text "
-        "(Journal Entry, idempotent by openceo_ref). "
+        "(Journal Entry; openceo_ref is required and makes retries idempotent). "
         "Boundary (c): writes the business record.",
     )
     server.tool(
@@ -1044,12 +1076,10 @@ def _register_all_tools(
     settings: Settings,
     task_service: "TaskService",
     erpnext: Any | None = None,
-    tool_registry: WorkflowToolRegistry | None = None,
 ) -> tuple[str, ...]:
     """Internal MCP: infra + OpenCEO-specific tools."""
     infra = _register_infra_tools(server, settings)
-    openceo = _register_openceo_tools(
-        server, settings, task_service, erpnext, tool_registry)
+    openceo = _register_openceo_tools(server, settings, task_service, erpnext)
     return infra + openceo
 
 

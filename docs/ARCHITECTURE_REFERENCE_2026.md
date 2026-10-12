@@ -416,6 +416,8 @@ Naming convention: `{agent}.{tool_name}`. Tools reused by multiple agents regist
 
 ### check_registry — Two-Level Query
 
+> Historical: the tool was removed in TASK-2026-00199; the agent catalog replaces it.
+
 ```python
 @tool
 def check_registry(agent: str | None = None) -> dict:
@@ -1315,7 +1317,7 @@ Both endpoints share the same security layer (loopback IP restriction + optional
 
 ### Exposed Tools
 
-Both mounts (`/internal/mcp`, `/internal/mcp-global`) expose the same 24 boundary tools (`catalog.MCP_BOUNDARY_TOOLS`; TASK-2026-00199). Each description documents the criterion that justifies it: (a) secret, (b) lock, (c) business record.
+Both mounts (`/internal/mcp`, `/internal/mcp-global`) expose the same 24 boundary tools (`catalog.MCP_BOUNDARY_TOOLS`; TASK-2026-00199). Each description documents the criterion that justifies it: (a) secret, (b) lock, (c) business record. (Defensive fallback, never hit in production: a global mount built without a `task_service` exposes DNS only.)
 
 | Tool | Purpose |
 |---|---|
@@ -1338,8 +1340,8 @@ Both mounts (`/internal/mcp`, `/internal/mcp-global`) expose the same 24 boundar
 | `openceo_delete_ticket_attachment(attachment, ticket)` | Delete an attachment. |
 | `openceo_send_email(to, subject, body_text, ...)` | Send an operational email from a configured sender (listed in its description). |
 | `openceo_ensure_erpnext_project(project_key, ...)` | Ensure the ERPNext Project identity, idempotent by key. |
-| `openceo_register_expense(text, ...)` | Register an occasional expense in ERPNext from free text. |
-| `openceo_register_income(text, ...)` | Register collected income in ERPNext from free text. |
+| `openceo_register_expense(text, openceo_ref, ...)` | Register an occasional expense in ERPNext from free text. `openceo_ref` is required so retries never double-post. |
+| `openceo_register_income(text, openceo_ref, ...)` | Register collected income in ERPNext from free text. `openceo_ref` is required so retries never double-post. |
 | `openceo_scope_summary(...)` | Balance/expense summary by scope from the ledger (read-only). |
 | `openceo_contribution_10_status(...)` | 10% contribution rule status from the ledger (read-only). |
 | `openceo_elfec_house_payment(...)` | Elfec house payment in practice mode: never pays. |
