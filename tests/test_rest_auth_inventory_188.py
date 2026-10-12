@@ -1,8 +1,14 @@
 """REST write-route auth inventory (TASK-2026-00188).
 
-Every POST/PUT/PATCH/DELETE route must carry recognizable authentication, or
-be an explicit, justified exception. The epic contract forbids anonymous REST
-access; this test is the automatic inventory from the ticket scope.
+Every POST/PUT/PATCH/DELETE APIRoute must carry recognizable authentication,
+or be an explicit, justified exception. The epic contract forbids anonymous
+REST access; this test is the automatic inventory from the ticket scope.
+
+Boundary: FastAPI APIRoutes only. WebSocket routes and mounted sub-apps (the
+MCP mounts, authenticated by the MCP badge middleware from TASK-2026-00196)
+use no Depends gate the classifier could judge, so they stay out — but the
+import-time mount set itself is pinned, and any new static mount fails the
+suite for review (lifespan-added mounts stay out of reach by construction).
 """
 from __future__ import annotations
 
@@ -15,6 +21,7 @@ if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
 from fastapi.routing import APIRoute
+from starlette.routing import Mount
 
 import main
 from auth import middleware as auth_middleware
@@ -24,10 +31,13 @@ WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 # Public by design, each with its reason. Adding an entry here is a deliberate
 # code change reviewed like any other auth exception.
 ALLOWLIST: dict[str, str] = {
-    "/api/auth/login": "login flow issues the session; has nothing to present yet",
-    "/api/auth/logout": "login flow; only clears cookies",
-    "/api/auth/refresh": "login flow; presents the refresh cookie, validated inside",
+    "POST /api/auth/login": "login flow issues the session; has nothing to present yet",
+    "POST /api/auth/logout": "login flow; only clears cookies",
+    "POST /api/auth/refresh": "login flow; presents the refresh cookie, validated inside",
 }
+
+# Mounted sub-apps pin: a new mount needs an explicit auth review.
+KNOWN_MOUNTS = frozenset({"/internal/mcp", "/internal/mcp-global"})
 
 ADMIN_ONLY_ROUTES = frozenset(
     {
@@ -71,22 +81,13 @@ def _dependency_calls(route: APIRoute) -> list:
     return [call for call in calls if call is not None]
 
 
-def _is_admin_checker(call) -> bool:
-    return getattr(call, "__qualname__", "") == "require_admin.<locals>.checker"
-
-
-def _is_perm_checker(call) -> bool:
-    return getattr(call, "__qualname__", "") == "require_permissions.<locals>.checker"
-
-
 def _route_auth_kind(route: APIRoute) -> str | None:
     for call in _dependency_calls(route):
         if call is auth_middleware.get_current_user:
             return "session"
-        if _is_admin_checker(call):
-            return "admin"
-        if _is_perm_checker(call):
-            return "permission"
+        kind = getattr(call, "_openceo_auth_kind", None)
+        if kind in ("admin", "permission"):
+            return kind
         if call is main.verify_api_key:
             return "api_key"
     dependant = getattr(route, "dependant", None)
@@ -104,10 +105,12 @@ class RestAuthInventoryTests(unittest.TestCase):
             kind = _route_auth_kind(route)
             if kind is not None:
                 continue
-            reason = ALLOWLIST.get(route.path)
-            if reason is None:
-                methods = ",".join(sorted(WRITE_METHODS.intersection(route.methods or set())))
-                unguarded.append(f"{methods} {route.path} ({route.endpoint.__name__})")
+            methods = sorted(WRITE_METHODS.intersection(route.methods or set()))
+            uncovered = [m for m in methods if f"{m} {route.path}" not in ALLOWLIST]
+            if uncovered:
+                unguarded.append(
+                    f"{','.join(uncovered)} {route.path} ({route.endpoint.__name__})"
+                )
         self.assertEqual(
             unguarded,
             [],
@@ -117,8 +120,34 @@ class RestAuthInventoryTests(unittest.TestCase):
     def test_allowlist_is_minimal(self) -> None:
         self.assertEqual(
             set(ALLOWLIST),
-            {"/api/auth/login", "/api/auth/logout", "/api/auth/refresh"},
+            {
+                "POST /api/auth/login",
+                "POST /api/auth/logout",
+                "POST /api/auth/refresh",
+            },
             "allowlist changed: every new anonymous write route needs an explicit decision",
+        )
+
+    def test_allowlist_entries_still_anonymous(self) -> None:
+        by_key = {}
+        for route in _iter_write_routes():
+            for method in sorted(WRITE_METHODS.intersection(route.methods or set())):
+                by_key[f"{method} {route.path}"] = _route_auth_kind(route)
+        for key in sorted(ALLOWLIST):
+            self.assertIn(key, by_key, f"allowlisted route disappeared: {key}")
+            self.assertIsNone(
+                by_key[key],
+                f"{key} gained auth: drop it from the allowlist",
+            )
+
+    def test_mount_set_is_pinned(self) -> None:
+        mounts = {
+            route.path for route in main.app.routes if isinstance(route, Mount)
+        }
+        self.assertEqual(
+            mounts,
+            set(KNOWN_MOUNTS),
+            f"mount set changed: a new mounted sub-app needs an explicit auth review ({mounts})",
         )
 
     def test_tmux_dev_voice_write_routes_require_admin(self) -> None:
