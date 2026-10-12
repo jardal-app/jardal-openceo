@@ -39,6 +39,16 @@ date: 2026-10-12
   ../.venv/bin/python -c "from catalog import load_catalog, load_all_role_skills, sync_skill_links; c = load_catalog(); print(sync_skill_links(load_all_role_skills(c)))"
   ```
 
+## Exact skills (no LLM)
+
+A skill dir may carry `workflow.yaml` (same format as `workflows/`): when a
+ticket names that skill in `params.skill`, the generic executor
+(TASK-2026-00205) runs the YAML in the deterministic engine instead of
+invoking the model. Completeness is judged by the run: the workflow reads
+the ticket (title, description, params) as its context, and a step that
+needs missing data fails the run as `bloqueado`. Unknown tools and HITL
+waits propagate exactly as the engine returns them.
+
 ## Checks
 
 - `muse skills validate skills/<role>/<skill>` (also runs in the suite).

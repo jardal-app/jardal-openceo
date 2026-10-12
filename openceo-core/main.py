@@ -108,6 +108,7 @@ from horizon.models import (
 )
 from horizon.triggers import HorizonScheduler, HorizonTriggerStore
 from horizon.service import HorizonService
+from orchestration.generic_agent import GenericAgentWiring
 from task_service import TaskService
 from tools.notion import NotionTicketManager
 from tools.erpnext_tickets import ERPNextTicketAdapter
@@ -154,6 +155,13 @@ workflow_service = WorkflowService(
     settings=settings,
     repo=repo,
     realtime_hub=realtime_hub,
+)
+# Generic catalog-agent runner (TASK-2026-00205): late-bound like _notion,
+# the workflow service is built after the graph.
+graph._generic_wiring = GenericAgentWiring(
+    settings=settings,
+    repo=repo,
+    workflow_service=workflow_service,
 )
 dev_session_service = DevSessionService(
     settings=settings,

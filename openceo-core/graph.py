@@ -11,9 +11,13 @@ from agents.dev.session import DevSessionManager
 from agents.finance.session import FinanceSessionManager
 from agents.pm.session import PMSessionManager
 from agents.secretary.session import SecretarySessionManager
-from catalog import Catalog, load_catalog
+from catalog import AgentType, Catalog, load_catalog
 from config_loader import ConfigLoader
 from objectives.agent_result import legacy_blocked_result
+from orchestration.generic_agent import (
+    GenericAgentWiring,
+    run_generic_agent,
+)
 from router import CEORouter
 from state import AgentName, GraphState, TaskStatus
 
@@ -51,9 +55,11 @@ def resolve_agent_gate(
     A ticket-level ``coding_tool`` still forces dev (persisted routing
     decision, F0 pilot 00097). Otherwise the explicit hint wins and the
     planner target (``params.target_agent``) backs it up: a wired name
-    routes by name, never by text; unknown, disabled, human or ``ceo``
-    names wait with ``routing_missing`` and their reason. No hint and no
-    target means a loose ticket, classified as today.
+    routes to its legacy node by name, never by text; an enabled AI
+    name with a muse-code profile routes to the generic node
+    (TASK-2026-00205); unknown, disabled, human, untranslated-engine
+    or ``ceo`` names wait with ``routing_missing`` and their reason.
+    No hint and no target means a loose ticket, classified as today.
     """
     if str(coding_tool or "").strip():
         return AgentGateDecision(True, AgentName.DEV.value, "")
@@ -82,10 +88,23 @@ def resolve_agent_gate(
                 False, None,
                 f"routing_missing: agent {name!r} is disabled "
                 f"({entry.disabled_reason}{ticket})")
-        return AgentGateDecision(
-            False, None,
-            f"routing_missing: agent {name!r} is enabled but has no runner "
-            "yet")
+        if entry.type is not AgentType.AI:
+            return AgentGateDecision(
+                False, None,
+                f"routing_missing: agent {name!r} is human (humans "
+                "answer from the cockpit, never execute tickets)")
+        if entry.engine != "muse-code":
+            return AgentGateDecision(
+                False, None,
+                f"routing_missing: agent {name!r} engine "
+                f"{entry.engine!r} has no runner yet (translator "
+                "TASK-2026-00200)")
+        if not (entry.profile or "").strip():
+            return AgentGateDecision(
+                False, None,
+                f"routing_missing: agent {name!r} is enabled but has no "
+                "runner yet")
+        return AgentGateDecision(True, name, "")
     return AgentGateDecision(True, None, "")
 
 
@@ -101,6 +120,7 @@ class OpenCEOGraph:
         secretary_session: SecretarySessionManager,
         pm_session: PMSessionManager | None = None,
         notion: Any | None = None,
+        generic_wiring: GenericAgentWiring | None = None,
     ) -> None:
         self._router = router
         self._config_loader = config_loader
@@ -109,6 +129,7 @@ class OpenCEOGraph:
         self._secretary_session = secretary_session
         self._pm_session = pm_session
         self._notion = notion
+        self._generic_wiring = generic_wiring
 
         builder = StateGraph(GraphState)
         builder.add_node("ceo_router", self._ceo_router_node)
@@ -116,6 +137,7 @@ class OpenCEOGraph:
         builder.add_node("pm_agent", self._pm_node)
         builder.add_node("finance_agent", self._finance_node)
         builder.add_node("secretary_agent", self._secretary_node)
+        builder.add_node("generic_agent", self._generic_node)
         builder.add_node("unsupported_agent", self._unsupported_agent_node)
 
         builder.add_edge(START, "ceo_router")
@@ -127,6 +149,7 @@ class OpenCEOGraph:
                 "pm": "pm_agent",
                 "finance": "finance_agent",
                 "secretary": "secretary_agent",
+                "generic_agent": "generic_agent",
                 "unsupported": "unsupported_agent",
             },
         )
@@ -134,6 +157,7 @@ class OpenCEOGraph:
         builder.add_edge("pm_agent", END)
         builder.add_edge("finance_agent", END)
         builder.add_edge("secretary_agent", END)
+        builder.add_edge("generic_agent", END)
         builder.add_edge("unsupported_agent", END)
 
         self._graph = builder.compile()
@@ -292,6 +316,8 @@ class OpenCEOGraph:
             return "finance"
         if state.get("selected_agent") == AgentName.SECRETARY.value:
             return "secretary"
+        if state.get("selected_agent") == AgentName.OPERATIONS.value:
+            return "generic_agent"
         return "unsupported"
 
     async def _dev_node(self, state: GraphState) -> GraphState:
@@ -404,6 +430,53 @@ class OpenCEOGraph:
             "last_response_summary": result.last_response_summary,
             "error": result.error,
         }
+
+    async def _generic_node(self, state: GraphState) -> GraphState:
+        agent = str(state.get("selected_agent") or "")
+        wiring = self._generic_wiring
+        if wiring is None:
+            reason = "config: generic agent runner is not wired"
+            step = {
+                "step": "generic_agent",
+                "status": "waiting",
+                "detail": reason,
+                "timestamp": datetime.now(timezone.utc),
+            }
+            return {
+                "selected_agent": agent,
+                "status": TaskStatus.WAITING.value,
+                "steps": [*(state.get("steps") or []), step],
+                "waiting_reason": reason,
+                "resume_at": None,
+                "error": None,
+            }
+        task = {
+            "task_id": state["task_id"],
+            "ticket_number": state.get("ticket_number"),
+            "project": state.get("project"),
+            "title": state["title"],
+            "description": state["description"],
+            "source": state.get("source"),
+            "attachments": state.get("attachments", []),
+            "params": state.get("params") or {},
+            "priority": state.get("priority", "medium"),
+            "objective_id": state.get("objective_id"),
+        }
+        out = await run_generic_agent(agent, task, wiring)
+        merged = {
+            "selected_agent": out.get("selected_agent", agent),
+            "status": out.get("status", TaskStatus.FAILED.value),
+            "steps": [*(state.get("steps") or []), *out.get("steps", [])],
+            "params": out.get("params", task["params"]),
+            "last_response_summary": out.get("last_response_summary"),
+            "error": out.get("error"),
+        }
+        if out.get("waiting_reason") is not None:
+            merged["waiting_reason"] = out["waiting_reason"]
+            merged["resume_at"] = out.get("resume_at")
+        if out.get("result_comment"):
+            merged["result_comment"] = out["result_comment"]
+        return merged  # type: ignore[return-value]
 
     async def _unsupported_agent_node(self, state: GraphState) -> GraphState:
         selected = str(state.get("selected_agent", "unknown"))

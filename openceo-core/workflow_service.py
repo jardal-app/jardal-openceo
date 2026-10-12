@@ -1617,6 +1617,10 @@ class WorkflowService:
             workflows[str(workflow["workflow"])] = workflow
         return workflows
 
+    def parse_workflow_text(self, raw: str, *, source: str) -> dict[str, Any]:
+        """Parse one workflow document (exact skills, TASK-2026-00205)."""
+        return self._parse_workflow_yaml(raw, source=source)
+
     def _parse_workflow_yaml(self, raw: str, *, source: str) -> dict[str, Any]:
         loaded = yaml.safe_load(raw)
         if not isinstance(loaded, dict):

@@ -21,6 +21,7 @@ class AgentName(str, Enum):
     SECRETARY = "secretary"
     SALES = "sales"
     MEDIA = "media"
+    OPERATIONS = "operations"
 
 
 class TaskSource(str, Enum):
@@ -604,6 +605,7 @@ class GraphState(TypedDict, total=False):
     error: str | None
     waiting_reason: str | None
     resume_at: datetime | None
+    result_comment: str | None
     coding_tool: str | None
     objective_id: str | None
     coding_session_id: str | None
