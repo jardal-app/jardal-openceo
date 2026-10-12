@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 __all__ = [
     "CATALOG_VERSION",
     "INDEX_SUMMARY_MAX_CHARS",
+    "MCP_BOUNDARY_TOOLS",
     "OWNER_SKILLS",
     "RESERVED_NAMES",
     "AgentCard",
@@ -66,6 +67,36 @@ OWNER_SKILLS = ("decidir", "aprobar", "responder", "hacer")
 #: Never executors, never catalog names: the CEO strategy and the planner
 #: decide work, they do not run tickets.
 RESERVED_NAMES = ("ceo", "planner")
+
+#: Every tool the MCP mounts may expose (TASK-2026-00199). A card box
+#: naming anything else fails the load; a registration outside this set
+#: fails the mount build. Both directions fail closed.
+MCP_BOUNDARY_TOOLS = frozenset({
+    "manage_dns_record",
+    "openceo_create_ticket",
+    "openceo_create_tickets_batch",
+    "openceo_create_pm_tickets_batch",
+    "openceo_search_tickets",
+    "openceo_get_ticket",
+    "openceo_create_objective",
+    "openceo_transition_ticket",
+    "openceo_transition_tickets_batch",
+    "openceo_update_ticket",
+    "openceo_add_ticket_comment",
+    "openceo_update_ticket_comment",
+    "openceo_delete_ticket_comment",
+    "openceo_attach_ticket_file",
+    "openceo_get_ticket_attachment",
+    "openceo_update_ticket_attachment",
+    "openceo_delete_ticket_attachment",
+    "openceo_send_email",
+    "openceo_ensure_erpnext_project",
+    "openceo_register_expense",
+    "openceo_register_income",
+    "openceo_scope_summary",
+    "openceo_contribution_10_status",
+    "openceo_elfec_house_payment",
+})
 
 _NAME_PATTERN = r"^[a-z][a-z0-9_]*$"
 TICKET_PATTERN = r"^TASK-2026-\d+$"
@@ -346,6 +377,11 @@ def load_catalog(root: str | Path | None = None) -> Catalog:
                 f"{rel(card_path)}: card name {card.name!r} must match "
                 f"index entry {entry.name!r} and the file name")
             continue
+        for tool in card.boundary_tools:
+            if tool not in MCP_BOUNDARY_TOOLS:
+                errors.append(
+                    f"{rel(card_path)}: boundary_tools: {tool!r} is not "
+                    "an MCP boundary tool")
         agents[entry.name] = card
 
     agents_dir = base / "agents"

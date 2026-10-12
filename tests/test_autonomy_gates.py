@@ -12,8 +12,8 @@ Decision table (policy: requires_owner, TASK-2026-00114):
 - the objective engine never parks as needs_owner: max_tickets defers with
   open work and attempts completion without it; the rest park with
   operational reasons (retried on the next trigger, consumed by the CEO).
-- workflow-created tickets run by default (autorun=True, overridable);
-  objective children already do.
+- workflows no longer create tickets (TASK-2026-00199 removed pm.* from
+  the registry); objective children run by default (autorun=True).
 
 No network, no CLI, no LLM.
 """
@@ -49,7 +49,10 @@ from tools.erpnext_tickets import (  # noqa: E402
     resolve_erpnext_status,
     waiting_needs_human_review,
 )
-from workflow_service import WorkflowToolRegistry  # noqa: E402
+from workflow_service import (  # noqa: E402
+    MissingWorkflowToolError,
+    WorkflowToolRegistry,
+)
 
 
 def _waiting_task(**overrides: Any) -> dict[str, Any]:
@@ -574,41 +577,34 @@ class EngineTopesTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WorkflowCreationTests(unittest.IsolatedAsyncioTestCase):
-    def _registry(self) -> tuple[WorkflowToolRegistry, list[Any]]:
-        requests: list[Any] = []
+    """Registry ticket creation was removed (TASK-2026-00199, scope 2).
 
-        class _TaskService:
-            async def create_task(self, request: Any) -> dict[str, Any]:
-                requests.append(request)
-                return {"task_id": "task-1", "ticket_number": 1,
-                        "status": "queued", "title": request.title}
+    ``pm.create_ticket``, ``pm.create_tickets_batch`` and
+    ``pm.extract_tickets`` duplicated the MCP ticket tools; workflows no
+    longer create tickets. The run-by-default autonomy behavior these tests
+    used to pin now lives in the objective engine
+    (``test_planned_children_run_by_default`` above) and the spend gate
+    (``tests/test_plan_spend_207.py``).
+    """
 
-        registry = WorkflowToolRegistry(task_service=_TaskService())
-        return registry, requests
+    def _registry(self) -> WorkflowToolRegistry:
+        return WorkflowToolRegistry()
 
-    async def test_pm_create_ticket_runs_by_default(self) -> None:
-        registry, requests = self._registry()
-        result = await registry.call(
-            "pm.create_ticket", {"title": "t", "description": "d"}, {})
-        self.assertTrue(result["ok"])
-        self.assertIs(requests[0].autorun, True)
+    async def test_pm_create_ticket_is_gone(self) -> None:
+        with self.assertRaises(MissingWorkflowToolError):
+            await self._registry().call(
+                "pm.create_ticket", {"title": "t"}, {})
 
-    async def test_pm_create_ticket_hold_is_overridable(self) -> None:
-        registry, requests = self._registry()
-        await registry.call(
-            "pm.create_ticket", {"title": "t", "autorun": False}, {})
-        self.assertIs(requests[0].autorun, False)
+    async def test_pm_create_tickets_batch_is_gone(self) -> None:
+        with self.assertRaises(MissingWorkflowToolError):
+            await self._registry().call(
+                "pm.create_tickets_batch", {"tickets": [{"title": "a"}]},
+                {})
 
-    async def test_batch_propagates_autorun(self) -> None:
-        registry, requests = self._registry()
-        result = await registry.call(
-            "pm.create_tickets_batch",
-            {"tickets": [{"title": "a"}, {"title": "b", "autorun": False}]},
-            {})
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["created_count"], 2)
-        self.assertIs(requests[0].autorun, True)
-        self.assertIs(requests[1].autorun, False)
+    async def test_pm_extract_tickets_is_gone(self) -> None:
+        with self.assertRaises(MissingWorkflowToolError):
+            await self._registry().call(
+                "pm.extract_tickets", {"text": "t"}, {})
 
 
 if __name__ == "__main__":

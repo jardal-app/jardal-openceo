@@ -4,7 +4,7 @@ type: human
 engine: null
 profile: null
 boundary_tools:
-  - manage_dns_check_or_create
+  - manage_dns_record
   - openceo_create_ticket
   - openceo_create_tickets_batch
   - openceo_create_pm_tickets_batch
@@ -21,6 +21,13 @@ boundary_tools:
   - openceo_get_ticket_attachment
   - openceo_update_ticket_attachment
   - openceo_delete_ticket_attachment
+  - openceo_send_email
+  - openceo_ensure_erpnext_project
+  - openceo_register_expense
+  - openceo_register_income
+  - openceo_scope_summary
+  - openceo_contribution_10_status
+  - openceo_elfec_house_payment
 skills_dir: skills/owner
 skills:
   - decidir

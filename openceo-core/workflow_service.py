@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import json
 import logging
 import re
 from copy import deepcopy
@@ -65,7 +64,6 @@ class WorkflowToolRegistry:
         self._horizon: Any | None = None
         self._research: Any | None = None
         self._research_watch: Any | None = None
-        self._catalog_provider: Callable[[], dict[str, Any]] | None = None
         self._register_builtin_tools()
 
     def set_task_service(self, task_service: Any) -> None:
@@ -73,9 +71,6 @@ class WorkflowToolRegistry:
 
     def set_repo(self, repo: MongoRepository) -> None:
         self._repo = repo
-
-    def set_catalog_provider(self, provider: Callable[[], dict[str, Any]]) -> None:
-        self._catalog_provider = provider
 
     def names(self) -> list[str]:
         return sorted(self._tools)
@@ -105,17 +100,12 @@ class WorkflowToolRegistry:
         return result
 
     def _register_builtin_tools(self) -> None:
-        # Core
+        # Core (check_registry removed in TASK-2026-00199: the agent
+        # catalog replaces it; pm.* removed: tickets go through the MCP).
         self.register("core.echo", self._core_echo)
         self.register("core.complete", self._core_complete)
-        self.register("core.check_registry", self._core_check_registry)
         self.register("core.query_tasks", self._core_query_tasks)
         self.register("core.query_workflow_runs", self._core_query_workflow_runs)
-
-        # PM
-        self.register("pm.create_ticket", self._pm_create_ticket)
-        self.register("pm.create_tickets_batch", self._pm_create_tickets_batch)
-        self.register("pm.extract_tickets", self._pm_extract_tickets)
 
         # Secretary
         self.register("secretary.send_email", self._secretary_send_email)
@@ -137,10 +127,6 @@ class WorkflowToolRegistry:
         self.register("ceo.get_next_action", self._ceo_get_next_action)
         self.register("ceo.capture_context", self._ceo_capture_context)
         self.register("ceo.record_progress", self._ceo_record_progress)
-
-        # Infrastructure
-        self.register("cloudflare.upsert_dns_record", self._cloudflare_upsert_dns)
-        self.register("cloudflare.delete_dns_record", self._cloudflare_delete_dns)
 
         # Operations (autonomy F6, TASK-2026-00115): end-to-end project creation
         self.register("ops.check_project_spend", self._ops_check_project_spend)
@@ -342,39 +328,6 @@ class WorkflowToolRegistry:
         """Marks a workflow branch as completed with the given parameters."""
         return {"status": "completed", **params}
 
-    def _core_check_registry(self, agent: str | None = None, **_: Any) -> dict[str, Any]:
-        """Returns available crystallized workflows and tools in OpenCEO.
-        If agent is None: returns compact summary of all agents and their workflows/tools.
-        If agent is given: returns full signatures and documentation for that agent only.
-        """
-        all_tools = self.describe()
-        workflows_by_agent: dict[str, list[str]] = {}
-        if self._catalog_provider:
-            for wf_id in self._catalog_provider():
-                ag = wf_id.split(".", 1)[0] if "." in wf_id else "ceo"
-                workflows_by_agent.setdefault(ag, []).append(wf_id)
-
-        tools_by_agent: dict[str, list[str]] = {}
-        for tool_name in self.names():
-            ag = tool_name.split(".", 1)[0] if "." in tool_name else "core"
-            tools_by_agent.setdefault(ag, []).append(tool_name)
-
-        if not agent:
-            agents = sorted(set(list(workflows_by_agent.keys()) + list(tools_by_agent.keys())))
-            return {
-                "agents": agents,
-                "workflows": {ag: workflows_by_agent.get(ag, []) for ag in agents},
-                "tools": {ag: tools_by_agent.get(ag, []) for ag in agents},
-            }
-
-        clean_agent = agent.strip().lower()
-        matching_tools = {k: v for k, v in all_tools.items() if k.startswith(f"{clean_agent}.")}
-        return {
-            "agent": clean_agent,
-            "workflows": workflows_by_agent.get(clean_agent, []),
-            "tools": matching_tools,
-        }
-
     async def _core_query_tasks(
         self,
         project: str | None = None,
@@ -433,144 +386,15 @@ class WorkflowToolRegistry:
             for r in runs
         ]
 
-    async def _pm_create_ticket(
-        self,
-        title: str,
-        description: str = "",
-        project: str | None = None,
-        priority: str = "medium",
-        assigned_to: str = "dev",
-        ticket_type: str = "task",
-        tags: list[str] | None = None,
-        params: dict[str, Any] | None = None,
-        autorun: bool = True,
-        **_: Any,
-    ) -> dict[str, Any]:
-        """Creates an operational task in OpenCEO (MongoDB with automatic Notion sync).
-
-        Tickets created by a running workflow run by default (autonomy F4,
-        TASK-2026-00118): a held ticket with no human watching is a silent
-        gate. Pass ``autorun=False`` to hold one for review.
-        """
-        from state import TaskCreateRequest, TaskPriority, TaskSource, AgentName
-
-        priority_map = {
-            "low": TaskPriority.LOW,
-            "medium": TaskPriority.MEDIUM,
-            "high": TaskPriority.HIGH,
-            "critical": TaskPriority.CRITICAL,
-        }
-        agent_map = {
-            "dev": AgentName.DEV,
-            "pm": AgentName.PM,
-            "finance": AgentName.FINANCE,
-            "secretary": AgentName.SECRETARY,
-            "ceo": AgentName.CEO,
-        }
-        mapped_priority = priority_map.get(str(priority).lower(), TaskPriority.MEDIUM)
-        mapped_agent = agent_map.get(str(assigned_to).lower(), AgentName.DEV)
-        merged_params = dict(params or {})
-        merged_params["ticket_type"] = ticket_type
-
-        req = TaskCreateRequest(
-            title=title,
-            description=description,
-            project=project,
-            priority=mapped_priority,
-            agent_hint=mapped_agent,
-            source=TaskSource.API,
-            tags=tags or [],
-            params=merged_params,
-            autorun=autorun,
-        )
-        if self._task_service is not None:
-            created = await self._task_service.create_task(req)
-            return {
-                "ok": True,
-                "task_id": created.get("task_id"),
-                "ticket_number": created.get("ticket_number"),
-                "status": created.get("status"),
-                "title": created.get("title"),
-            }
-        return {"ok": False, "error": "TaskService not configured in registry"}
-
-    async def _pm_create_tickets_batch(
-        self,
-        tickets: list[dict[str, Any]],
-        project: str | None = None,
-        **_: Any,
-    ) -> dict[str, Any]:
-        """Batch-creates tickets in OpenCEO. Input: list of ticket objects with at least title."""
-        results: list[dict[str, Any]] = []
-        created_count = 0
-        for item in tickets:
-            if not isinstance(item, dict) or not item.get("title"):
-                continue
-            res = await self._pm_create_ticket(
-                title=item["title"],
-                description=item.get("description", ""),
-                project=item.get("project") or project,
-                priority=item.get("priority", "medium"),
-                assigned_to=item.get("assigned_to", "dev"),
-                ticket_type=item.get("ticket_type", "task"),
-                tags=item.get("tags"),
-                params=item.get("params"),
-                autorun=item.get("autorun", True),
-            )
-            results.append(res)
-            if res.get("ok"):
-                created_count += 1
-        return {"ok": True, "created_count": created_count, "results": results}
-
-    async def _pm_extract_tickets(
-        self,
-        text: str,
-        project: str | None = None,
-        create: bool = False,
-        **_: Any,
-    ) -> dict[str, Any]:
-        """Extracts actionable development tickets from text using DeepSeek v4 Flash."""
-        if not self._settings.DEEPSEEK_API_KEY:
-            return {"tickets": [], "error": "DEEPSEEK_API_KEY not configured"}
-
-        llm = ChatOpenAI(
-            model=self._settings.CEO_LLM_MODEL,
-            api_key=self._settings.DEEPSEEK_API_KEY,
-            base_url=self._settings.CEO_LLM_BASE_URL,
-            temperature=0,
-        )
-        prompt = (
-            "You are a Senior Technical Project Manager. "
-            "Extract actionable development tickets from the provided text. "
-            "Return a JSON array of objects with keys: "
-            "title (string), description (string), priority (low/medium/high/critical), "
-            "ticket_type (feature/bug/task/refactor), tags (list of strings). "
-            "Return JSON ONLY inside ```json ``` block."
-        )
-        response = await llm.ainvoke([
-            SystemMessage(content=prompt),
-            HumanMessage(content=text),
-        ])
-        raw = _strip_fenced_json(str(getattr(response, "content", "") or ""))
-        try:
-            tickets = json.loads(raw)
-            if not isinstance(tickets, list):
-                tickets = []
-        except Exception:
-            tickets = []
-
-        if create and tickets:
-            batch_res = await self._pm_create_tickets_batch(tickets, project=project)
-            return {"tickets": tickets, "created": batch_res}
-        return {"tickets": tickets, "count": len(tickets)}
-
     @staticmethod
     def _secretary_send_email(**params: Any) -> dict[str, Any]:
+        """Boundary (a): sends through the SMTP credentials agents never hold."""
         from agents.secretary.tools import send_email
         return send_email(**params)
 
     @staticmethod
     def _secretary_list_sender_accounts(**_: Any) -> dict[str, Any]:
+        """Lists the configured sender addresses (no secrets)."""
         from agents.secretary.tools import list_sender_accounts
         return list_sender_accounts()
 
@@ -625,6 +449,7 @@ class WorkflowToolRegistry:
 
     @staticmethod
     def _finance_pago_elfec_house(**params: Any) -> dict[str, Any]:
+        """Boundary (a): Elfec portal run in practice mode, never pays."""
         from agents.finance.elfec import run_elfec_house_payment_practice
 
         workflow_cfg = params.get("workflow")
@@ -807,14 +632,6 @@ class WorkflowToolRegistry:
         payload["ok"] = True
         payload["summary"] = _contribution.build_spoken_summary(status)
         return payload
-
-    def _cloudflare_upsert_dns(self, hostname: str, **_: Any) -> dict[str, Any]:
-        from tools.cloudflare import CloudflareDNSManager
-        return CloudflareDNSManager(self._settings).check_or_create(hostname)
-
-    def _cloudflare_delete_dns(self, hostname: str, **_: Any) -> dict[str, Any]:
-        from tools.cloudflare import CloudflareDNSManager
-        return CloudflareDNSManager(self._settings).delete(hostname)
 
     def set_ops_erpnext(self, adapter: Any) -> None:
         """Inject the ERPNext adapter for `ops.*` tools (tests)."""
@@ -1063,7 +880,6 @@ class WorkflowService:
         self._repo = repo
         self._hub = realtime_hub
         self._tools = tool_registry or WorkflowToolRegistry(settings=settings, repo=repo)
-        self._tools.set_catalog_provider(lambda: self._load_workflows())
         self._llm: ChatOpenAI | None = None
         if settings.DEEPSEEK_API_KEY:
             self._llm = ChatOpenAI(
@@ -2058,20 +1874,6 @@ def _agent_from_workflow_id(workflow_id: str) -> str:
 def _safe_name(value: str) -> str:
     cleaned = _SAFE_NAME_RE.sub("_", value.strip().lower()).strip("._-")
     return cleaned or "workflow"
-
-
-def _strip_fenced_json(text: str) -> str:
-    stripped = text.strip()
-    if not stripped.startswith("```"):
-        return stripped
-    lines = stripped.splitlines()
-    if lines and lines[0].strip().startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].strip().startswith("```"):
-        lines = lines[:-1]
-    if lines and lines[0].strip().lower() in {"json", "javascript", "js"}:
-        lines = lines[1:]
-    return "\n".join(lines).strip()
 
 
 def _strip_fenced_yaml(text: str) -> str:

@@ -12,8 +12,11 @@ from mcp_identity import (
     McpAuthError,
     bearer_from_headers,
 )
+from catalog import MCP_BOUNDARY_TOOLS
 from settings import Settings
 from tools.cloudflare import CloudflareDNSManager
+from tools.email_sender import SMTPEmailSender
+from workflow_service import WorkflowToolRegistry
 from tools.erpnext_client import (
     ERPNextDuplicateError,
     ERPNextPermissionError,
@@ -155,6 +158,10 @@ def _build_mcp(
 
     server = FastMCP(name)
     tool_names = register_fn(server, settings)
+    unknown = sorted(set(tool_names) - MCP_BOUNDARY_TOOLS)
+    if unknown:
+        raise ValueError(
+            f"{name} registers unknown tools: {', '.join(unknown)}")
     if issuer is not None and audit is not None:
         if settings.MCP_SERVER_API_KEY.strip():
             logger.warning(
@@ -279,15 +286,21 @@ def _register_infra_tools(server: FastMCP, settings: Settings) -> tuple[str, ...
     """Infrastructure tools available globally (DNS)."""
     manager = CloudflareDNSManager(settings)
 
-    def manage_dns_check_or_create(hostname: str) -> dict[str, Any]:
+    def manage_dns_record(
+        hostname: str, action: Literal["create", "delete"] = "create",
+    ) -> dict[str, Any]:
+        if action == "delete":
+            return manager.delete(hostname=hostname)
         return manager.check_or_create(hostname=hostname)
 
     server.tool(
-        manage_dns_check_or_create,
-        name="manage_dns_check_or_create",
-        description="DNS: create/verify A record in Cloudflare. Use before deploying with Traefik.",
+        manage_dns_record,
+        name="manage_dns_record",
+        description="DNS: create (idempotent) or delete an A record in Cloudflare. "
+        "Use create before deploying with Traefik. "
+        "Boundary (a): holds the Cloudflare token.",
     )
-    return ("manage_dns_check_or_create",)
+    return ("manage_dns_record",)
 
 
 def _register_openceo_tools(
@@ -295,6 +308,7 @@ def _register_openceo_tools(
     settings: Settings,
     task_service: "TaskService",
     erpnext: Any | None = None,
+    tool_registry: WorkflowToolRegistry | None = None,
 ) -> tuple[str, ...]:
     """OpenCEO-specific tools (ticket CRUD via ERPNext + MongoDB). Never exposed globally."""
 
@@ -685,42 +699,42 @@ def _register_openceo_tools(
     server.tool(
         openceo_create_ticket,
         name="openceo_create_ticket",
-        description="Create a ticket in OpenCEO. It is registered in ERPNext (the business record) and in MongoDB (the execution record). Required: title. Optional: description, project, priority (low/medium/high/critical), status (queued/in_progress/completed/failed/escalated/interrupted/waiting), ticket_type, source, source_id, tags, due_date, external_url, coding_tool, autorun (default false), parent_task (TASK-... group), depends_on (list of TASK-...). Set autorun=true ONLY when the ticket must start executing now; by default it is only registered. Before creating, consider openceo_search_tickets to avoid duplicating existing work.",
+        description="Create a ticket in OpenCEO. It is registered in ERPNext (the business record) and in MongoDB (the execution record). Required: title. Optional: description, project, priority (low/medium/high/critical), status (queued/in_progress/completed/failed/escalated/interrupted/waiting), ticket_type, source, source_id, tags, due_date, external_url, coding_tool, autorun (default false), parent_task (TASK-... group), depends_on (list of TASK-...). Set autorun=true ONLY when the ticket must start executing now; by default it is only registered. Before creating, consider openceo_search_tickets to avoid duplicating existing work. Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_create_tickets_batch,
         name="openceo_create_tickets_batch",
-        description='Batch-create tickets. Input: JSON array of objects with at least "title" (each may also carry parent_task and depends_on with TASK-... names). Max 50. Registered but NOT executed unless autorun=true.',
+        description='Batch-create tickets. Input: JSON array of objects with at least "title" (each may also carry parent_task and depends_on with TASK-... names). Max 50. Registered but NOT executed unless autorun=true. Boundary (c): writes the business record.',
     )
     server.tool(
         openceo_create_pm_tickets_batch,
         name="openceo_create_pm_tickets_batch",
-        description='Create child tickets (spillover/interview) from a parent ticket. Forces project/source/source_id across the batch. Required: project, source_id, tickets (JSON array with title and optional description, priority, tags, ticket_type, due_date, external_url, parent_task, depends_on). Optional: source (default "spillover"), autorun (default false).',
+        description='Create child tickets (spillover/interview) from a parent ticket. Forces project/source/source_id across the batch. Required: project, source_id, tickets (JSON array with title and optional description, priority, tags, ticket_type, due_date, external_url, parent_task, depends_on). Optional: source (default "spillover"), autorun (default false). Owner token only. Boundary (c): writes the business record.',
     )
     server.tool(
         openceo_search_tickets,
         name="openceo_search_tickets",
-        description="Search business tickets in ERPNext before creating new ones. Returns ERPNext tickets (name, subject, status, priority, project, openceo_ref, is_group, parent_task) plus execution_status from the runtime when the ticket has been started. Optional filters: query (substring of the subject), project (project_key, e.g. 'jardal-openceo'), status (Open/Working/Pending Review/Completed/Cancelled), limit (default 20).",
+        description="Search business tickets in ERPNext before creating new ones. Returns ERPNext tickets (name, subject, status, priority, project, openceo_ref, is_group, parent_task) plus execution_status from the runtime when the ticket has been started. Optional filters: query (substring of the subject), project (project_key, e.g. 'jardal-openceo'), status (Open/Working/Pending Review/Completed/Cancelled), limit (default 20). Boundary (a): reads through the ERPNext credential.",
     )
     server.tool(
         openceo_get_ticket,
         name="openceo_get_ticket",
-        description="Read one ticket in full: fields, execution status, comments (newest first) and attachments with download URLs. Accepts the ERPNext name (e.g. 'TASK-2026-00025') or the OpenCEO ref.",
+        description="Read one ticket in full: fields, execution status, comments (newest first) and attachments with download URLs. Accepts the ERPNext name (e.g. 'TASK-2026-00025') or the OpenCEO ref. Boundary (a): reads through the ERPNext credential.",
     )
     server.tool(
         openceo_create_objective,
         name="openceo_create_objective",
-        description="Create a top-down company objective: one ERPNext group Task (business identity) whose children the planner creates. Required: project, goal. Optional: acceptance (delivery criteria), source_id. Refuses duplicates and admission limits deterministically.",
+        description="Create a top-down company objective: one ERPNext group Task (business identity) whose children the planner creates. Required: project, goal. Optional: acceptance (delivery criteria), source_id. Refuses duplicates and admission limits deterministically. Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_transition_ticket,
         name="openceo_transition_ticket",
-        description="Move a ticket's business status (Open/Working/Pending Review/Completed/Cancelled) under the global policy: reason always, human_action for review, evidence for close, owner quote to cancel owner-set work.",
+        description="Move a ticket's business status under the global policy: reason always, human_action for review, evidence for close, owner quote to cancel owner-set work. Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_transition_tickets_batch,
         name="openceo_transition_tickets_batch",
-        description="Apply several status transitions one by one, each verified by reread. Input: JSON array of {ticket, to_status, reason, ...}. Reports applied/escalated/failed counts.",
+        description="Apply several status transitions one by one, each verified by reread. Input: JSON array of {ticket, to_status, reason, ...}. Reports applied/escalated/failed counts. Boundary (c): writes the business record.",
     )
     # --- hilo del ticket: edicion, comentarios y adjuntos (TASK-2026-00079) ----
     #
@@ -792,42 +806,211 @@ def _register_openceo_tools(
     server.tool(
         openceo_update_ticket,
         name="openceo_update_ticket",
-        description="Edit a ticket's subject, description (plain text or HTML), priority (low/medium/high/critical) or due_date. Only the given fields change. Status, dependencies and execution are untouched.",
+        description="Edit a ticket's subject, description, priority or due_date. Only the given fields change. Never status, dependencies or execution. Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_add_ticket_comment,
         name="openceo_add_ticket_comment",
-        description="Comment on a ticket; it appears in the ERPNext timeline. Idempotent: identical text from this agent is not posted twice.",
+        description="Comment on a ticket; it appears in the ERPNext timeline. Idempotent: identical text from this agent is not posted twice. Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_update_ticket_comment,
         name="openceo_update_ticket_comment",
-        description="Edit any comment by its id, whoever wrote it.",
+        description="Edit any comment by its id, whoever wrote it. Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_delete_ticket_comment,
         name="openceo_delete_ticket_comment",
-        description="Delete a comment. Requires the id and its ticket.",
+        description="Delete a comment. Requires the id and its ticket. Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_attach_ticket_file,
         name="openceo_attach_ticket_file",
-        description="Attach a file to a ticket. Give exactly one of source_path (local file inside the allowed root) or content_base64. Private by default, deduplicated by content, name sanitized.",
+        description="Attach a file to a ticket. Give exactly one of source_path (local file inside the allowed root) or content_base64. Private by default, deduplicated by content. Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_get_ticket_attachment,
         name="openceo_get_ticket_attachment",
-        description="Read one attachment by its id: metadata and authenticated download_url. include_content=true also returns text or base64 when it fits in 256 KiB.",
+        description="Read one attachment by its id: metadata and authenticated download_url. include_content=true also returns text or base64 when it fits in 256 KiB. Boundary (a): reads through the ERPNext credential.",
     )
     server.tool(
         openceo_update_ticket_attachment,
         name="openceo_update_ticket_attachment",
-        description="Rename an attachment (file_name) or change its privacy (private). Requires the id and its ticket.",
+        description="Rename an attachment (file_name) or change its privacy (private). Requires the id and its ticket. Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_delete_ticket_attachment,
         name="openceo_delete_ticket_attachment",
-        description="Delete an attachment. Requires the id and its ticket.",
+        description="Delete an attachment. Requires the id and its ticket. Boundary (c): writes the business record.",
+    )
+
+    # --- boundary tools (TASK-2026-00199) ---------------------------------
+    # One implementation, two access paths: the YAML registry owns the logic
+    # and these wrappers expose it to agents. Each description documents the
+    # criterion that justifies it: (a) secret, (b) lock, (c) business record.
+    boundary = tool_registry or WorkflowToolRegistry(settings=settings)
+
+    def _senders_text() -> str:
+        try:
+            accounts = SMTPEmailSender(settings).list_accounts()
+        except Exception:  # noqa: BLE001 - description fallback; calls report the real error
+            return "no sender account configured"
+        emails = [str(item.get("email") or "") for item in accounts
+                  if str(item.get("email") or "").strip()]
+        return ", ".join(emails) if emails else "no sender account configured"
+
+    async def openceo_send_email(
+        to: str | list[str],
+        subject: str,
+        body_text: str,
+        from_email: str | None = None,
+        body_html: str | None = None,
+        cc: str | list[str] | None = None,
+        bcc: str | list[str] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return await boundary.call("secretary.send_email", {
+                "from_email": from_email,
+                "to": to,
+                "subject": subject,
+                "body_text": body_text,
+                "body_html": body_html,
+                "cc": cc,
+                "bcc": bcc,
+            }, {})
+        except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
+            return _classify(exc)
+
+    async def openceo_ensure_erpnext_project(
+        project_key: str, display_name: str = "",
+    ) -> dict[str, Any]:
+        if erpnext is None or not erpnext.is_enabled:
+            return _not_configured()
+        try:
+            from ops.create_project import normalize_key
+            key = normalize_key(project_key)
+            existing = await erpnext.find_project(key)
+            name = await erpnext.ensure_project(
+                key, (display_name or "").strip() or None)
+            return {"name": name, "created": not existing}
+        except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
+            return _classify(exc)
+
+    async def openceo_register_expense(
+        text: str = "",
+        openceo_ref: str | None = None,
+        submit: bool = True,
+        exchange_rate: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return await boundary.call("finance.register_expense", {
+                "text": text,
+                "openceo_ref": openceo_ref,
+                "submit": submit,
+                "exchange_rate": exchange_rate,
+            }, {})
+        except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
+            return _classify(exc)
+
+    async def openceo_register_income(
+        text: str = "",
+        openceo_ref: str | None = None,
+        submit: bool = True,
+        exchange_rate: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return await boundary.call("finance.register_income", {
+                "text": text,
+                "openceo_ref": openceo_ref,
+                "submit": submit,
+                "exchange_rate": exchange_rate,
+            }, {})
+        except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
+            return _classify(exc)
+
+    async def openceo_scope_summary(
+        cost_center: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return await boundary.call("finance.get_scope_summary", {
+                "cost_center": cost_center,
+                "date_from": date_from,
+                "date_to": date_to,
+            }, {})
+        except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
+            return _classify(exc)
+
+    async def openceo_contribution_10_status(
+        date_from: str | None = None,
+        date_to: str | None = None,
+        cost_center: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return await boundary.call("finance.get_contribution_10_status", {
+                "date_from": date_from,
+                "date_to": date_to,
+                "cost_center": cost_center,
+            }, {})
+        except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
+            return _classify(exc)
+
+    async def openceo_elfec_house_payment(
+        expected_row_label: str = "",
+    ) -> dict[str, Any]:
+        try:
+            return await boundary.call("finance.pago_elfec_house", {
+                "expected_row_label": expected_row_label,
+            }, {})
+        except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
+            return _classify(exc)
+
+    server.tool(
+        openceo_send_email,
+        name="openceo_send_email",
+        description="Send an operational email from one of: "
+        f"{_senders_text()}. Unknown senders are rejected. "
+        "Boundary (a): holds the SMTP credentials.",
+    )
+    server.tool(
+        openceo_ensure_erpnext_project,
+        name="openceo_ensure_erpnext_project",
+        description="Ensure the ERPNext Project identity (idempotent by project_key). "
+        "Boundary (c): writes the business record.",
+    )
+    server.tool(
+        openceo_register_expense,
+        name="openceo_register_expense",
+        description="Register an occasional expense in ERPNext from free text "
+        "(Journal Entry, idempotent by openceo_ref). "
+        "Boundary (c): writes the business record.",
+    )
+    server.tool(
+        openceo_register_income,
+        name="openceo_register_income",
+        description="Register collected income in ERPNext from free text "
+        "(Journal Entry, idempotent by openceo_ref). "
+        "Boundary (c): writes the business record.",
+    )
+    server.tool(
+        openceo_scope_summary,
+        name="openceo_scope_summary",
+        description="Balance/expense summary by scope from the ledger (read-only). "
+        "Boundary (a): reads through the ERPNext credential.",
+    )
+    server.tool(
+        openceo_contribution_10_status,
+        name="openceo_contribution_10_status",
+        description="10% contribution rule status from the ledger (read-only). "
+        "Boundary (a): reads through the ERPNext credential.",
+    )
+    server.tool(
+        openceo_elfec_house_payment,
+        name="openceo_elfec_house_payment",
+        description="Elfec house payment in practice mode: drives the portal to "
+        "the card form and stops, never pays. "
+        "Boundary (a): holds the Elfec credentials.",
     )
     return (
         "openceo_create_ticket",
@@ -846,6 +1029,13 @@ def _register_openceo_tools(
         "openceo_get_ticket_attachment",
         "openceo_update_ticket_attachment",
         "openceo_delete_ticket_attachment",
+        "openceo_send_email",
+        "openceo_ensure_erpnext_project",
+        "openceo_register_expense",
+        "openceo_register_income",
+        "openceo_scope_summary",
+        "openceo_contribution_10_status",
+        "openceo_elfec_house_payment",
     )
 
 
@@ -854,10 +1044,12 @@ def _register_all_tools(
     settings: Settings,
     task_service: "TaskService",
     erpnext: Any | None = None,
+    tool_registry: WorkflowToolRegistry | None = None,
 ) -> tuple[str, ...]:
     """Internal MCP: infra + OpenCEO-specific tools."""
     infra = _register_infra_tools(server, settings)
-    openceo = _register_openceo_tools(server, settings, task_service, erpnext)
+    openceo = _register_openceo_tools(
+        server, settings, task_service, erpnext, tool_registry)
     return infra + openceo
 
 

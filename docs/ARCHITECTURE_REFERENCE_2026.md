@@ -408,7 +408,7 @@ TOOL_REGISTRY = {
     "finance.binance_api":    binance_api_fn,
     "finance.bank_transfer":  bank_transfer_fn,
     "secretary.send_email":   send_email_fn,
-    "pm.create_ticket":       create_ticket_fn,
+    "core.echo":              echo_fn,
 }
 ```
 
@@ -434,6 +434,8 @@ def check_registry(agent: str | None = None) -> dict:
 ```
 
 CEO flow for large tasks: `check_registry()` → global summary → reason about matches → `check_registry("finance")` → full detail where it applies. First global summary (avoids missing matches by wrong agent assumption), then detail only where relevant.
+
+> **Retired (2026-10-11, TASK-2026-00199).** `core.check_registry` was removed from the registry; the agent catalog (`catalog/`, `openceo-core/catalog.py`) replaces it. Kept as history.
 
 ### LLM Usage Guidelines
 
@@ -1031,7 +1033,9 @@ Consumers (TASK-2026-00195): the planner registry derives from the catalog (AI a
 
 A tool exists only if it meets at least one condition: (a) it uses a secret the agent must not hold; (b) it enforces a lock that does not depend on the LLM obeying; (c) it writes to the business record under its own rules. Everything else is terminal plus skills. Each agent sees all its role's tools on any ticket; the ticket token is a badge (which agent, on which ticket) enforced server-side; no anonymous access to MCP or REST; dangerous tools carry their lock inside; agents comment and attach on their ticket; code changes states. (TASK-2026-00196, TASK-2026-00199, TASK-2026-00208.)
 
-Identity (TASK-2026-00196): `openceo-core/mcp_identity.py` issues opaque ticket tokens (SHA-256 stored, kinds owner/agent/readonly/service; planner and ceo are read-only principals, never catalog agents) and a FastMCP middleware filters `tools/list` to the grant's box and blocks out-of-box calls; both `/internal/mcp` and `/internal/mcp-global` answer 401 without a valid badge on every method (logged with client host, never the token), and every authenticated call lands in the `mcp_calls` audit log. The box resolves from the agent's catalog card (`boundary_tools`; dev reads its ticket and comments/attaches on it, owner sees all 17, creation and state changes stay owner-only); badges die on terminal execution (funnel hook, best-effort) plus a TTL backstop. The shared `MCP_SERVER_API_KEY` is retired on the internal mounts; the research broker keeps its own bearer and consumers. PM extraction keeps working through a per-run service badge (single tool, project-scoped, sunset in TASK-2026-00209); interactive dev sessions regain scoped access with the role profiles (TASK-2026-00197). Tests: `tests/test_mcp_identity_196.py`.
+Identity (TASK-2026-00196): `openceo-core/mcp_identity.py` issues opaque ticket tokens (SHA-256 stored, kinds owner/agent/readonly/service; planner and ceo are read-only principals, never catalog agents) and a FastMCP middleware filters `tools/list` to the grant's box and blocks out-of-box calls; both `/internal/mcp` and `/internal/mcp-global` answer 401 without a valid badge on every method (logged with client host, never the token), and every authenticated call lands in the `mcp_calls` audit log. The box resolves from the agent's catalog card (`boundary_tools`; dev reads its ticket and comments/attaches on it, owner sees all 24, creation and state changes stay owner-only); badges die on terminal execution (funnel hook, best-effort) plus a TTL backstop. The shared `MCP_SERVER_API_KEY` is retired on the internal mounts; the research broker keeps its own bearer and consumers. PM extraction keeps working through a per-run service badge (single tool, project-scoped, sunset in TASK-2026-00209); interactive dev sessions regain scoped access with the role profiles (TASK-2026-00197). Tests: `tests/test_mcp_identity_196.py`.
+
+Registry and surface (TASK-2026-00199): the YAML registry keeps 26 builtin tools plus the 3 conditional research ticks (`pm.*`, `core.check_registry` and `cloudflare.*` removed; `ops.*` stays until TASK-2026-00223, secretary notes until TASK-2026-00220). Both mounts expose the same 24 boundary tools: the ticket/objective set, one DNS tool (`manage_dns_record`, create/delete), email with the sender list in its description, the ERPNext project ensure, and the five finance tools (practice-only Elfec). Each description documents its criterion; `catalog.MCP_BOUNDARY_TOOLS` is the canonical set — unknown card boxes fail the load and unknown registrations fail the mount build. `openceo_create_pm_tickets_batch` answers only to owner and service badges (the service exception retires with TASK-2026-00209). Tests: `tests/test_boundary_tools_199.py`.
 
 ### Agent result
 
@@ -1299,7 +1303,7 @@ OpenCEO exposes two MCP mount points **inside `openceo-core`** (same process, sa
 | **Global MCP** | `/internal/mcp-global` | Entire VM — any project on this machine | Infrastructure only (DNS) |
 | **Internal MCP** | `/internal/mcp` | OpenCEO-managed coding runtimes only | Infrastructure + OpenCEO ticket capabilities |
 
-**Why two endpoints?** Coding clients load tool schemas into their context. The global MCP carries universal DevOps tools (DNS); the internal MCP adds OpenCEO-specific capabilities and is injected into managed coding runtimes through `build_mcp_provider_env()` or explicit MCP config. Changing the business backend does not require exposing its full API globally.
+**Why two endpoints?** Both mounts expose the same tool set; the difference is who receives them, not what they contain: the internal MCP is injected into OpenCEO-managed coding runtimes through `build_mcp_provider_env()` or explicit MCP config, and the global MCP is opt-in for manual host sessions (Claude Code / Codex CLI). Changing the business backend does not require exposing its full API globally.
 
 Both endpoints share the same security layer (loopback IP restriction + optional Bearer token), the same FastMCP transport, and the same `mcp_server.py` registration functions.
 
@@ -1311,22 +1315,19 @@ Both endpoints share the same security layer (loopback IP restriction + optional
 
 ### Exposed Tools
 
-**Global MCP** (`/internal/mcp-global`) — configured in Claude Code / Codex CLI settings for the whole VM:
+Both mounts (`/internal/mcp`, `/internal/mcp-global`) expose the same 24 boundary tools (`catalog.MCP_BOUNDARY_TOOLS`; TASK-2026-00199). Each description documents the criterion that justifies it: (a) secret, (b) lock, (c) business record.
 
 | Tool | Purpose |
 |---|---|
-| `manage_dns_check_or_create(hostname)` | Cloudflare DNS: create/verify A record. Required before Traefik deploy. |
-
-**Internal MCP** (`/internal/mcp`) — injected only into OpenCEO-managed coding runtimes:
-
-| Tool | Purpose |
-|---|---|
-| `manage_dns_check_or_create(hostname)` | Cloudflare DNS: create/verify A record. Required before Traefik deploy. |
+| `manage_dns_record(hostname, action)` | Cloudflare DNS: create (idempotent) or delete an A record. Required before Traefik deploy. |
 | `openceo_create_ticket(title, ...)` | Register a ticket through `TaskService`, with source identity and runtime policy. |
 | `openceo_create_tickets_batch(tickets)` | Register a structured JSON batch through the same service. |
-| `openceo_create_pm_tickets_batch(project, source_id, tickets, ...)` | Register a PM batch with explicit project and source context. |
+| `openceo_create_pm_tickets_batch(project, source_id, tickets, ...)` | Register a PM batch with explicit project and source context. Owner token only. |
 | `openceo_search_tickets(query, project, status, limit)` | Read business tickets in ERPNext before creating new ones. |
 | `openceo_get_ticket(identifier, limit)` | Read one ticket in full: fields, execution status, comments and attachments. |
+| `openceo_create_objective(project, goal, ...)` | Create a company objective whose children the planner creates. |
+| `openceo_transition_ticket(ticket, to_status, ...)` | Move a ticket's business status under the global policy. |
+| `openceo_transition_tickets_batch(transitions)` | Apply several status transitions, each verified by reread. |
 | `openceo_update_ticket(ticket, subject, description, priority, due_date)` | Edit a ticket's content fields. Never status, dependencies or execution. |
 | `openceo_add_ticket_comment(ticket, content)` | Comment on a ticket; idempotent by text and author. |
 | `openceo_update_ticket_comment(comment_id, content)` | Edit any comment, whoever wrote it. |
@@ -1335,6 +1336,13 @@ Both endpoints share the same security layer (loopback IP restriction + optional
 | `openceo_get_ticket_attachment(attachment, include_content)` | Read one attachment: metadata, download URL, optional small content. |
 | `openceo_update_ticket_attachment(attachment, ticket, file_name, private)` | Rename an attachment or change its privacy. |
 | `openceo_delete_ticket_attachment(attachment, ticket)` | Delete an attachment. |
+| `openceo_send_email(to, subject, body_text, ...)` | Send an operational email from a configured sender (listed in its description). |
+| `openceo_ensure_erpnext_project(project_key, ...)` | Ensure the ERPNext Project identity, idempotent by key. |
+| `openceo_register_expense(text, ...)` | Register an occasional expense in ERPNext from free text. |
+| `openceo_register_income(text, ...)` | Register collected income in ERPNext from free text. |
+| `openceo_scope_summary(...)` | Balance/expense summary by scope from the ledger (read-only). |
+| `openceo_contribution_10_status(...)` | 10% contribution rule status from the ledger (read-only). |
+| `openceo_elfec_house_payment(...)` | Elfec house payment in practice mode: never pays. |
 
 These names reflect `openceo-core/mcp_server.py`. Their existing Mongo/Notion behavior is a compatibility implementation, not an ERPNext adapter. Legacy `notion_create_*` references do not authorize direct writes around OpenCEO. The direction's `ticket.create()`/`ticket.transition()` vocabulary describes semantics; it does not rename deployed tools by documentation alone.
 
