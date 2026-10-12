@@ -1381,8 +1381,12 @@ class RunTaskLockFunnelTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_mid_run_park_wins_over_completion(self) -> None:
+        # Explicit agent: these funnel tests predate the single planner;
+        # since TASK-2026-00204 an undecided ticket on an unwired
+        # service fails fast instead of running.
         repo = _LockRepo()
-        repo.tasks["t1"] = _lock_task("t1", status="queued")
+        repo.tasks["t1"] = _lock_task(
+            "t1", status="queued", agent_hint="operations")
         outcome = {
             "selected_agent": "operations",
             "status": "completed",
@@ -1403,7 +1407,8 @@ class RunTaskLockFunnelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_mid_run_park_wins_over_failure(self) -> None:
         repo = _LockRepo()
-        repo.tasks["t1"] = _lock_task("t1", status="queued")
+        repo.tasks["t1"] = _lock_task(
+            "t1", status="queued", agent_hint="operations")
         outcome = {
             "selected_agent": "operations",
             "status": "failed",
@@ -1426,7 +1431,8 @@ class RunTaskStaleDiscardTests(unittest.IsolatedAsyncioTestCase):
         from task_service import TaskService
 
         repo = _LockRepo()
-        repo.tasks["t1"] = _lock_task("t1", status="queued")
+        repo.tasks["t1"] = _lock_task(
+            "t1", status="queued", agent_hint="operations")
 
         async def behavior(task: dict[str, Any]) -> dict[str, Any]:
             await repo.patch_task(task["task_id"], {
@@ -1474,7 +1480,7 @@ class RunTaskStaleDiscardTests(unittest.IsolatedAsyncioTestCase):
 
         repo = _LockRepo()
         repo.tasks["t1"] = _lock_task(
-            "t1", status="queued",
+            "t1", status="queued", agent_hint="operations",
             params={"owner_answer": {
                 "decision": "approved",
                 "at": "2026-10-12T12:00:00+00:00",

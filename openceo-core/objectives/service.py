@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any, Mapping
 
-from agents.dev.loose_tier import project_money_routing
+from objectives.money_guide import project_money_routing
 from orchestration.inbox import InMemoryInboxStore, MongoInboxStore
 from orchestration.live import AllowAllQuota, ProcessExecutor, RateMonitorQuota
 from orchestration.role_muse import ObjectiveBadgeProvider, issuer_for_repo
@@ -62,10 +62,12 @@ async def create_internal_ticket(
     """Create engine tickets through the internal API (ERPNext first).
 
     Idempotent per ``source_id``. ``agent_hint``/``params`` ride through
-    from the payload (planner targets; default dev); hierarchy
-    (``parent_task``/``depends_on``/``is_group``) rides through to business
-    registration. None when unbound or on failure: callers degrade to
-    telemetry instead of forking Mongo-only tickets.
+    from the payload (planner targets; no default: undecided tickets
+    are pedidos and the single planner decides them,
+    TASK-2026-00204); hierarchy (``parent_task``/``depends_on``/
+    ``is_group``) rides through to business registration. None when
+    unbound or on failure: callers degrade to telemetry instead of
+    forking Mongo-only tickets.
     """
     if task_service is None:
         return None
@@ -76,7 +78,7 @@ async def create_internal_ticket(
         source = TaskSource.SPILLOVER
     hint = data.get("agent_hint")
     try:
-        agent_hint = AgentName(str(hint)) if hint else AgentName.DEV
+        agent_hint = AgentName(str(hint)) if hint else None
     except ValueError:
         # Unknown to the router enum: leave it unset. The graph agent gate
         # resolves the planner target from params (TASK-2026-00195): wired

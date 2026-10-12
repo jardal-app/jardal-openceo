@@ -4,6 +4,7 @@ import re
 import time
 from uuid import uuid4
 
+from router import CEORouter
 from state import (
     AgentName,
     ChatCompletionChoice,
@@ -25,18 +26,7 @@ def parse_agent_hint(text: str) -> AgentName | None:
     match = AGENT_PREFIX.match(text.strip())
     if not match:
         return None
-
-    alias = match.group("agent").lower()
-    mapping = {
-        "dev": AgentName.DEV,
-        "pm": AgentName.PM,
-        "marketing": AgentName.MARKETING,
-        "finance": AgentName.FINANCE,
-        "secretary": AgentName.SECRETARY,
-        "sales": AgentName.SALES,
-        "media": AgentName.MEDIA,
-    }
-    return mapping.get(alias)
+    return CEORouter.AGENT_ALIASES.get(match.group("agent").lower())
 
 
 def chat_response(model: str, text: str) -> ChatCompletionResponse:

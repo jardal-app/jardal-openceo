@@ -197,7 +197,10 @@ class AgentGateTest(unittest.TestCase):
         params = {"target_agent": target} if target else {}
         return resolve_agent_gate(hint, params, tool, self.catalog)
 
-    def test_loose_ticket_classifies_as_today(self):
+    def test_loose_ticket_passes_gate_undecided(self):
+        # No hint and no target: the gate proceeds and the graph node
+        # waits routing_missing (TASK-2026-00204). In production the
+        # run pre-stage plans every pedido, so the node never sees one.
         decision = self.gate()
         self.assertTrue(decision.proceed)
         self.assertIsNone(decision.hint)

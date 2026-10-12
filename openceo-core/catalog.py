@@ -1065,7 +1065,7 @@ def find_consumer_mismatches(
     R5: the disabled-but-live legacy names stay in the enum until removal.
     R6: every enabled AI agent is in the enum and the router aliases
     (review 00006: the gate approves it from the catalog, and without
-    its alias the router would reclassify by text, silently).
+    its alias an explicit name would not resolve).
     """
     problems: list[str] = []
     names = set(catalog.agents)
@@ -1120,11 +1120,11 @@ def find_consumer_mismatches(
         if name not in enum_names:
             problems.append(
                 f"R6: enabled AI agent {name!r} is missing from the enum "
-                "(the gate would approve it, the router would reclassify "
-                "it by text)")
+                "(the gate would approve it, but the explicit name would "
+                "not resolve)")
         if name not in alias_names:
             problems.append(
                 f"R6: enabled AI agent {name!r} is missing from the router "
-                "aliases (the gate would approve it, the router would "
-                "reclassify it by text)")
+                "aliases (the gate would approve it, but the explicit "
+                "name would not resolve)")
     return problems

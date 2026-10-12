@@ -18,7 +18,10 @@ webhook all flow through that parent ticket.
 Entry points: :func:`create_objective` (top-down, for the CEO/owner; F5
 Horizon promotion calls it too), :func:`convert_ticket` (a ticket outgrew
 one session — inside its own objective when it already has one),
-:func:`plan_objective` (next horizon of tickets), :func:`on_ticket_closed`
+:func:`plan_objective` (next horizon of tickets), :func:`plan_pedido`
+(the single planner decides one loose ticket without an explicit
+decision: ticket or objective, agent, suggested skill and, for dev,
+the tier — TASK-2026-00204), :func:`on_ticket_closed`
 (triggers + capsule after any objective ticket closes) and
 :func:`run_final_review` (planner declared ``complete_candidate``).
 """
@@ -36,9 +39,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
-from agents.dev.loose_tier import routing_guide_section
 from catalog import (load_all_role_skills, load_catalog,
                      skills_index_for_planner, suggestable_skills)
+from objectives.money_guide import routing_guide_section
 from orchestration import findings as findings_mod
 from orchestration import inbox as inbox_mod
 from orchestration import knowledge as knowledge_mod
@@ -1503,6 +1506,351 @@ async def _plan_objective_inner(
         env, objective, objective_id, result, return_from=return_from,
         closed_before=closed_before,
         policy_sha=planner_mod.policy_fingerprint(policy_text))
+
+
+def pedido_scratch(repo: Path, task_id: str) -> Path:
+    """Per-pedido scratch dir: ``repo/.tier-s/loose/<task_id>``."""
+    return scratch_root(repo) / "loose" / task_id
+
+
+def _pedido_prompt(
+    ticket: Mapping[str, Any],
+    *,
+    agents_md: str = "",
+    policy_text: str = "",
+    policy_index: str = "",
+    routing_guide: str = "",
+    spend_guide: str = "",
+    agent_return: Mapping[str, Any] | None = None,
+) -> str:
+    """Planner prompt for one pedido (self-contained decision contract)."""
+    task_id = str(ticket.get("task_id") or "")
+    lines = [
+        "You are the single OpenCEO planner. Decide this ONE pedido: a "
+        "loose ticket with no explicit decision.",
+        "",
+        f"TASK_ID: {task_id}",
+        f"TITLE: {str(ticket.get('title') or '')[:500]}",
+        f"PROJECT: {str(ticket.get('project') or '')}",
+        f"PRIORITY: {str(ticket.get('priority') or 'medium')}",
+        "DESCRIPTION:",
+        (str(ticket.get("description") or "")[:6000] or "(empty)"),
+    ]
+    attachments = ticket.get("attachments") or []
+    if attachments:
+        names = ", ".join(str(name) for name in attachments[:10])
+        lines.extend(["", f"ATTACHMENTS: {names}"])
+    if agent_return is not None:
+        lines.extend([
+            "",
+            "AGENT RETURNS (this pedido already ran once and the agent "
+            "could not do it; relaunch it with guidance, reassign it, or "
+            "convert it — never ignore the return):",
+            f"- {agent_return.get('title')} [{agent_return.get('agent')}/"
+            f"{agent_return.get('resultado')}]: "
+            f"{agent_return.get('motivo')}",
+            f"  necesidad: {agent_return.get('necesidad')}",
+        ])
+    lines.extend([
+        "",
+        agents_md.strip(),
+        "",
+        "Decide exactly one ticket when the pedido fits one execution, "
+        "with target_agent, an optional skill suggestion, and — dev only "
+        "— the tier with its justification (read the dev detail file "
+        "before choosing a tier).",
+        "When the pedido outgrows one ticket, return capability_gap with "
+        "no tickets: the system converts it to an objective and the "
+        "objective planner takes over. blocked and complete_candidate "
+        "are not pedido outcomes: a stuck pedido converts, and whether "
+        "work is needed is judged by execution, never by declining to "
+        "decide.",
+        "The decision patches the pedido itself: blocked_by must stay "
+        "empty and completes_task_id is forbidden.",
+    ])
+    if policy_text.strip():
+        lines.extend(["", policy_text.strip()])
+    if policy_index.strip():
+        lines.extend(["", policy_index.strip()])
+    lines.extend([
+        "",
+        "- NEW BOUNDARY TOOL (rare; at most "
+        f"{planner_mod.PROPOSED_TOOLS_MAX}): when the pedido needs a "
+        "missing boundary tool — a secret the agent must not hold, a "
+        "lock that must not depend on the model obeying, or a "
+        "business-record write with its own rules — list it in "
+        "proposed_tools. The Owner approves through the human channel. "
+        "Never propose for technical failures. Omit the key when "
+        "nothing is missing.",
+    ])
+    if (routing_guide or "").strip():
+        lines.extend(["", routing_guide.strip()])
+    if (spend_guide or "").strip():
+        lines.extend(["", spend_guide.strip()])
+    lines.extend([
+        "",
+        f"OUTPUT: write {SCRATCH_DIRNAME}/loose/"
+        f"{task_id}/{PLANNER_RESULT_FILE} "
+        "with exactly this JSON",
+        "object (no YAML, no markdown fences around the file content):",
+        "{",
+        '  "objective_status": "active | capability_gap",',
+        '  "state_summary": "<the decision in one line>",',
+        '  "information_gaps": [{...}] (capability_gap only: why it '
+        'outgrows one ticket),',
+        '  "tickets": [ <exactly one, ONLY when active> {',
+        '    "local_ref": "pedido-1", "title": "...",',
+        '    "target_agent": "<enabled agent>", "work_type": "...",',
+        '    "skill?": "<optional suggested skill, any agent>",',
+        '    "goal": "...", "why_now": "...",',
+        '    "inputs": [], "constraints": [], "out_of_scope": [],',
+        '    "acceptance_criteria": ["<at least one>"],',
+        '    "expected_artifacts": ["<at least one>"],',
+        '    "blocked_by": [],',
+        '    "coding_tool": "<REQUIRED for dev: tier_s|tier_a|tier_b|'
+        'tier_c; FORBIDDEN otherwise>",',
+        '    "tier_reason": "<REQUIRED for dev: why this tier>",',
+        '    "oracle?": {"type": "<oracle type>", "refs": [{"ref": '
+        '"..."}]},',
+        '    "why_consensus_is_needed?": "<tier_s only>",',
+        '    "why_single_session_is_insufficient?": "<tier_s only>",',
+        '    "why_not_c?": "<required for tier_a/tier_b>",',
+        '    "costs?": [{"label": "<what it buys>", "amount": '
+        '"<decimal string, or null when unknown>"}]',
+        "  } ],",
+        '  "proposed_tools?": [{"name": "<missing boundary tool>",',
+        '    "need": "<in words>", "spec?": "<how it should behave>"}],',
+        '  "roadmap_remaining": []',
+        "}",
+    ])
+    return "\n".join(lines)
+
+
+def _pedido_extra_errors(result: planner_mod.PlannerResult) -> list[str]:
+    """Pedido-only validation over an already-parsed result."""
+    errors: list[str] = []
+    if result.objective_status not in {
+            planner_mod.ObjectiveStatus.ACTIVE,
+            planner_mod.ObjectiveStatus.CAPABILITY_GAP}:
+        errors.append(
+            "a pedido decides (active, exactly one ticket) or converts "
+            "(capability_gap, no tickets); "
+            f"{result.objective_status.value} is not a pedido outcome")
+    for ticket in result.tickets:
+        if ticket.completes_task_id:
+            errors.append(
+                f"ticket {ticket.local_ref!r}: completes_task_id is "
+                "for objective children, never for a pedido")
+    return errors
+
+
+async def plan_pedido(
+    env: ObjectiveEnv,
+    ticket: Mapping[str, Any],
+    *,
+    return_from: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run the single planner for one pedido (TASK-2026-00204).
+
+    Same planner function as objectives (``objective_planner`` role,
+    one fresh headless run, ``PlannerResult`` validated with Pydantic
+    + deterministic rules), over the pedido alone. Single-flight per
+    ticket: concurrent triggers share one run.
+
+    Decided: the decision is patched onto the ticket (agent hint,
+    target, skill, tier, provenance) and the run returns
+    ``{"ok": True, "action": "decided", ...}`` with the spend verdict
+    for the caller to hold on. capability_gap: nothing is patched and
+    the caller converts (``action: convert``). Invalid twice: attempts
+    are counted on the ticket and the caller backs off
+    (``reason: planner_error``); unreadable policy or an empty
+    registry fail fast (``reason: config``).
+    """
+    task_id = str(ticket.get("task_id") or "")
+    flight_key = f"loose:{task_id}"
+    flight = _PLAN_FLIGHTS.get(flight_key)
+    if flight is not None and not flight.task.done():
+        if flight.task is asyncio.current_task():
+            return await _plan_pedido_inner(env, ticket, return_from)
+        flight.rerun_requested = True
+        return await flight.task
+
+    rec: _PlanFlight | None = None
+
+    async def _leader() -> dict[str, Any]:
+        assert rec is not None
+        result = await _plan_pedido_inner(env, ticket, return_from)
+        while _PLAN_FLIGHTS.get(flight_key) is rec \
+                and rec.rerun_requested:
+            rec.rerun_requested = False
+            result = await _plan_pedido_inner(env, ticket, return_from)
+        return result
+
+    task = asyncio.create_task(_leader())
+    rec = _PlanFlight(task=task)
+    _PLAN_FLIGHTS[flight_key] = rec
+    try:
+        return await task
+    finally:
+        if _PLAN_FLIGHTS.get(flight_key) is rec:
+            del _PLAN_FLIGHTS[flight_key]
+
+
+async def _plan_pedido_inner(
+    env: ObjectiveEnv,
+    ticket: Mapping[str, Any],
+    return_from: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run the single planner for one pedido once. Returns the outcome."""
+    task_id = str(ticket.get("task_id") or "")
+    planner_cfg = env.planner_cfg
+    agents = planner_cfg.get("agents", {}) or {}
+    if not agents:
+        return {"ok": False, "reason": "config",
+                "detail": "planner agent registry is empty "
+                          "(global objective_planner.agents)"}
+    policy_path = planner_cfg.get("policy_path")
+    policy_core = planner_mod.load_policy_core(policy_path)
+    policy_details = planner_mod.load_policy_details(policy_path)
+    if not policy_core or policy_details is None:
+        return {"ok": False, "reason": "config",
+                "detail": "planner routing policy unreadable "
+                f"({planner_mod.check_policy(policy_path).problem}); "
+                "refusing to plan blind"}
+    policy_text = planner_mod.compose_policy(
+        policy_core, [text for _, text in policy_details])
+    skills_md, skill_map = _planner_skills()
+    scratch = pedido_scratch(env.repo, task_id)
+    scratch.mkdir(parents=True, exist_ok=True)
+    (scratch / "PEDIDO.md").write_text(
+        f"# {ticket.get('title')}\n\n"
+        f"{str(ticket.get('description') or '')[:6000] or '(empty)'}\n",
+        encoding="utf-8")
+    staged = _stage_policy_details(scratch, policy_details)
+    project = str(ticket.get("project") or "")
+    prompt = _pedido_prompt(
+        ticket,
+        agents_md=_agents_section(agents, skills_md),
+        policy_text=policy_core,
+        policy_index=planner_mod.policy_detail_index(staged),
+        routing_guide=routing_guide_section(project, env.project_routing),
+        spend_guide=spend_mod.spend_guide_section(env.mandate),
+        agent_return=return_from)
+    timeout_s = int(planner_cfg.get("timeout_minutes", 15)) * 60
+    errors: list[str] = []
+    result: planner_mod.PlannerResult | None = None
+    result_path = scratch / PLANNER_RESULT_FILE
+    base_prompt = prompt
+    for _attempt in range(2):
+        try:
+            result_path.unlink()
+        except OSError:
+            pass
+        await env.executor.run("objective_planner", prompt, env.repo, timeout_s)
+        text = _read(result_path)
+        if not text:
+            errors = [f"no {PLANNER_RESULT_FILE}"]
+        else:
+            try:
+                candidate = planner_mod.parse_planner_result(text)
+            except ValueError as exc:
+                errors = [str(exc)]
+            else:
+                errors = await planner_mod.validate_planner_result(
+                    candidate,
+                    agents=agents,
+                    open_titles=[],
+                    task_exists=_pedido_no_tasks,
+                    material_failures=[],
+                    horizon=[1, 1],
+                    skills=skill_map,
+                )
+                errors.extend(_pedido_extra_errors(candidate))
+                if not errors:
+                    result = candidate
+        if not errors:
+            break
+        # Retry with the full context: each executor run is a fresh
+        # process, so an errors-only prompt could never succeed.
+        prompt = (base_prompt + "\n\n"
+                  f"Your previous {PLANNER_RESULT_FILE} was invalid: "
+                  f"{'; '.join(errors)}\n"
+                  "Fix it and rewrite the same OUTPUT file.")
+    try:
+        await env.executor.cleanup("objective_planner")
+    except Exception:
+        pass
+    if errors or result is None:
+        params = dict(ticket.get("params") or {})
+        params["planner_attempts"] = int(params.get("planner_attempts") or 0) + 1
+        await env.patch_task(task_id, {"params": params})
+        return {"ok": False, "reason": "planner_error",
+                "detail": f"invalid {PLANNER_RESULT_FILE} after retry: "
+                          f"{'; '.join(errors)}"}
+    await create_tool_proposal_questions(
+        env, f"loose:{task_id}", project, result)
+    if result.objective_status != planner_mod.ObjectiveStatus.ACTIVE:
+        return {"ok": True, "action": "convert",
+                "goal": str(ticket.get("title") or ""),
+                "acceptance": [result.state_summary[:500]],
+                "state_summary": result.state_summary,
+                "costs": spend_mod.collect_plan_costs(result)}
+    planned = result.tickets[0]
+    params = dict(ticket.get("params") or {})
+    params.update(_planned_params(planned))
+    params["decided_by"] = "planner"
+    params["planner_policy_sha"] = planner_mod.policy_fingerprint(policy_text)
+    params.pop("planner_attempts", None)
+    params.pop("agent_result", None)
+    if return_from is not None:
+        params["returns_from"] = task_id
+    updates: dict[str, Any] = {
+        "agent_hint": planned.target_agent,
+        "params": params,
+    }
+    if planned.coding_tool is not None:
+        updates["coding_tool"] = planned.coding_tool.value
+    elif ticket.get("coding_tool"):
+        # A re-decision away from dev clears the stale tier: the gate
+        # forces DEV on any coding_tool. Fresh pedidos stay tier-free.
+        updates["coding_tool"] = None
+    if planned.coding_tool is None:
+        for key in ("tier_reason", "tier_assigned_by", "tier_signals",
+                    "oracle", "why_consensus_is_needed",
+                    "why_single_session_is_insufficient", "why_not_c",
+                    "material_failure"):
+            params.pop(key, None)
+    await env.patch_task(task_id, updates)
+    spend = spend_mod.check_plan_spend(
+        costs=spend_mod.collect_plan_costs(result),
+        summary=f"Plan for pedido {task_id}: {result.state_summary[:160]}",
+        mandate=env.mandate)
+    if env.notify is not None:
+        tier = planned.coding_tool.value if planned.coding_tool else "-"
+        try:
+            await env.notify(
+                task_id,
+                f"Planner decided: agent {planned.target_agent}, "
+                f"skill {planned.skill or '-'}, tier {tier}. "
+                f"{planned.tier_reason or ''} "
+                f"(policy {params['planner_policy_sha']})".strip())
+        except Exception:
+            logger.warning("pedido decision comment failed for %s",
+                           task_id, exc_info=True)
+    return {"ok": True, "action": "decided",
+            "decision": {"target_agent": planned.target_agent,
+                         "skill": planned.skill,
+                         "coding_tool": planned.coding_tool.value
+                         if planned.coding_tool else None,
+                         "tier_reason": planned.tier_reason,
+                         "costs": spend_mod.collect_plan_costs(result)},
+            "spend": spend}
+
+
+async def _pedido_no_tasks(task_id: str) -> bool:
+    """A pedido decision carries no dependencies: every ref is unknown."""
+    del task_id
+    return False
 
 
 async def _record_and_apply_plan(

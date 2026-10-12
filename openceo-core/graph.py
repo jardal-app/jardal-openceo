@@ -18,7 +18,7 @@ from orchestration.generic_agent import (
     GenericAgentWiring,
     run_generic_agent,
 )
-from router import CEORouter
+from router import CEORouter, resolve_explicit_name
 from state import AgentName, GraphState, TaskStatus
 
 #: Agents with a wired executor node below. Disabled-but-wired names stay
@@ -59,7 +59,9 @@ def resolve_agent_gate(
     name with a muse-code profile routes to the generic node
     (TASK-2026-00205); unknown, disabled, human, untranslated-engine
     or ``ceo`` names wait with ``routing_missing`` and their reason.
-    No hint and no target means a loose ticket, classified as today.
+    No hint and no target means an undecided ticket: the node waits
+    fail-closed (TASK-2026-00204) — in production the run pre-stage
+    plans every pedido, so the node never sees one.
     """
     if str(coding_tool or "").strip():
         return AgentGateDecision(True, AgentName.DEV.value, "")
@@ -185,6 +187,8 @@ class OpenCEOGraph:
             "project": task.get("project"),
             "title": task["title"],
             "description": task["description"],
+            "params": task.get("params")
+            if isinstance(task.get("params"), dict) else None,
             "source": task["source"],
             "source_id": task.get("source_id"),
             "attachments": task.get("attachments", []),
@@ -237,15 +241,14 @@ class OpenCEOGraph:
 
     async def _ceo_router_node(self, state: GraphState) -> GraphState:
         project_cfg = self._config_loader.load_project(state.get("project"))
+        # Explicit only (TASK-2026-00204): a validated-plan phase agent,
+        # else the gate-validated hint. Nothing here reads ticket text;
+        # undecided work never reaches this node (the run pre-stage
+        # plans every pedido) and waits fail-closed if it ever does.
         selected_agent = self._phase_agent_override(state)
         if selected_agent is None:
-            selected_agent = await self._router.select_agent(
-                title=state["title"],
-                description=state["description"],
-                agent_hint=state.get("agent_hint"),
-                project_config=project_cfg,
-                coding_tool=state.get("coding_tool"),
-            )
+            selected_agent = resolve_explicit_name(
+                state.get("agent_hint"), state.get("coding_tool"))
 
         step = {
             "step": "ceo_route",
@@ -255,7 +258,8 @@ class OpenCEOGraph:
         }
 
         return {
-            "selected_agent": selected_agent.value,
+            "selected_agent": selected_agent.value
+            if selected_agent is not None else "",
             "project_config": project_cfg,
             "steps": [*(state.get("steps") or []), step],
             "status": TaskStatus.IN_PROGRESS.value,
@@ -290,7 +294,10 @@ class OpenCEOGraph:
         return AgentName(raw_agent) if raw_agent in AgentName._value2member_map_ else None
 
     @staticmethod
-    def _route_detail(selected_agent: AgentName, state: GraphState) -> str:
+    def _route_detail(selected_agent: AgentName | None,
+                      state: GraphState) -> str:
+        name = selected_agent.value if selected_agent is not None \
+            else "undecided"
         phase_key = str(state.get("phase") or "").strip()
         phases = state.get("workflow_phases") or []
         if phase_key and isinstance(phases, list):
@@ -300,12 +307,15 @@ class OpenCEOGraph:
                 if str(phase.get("key") or "").strip() != phase_key:
                     continue
                 if str(phase.get("type") or "").strip().lower() == "agent":
-                    return f"Task routed to {selected_agent.value} by phase {phase_key}"
+                    return f"Task routed to {name} by phase {phase_key}"
                 break
         tool = str(state.get("coding_tool") or "").strip()
         if tool and selected_agent == AgentName.DEV:
             return f"Task routed to dev by coding_tool={tool}"
-        return f"Task routed to {selected_agent.value}"
+        if selected_agent is None:
+            return ("No explicit agent: routing_missing — the single "
+                    "planner decides pedidos before dispatch")
+        return f"Task routed to {name} (explicit)"
 
     def _after_ceo_route(self, state: GraphState) -> str:
         if state.get("selected_agent") == AgentName.DEV.value:
@@ -414,7 +424,11 @@ class OpenCEOGraph:
             out["waiting_reason"] = result.waiting_reason
             out["resume_at"] = None
             if result.owner_question_id:
-                out["params"] = {"owner_question_id": result.owner_question_id}
+                # Merge over the ticket params: replacing them wholesale
+                # would drop the planner decision and mirrors.
+                out["params"] = {**(state.get("params") or {}),
+                                 "owner_question_id":
+                                 result.owner_question_id}
         return out
 
     async def _secretary_node(self, state: GraphState) -> GraphState:
@@ -441,7 +455,11 @@ class OpenCEOGraph:
             out["waiting_reason"] = result.waiting_reason
             out["resume_at"] = None
             if result.owner_question_id:
-                out["params"] = {"owner_question_id": result.owner_question_id}
+                # Merge over the ticket params: replacing them wholesale
+                # would drop the planner decision and mirrors.
+                out["params"] = {**(state.get("params") or {}),
+                                 "owner_question_id":
+                                 result.owner_question_id}
         return out
 
     async def _generic_node(self, state: GraphState) -> GraphState:

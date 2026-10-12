@@ -14,8 +14,6 @@ from pathlib import Path
 from typing import Any
 
 from .review_links import ReviewLinksExtraction, apply_review_links_to_params, extract_review_links
-from .loose_tier import (ASSIGNED_BY, LooseTierDecision, classify_loose_tier,
-                          project_money_routing, record_loose_tier_decision)
 from .routing import (ROUTING_MISSING_REASON, TIER_C_CHAIN, RoutingDecision,
                       resolve_coding_tool, select_tier_c_link)
 from .tier_oracle import (
@@ -30,6 +28,8 @@ from .tier_s.gates import (baseline_blocked, gates_failed, handoff_gates_section
 from .tier_s.models import GateSpec
 from catalog import CatalogError, load_role_profile
 from mcp_identity import McpAuthError
+from objectives.money_guide import project_money_routing
+from objectives.pedido import is_explicit_dev
 from orchestration.inbox import InMemoryInboxStore, MongoInboxStore
 from orchestration.knowledge import detect_prompt_lang, with_preamble
 from orchestration.live import AllowAllQuota, ProcessExecutor, RateMonitorQuota
@@ -175,38 +175,26 @@ class _SimpleBranch:
     oracle_baseline_red: str = ""
 
 
-def _task_with_loose_tier(
-    task: dict[str, Any], classified: LooseTierDecision,
-) -> dict[str, Any]:
-    """Copy of ``task`` carrying the loose-tier assignment in ``params``.
+#: Provenance marker for the explicit-dev tier default (TASK-2026-00204).
+EXPLICIT_DEFAULT_BY = "explicit_default/v1"
 
-    Same keys the planner path uses (``tier_reason``, ``oracle``,
-    ``why_*`` for S) plus provenance, so downstream (oracle freeze,
-    telemetry, persistence funnel) treats both paths uniformly.
-    """
+
+def _task_with_default_tier(task: dict[str, Any]) -> dict[str, Any]:
+    """Copy of ``task`` carrying the explicit-dev C default in ``params``."""
     params = dict(task.get("params") or {})
-    params["tier_reason"] = classified.reason
-    params["tier_assigned_by"] = ASSIGNED_BY
-    params["tier_signals"] = list(classified.signals)
-    if classified.oracle is not None:
-        params["oracle"] = classified.oracle
-    if classified.why_consensus_is_needed is not None:
-        params["why_consensus_is_needed"] = classified.why_consensus_is_needed
-    if classified.why_single_session_is_insufficient is not None:
-        params["why_single_session_is_insufficient"] = (
-            classified.why_single_session_is_insufficient)
-    if classified.why_not_c is not None:
-        params["why_not_c"] = classified.why_not_c
+    params["tier_reason"] = (
+        "explicit dev without a tier runs the safe C default (§25)")
+    params["tier_assigned_by"] = EXPLICIT_DEFAULT_BY
     return {**task, "params": params}
 
 
-def _merge_loose_params(
+def _merge_session_params(
     enriched: dict[str, Any] | None, downstream: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    """Reattach classification keys dropped by the execution path.
+    """Reattach session-assigned keys dropped by the execution path.
 
     Downstream keys win on conflict; keys only differ in practice for
-    ``tier_reason``-style classification outputs, which downstream never
+    ``tier_reason``-style session outputs, which downstream never
     writes.
     """
     if not enriched:
@@ -244,7 +232,7 @@ class DevSessionManager:
         # Single routing reader (Tier S design §3): the top-level
         # coding_tool, a tier letter written at creation.
         decision = resolve_coding_tool(task)
-        classified: LooseTierDecision | None = None
+        defaulted = False
         if decision.tool is None:
             if task.get("objective_id"):
                 # Objective children must arrive with the planner tier; auto-
@@ -256,29 +244,27 @@ class DevSessionManager:
                     waiting_reason=f"{ROUTING_MISSING_REASON}: {decision.detail}",
                     params=task.get("params") if isinstance(task.get("params"), dict) else None,
                 )
-            # Loose ticket (TASK-2026-00137): deterministic tier authority,
-            # zero tokens. Never parks in routing_missing. A money-sensitive
-            # project (TASK-2026-00161) adds its domain signal here, same as
-            # the dispatcher peek.
-            classified = classify_loose_tier(
-                str(task.get("title") or ""),
-                str(task.get("description") or ""),
-                task.get("attachments") or [],
-                project_routing=project_money_routing(project_config),
-            )
-            logger.info(
-                "loose tier task_id=%s tier=%s signals=%s",
-                task.get("task_id"), classified.tier.value,
-                ",".join(classified.signals) or "default",
-            )
-            task = _task_with_loose_tier(task, classified)
-            await record_loose_tier_decision(
-                self._repo, task_id=str(task.get("task_id") or ""),
-                ticket_number=task.get("ticket_number"),
-                decision=classified)
+            if not is_explicit_dev(task):
+                # Undecided loose work never reaches dev: the run
+                # pre-stage plans every pedido and the graph waits
+                # routing_missing without a hint (TASK-2026-00204).
+                # Fail closed.
+                return DevExecutionOutput(
+                    status=TaskStatus.WAITING,
+                    waiting_reason=f"{ROUTING_MISSING_REASON}: {decision.detail}",
+                    params=task.get("params") if isinstance(task.get("params"), dict) else None,
+                )
+            # Explicit dev without a tier runs the safe C default
+            # (policy §25): specified work with no S/A/B justification.
+            # Only the planner ever assigns S/A/B or picks agents; this
+            # default assigns neither.
+            logger.info("explicit dev task_id=%s runs default tier_c",
+                        task.get("task_id"))
+            task = _task_with_default_tier(task)
+            defaulted = True
             decision = RoutingDecision(
-                classified.tier, "loose_classifier",
-                f"loose_classifier={classified.tier.value}",
+                CodingTool.TIER_C, "explicit_default",
+                "explicit_default=tier_c",
             )
 
         # Invalid project config parks every ticket, whatever the tier.
@@ -329,10 +315,10 @@ class DevSessionManager:
                 # back by itself (TASK-2026-00122); holding the lock would wedge
                 # the repo for 24h (live: E1 diagnostic blocked E2 review).
                 await self._repo.release_repo_lock(repo, holder)
-        if classified is not None:
+        if defaulted:
             # The simple-tier path drops input params when no review links
-            # change; reattach the classification so it persists.
-            output.params = _merge_loose_params(
+            # change; reattach the default assignment so it persists.
+            output.params = _merge_session_params(
                 task.get("params"), output.params)
         return output
 
@@ -604,9 +590,14 @@ class DevSessionManager:
         if tampered:
             names = ", ".join(tampered)
             params = task.get("params") if isinstance(task.get("params"), dict) else {}
-            origin = ("frozen from the ticket text by the loose classifier"
-                      if (params or {}).get("tier_assigned_by")
-                      else "declared by the planner")
+            assigned = str((params or {}).get("tier_assigned_by") or "")
+            if assigned.startswith("loose_classifier"):
+                origin = ("frozen from the ticket text by the retired "
+                          "loose classifier")
+            elif assigned.startswith("explicit_default"):
+                origin = "defaulted on explicit dev (§25)"
+            else:
+                origin = "declared by the planner"
             output.steps.append(self._step(
                 "oracle", "failed",
                 f"protected oracle refs modified by builder: {names} ({origin})"))

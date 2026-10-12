@@ -14,8 +14,9 @@ atomic acquire), and an atomic claim against double dispatch
 (``MongoRepository.claim_queued_ticket``).
 
 Routing is enforced before admission: objective children without the planner
-tier park fail-closed as ``routing_missing``; loose tickets peek the
-deterministic classifier for quota accounting without persisting. Tickets
+tier park fail-closed as ``routing_missing``; loose tickets without a tier
+launch tier-unaware and the run pre-stage plans the pedido before executing
+(TASK-2026-00204). Tickets
 whose ERPNext business link is still pending never launch. Wait reasons are
 typed (``state.WAIT_*``) and stored on the ticket's ``waiting_reason`` so
 the dashboard and Horizon read them through the existing queries. All of
@@ -32,7 +33,6 @@ from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
-from agents.dev.loose_tier import classify_loose_tier, project_money_routing
 from agents.dev.routing import ROUTING_MISSING_REASON, resolve_coding_tool
 from state import (
     WAIT_BLOCKED_BY,
@@ -126,25 +126,6 @@ def execution_repo_for_project_config(project_config: Any) -> str | None:
     except OSError:
         pass
     return str(local_path)
-
-
-def _project_routing(service: Any, project: str) -> dict[str, Any]:
-    """Project tier routing for the peek (fail-open: ``{}``).
-
-    The peek and the dispatch assignment (``agents.dev.session``) must
-    agree, so the peek reads the same ``dev.routing`` characteristic
-    (TASK-2026-00161). An unreadable project or a missing loader only
-    disables the guide for this peek — admission never breaks.
-    """
-    try:
-        loader = getattr(service, "_config_loader", None)
-        if loader is None:
-            return {}
-        return project_money_routing(loader.load_project(project))
-    except Exception:
-        logger.warning("Dispatcher: project routing unreadable for %s",
-                       project, exc_info=True)
-        return {}
 
 
 class Dispatcher:
@@ -365,24 +346,18 @@ class Dispatcher:
         decision = resolve_coding_tool(ticket)
         effective = ticket
         effective_tier = decision.tool
-        if effective_tier is None:
-            if ticket.get("objective_id"):
-                # Planner/validation gap: assigning a tier would mask it, so
-                # this stays fail-closed (same shape as the build-time path).
-                await self._park(
-                    ticket, f"{ROUTING_MISSING_REASON}: {decision.detail}",
-                    None, now,
-                )
-                return "parked"
-            peeked = classify_loose_tier(
-                str(ticket.get("title") or ""),
-                str(ticket.get("description") or ""),
-                ticket.get("attachments") or [],
-                project_routing=_project_routing(
-                    self._service, str(ticket.get("project") or "")),
+        if effective_tier is None and ticket.get("objective_id"):
+            # Planner/validation gap: assigning a tier would mask it, so
+            # this stays fail-closed (same shape as the build-time path).
+            await self._park(
+                ticket, f"{ROUTING_MISSING_REASON}: {decision.detail}",
+                None, now,
             )
-            effective = {**ticket, "coding_tool": peeked.tier.value}
-            effective_tier = peeked.tier
+            return "parked"
+        # A loose ticket without a tier is either a pedido (the run
+        # pre-stage plans it before executing, TASK-2026-00204) or
+        # explicit non-dev work: admission proceeds tier-unaware and
+        # the run decides. No keyword peek anymore.
         if ticket.get("blocked_by") and await self._service.blockers_open(ticket):
             blockers = ",".join(str(b) for b in (ticket.get("blocked_by") or []))
             await self._park(ticket, f"{WAIT_BLOCKED_BY}: {blockers}", None, now)

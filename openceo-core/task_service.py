@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from pymongo.errors import DuplicateKeyError
@@ -27,11 +27,13 @@ from events import RealtimeHub
 from graph import OpenCEOGraph
 from horizon.privacy import is_personal_scope
 from horizon.promotion import is_horizon_promoted
+from objectives import engine as engine_mod
 from objectives.engine import (
     ObjectiveRejected,
     TicketCloseContext,
     on_ticket_closed,
 )
+from objectives.pedido import is_pedido
 from objectives.plan_spend import (
     SPEND_WAITING_REASON,
     PlanSpendError,
@@ -133,6 +135,26 @@ _TERMINAL_TASK_STATUSES = frozenset(
     }
 )
 
+
+class _UnknownWorkflowTarget(Exception):
+    """Explicit workflow target no template resolves (loud failure)."""
+
+
+def _target_of(task: dict[str, Any]) -> str:
+    params = task.get("params")
+    params = params if isinstance(params, dict) else {}
+    return str(params.get("target_agent") or "").strip()
+
+
+def _workflow_target_of(task: dict[str, Any]) -> str:
+    params = task.get("params")
+    params = params if isinstance(params, dict) else {}
+    for key in ("workflow", "workflow_id", "workflow_ref"):
+        name = str(params.get(key) or "").strip()
+        if name:
+            return name
+    return "?"
+
 #: Estados de ERPNext que son una decision de NEGOCIO y por tanto se propagan de vuelta
 #: al runtime. El resto (Open, Working, Pending Review, Overdue, Template) son eco de lo
 #: que OpenCEO ya empujo: propagarlos seria un bucle.
@@ -179,21 +201,19 @@ def wait_comment_text(task: dict[str, Any], reason: str) -> str:
             if "routing_missing:" in reason else reason.strip()
         return ("OpenCEO no puede ejecutar este ticket: "
                 f"el agente pedido no puede correr ({detail}).")
-    # Loose tickets self-classify at dispatch (TASK-2026-00137), so
-    # this wait now means an objective child arrived without the
-    # planner tier: a planner/validation gap, not an owner action.
+    # Undecided loose work is planned before dispatch (TASK-2026-00204),
+    # so this wait means a planner/validation gap, not an owner action.
     if task.get("objective_id"):
         return (
             "OpenCEO no puede ejecutar este ticket: pertenece a un "
-            "objetivo pero llegó sin tier (coding_tool). La "
-            "clasificación automática solo cubre tickets sueltos; "
-            "hay que regenerar el hijo con tier o fijar coding_tool "
+            "objetivo pero llegó sin tier (coding_tool). Hay que "
+            "regenerar el hijo con tier o fijar coding_tool "
             "(tier_s, tier_a, tier_b o tier_c) por API."
         )
     return (
-        "OpenCEO no puede ejecutar este ticket: falta el campo coding_tool, "
-        "que se fija al crear la tarea (tier_s, tier_a, tier_b o tier_c; "
-        "tier_c es la opción por defecto). Asigna el tier para continuar."
+        "OpenCEO no puede ejecutar este ticket: llegó sin decisión "
+        "(ni agente ni tier) y el planner no lo decidió. Fija un "
+        "agente explícito o coding_tool por API para continuar."
     )
 
 
@@ -3234,6 +3254,173 @@ class TaskService:
 
         return task
 
+    async def _plan_pedido_pre_stage(
+        self, task: dict[str, Any], *, force: bool,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Plan a pedido before execution (TASK-2026-00204).
+
+        Returns ``(task_for_run, None)`` to proceed, or ``(task, stop)``
+        with the ticket to return instead of running. Explicit tickets
+        proceed untouched; a decided pedido refreshes from the patched
+        decision, holds on declared spend, and re-queues for decided
+        A/B/S tiers so the dispatcher re-admits with the exact tier.
+        Unplannable pedidos (unwired service, broken env) fail fast:
+        proceeding undecided would strand in a wake-less wait.
+        """
+        task_id = str(task.get("task_id") or "")
+        if not is_pedido(task):
+            return task, None
+        service = getattr(self, "_objective_service", None)
+        if service is None:
+            return task, await self._stop_pedido_failed(
+                task_id, "planner unavailable: no objective service wired")
+        if force:
+            params = dict(task.get("params") or {})
+            if params.pop("planner_attempts", None) is not None:
+                task = await self._repo.patch_task(
+                    task_id, {"params": params}) or task
+        try:
+            env = service.env_for(str(task.get("project") or ""))
+        except Exception as exc:
+            logger.warning("pedido env failed for %s", task_id, exc_info=True)
+            return task, await self._stop_pedido_failed(
+                task_id, f"planner unavailable: {exc}")
+        try:
+            out = await engine_mod.plan_pedido(env, task)
+        except Exception:
+            logger.warning("pedido planner crashed for %s", task_id,
+                           exc_info=True)
+            out = {"ok": False, "reason": "planner_error",
+                   "detail": "planner run crashed"}
+        if out.get("ok") and out.get("action") == "decided":
+            return await self._plan_pedido_decided(task, out)
+        if out.get("ok") and out.get("action") == "convert":
+            return task, await self._plan_pedido_convert(task, env, out)
+        if out.get("reason") == "config":
+            return task, await self._stop_pedido_failed(
+                task_id, f"planner unavailable: {out.get('detail')}")
+        return task, await self._plan_pedido_backoff(task, out)
+
+    async def _plan_pedido_decided(
+        self, task: dict[str, Any], out: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Refresh a decided pedido; hold on spend, re-queue for A/B/S."""
+        task_id = str(task.get("task_id") or "")
+        decision = out.get("decision") or {}
+        refreshed = await self._repo.get_task(task_id) or task
+        spend = out.get("spend") or {}
+        if spend.get("escalate"):
+            held = await self._hold_loose_spend(
+                refreshed, decision.get("costs"), spend=spend)
+            if held is not None:
+                return refreshed, held
+        tier = str(decision.get("coding_tool") or "")
+        if tier in {"tier_s", "tier_a", "tier_b"}:
+            # The dispatch admitted this pedido tier-unaware; stop here
+            # (still queued, decision kept) so the next cycle re-admits
+            # with the exact tier: full concurrency, quota and reserve
+            # semantics, no partial re-check.
+            return refreshed, refreshed
+        return refreshed, None
+
+    async def _plan_pedido_convert(
+        self, task: dict[str, Any], env: Any,
+        out: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Convert a pedido that outgrows one ticket; stop the run."""
+        task_id = str(task.get("task_id") or "")
+        try:
+            # convert_ticket plans the first horizon internally; no
+            # outer plan_objective (a second cycle would double-spend
+            # and could duplicate children).
+            objective = await engine_mod.convert_ticket(
+                env, task, "planner pedido conversion",
+                sizing_text=str(out.get("state_summary") or ""))
+            objective_id = str(objective.get("objective_id") or "")
+        except Exception as exc:
+            logger.warning("pedido convert failed for %s", task_id,
+                           exc_info=True)
+            return await self._stop_pedido_failed(
+                task_id, f"pedido conversion failed: {exc}")
+        try:
+            note = (f"Planner converts to objective {objective_id}: "
+                    f"{str(out.get('state_summary') or '')[:300]}")
+            costs = out.get("costs") or []
+            if costs:
+                # Objective-level spend on a convert is speculative (no
+                # tickets exist yet); the objective plans re-declare and
+                # gate it, but the declaration must not vanish silently.
+                bits = ", ".join(
+                    f"{entry.get('label') or '?'} "
+                    f"({entry.get('amount') or '?'})"
+                    for entry in costs if isinstance(entry, dict))
+                note += (" Declared spend (re-gated by objective plans): "
+                         f"{bits[:300]}.")
+            await self.comment_on_ticket(task_id, note)
+        except Exception:
+            logger.warning("pedido convert comment failed for %s", task_id,
+                           exc_info=True)
+        refreshed = await self._repo.get_task(task_id)
+        return refreshed or task
+
+    async def _plan_pedido_backoff(
+        self, task: dict[str, Any], out: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Back off a failed pedido plan; fail terminally past 3 tries."""
+        task_id = str(task.get("task_id") or "")
+        refreshed = await self._repo.get_task(task_id) or task
+        params = refreshed.get("params") \
+            if isinstance(refreshed.get("params"), dict) else {}
+        attempts = int(params.get("planner_attempts") or 0)
+        if out.get("reason") == "planner_error" and out.get("detail") == \
+                "planner run crashed":
+            attempts += 1
+            await self._repo.patch_task(
+                task_id, {"params": {**params, "planner_attempts": attempts}})
+        detail = str(out.get("detail") or "planner_error")
+        if attempts >= 3:
+            return await self._stop_pedido_failed(
+                task_id, f"planner failed {attempts}x: {detail[:300]}")
+        backoff = (5, 15, 30)[min(max(attempts, 1), 3) - 1]
+        parked = await self._repo.patch_task(task_id, {
+            "status": TaskStatus.WAITING.value,
+            "waiting_reason": f"planner_error: {detail[:200]}",
+            "resume_at": datetime.now(timezone.utc)
+            + timedelta(minutes=backoff),
+        })
+        try:
+            await self.comment_on_ticket(
+                task_id,
+                f"Planner failed (attempt {max(attempts, 1)}/3, retry in "
+                f"{backoff}m): {detail[:300]}")
+        except Exception:
+            logger.warning("pedido backoff comment failed for %s", task_id,
+                           exc_info=True)
+        return parked or refreshed
+
+    async def _stop_pedido_failed(
+        self, task_id: str, detail: str,
+    ) -> dict[str, Any]:
+        """Fail a pedido whose planning cannot proceed. Mirrors a run crash."""
+        failed = await self._repo.patch_task(task_id, {
+            "status": TaskStatus.FAILED.value,
+            "error": detail[:500],
+            "waiting_reason": None,
+            "resume_at": None,
+            "completed_at": datetime.now(timezone.utc),
+        })
+        if failed is not None:
+            await self._hub.broadcast("task_updated", failed)
+            asyncio.create_task(self._fire_notion_sync_back(failed, "failed"))
+            asyncio.create_task(self._revoke_ticket_badges(failed))
+        try:
+            await self.comment_on_ticket(task_id, detail[:500])
+        except Exception:
+            logger.warning("pedido failure comment failed for %s", task_id,
+                           exc_info=True)
+        current = await self._repo.get_task(task_id)
+        return current or failed or {"task_id": task_id}
+
     async def run_task(self, task_id: str, force: bool = False) -> dict[str, Any] | None:
         lock = self._locks.setdefault(task_id, asyncio.Lock())
         if lock.locked() and not force:
@@ -3280,6 +3467,23 @@ class TaskService:
                     )
                     self._wake_dispatcher()
                     return task
+                try:
+                    task, stop = await self._plan_pedido_pre_stage(
+                        task, force=force)
+                except Exception as exc:
+                    # Outside the run try: fail terminally (commented, CEO
+                    # sees it) instead of crashing the launch or stranding
+                    # the ticket in an undecided wait.
+                    logger.warning("pedido pre-stage failed for %s",
+                                   task_id, exc_info=True)
+                    self._wake_dispatcher()
+                    return await self._stop_pedido_failed(
+                        task_id, f"pedido planning failed: {exc}")
+                if stop is not None:
+                    # Planned holds and parks land before in_progress, so
+                    # the dispatcher sees them as ordinary waits.
+                    self._wake_dispatcher()
+                    return stop
                 started_at = datetime.now(timezone.utc)
                 patch_started = {
                     "status": TaskStatus.IN_PROGRESS.value,
@@ -3314,16 +3518,36 @@ class TaskService:
                         or params.get("workflow_discovery")
                     )
                     has_approval_phases = bool(task.get("workflow_phases")) and not explicit_yaml_target
+                    # Explicit routing first: the persisted hint, else the
+                    # persisted agent (legacy mirrors carry the name
+                    # there) — except the "ceo" default, which is
+                    # undecided and must not shadow params.target_agent.
+                    # Nothing undecided reaches the graph: the pre-stage
+                    # planned every pedido above.
+                    agent = task.get("agent")
+                    agent = agent if str(agent or "").strip().lower() not in {"", "ceo"} else None
+                    hint = task.get("agent_hint") or agent
                     if has_approval_phases:
-                        graph_out = await self._graph.execute(task, agent_hint=task.get("agent_hint"))
+                        graph_out = await self._graph.execute(task, agent_hint=hint)
                     elif self._workflow_service is not None:
                         workflow_out = await self._workflow_service.run_for_task(task)
                         if workflow_out is not None:
                             graph_out = self._workflow_outcome_to_graph_out(workflow_out)
+                        elif explicit_yaml_target and not hint and not _target_of(task):
+                            # Unknown workflow target with no agent to
+                            # fall back to: fail loudly instead of
+                            # stranding in a wake-less routing wait.
+                            target = _workflow_target_of(task)
+                            await self.comment_on_ticket(
+                                task_id,
+                                f"Unknown workflow target {target!r} and "
+                                "no agent to fall back to: failing. Fix "
+                                "the target or set an explicit agent.")
+                            raise _UnknownWorkflowTarget(target)
                         else:
-                            graph_out = await self._graph.execute(task, agent_hint=task.get("agent_hint"))
+                            graph_out = await self._graph.execute(task, agent_hint=hint)
                     else:
-                        graph_out = await self._graph.execute(task, agent_hint=task.get("agent_hint"))
+                        graph_out = await self._graph.execute(task, agent_hint=hint)
                 except Exception as exc:
                     current = await self._repo.get_task(task_id)
                     current_status = str((current or {}).get("status") or "")
@@ -3406,8 +3630,9 @@ class TaskService:
                 ]
                 updates["phase_index"] = 0
             # Persist modified files into params to keep task document stable.
-            # The dev session's own additions (loose-tier assignment, frozen
-            # oracle, executor link, material failure...) travel in
+            # The dev session's own additions (planner decision, default
+            # tier, frozen oracle, executor link, material failure...)
+            # travel in
             # ``graph_out["params"]``: merge them over the ticket's params.
             # Rebuilding from ``task`` alone discarded them on every run that
             # touched files (TASK-2026-00178; live ticket #196 kept only the
@@ -3526,9 +3751,9 @@ class TaskService:
                     # covered by it.
                     await self._trigger_objective_close(
                         updated, graph_out.get("params"))
-                if (final_status == TaskStatus.FAILED.value
-                        and updated.get("objective_id")):
-                    # Single post-persist agent return (TASK-2026-00202):
+                if final_status == TaskStatus.FAILED.value:
+                    # Single post-persist agent return (TASK-2026-00202;
+                    # loose tickets return once as well, TASK-2026-00204):
                     # the hook no-ops without a verdict.
                     await self._trigger_objective_return(
                         updated, graph_out.get("params"))
@@ -5509,16 +5734,17 @@ class TaskService:
         ticket: dict[str, Any],
         session_params: Any,
     ) -> None:
-        """Return a persisted FAILED verdict to the planner (00202).
+        """Return a persisted FAILED verdict to the planner (00202/00204).
 
         Single post-persist return, mirroring the §9.4 close: the run's
         fresh ``agent_result`` (parsed or legacy-mapped) decides. A
         first bloqueado/no_aplica replans once with ``return_from``; a
         verdict on a relaunched ticket (``returns_from`` tag) parks
-        capability_gap instead. Skipped without a verdict, after a dev
-        material failure (§29 already replanned), on cancellation, on
-        loose tickets (their return arrives with TASK-2026-00204) and
-        without objective wiring. Never fails the run.
+        capability_gap instead — or, for a loose ticket with no
+        objective to park on, stays failed with its return history for
+        the CEO reactive review. Skipped without a verdict, after a
+        dev material failure (§29 already replanned), on cancellation
+        and without objective wiring. Never fails the run.
         """
         try:
             fresh = session_params \
@@ -5543,6 +5769,8 @@ class TaskService:
                     return
             objective_id = str(ticket.get("objective_id") or "")
             if not objective_id:
+                await self._trigger_loose_return(
+                    ticket, fresh, verdict, task_id, resultado)
                 return
             service = getattr(self, "_objective_service", None)
             if service is None:
@@ -5582,6 +5810,117 @@ class TaskService:
         except Exception:
             logger.warning("objective return trigger failed for %s",
                            ticket.get("task_id"), exc_info=True)
+
+    async def _trigger_loose_return(
+        self,
+        ticket: dict[str, Any],
+        fresh: dict[str, Any],
+        verdict: dict[str, Any],
+        task_id: str,
+        resultado: str,
+    ) -> None:
+        """Return a loose FAILED verdict to the planner, once (00204).
+
+        A first bloqueado/no_aplica replans the pedido with the return
+        as context: the planner re-decides (or converts), the stale
+        verdict is dropped, and the ticket requeues for its second and
+        last attempt. A verdict on the relaunched ticket
+        (``returns_from`` tag) stays failed with the return history in
+        a comment — the CEO reactive review already wakes on failed
+        company executions. Never fails the run.
+        """
+        motivo = str(verdict.get("motivo") or "")[:500]
+        if fresh.get("returns_from"):
+            note = (f"Agent {resultado} after one replan: no further "
+                    f"return, the ticket stays failed. Motivo: {motivo}")
+            try:
+                await self.comment_on_ticket(task_id, note)
+            except Exception:
+                logger.warning("loose return comment failed for %s",
+                               task_id, exc_info=True)
+            return
+        service = getattr(self, "_objective_service", None)
+        if service is None:
+            return
+        entry = {
+            "task_id": task_id,
+            "title": str(ticket.get("title") or ""),
+            "agent": str(ticket.get("agent") or ""),
+            "resultado": resultado,
+            "motivo": motivo,
+            "necesidad": str(verdict.get("necesidad") or "")[:500],
+        }
+        try:
+            env = service.env_for(str(ticket.get("project") or ""))
+            current = None
+            if self._repo is not None and task_id:
+                try:
+                    current = await self._repo.get_task(task_id)
+                except Exception:
+                    current = None
+            out = await engine_mod.plan_pedido(
+                env, current or ticket, return_from=entry)
+        except Exception:
+            logger.warning("loose return replan crashed for %s", task_id,
+                           exc_info=True)
+            return
+        if out.get("ok") and out.get("action") == "convert":
+            try:
+                # convert_ticket plans the first horizon internally.
+                objective = await engine_mod.convert_ticket(
+                    env, current or ticket, "planner loose-return conversion",
+                    sizing_text=str(out.get("state_summary") or ""))
+                objective_id = str(objective.get("objective_id") or "")
+                note = (f"Agent {resultado}: the return outgrows one "
+                        f"ticket, converted to objective {objective_id}. "
+                        f"Motivo: {motivo}")
+                costs = out.get("costs") or []
+                if costs:
+                    bits = ", ".join(
+                        f"{entry.get('label') or '?'} "
+                        f"({entry.get('amount') or '?'})"
+                        for entry in costs if isinstance(entry, dict))
+                    note += (" Declared spend (re-gated by objective "
+                             f"plans): {bits[:300]}.")
+            except Exception:
+                logger.warning("loose return convert failed for %s",
+                               task_id, exc_info=True)
+                return
+        elif out.get("ok") and out.get("action") == "decided":
+            try:
+                # Fresh read: the planner patched its decision above and
+                # this requeue must keep it, not clobber it.
+                latest = await self._repo.get_task(task_id) or {}
+                params = dict(latest.get("params") or {})
+                params["returns_from"] = task_id
+                params.pop("agent_result", None)
+                await self._repo.patch_task(task_id, {
+                    "status": TaskStatus.QUEUED.value,
+                    "waiting_reason": None,
+                    "resume_at": None,
+                    "error": None,
+                    "params": params,
+                })
+            except Exception:
+                logger.warning("loose return requeue failed for %s",
+                               task_id, exc_info=True)
+                return
+            decision = out.get("decision") or {}
+            note = (f"Agent {resultado}: returned once to the planner, "
+                    f"re-decided ({decision.get('target_agent')}/"
+                    f"{decision.get('coding_tool') or '-'}), requeued. "
+                    f"Motivo: {motivo}")
+            self._wake_dispatcher()
+        else:
+            note = (f"Agent {resultado}: return replan failed "
+                    f"({out.get('reason')}: "
+                    f"{str(out.get('detail') or '')[:200]}); the ticket "
+                    f"stays failed. Motivo: {motivo}")
+        try:
+            await self.comment_on_ticket(task_id, note)
+        except Exception:
+            logger.warning("loose return comment failed for %s", task_id,
+                           exc_info=True)
 
     async def _on_ticket_done(self, ticket: dict[str, Any]) -> None:
         """Post-completion: QA gate, then refresh rate limits and wake the dispatcher."""
