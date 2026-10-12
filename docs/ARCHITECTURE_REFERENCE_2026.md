@@ -1427,39 +1427,19 @@ project:
       trigger: n8n_webhook
 
   dev:
-    coding_tool: codex | claude | tier_s
     branch_pattern: string
     auto_push: boolean
     create_pr: boolean
-    tier_s:
-      iterations: 2
-      timeout_minutes: 15
-      max_scripts_per_step: 1
-      lead: claude
-      reviewers:
-        - codex
-        - gemini
-        - opencode
-      keep_sessions_alive: true
     qa:
       playwright: required | optional | skip
       confidence_threshold: float
       max_retries: integer
 
-  routing:
-    llm_fallback: boolean
-    default_agent: dev | pm | finance | secretary | sales | marketing | media
-    agents:
-      pm:
-        triggers: ["entrevista", "requerimientos", "crear tickets"]
-        patterns:
-          - "\\b(?:crear|generar|extraer)\\s+tickets?\\b"
-      secretary:
-        triggers: ["correo", "reunion"]
-        patterns: []
-      finance:
-        triggers: ["pagar factura", "pago luz"]
-        patterns: []
+  # Retired (TASK-2026-00204), rejected by validation when present:
+  # the top-level `routing:` block (llm_fallback / default_agent /
+  # triggers / patterns), `dev.coding_tool`, `dev.tier_s` and
+  # `dev.tiers`. Routing is per-task and the planner decides; Tier S
+  # roles and the review pool are global (config_loader defaults).
 
   sales:
     workflows:
