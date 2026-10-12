@@ -22,6 +22,7 @@ from objectives.engine import (
 )
 from objectives.service import create_internal_ticket
 from orchestration.live import ProcessExecutor
+from orchestration.role_muse import ReadonlyBadgeProvider, issuer_for_repo
 from ceo.models import CEOKpiReading
 from ceo.review import (
     CEO_BUSINESS_ROWS,
@@ -105,6 +106,10 @@ class CEOService:
         """Bind one review to production (no I/O)."""
         wiring = ceo_wiring_config(self._config.load_project(None))
         repo = self._repo
+        issuer = issuer_for_repo(repo)
+        provider = (ReadonlyBadgeProvider(
+            issuer, self._settings, "ceo")
+            if issuer is not None else None)
         return CEOEnv(
             mandate=mandate,
             objectives=(
@@ -130,7 +135,8 @@ class CEOService:
             create_objective=self._create_objective,
             create_ticket=self._create_ticket,
             escalate=self._escalate,
-            executor=ProcessExecutor(roles=wiring["roles"], pool=[]),
+            executor=ProcessExecutor(roles=wiring["roles"], pool=[],
+                                   badge_provider=provider),
             repo_root=Path(__file__).resolve().parents[2],
             publish=self._publish,
             ceo_cfg={"timeout_minutes": wiring["timeout_minutes"]},

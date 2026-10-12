@@ -257,6 +257,16 @@ class TierExecutorSchemaFlagTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(argv, ["musej"])
 
 
+def _stub_role_badge(manager):
+    """Badge seam stub: these tests pin verdict parsing, not badges."""
+    provider_stub = MagicMock()
+    provider_stub.revoke = AsyncMock()
+    manager._ticket_badge_provider = MagicMock(  # type: ignore[method-assign]
+        return_value=provider_stub)
+    manager._muse_role_overlays = AsyncMock(  # type: ignore[method-assign]
+        return_value=({}, "badge-stub"))
+
+
 class StepCodeParseTests(unittest.IsolatedAsyncioTestCase):
     async def test_stdout_verdict_is_attached(self) -> None:
         manager = _manager()
@@ -265,11 +275,13 @@ class StepCodeParseTests(unittest.IsolatedAsyncioTestCase):
                                    cwd=None, env={}, label="tier_c:muse"))
 
         async def _ok(command, stdin_payload=None, timeout=120, cwd=None,
-                      env=None, sandbox=True, config_argv=None):
+                      env=None, sandbox=True, config_argv=None,
+                      home_file_overlays=None):
             return True, ('done\n```agent-result\n{"resultado": "no_aplica", '
                           '"motivo": "needs sales data"}\n```\n'), ""
 
         manager._run_process = _ok  # type: ignore[method-assign]
+        _stub_role_badge(manager)
         result = await manager._step_code(
             {"task_id": "t", "title": "t", "description": "d"}, {},
             CodingTool.TIER_C)
@@ -284,10 +296,12 @@ class StepCodeParseTests(unittest.IsolatedAsyncioTestCase):
                                    cwd=None, env={}, label="tier_c:muse"))
 
         async def _ok(command, stdin_payload=None, timeout=120, cwd=None,
-                      env=None, sandbox=True, config_argv=None):
+                      env=None, sandbox=True, config_argv=None,
+                      home_file_overlays=None):
             return True, "did the thing", ""
 
         manager._run_process = _ok  # type: ignore[method-assign]
+        _stub_role_badge(manager)
         result = await manager._step_code(
             {"task_id": "t", "title": "t", "description": "d"}, {},
             CodingTool.TIER_C)

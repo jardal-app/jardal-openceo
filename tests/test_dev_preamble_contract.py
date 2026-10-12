@@ -377,7 +377,7 @@ class SimpleTierPromptsTests(_RepoCases):
 
         async def fake_run_process(command, stdin_payload=None, timeout=120,
                                    cwd=None, env=None, sandbox=True,
-                                   config_argv=None):
+                                   config_argv=None, home_file_overlays=None):
             calls.append({"command": command, "stdin": stdin_payload})
             return True, "ok", ""
 
@@ -386,6 +386,12 @@ class SimpleTierPromptsTests(_RepoCases):
             manager._resolve_tier_executor = AsyncMock(  # type: ignore[method-assign]
                 return_value=MagicMock(argv=["musej", "exec"], prompt_via="argv",
                                        env={}, label="tier_c:muse"))
+            provider_stub = MagicMock()
+            provider_stub.revoke = AsyncMock()
+            manager._ticket_badge_provider = MagicMock(  # type: ignore[method-assign]
+                return_value=provider_stub)
+            manager._muse_role_overlays = AsyncMock(  # type: ignore[method-assign]
+                return_value=({}, "badge-stub"))
             await manager._simple_followup(
                 CodingTool.TIER_C, {}, self.claude_only,
                 "Fix the code (no commits).")

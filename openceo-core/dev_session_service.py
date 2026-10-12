@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import shlex
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -17,7 +18,19 @@ from agents.dev.opencode_run import (
     parse_run_output,
 )
 from agents.dev.tmux_runtime import TmuxRuntime
+from catalog import CatalogError, load_role_profile
+from mcp_identity import McpAuthError
 from orchestration.knowledge import detect_prompt_lang, with_preamble
+from orchestration.role_muse import (
+    SETTINGS_OVERLAY_RELPATH,
+    RoleProfileError,
+    ServiceBadgeProvider,
+    dev_box_tools,
+    issuer_for_repo,
+    render_argv_extras,
+    render_card_argv,
+    settings_overlay_bytes,
+)
 from config_loader import ConfigLoader
 from db.mongo import MongoRepository
 from events import RealtimeHub
@@ -139,6 +152,32 @@ class DevSessionService:
                 session_doc.status = DevSessionStatus.WAITING_USER
             else:
                 command, env_vars, cwd = self._resolve_command(provider, config)
+                overlays: dict[str, bytes] | None = None
+                if provider == DevProvider.MUSE:
+                    try:
+                        profile = load_role_profile("dev")
+                        issuer = issuer_for_repo(self._repo)
+                        if issuer is None:
+                            raise RoleProfileError(
+                                "role badges need a bound repository")
+                        interactive = ServiceBadgeProvider(
+                            issuer, self._settings,
+                            f"dev-interactive-{project}", project,
+                            dev_box_tools(),
+                            timedelta(days=7))
+                        badge = await interactive.mint("interactive")
+                        rendered = settings_overlay_bytes(
+                            profile, Path(os.path.expanduser("~")),
+                            cwd or os.getcwd(),
+                            interactive.mcp_servers(badge))
+                        overlays = {SETTINGS_OVERLAY_RELPATH: rendered}
+                        command = [*command,
+                                   *render_argv_extras(profile),
+                                   *render_card_argv(profile)]
+                    except (RoleProfileError, CatalogError, McpAuthError,
+                            ValueError, OSError) as exc:
+                        raise ValueError(
+                            f"role profile refused: {exc}") from exc
                 try:
                     shell_mode = provider == DevProvider.OPENCODE
                     if shell_mode:
@@ -151,6 +190,7 @@ class DevSessionService:
                         cwd=cwd,
                         env=env_vars,
                         shell_mode=shell_mode,
+                        home_file_overlays=overlays,
                     )
                 except ValueError as exc:
                     if "already exists" in str(exc):

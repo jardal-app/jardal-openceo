@@ -63,6 +63,7 @@ class _SessionInfo:
     prompt_pattern: re.Pattern[str] | None = None
     shell_mode: bool = False
     env: dict[str, str] | None = None
+    overlays: dict[str, bytes] | None = None
 
 
 class TmuxRuntime:
@@ -108,6 +109,7 @@ class TmuxRuntime:
         prompt_pattern: re.Pattern[str] | None = None,
         tmux_session_name: str | None = None,
         shell_mode: bool = False,
+        home_file_overlays: dict[str, bytes] | None = None,
     ) -> str:
         """Start a new tmux session with the given interactive command.
 
@@ -129,7 +131,8 @@ class TmuxRuntime:
                 command=[str(token) for token in command],
                 workspace=start_dir, base=os.environ,
                 overlay=dict(env or {}),
-                config_args=[str(token) for token in command])
+                config_args=[str(token) for token in command],
+                home_file_overlays=home_file_overlays)
         else:
             shell_cmd = ""
 
@@ -162,6 +165,8 @@ class TmuxRuntime:
             prompt_pattern=pattern,
             shell_mode=shell_mode,
             env=dict(env) if env else None,
+            overlays=dict(home_file_overlays)
+            if home_file_overlays else None,
         )
 
         logger.info("Started tmux session '%s' for project '%s' with command: %s", name, project, shell_cmd)
@@ -628,7 +633,7 @@ class TmuxRuntime:
         # Generic: relaunch the interactive command
         if info.command:
             self._restart_interactive_command(
-                pane, info.command, info.cwd, info.env)
+                pane, info.command, info.cwd, info.env, info.overlays)
             await asyncio.sleep(5)
 
             if provider == "claude":
@@ -692,7 +697,8 @@ class TmuxRuntime:
                             info.tmux_session_name,
                         )
                         self._restart_interactive_command(
-                            pane, info.command, info.cwd, info.env)
+                            pane, info.command, info.cwd, info.env,
+                            info.overlays)
                         codex_restart_submitted = True
                         await asyncio.sleep(max(poll_interval, 0.8))
                         elapsed += max(poll_interval, 0.8)
@@ -911,6 +917,11 @@ class TmuxRuntime:
             for s in self.server.sessions:
                 if s.name == session_name:
                     s.kill_session()
+                    stale = [project for project, info
+                             in self._sessions.items()
+                             if info.tmux_session_name == session_name]
+                    for project in stale:
+                        del self._sessions[project]
                     return True
         except Exception as exc:
             logger.warning("Failed to kill tmux session '%s': %s", session_name, exc)
@@ -1105,6 +1116,7 @@ class TmuxRuntime:
         pane: Any, command: list[str],
         workspace: str | None = None,
         env: dict[str, str] | None = None,
+        home_file_overlays: dict[str, bytes] | None = None,
     ) -> None:
         if not command:
             return
@@ -1113,7 +1125,8 @@ class TmuxRuntime:
             command=[str(token) for token in command],
             workspace=workspace or os.getcwd(), base=os.environ,
             overlay=dict(env or {}),
-            config_args=[str(token) for token in command])
+            config_args=[str(token) for token in command],
+            home_file_overlays=home_file_overlays)
         pane.send_keys(line, enter=True)
 
     @staticmethod

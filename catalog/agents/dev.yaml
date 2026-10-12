@@ -2,7 +2,7 @@
 name: dev
 type: ai
 engine: muse-code
-profile: null
+profile: profiles/dev.yaml
 boundary_tools:
   - openceo_search_tickets
   - openceo_get_ticket

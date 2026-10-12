@@ -28,9 +28,21 @@ from .tier_s.cycle import TierSCycle
 from .tier_s.gates import (baseline_blocked, gates_failed, handoff_gates_section,
                          load_gates, run_gate, run_gates)
 from .tier_s.models import GateSpec
+from catalog import CatalogError, load_role_profile
+from mcp_identity import McpAuthError
 from orchestration.inbox import InMemoryInboxStore, MongoInboxStore
 from orchestration.knowledge import detect_prompt_lang, with_preamble
 from orchestration.live import AllowAllQuota, ProcessExecutor, RateMonitorQuota
+from orchestration.role_muse import (
+    SETTINGS_OVERLAY_RELPATH,
+    ObjectiveBadgeProvider,
+    RoleProfileError,
+    TicketBadgeProvider,
+    issuer_for_repo,
+    render_argv_extras,
+    render_card_argv,
+    settings_overlay_bytes,
+)
 from objectives.engine import (
     InMemoryObjectiveStore,
     InMemoryTaskLister,
@@ -714,7 +726,9 @@ class DevSessionManager:
                 tool, project_config, repo,
                 f"Gates failed:\n{tail[:6000]}\nFix the code (no commits), "
                 "keep HANDOFF.md truthful. Never edit the frozen oracle "
-                "files: fix the code under test.")
+                "files: fix the code under test.",
+                task_id=str(task.get("task_id") or ""),
+                project=str(task.get("project") or ""))
             # The retry saw the failing oracle's output: re-verify its hashes
             # before running the gates again (a "fix" by editing the test is
             # the oracle being redefined).
@@ -745,7 +759,9 @@ class DevSessionManager:
             await self._simple_followup(
                 tool, project_config, repo,
                 "Write .tier-s/HANDOFF.md (executor sections ≤300 words). "
-                "Do not touch code.")
+                "Do not touch code.",
+                task_id=str(task.get("task_id") or ""),
+                project=str(task.get("project") or ""))
             try:
                 handoff = handoff_path.read_text(
                     encoding="utf-8", errors="replace")
@@ -860,6 +876,9 @@ class DevSessionManager:
         project_config: dict[str, Any],
         repo: Path,
         prompt: str,
+        *,
+        task_id: str = "",
+        project: str = "",
     ) -> None:
         """One follow-up turn on the work branch (gate/handoff fixes)."""
         prompt = with_preamble(prompt, repo, detect_prompt_lang(prompt))
@@ -873,10 +892,32 @@ class DevSessionManager:
         else:
             command = list(executor.argv)
             stdin_payload = prompt
-        await self._run_process(
-            command, stdin_payload=stdin_payload, timeout=1800,
-            cwd=str(repo), env=executor.env or None,
-            config_argv=list(executor.argv))
+        overlays: dict[str, bytes] | None = None
+        badge: str | None = None
+        badge_provider: TicketBadgeProvider | None = None
+        if executor.label == "tier_c:muse":
+            badge_provider = self._ticket_badge_provider(task_id, project)
+            if badge_provider is None:
+                logger.error("follow-up refused without repository: %s",
+                             task_id or "unknown task")
+                return
+            try:
+                overlays, badge = await self._muse_role_overlays(
+                    badge_provider, str(executor.label), str(repo))
+            except (RoleProfileError, CatalogError, McpAuthError,
+                    ValueError, OSError) as exc:
+                logger.error("follow-up refused without role profile: %s",
+                             exc)
+                return
+        try:
+            await self._run_process(
+                command, stdin_payload=stdin_payload, timeout=1800,
+                cwd=str(repo), env=executor.env or None,
+                config_argv=list(executor.argv),
+                home_file_overlays=overlays)
+        finally:
+            if badge is not None and badge_provider is not None:
+                await badge_provider.revoke(badge)
 
     async def _task_cancelled(self, task_id: str) -> bool:
         """Fresh cancel check against the stored ticket (fail-open).
@@ -1054,9 +1095,17 @@ class DevSessionManager:
                             "material-failure notify failed for %s",
                             task_id, exc_info=True)
 
+            replan_provider: ObjectiveBadgeProvider | None = None
+            replan_project = str(task.get("project") or "")
+            replan_issuer = issuer_for_repo(self._repo)
+            if replan_issuer is not None and task_id and replan_project:
+                replan_provider = ObjectiveBadgeProvider(
+                    replan_issuer, self._settings,
+                    replan_project, ticket=task_id)
             env = self._objective_env_for(
                 project_config, repo,
-                objectives_process_executor(project_config),
+                objectives_process_executor(
+                    project_config, badge_provider=replan_provider),
                 self._objective_quota(), notify)
             await record_material_failure(
                 env.objectives, objective_id, task_id=task_id,
@@ -1156,8 +1205,15 @@ class DevSessionManager:
         # runs its roles from cycle_cfg, the objective env resolves the
         # planner role and the review machinery from the global wiring.
         # No planner role is fused into the Tier S roles anymore.
+        project = str(task.get("project") or "")
+        badge_provider: TicketBadgeProvider | None = None
+        cycle_issuer = issuer_for_repo(self._repo)
+        if cycle_issuer is not None and task_id and project:
+            badge_provider = TicketBadgeProvider(
+                cycle_issuer, self._settings, "dev", task_id, project)
         executor = ProcessExecutor(
-            roles=cycle_cfg["roles"], pool=cycle_cfg["reviewers"])
+            roles=cycle_cfg["roles"], pool=cycle_cfg["reviewers"],
+            badge_provider=badge_provider)
         quota: Any = self._objective_quota()
         notices: list[str] = []
 
@@ -1171,9 +1227,16 @@ class DevSessionManager:
                                    exc_info=True)
 
         repo = self._repo
+        obj_provider: ObjectiveBadgeProvider | None = None
+        obj_issuer = issuer_for_repo(repo)
+        if obj_issuer is not None and task_id and project:
+            obj_provider = ObjectiveBadgeProvider(
+                obj_issuer, self._settings, project, ticket=task_id)
         obj_env = self._objective_env_for(
             project_config, Path(repo_path),
-            objectives_process_executor(project_config), quota, notify)
+            objectives_process_executor(
+                project_config, badge_provider=obj_provider),
+            quota, notify)
         cycle = TierSCycle(
             MongoRunStore(repo) if repo is not None else InMemoryRunStore(),
             MongoLockStore(repo) if repo is not None else InMemoryLockStore(),
@@ -1324,6 +1387,34 @@ class DevSessionManager:
         """
         return await create_internal_ticket(self._task_service, payload)
 
+    def _ticket_badge_provider(
+        self, task_id: str, project: str,
+    ) -> TicketBadgeProvider | None:
+        """Ticket badge provider, None when the manager is unbound."""
+        issuer = issuer_for_repo(self._repo)
+        if issuer is None:
+            return None
+        return TicketBadgeProvider(
+            issuer, self._settings, "dev", task_id, project)
+
+    async def _muse_role_overlays(
+        self,
+        provider: TicketBadgeProvider,
+        role: str,
+        workspace: str,
+    ) -> tuple[dict[str, bytes], str]:
+        """Badge + settings overlay for one muse tier run (refuses loudly)."""
+        badge = await provider.mint(role)
+        try:
+            profile = load_role_profile("dev")
+            rendered = settings_overlay_bytes(
+                profile, Path(os.path.expanduser("~")), workspace,
+                provider.mcp_servers(badge))
+        except Exception:
+            await provider.revoke(badge)
+            raise
+        return {SETTINGS_OVERLAY_RELPATH: rendered}, badge
+
     @staticmethod
     def _executor_link(executor: "TierExecutor") -> str | None:
         """Tier C chain link of ``executor`` (``muse``/``dsh``/``claudep``).
@@ -1360,11 +1451,46 @@ class DevSessionManager:
         else:
             command = list(executor.argv)
             stdin_payload = prompt
-        ok, output, err = await self._run_process(
-            command, stdin_payload=stdin_payload, timeout=1800,
-            cwd=executor.cwd, env=executor.env or None,
-            config_argv=list(executor.argv),
-        )
+        overlays: dict[str, bytes] | None = None
+        badge: str | None = None
+        badge_provider: TicketBadgeProvider | None = None
+        if executor.label == "tier_c:muse":
+            task_id = str(task.get("task_id") or "")
+            project = str(task.get("project") or "")
+            badge_provider = self._ticket_badge_provider(task_id, project)
+            if badge_provider is None:
+                detail = "role badge needs a bound repository"
+                return CodingStepResult(
+                    step=self._step("code", "failed", detail),
+                    prompt=prompt,
+                    summary="",
+                    error=detail,
+                    executor_link=self._executor_link(executor),
+                )
+            try:
+                overlays, badge = await self._muse_role_overlays(
+                    badge_provider, str(executor.label),
+                    executor.cwd or os.getcwd())
+            except (RoleProfileError, CatalogError, McpAuthError,
+                    ValueError, OSError) as exc:
+                detail = f"role profile refused: {exc}"
+                return CodingStepResult(
+                    step=self._step("code", "failed", detail),
+                    prompt=prompt,
+                    summary="",
+                    error=detail,
+                    executor_link=self._executor_link(executor),
+                )
+        try:
+            ok, output, err = await self._run_process(
+                command, stdin_payload=stdin_payload, timeout=1800,
+                cwd=executor.cwd, env=executor.env or None,
+                config_argv=list(executor.argv),
+                home_file_overlays=overlays,
+            )
+        finally:
+            if badge is not None and badge_provider is not None:
+                await badge_provider.revoke(badge)
 
         if not ok:
             detail = self._summarize_failure_output(
@@ -1444,9 +1570,16 @@ class DevSessionManager:
                 provider_cfg = providers.get("muse", {}) or {}
                 argv = self._as_argv(link_cfg.get("command")) or self._as_argv(
                     provider_cfg.get("command")) or ["musej", "exec"]
+                argv = self._with_output_schema(
+                    argv + self._model_args(link_cfg))
+                profile_name = (link_cfg.get("role_profile")
+                                or provider_cfg.get("role_profile"))
+                if profile_name:
+                    profile = load_role_profile(str(profile_name))
+                    argv = [*argv, *render_argv_extras(profile),
+                            *render_card_argv(profile)]
                 return TierExecutor(
-                    argv=self._with_output_schema(
-                        argv + self._model_args(link_cfg)),
+                    argv=argv,
                     prompt_via="argv",
                     cwd=self._provider_cwd(provider_cfg, repo_cwd),
                     env=self._provider_env(provider_cfg),
@@ -1729,6 +1862,7 @@ class DevSessionManager:
         env: dict[str, str] | None = None,
         sandbox: bool = True,
         config_argv: list[str] | None = None,
+        home_file_overlays: dict[str, bytes] | None = None,
     ) -> tuple[bool, str, str]:
         result = await self._run_process_detailed(
             command,
@@ -1738,6 +1872,7 @@ class DevSessionManager:
             env=env,
             sandbox=sandbox,
             config_argv=config_argv,
+            home_file_overlays=home_file_overlays,
         )
         return result.ok, result.stdout, result.stderr
 
@@ -1750,6 +1885,7 @@ class DevSessionManager:
         env: dict[str, str] | None = None,
         sandbox: bool = True,
         config_argv: list[str] | None = None,
+        home_file_overlays: dict[str, bytes] | None = None,
     ) -> "ProcessRunResult":
         plan = None
         if sandbox:
@@ -1763,7 +1899,8 @@ class DevSessionManager:
                     workspace=cwd or os.getcwd(),
                     base=os.environ, overlay=env,
                     config_args=(config_argv if config_argv is not None
-                                 else [str(command[0])] if command else []))
+                                 else [str(command[0])] if command else []),
+                    home_file_overlays=home_file_overlays)
             except (IsolationUnavailable, ValueError, OSError) as exc:
                 return ProcessRunResult(
                     False, "", f"sandbox refused: {exc}", None)

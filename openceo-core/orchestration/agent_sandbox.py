@@ -387,8 +387,15 @@ def plan_agent(
     config_args: Sequence[str] | None = None,
     home: Path | None = None,
     opencode_state_rw: bool = False,
+    home_file_overlays: Mapping[str, bytes | str] | None = None,
 ) -> IsolationPlan:
-    """Fenced argv/env/cwd for one agent run. Raises IsolationUnavailable."""
+    """Fenced argv/env/cwd for one agent run. Raises IsolationUnavailable.
+
+    ``home_file_overlays`` bind-mounts rendered content over
+    home-relative paths (role settings, TASK-2026-00197): each value is
+    written 0600 into the run scratch (cleaned with it) and bound
+    read-only after the home mounts, so it shadows them per run.
+    """
     backend = BubblewrapBackend()
     if not backend.available:
         raise IsolationUnavailable("bwrap is missing: refusing agent spawn")
@@ -423,6 +430,24 @@ def plan_agent(
                 ops.append(["--tmpfs", str(path)])
             else:
                 ops.append(["--ro-bind", str(scratch / "empty"), str(path)])
+    if home_file_overlays:
+        overlay_dir = scratch / "overlays"
+        overlay_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(overlay_dir, 0o700)
+        for index, key in enumerate(sorted(home_file_overlays)):
+            relpath = Path(str(key))
+            if relpath.is_absolute() or ".." in relpath.parts:
+                raise ValueError(
+                    f"overlay escapes the home dir: {key!r}")
+            content = home_file_overlays[key]
+            data = (content.encode("utf-8") if isinstance(content, str)
+                    else bytes(content))
+            target = overlay_dir / f"{index}.overlay"
+            with open(target, "wb") as handle:
+                handle.write(data)
+            os.chmod(target, 0o600)
+            ops.append(["--ro-bind", str(target),
+                        str(host_home / relpath)])
     return backend.plan(
         argv=list(argv),
         workspace=workdir,
@@ -443,6 +468,7 @@ def sandboxed_shell_command(
     overlay: Mapping[str, str] | None = None,
     config_args: Sequence[str] | None = None,
     home: Path | None = None,
+    home_file_overlays: Mapping[str, bytes | str] | None = None,
 ) -> str:
     """Single shell line running ``command`` fenced (tmux panes).
 
@@ -451,7 +477,8 @@ def sandboxed_shell_command(
     inherit the fence.
     """
     plan = plan_agent(argv=list(command), workspace=workspace, base=base,
-                      overlay=overlay, config_args=config_args, home=home)
+                      overlay=overlay, config_args=config_args, home=home,
+                      home_file_overlays=home_file_overlays)
     # Pane TUIs need a terminal even when the service started without one.
     env = {"TERM": "tmux-256color", "LANG": "C.UTF-8", **plan.env}
     parts: list[str] = ["env", "-i"]

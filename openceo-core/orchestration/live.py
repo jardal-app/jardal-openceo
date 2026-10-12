@@ -25,7 +25,15 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
+from catalog import CatalogError, load_role_profile
 from orchestration.agent_sandbox import cleanup_sandbox_scratch, plan_agent
+from orchestration.role_muse import (
+    SETTINGS_OVERLAY_RELPATH,
+    RoleProfileError,
+    render_argv_extras,
+    render_card_argv,
+    settings_overlay_bytes,
+)
 from research.runtimes.base import IsolationUnavailable
 
 logger = logging.getLogger(__name__)
@@ -92,10 +100,12 @@ class ProcessExecutor:
         self,
         roles: Mapping[str, Any] | None = None,
         pool: Sequence[Mapping[str, Any]] | None = None,
+        badge_provider: Any | None = None,
     ) -> None:
         self._roles = dict(roles or {})
         self._pool = {str(slot.get("label")): dict(slot)
                       for slot in (pool or []) if slot.get("label")}
+        self._badge_provider = badge_provider
 
     # -- Executor protocol -------------------------------------------------
 
@@ -118,6 +128,52 @@ class ProcessExecutor:
             return ExecResult(
                 returncode=1, elapsed_s=0.0,
                 output_tail=f"role {role} has no command")
+        badge: str | None = None
+        file_overlays: dict[str, bytes] | None = None
+        profile_name = spec.get("role_profile")
+        if profile_name:
+            if self._badge_provider is None:
+                return ExecResult(
+                    returncode=1, elapsed_s=0.0,
+                    output_tail=(f"role {role} needs a badge provider "
+                                 f"for profile {profile_name}"),
+                    model=str(spec.get("model") or ""),
+                    slot=str(spec.get("account") or spec.get("label")
+                             or role))
+            try:
+                profile = load_role_profile(str(profile_name))
+            except CatalogError as exc:
+                return ExecResult(
+                    returncode=1, elapsed_s=0.0,
+                    output_tail=f"role profile refused: {exc}",
+                    model=str(spec.get("model") or ""),
+                    slot=str(spec.get("account") or spec.get("label")
+                             or role))
+            try:
+                badge = await self._badge_provider.mint(role)
+            except Exception as exc:
+                return ExecResult(
+                    returncode=1, elapsed_s=0.0,
+                    output_tail=f"role badge mint failed: {exc}",
+                    model=str(spec.get("model") or ""),
+                    slot=str(spec.get("account") or spec.get("label")
+                             or role))
+            try:
+                servers = self._badge_provider.mcp_servers(badge)
+                home = Path(os.path.expanduser("~"))
+                rendered = settings_overlay_bytes(
+                    profile, home, workdir, servers)
+            except (RoleProfileError, ValueError, OSError) as exc:
+                await self._badge_provider.revoke(badge)
+                return ExecResult(
+                    returncode=1, elapsed_s=0.0,
+                    output_tail=f"role profile refused: {exc}",
+                    model=str(spec.get("model") or ""),
+                    slot=str(spec.get("account") or spec.get("label")
+                             or role))
+            file_overlays = {SETTINGS_OVERLAY_RELPATH: rendered}
+            config_argv += render_argv_extras(profile)
+            config_argv += render_card_argv(profile)
         stdin_payload: str | None = None
         full_argv = list(config_argv)
         if via == "stdin":
@@ -134,8 +190,11 @@ class ProcessExecutor:
         try:
             plan = plan_agent(argv=full_argv, workspace=workdir,
                               base=os.environ, overlay=overlay,
-                              config_args=config_argv)
+                              config_args=config_argv,
+                              home_file_overlays=file_overlays)
         except (IsolationUnavailable, ValueError, OSError) as exc:
+            if badge is not None and self._badge_provider is not None:
+                await self._badge_provider.revoke(badge)
             return ExecResult(
                 returncode=1, elapsed_s=0.0,
                 output_tail=f"sandbox refused: {exc}",
@@ -197,6 +256,8 @@ class ProcessExecutor:
                 output_tail=text[:OUTPUT_CAP_CHARS],
                 model=model, slot=slot)
         finally:
+            if badge is not None and self._badge_provider is not None:
+                await self._badge_provider.revoke(badge)
             cleanup_sandbox_scratch(workdir)
 
     async def cleanup(self, role: str) -> None:
