@@ -3985,18 +3985,16 @@ class TaskService:
 
         Keyed by resolved path, with the sender's own normalization, so
         a swap or deletion between the request and the approval fails
-        the execution instead of sending something else. A missing file
-        fails fast; without SMTP configured there is nothing to hash
-        yet (the execution fails closed on its own).
+        the execution instead of sending something else. With
+        attachments, snapshot failures fail fast at the request
+        (review 00008): a silent empty snapshot would hold every
+        approval forever.
         """
         from tools.email_sender import SMTPEmailSender
 
         if not attachments:
             return {}
-        try:
-            sender = SMTPEmailSender(self._settings)
-        except Exception:
-            return {}
+        sender = SMTPEmailSender(self._settings)
         items = attachments if isinstance(attachments, list) else [attachments]
 
         def _hash() -> dict[str, str]:
@@ -4006,12 +4004,7 @@ class TaskService:
                     item.path.read_bytes()).hexdigest()
             return out
 
-        try:
-            return await asyncio.to_thread(_hash)
-        except FileNotFoundError:
-            raise
-        except Exception:
-            return {}
+        return await asyncio.to_thread(_hash)
 
     def _verify_attachment_snapshot(self, action: dict[str, Any]) -> None:
         """Refuse the send when attachments changed since the request."""
@@ -4107,10 +4100,14 @@ class TaskService:
         }
         action["_attachment_hashes"] = await self._snapshot_attachments(
             attachments)
+        def _norm(items: Any) -> list[str]:
+            return sorted(str(item).strip().lower() for item in items or [])
+
         fingerprint = action_fingerprint({
             "from": str(from_email or "").strip().lower(),
-            "to": sorted(str(item).strip().lower()
-                         for item in decision.get("recipients") or []),
+            "to": _norm(action["to"]),
+            "cc": _norm(action["cc"]),
+            "bcc": _norm(action["bcc"]),
             "subject": str(subject or "").strip(),
             "body": str(body_text or ""),
             "body_html": str(body_html or ""),
