@@ -250,7 +250,7 @@ global_mcp = build_global_mcp_mount(
     issuer=mcp_token_issuer, audit=mcp_audit_sink)
 horizon_service = HorizonService(settings=settings, repo=repo)
 # El timer unico de Horizon: duerme hasta el proximo vencimiento y lo despierta
-# cada encolado. No es un barrido (AGENTS.md §5.1).
+# cada encolado. No es un barrido (reglas permanentes de AGENTS.md).
 horizon_store = HorizonTriggerStore(repo, settings=settings)
 horizon_scheduler = HorizonScheduler(
     repo=repo,
@@ -1154,7 +1154,8 @@ async def erpnext_task_webhook(
     """Camino inverso: una decision humana en ERPNext llega al runtime.
 
     Lo llama el webhook de Frappe cuando alguien **cierra, cancela o borra** un `Task` en
-    el desk. No lo llama un cron: AGENTS.md §5.1 prohibe los barridos periodicos, y el
+    el desk. No lo llama un cron: las reglas permanentes de AGENTS.md prohiben
+    los barridos periodicos, y el
     contrato exige que la actividad humana llegue por eventos explicitos.
 
     No usa sesion de usuario (quien llama es ERPNext): se autentica con el secreto

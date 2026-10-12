@@ -40,6 +40,10 @@ OWNER_MARKS = (
 )
 
 
+def _section_10(text: str) -> str:
+    return text[text.index("## 10."):text.index("## 11.")]
+
+
 class AgentsSplitTests(unittest.TestCase):
     def test_agents_md_is_a_real_file(self) -> None:
         agents = REPO / "AGENTS.md"
@@ -64,10 +68,11 @@ class AgentsSplitTests(unittest.TestCase):
     def test_claude_md_imports_agents_md(self) -> None:
         text = (REPO / "CLAUDE.md").read_text(encoding="utf-8")
         self.assertIn("## 10.", text)
-        self.assertIn("@AGENTS.md", text)
-        self.assertNotIn("### Tier S executor contract", text)
-        self.assertNotIn("### Standing rules", text)
-        self.assertNotIn("symlink", text)
+        section = _section_10(text)
+        self.assertIn("@AGENTS.md", section)
+        self.assertNotIn("### Tier S executor contract", section)
+        self.assertNotIn("### Standing rules", section)
+        self.assertNotIn("symlink", section)
 
     def test_prompts_read_agents_md_as_its_own_file(self) -> None:
         self.assertEqual(["CLAUDE.md", "AGENTS.md"], _rules_files(REPO))

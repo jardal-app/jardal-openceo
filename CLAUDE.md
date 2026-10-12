@@ -179,7 +179,7 @@ cd openceo-react && npm run build
 
 ---
 
-## 7. Reglas Críticas de Eficiencia y Escalabilidad (AGENTS.md)
+## 7. Reglas Críticas de Eficiencia y Escalabilidad
 
 1. **Sin barridos ni polling periódico**: Prohibido hacer polling contra Mongo o APIs externas en background loops. Todo cambio debe ser reactivo por eventos CRUD.
 2. **Respuesta inmediata en modo dev**: Los turnos de código se procesan en background (`send_message_async`), la respuesta HTTP/SSE es instantánea.
@@ -257,8 +257,7 @@ del mismo trabajo. Al cerrar, en orden:
 
 @AGENTS.md
 
-Los CLI del roster leen `AGENTS.md` directamente; Claude Code lo ve mediante
-esta importación. El resto de este archivo es el manual de las sesiones del Owner.
+Los CLI del roster leen `AGENTS.md` directamente. El resto de este archivo es el manual de las sesiones del Owner.
 
 ---
 

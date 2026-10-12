@@ -6,7 +6,8 @@ TASK-2026-00113; el despacho de tickets vive ahora en
 
 1. **Ese scheduler hacia un barrido.** Su bucle era
    ``resume_waiting_tasks(); resume_queued_tickets(); sleep(60)`` — dos consultas
-   sin alcance cada minuto, para siempre. AGENTS.md §5.1 lo prohibe y la
+   sin alcance cada minuto, para siempre. Las reglas permanentes de AGENTS.md lo
+   prohiben y la
    seccion 9.2 punto 4 lo prohibe expresamente para esta capacidad.
 2. **Su trabajo es derivable; el nuestro no.** Las tareas en espera se pueden
    recalcular desde el estado de las tareas, asi que un reinicio no pierde nada.

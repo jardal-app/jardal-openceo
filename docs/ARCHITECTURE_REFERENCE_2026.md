@@ -2027,7 +2027,7 @@ LiveKit Android: Open `openceo-voice-android/` in Android Studio → Build → R
 - Record durable engineering conclusions in the vault using `obsidian-vault-links`, with valid links and a passing checker. Keep code topology in the repository and business records in ERPNext.
 - Keep `README.md`, `STATUS.md`, and the affected skill manifests in sync whenever architecture, install contracts, or runtime behavior changes.
 - Do not put planning or tracking notes in `README.md`.
-- If you change the dev runtime flow, re-run the smoke checklist from `AGENTS.md` before closing the task.
+- If you change the dev runtime flow, re-run the smoke checklist from `CLAUDE.md` §9 before closing the task.
 
 ---
 

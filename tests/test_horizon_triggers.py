@@ -1,7 +1,8 @@
 """Disparadores persistidos y el timer unico.
 
 La propiedad mas importante de este archivo no es que el trabajo se ejecute: es
-que **no se sondea**. AGENTS.md §5.1 lo prohibe y la seccion 9.2 punto 4 lo
+que **no se sondea**. Las reglas permanentes de AGENTS.md lo prohiben y la
+seccion 9.2 punto 4 lo
 prohibe para esta capacidad en concreto. Un test que solo comprobara el
 resultado seguiria pasando con un bucle que consulta cada segundo, asi que aqui
 se cuenta cuantas veces consulta estando ocioso.
@@ -161,7 +162,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_an_idle_scheduler_does_not_poll(self) -> None:
-        """La propiedad que AGENTS.md §5.1 exige y que un test de resultado no ve."""
+        """La propiedad que las reglas de AGENTS.md exigen y que un test de resultado no ve."""
         scheduler = self._scheduler()
         await scheduler.start()
         await asyncio.sleep(0.2)
