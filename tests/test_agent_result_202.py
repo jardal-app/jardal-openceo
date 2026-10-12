@@ -265,7 +265,7 @@ class StepCodeParseTests(unittest.IsolatedAsyncioTestCase):
                                    cwd=None, env={}, label="tier_c:muse"))
 
         async def _ok(command, stdin_payload=None, timeout=120, cwd=None,
-                      env=None):
+                      env=None, sandbox=True, config_argv=None):
             return True, ('done\n```agent-result\n{"resultado": "no_aplica", '
                           '"motivo": "needs sales data"}\n```\n'), ""
 
@@ -284,7 +284,7 @@ class StepCodeParseTests(unittest.IsolatedAsyncioTestCase):
                                    cwd=None, env={}, label="tier_c:muse"))
 
         async def _ok(command, stdin_payload=None, timeout=120, cwd=None,
-                      env=None):
+                      env=None, sandbox=True, config_argv=None):
             return True, "did the thing", ""
 
         manager._run_process = _ok  # type: ignore[method-assign]

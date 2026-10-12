@@ -105,9 +105,11 @@ _SUBPROCESS_TIMEOUT = 600
 _PM_MCP_TOKEN_ENV = "OPENCEO_PM_MCP_TOKEN"
 
 
-def _write_temp_mcp_config(mcp_config: dict[str, Any]) -> str:
+def _write_temp_mcp_config(mcp_config: dict[str, Any],
+                         directory: str | None = None) -> str:
     """MCP config on a 0600 temp file: the token never travels on argv."""
-    fd, path = tempfile.mkstemp(prefix="pm-mcp-", suffix=".json")
+    fd, path = tempfile.mkstemp(prefix="pm-mcp-", suffix=".json",
+                                dir=directory)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(mcp_config, handle)
@@ -346,7 +348,6 @@ class PMSessionManager:
             else:
                 binary = self._settings.CODEX_CLI_PATH
 
-        cwd = provider_cfg.get("cwd") or None
         env_vars = dict(provider_cfg.get("env") or {})
         source_id = f"pm-{tool}-{uuid4().hex[:12]}"
 
@@ -368,6 +369,13 @@ class PMSessionManager:
                     error=f"MCP token issuance failed: {exc}",
                 )
 
+        from orchestration.agent_sandbox import (
+            ensure_ticket_dir, plan_agent, remove_ticket_dir,
+        )
+        from research.runtimes.base import IsolationUnavailable
+        # PM reads nothing from disk (prompt via stdin): it runs in an
+        # empty per-run ticket dir instead of the service checkout.
+        pm_dir = ensure_ticket_dir(source_id)
         mcp_config_path: str | None = None
         if tool == "claude":
             mcp_config = build_mcp_provider_config(
@@ -380,7 +388,8 @@ class PMSessionManager:
                 "--effort", "high",
             ]
             if mcp_config is not None:
-                mcp_config_path = _write_temp_mcp_config(mcp_config)
+                mcp_config_path = _write_temp_mcp_config(
+                    mcp_config, directory=str(pm_dir))
                 cmd.extend([
                     "--mcp-config",
                     mcp_config_path,
@@ -407,23 +416,35 @@ class PMSessionManager:
 
         prompt = _CLI_PROMPT_TEMPLATE.format(project=project, source_id=source_id, interview=interview_text)
 
-        full_env = dict(os.environ)
-        full_env.update(build_mcp_provider_env(self._settings))
+        overlay = dict(build_mcp_provider_env(self._settings))
         if pm_token is not None:
-            full_env[_PM_MCP_TOKEN_ENV] = pm_token
-        full_env.update(env_vars)
+            overlay[_PM_MCP_TOKEN_ENV] = pm_token
+        overlay.update(env_vars)
+        try:
+            plan = plan_agent(argv=[str(token) for token in cmd],
+                              workspace=pm_dir, base=os.environ,
+                              overlay=overlay, config_args=[
+                                  str(token) for token in cmd])
+        except (IsolationUnavailable, ValueError, OSError) as exc:
+            _remove_quietly(mcp_config_path)
+            remove_ticket_dir(source_id)
+            logger.error("PM sandbox refused: %s", exc)
+            return PMExtractionResult(
+                status=TaskStatus.FAILED,
+                error=f"sandbox refused: {exc}",
+            )
 
-        logger.info("PM subprocess: launching %s for project=%s (cwd=%s)", tool, project, cwd)
+        logger.info("PM subprocess: launching %s for project=%s (cwd=%s)", tool, project, pm_dir)
 
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
-                *cmd,
+                *plan.argv,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=full_env,
+                cwd=plan.cwd,
+                env=plan.env,
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(input=prompt.encode("utf-8")),
@@ -434,6 +455,7 @@ class PMSessionManager:
                 proc.kill()
                 await proc.wait()
             _remove_quietly(mcp_config_path)
+            remove_ticket_dir(source_id)
             logger.error("PM subprocess timed out (%ds) for tool=%s project=%s", _SUBPROCESS_TIMEOUT, tool, project)
             return PMExtractionResult(
                 status=TaskStatus.FAILED,
@@ -441,6 +463,7 @@ class PMSessionManager:
             )
         except FileNotFoundError:
             _remove_quietly(mcp_config_path)
+            remove_ticket_dir(source_id)
             logger.error("PM subprocess binary not found: %s", binary)
             return PMExtractionResult(
                 status=TaskStatus.FAILED,
@@ -448,12 +471,14 @@ class PMSessionManager:
             )
         except Exception as exc:
             _remove_quietly(mcp_config_path)
+            remove_ticket_dir(source_id)
             logger.error("PM subprocess error: %s", exc)
             return PMExtractionResult(
                 status=TaskStatus.FAILED,
                 error=f"Subprocess error: {exc}",
             )
         _remove_quietly(mcp_config_path)
+        remove_ticket_dir(source_id)
 
         output = stdout_bytes.decode(errors="replace").strip()
         err_output = stderr_bytes.decode(errors="replace").strip()

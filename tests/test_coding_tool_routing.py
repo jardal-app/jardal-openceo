@@ -330,7 +330,8 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
         manager = self._manager()
         calls = []
 
-        async def fake_run_process(command, stdin_payload=None, timeout=120, cwd=None, env=None):
+        async def fake_run_process(command, stdin_payload=None, timeout=120, cwd=None, env=None,
+                                   sandbox=True, config_argv=None):
             calls.append({"command": command, "stdin": stdin_payload, "cwd": cwd, "env": env})
             return True, "did the thing", ""
 
@@ -399,7 +400,9 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
             buggy = await manager._run_process_detailed(
                 [str(exe), "--sandbox", "workspace-write", "-a", "never",
                  "--no-alt-screen"],
-                stdin_payload="prompt", timeout=30, cwd=tmp, env={})
+                stdin_payload="prompt", timeout=30, cwd=tmp, env={},
+                # Plumbing probe, not a fencing test (00192).
+                sandbox=False)
             self.assertFalse(buggy.ok)
             self.assertIn("stdin is not a terminal", buggy.stderr)
             guarded = DevSessionManager._ensure_codex_exec(
@@ -408,7 +411,9 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("exec", guarded)
             fixed = await manager._run_process_detailed(
                 guarded, stdin_payload="prompt",
-                timeout=30, cwd=tmp, env={})
+                timeout=30, cwd=tmp, env={},
+                # Plumbing probe, not a fencing test (00192).
+                sandbox=False)
             self.assertTrue(fixed.ok, fixed.stderr)
             self.assertNotIn("stdin is not a terminal", fixed.stderr)
 
@@ -416,7 +421,8 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
         manager = self._manager()
         calls = []
 
-        async def fake_run_process(command, stdin_payload=None, timeout=120, cwd=None, env=None):
+        async def fake_run_process(command, stdin_payload=None, timeout=120, cwd=None, env=None,
+                                   sandbox=True, config_argv=None):
             calls.append({"command": command, "stdin": stdin_payload})
             return True, "did the thing", ""
 

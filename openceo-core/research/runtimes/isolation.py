@@ -62,6 +62,10 @@ _DENIED_ENV_PREFIXES = (
 _DENIED_ENV_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_PASS", "_CREDENTIAL")
 _ALLOWED_ENV_EXACT = frozenset({"PATH", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR"})
 
+# Raw bwrap groups allowed in BubblewrapBackend.plan(extra_ops=...).
+# Anything else fails closed: a typo must never widen the sandbox.
+_AGENT_EXTRA_OPS = frozenset({"--tmpfs", "--ro-bind", "--bind", "--symlink"})
+
 
 def sanitized_worker_env(
     base_env: Mapping[str, str],
@@ -245,12 +249,18 @@ class BubblewrapBackend:
         *,
         argv: Sequence[str],
         workspace: Path,
-        worker_home: Path,
-        worker_config: Path,
+        worker_home: Path | None = None,
+        worker_config: Path | None = None,
         env: Mapping[str, str],
         allow_network: bool,
         extra_read_only: Sequence[Path] = (),
         egress: "EgressPolicy | None" = None,
+        # Agent profile (TASK-2026-00192): the motor keeps its real $HOME
+        # (auth/config reads preserved) while allowlisted paths mount around
+        # it. Research passes none of these and gets byte-identical argv.
+        home_env: str | None = None,
+        skip_worker_binds: bool = False,
+        extra_ops: Sequence[Sequence[str]] = (),
     ) -> IsolationPlan:
         command = [
             "bwrap",
@@ -289,8 +299,9 @@ class BubblewrapBackend:
         # que el fichero desaparece dentro de la frontera y toda resolucion falla
         # (`getaddrinfo ETIMEOUT`). Se copia el resolutor real a un fichero propio del
         # worker y se monta encima, sin exponer `/run`.
-        resolver = _worker_resolver_file(worker_home)
-        if resolver is not None:
+        resolver = (_worker_resolver_file(worker_home)
+                    if worker_home is not None else None)
+        if resolver is not None and worker_home is not None:
             command.extend(_resolver_bind_args(worker_home))
         read_only = ["/usr", "/bin", "/lib", "/lib64", "/etc"]
         # El motor (CLI de OpenCode) vive fuera de las rutas del sistema. Sin montarlo
@@ -314,24 +325,28 @@ class BubblewrapBackend:
         # `opencode.json` con el perfil cerrado. Sin este bind el CLI arrancaria con
         # `XDG_CONFIG_HOME` apuntando a un directorio inexistente y `--agent
         # investigator` volveria a morir con "Agent not found".
-        for dedicated in (worker_home, worker_config):
-            command.extend(["--bind", str(dedicated), str(dedicated)])
-        command.extend(
-            [
-                "--chdir",
-                str(workspace),
-                "--setenv",
-                "HOME",
-                str(worker_home),
-                "--setenv",
-                "XDG_CONFIG_HOME",
-                str(worker_config),
-                "--setenv",
-                "TMPDIR",
-                "/tmp",
-                "--unshare-all",
-            ]
-        )
+        if skip_worker_binds:
+            if home_env is None:
+                raise ValueError("home_env is required with skip_worker_binds")
+        else:
+            if worker_home is None or worker_config is None:
+                raise ValueError(
+                    "worker_home/worker_config are required "
+                    "without skip_worker_binds")
+            for dedicated in (worker_home, worker_config):
+                command.extend(["--bind", str(dedicated), str(dedicated)])
+        for op in extra_ops:
+            parts = [str(token) for token in op]
+            if not parts or parts[0] not in _AGENT_EXTRA_OPS:
+                raise ValueError(f"unsupported sandbox op: {parts[:1]!r}")
+            command.extend(parts)
+        command.extend(["--chdir", str(workspace)])
+        if skip_worker_binds:
+            command.extend(["--setenv", "HOME", str(home_env)])
+        else:
+            command.extend(["--setenv", "HOME", str(worker_home),
+                            "--setenv", "XDG_CONFIG_HOME", str(worker_config)])
+        command.extend(["--setenv", "TMPDIR", "/tmp", "--unshare-all"])
         if allow_network:
             command.append("--share-net")
         command.append("--")

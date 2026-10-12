@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import re
-import shlex
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -63,6 +62,7 @@ class _SessionInfo:
     cwd: str | None = None
     prompt_pattern: re.Pattern[str] | None = None
     shell_mode: bool = False
+    env: dict[str, str] | None = None
 
 
 class TmuxRuntime:
@@ -134,10 +134,16 @@ class TmuxRuntime:
 
         pattern = prompt_pattern or (_SHELL_PROMPT_PATTERN if shell_mode else _DEFAULT_PROMPT_PATTERNS.get(provider.value))
 
-        # Launch the interactive provider command inside the shell
+        # Launch the interactive provider command inside the shell,
+        # fenced: clean env + bwrap (CLI shell escapes inherit the fence).
         pane = session.active_window.active_pane
         if command:
-            shell_cmd = shlex.join(command)
+            from orchestration.agent_sandbox import sandboxed_shell_command
+            shell_cmd = sandboxed_shell_command(
+                command=[str(token) for token in command],
+                workspace=start_dir, base=os.environ,
+                overlay=dict(env or {}),
+                config_args=[str(token) for token in command])
             pane.send_keys(shell_cmd, enter=True)
         else:
             shell_cmd = ""
@@ -150,6 +156,7 @@ class TmuxRuntime:
             cwd=cwd,
             prompt_pattern=pattern,
             shell_mode=shell_mode,
+            env=dict(env) if env else None,
         )
 
         logger.info("Started tmux session '%s' for project '%s' with command: %s", name, project, shell_cmd)
@@ -606,14 +613,17 @@ class TmuxRuntime:
             cached = self._rate_monitor._cache.get("codex")
             session_id = cached.codex_session_id if cached else None
             if session_id:
-                cmd = f"{self._settings.CODEX_CLI_PATH} resume {session_id} \"Continue the task\""
-                pane.send_keys(cmd, enter=True)
+                self._restart_interactive_command(
+                    pane, [self._settings.CODEX_CLI_PATH, "resume",
+                           session_id, "Continue the task"],
+                    info.cwd, info.env)
                 await asyncio.sleep(5)
                 return True
 
         # Generic: relaunch the interactive command
         if info.command:
-            self._restart_interactive_command(pane, info.command)
+            self._restart_interactive_command(
+                pane, info.command, info.cwd, info.env)
             await asyncio.sleep(5)
 
             if provider == "claude":
@@ -676,7 +686,8 @@ class TmuxRuntime:
                             "Restarting Codex in '%s' after auto-update",
                             info.tmux_session_name,
                         )
-                        self._restart_interactive_command(pane, info.command)
+                        self._restart_interactive_command(
+                            pane, info.command, info.cwd, info.env)
                         codex_restart_submitted = True
                         await asyncio.sleep(max(poll_interval, 0.8))
                         elapsed += max(poll_interval, 0.8)
@@ -1085,10 +1096,20 @@ class TmuxRuntime:
         return any(re.search(r"^[^\n]*@[^\n:]+:.*[$#%]\s*$", line) for line in recent)
 
     @staticmethod
-    def _restart_interactive_command(pane: Any, command: list[str]) -> None:
+    def _restart_interactive_command(
+        pane: Any, command: list[str],
+        workspace: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> None:
         if not command:
             return
-        pane.send_keys(shlex.join(command), enter=True)
+        from orchestration.agent_sandbox import sandboxed_shell_command
+        line = sandboxed_shell_command(
+            command=[str(token) for token in command],
+            workspace=workspace or os.getcwd(), base=os.environ,
+            overlay=dict(env or {}),
+            config_args=[str(token) for token in command])
+        pane.send_keys(line, enter=True)
 
     @staticmethod
     def _needs_extra_enter(content: str, submitted_text: str) -> bool:
