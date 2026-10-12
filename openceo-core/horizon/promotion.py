@@ -16,7 +16,7 @@ Reglas de frontera (ver workfile del ticket):
   personal a un ticket de empresa.
 - Toque que no resuelve contra la configuracion -> rechazo (`refused`): no se
   crea nada, ni siquiera personal. Degradarlo a personal ocultaria trabajo de
-  empresa del negocio y recrearia la contradiccion con CLAUDE.md S10.
+  empresa del negocio y recrearia la contradiccion con AGENTS.md.
 - Un ticket promovido es trabajo de empresa ordinario: ERPNext primero y
   espejos normales. Por eso NO lleva `horizon_scope=personal` (ese flag lo
   excluiria de ERPNext y volveria a ser solo-Mongo).
