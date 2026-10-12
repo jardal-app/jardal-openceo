@@ -598,8 +598,8 @@ def policy_file(policy_path: str | Path | None = None) -> Path:
     return Path(policy_path)
 
 
-def load_policy_text(policy_path: str | Path | None = None) -> str:
-    """Read the normative routing policy ("" when unreadable)."""
+def load_policy_core(policy_path: str | Path | None = None) -> str:
+    """Read the core policy file only ("" when unreadable)."""
     try:
         text = policy_file(policy_path).read_text(
             encoding="utf-8", errors="replace")
@@ -608,16 +608,99 @@ def load_policy_text(policy_path: str | Path | None = None) -> str:
     return text if text.strip() else ""
 
 
+def policy_detail_files(
+        policy_path: str | Path | None = None) -> list[tuple[str, Path]]:
+    """Per-agent detail files next to the core policy, sorted by agent.
+
+    For a ``<stem>.md`` core the details live in ``<stem>.d/*.md``
+    (shipped: ``routing_policy.d/dev.md`` next to
+    ``routing_policy.md``); the agent name is the file stem. A core
+    without a ``.d`` dir simply has no details.
+    """
+    core = policy_file(policy_path)
+    folder = core.parent / (core.stem + ".d")
+    try:
+        names = sorted(path.name for path in folder.iterdir()
+                       if path.suffix == ".md")
+    except OSError:
+        return []
+    return [(Path(name).stem, folder / name) for name in names]
+
+
+def _read_detail(name: str, path: Path) -> str | None:
+    """One detail text, None when it is missing, unreadable or empty."""
+    del name
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return text if text.strip() else None
+
+
+def load_policy_details(
+        policy_path: str | Path | None = None) -> list[tuple[str, str]] | None:
+    """Per-agent detail texts in filename order; None when one is broken.
+
+    None fails closed upstream: :func:`load_policy_text` returns "" and
+    the cycle refuses to plan blind, exactly like a missing core.
+    """
+    found = []
+    for name, path in policy_detail_files(policy_path):
+        text = _read_detail(name, path)
+        if text is None:
+            return None
+        found.append((name, text))
+    return found
+
+
+def _compose_policy(core: str, details: list[str]) -> str:
+    """Full normative text: parts joined by exactly one blank line."""
+    parts = [core.rstrip("\n")] + [item.rstrip("\n") for item in details]
+    return "\n\n".join(parts) + "\n"
+
+
+def load_policy_text(policy_path: str | Path | None = None) -> str:
+    """Read the full normative policy: core plus every per-agent detail.
+
+    "" when the core or any detail is missing, unreadable or empty.
+    """
+    core = load_policy_core(policy_path)
+    details = load_policy_details(policy_path)
+    if not core or details is None:
+        return ""
+    return _compose_policy(core, [text for _, text in details])
+
+
+def policy_detail_index(
+        staged: Sequence[tuple[str, str | Path]]) -> str:
+    """Prompt block naming the staged per-agent detail files ("" when none).
+
+    Each entry pairs an agent with the absolute path the planner run
+    can read: the engine stages the exact hashed texts under the
+    objective scratch.
+    """
+    files = [(str(name), str(path)) for name, path in staged]
+    if not files:
+        return ""
+    lines = ["AGENT POLICY DETAIL (read the agent's file before assigning "
+             "it work; for target_agent == dev, reading it is MANDATORY "
+             "to choose the tier):"]
+    lines.extend(f"- {name}: {path}" for name, path in files)
+    return "\n".join(lines)
+
+
 def policy_prompt_text(policy_text: str) -> str:
     """Exactly the policy text the planner prompt carries (one definition)."""
     return (policy_text or "").strip()[:POLICY_PROMPT_MAX_CHARS]
 
 
 def policy_fingerprint(policy_text: str) -> str:
-    """Short SHA-256 (12 hex) of what the planner prompt carries ("" if empty).
+    """Short SHA-256 (12 hex) of a policy text ("" when empty).
 
-    Each planning run stores it (``planning_runs[].policy_sha``) so a decision
-    can be traced to the policy text the planner actually saw. Plain hashing:
+    Each planning run stores it (``planning_runs[].policy_sha``) over the
+    composed policy (core plus every per-agent detail), so a decision can
+    be traced to the policy version it saw: the core pasted in the prompt
+    plus the detail files staged for on-demand reading. Plain hashing:
     no model call, and it never enters the prompt.
     """
     carried = policy_prompt_text(policy_text)
@@ -628,31 +711,52 @@ def policy_fingerprint(policy_text: str) -> str:
 
 @dataclass(frozen=True)
 class PolicyStatus:
-    """Health of the planner policy file (:func:`check_policy`)."""
+    """Health of the planner policy files (:func:`check_policy`)."""
 
     ok: bool
     path: str
     chars: int
     sha: str
     problem: str = ""
+    files: tuple[str, ...] = ()
 
 
 def check_policy(policy_path: str | Path | None = None) -> PolicyStatus:
-    """Is the policy readable and does it fit the prompt untruncated?"""
+    """Is the policy readable and does its core fit the prompt untruncated?
+
+    Covers the core file plus every per-agent detail: a broken detail
+    fails the check like a broken core. ``chars`` counts the core (the
+    always-pasted part); ``sha`` fingerprints the composed whole;
+    ``files`` lists every covered file, core first.
+    """
     path = policy_file(policy_path)
-    text = load_policy_text(policy_path)
-    if not text:
+    core = load_policy_core(policy_path)
+    if not core:
         return PolicyStatus(
             False, str(path), 0, "",
             "the file is missing, unreadable or empty")
-    chars = len(text.strip())
+    chars = len(core.strip())
     if chars > POLICY_PROMPT_MAX_CHARS:
         return PolicyStatus(
-            False, str(path), chars, policy_fingerprint(text),
+            False, str(path), chars, policy_fingerprint(core),
             f"{chars} characters exceed the prompt budget of "
             f"{POLICY_PROMPT_MAX_CHARS}: the tail (the compact runtime "
             "kernel) would be cut off")
-    return PolicyStatus(True, str(path), chars, policy_fingerprint(text))
+    files = [str(path)]
+    texts = []
+    for name, detail_path in policy_detail_files(policy_path):
+        text = _read_detail(name, detail_path)
+        if text is None:
+            return PolicyStatus(
+                False, str(path), chars, "",
+                f"detail {name} ({detail_path}) is missing, unreadable "
+                "or empty")
+        files.append(str(detail_path))
+        texts.append(text)
+    return PolicyStatus(
+        True, str(path), chars,
+        policy_fingerprint(_compose_policy(core, texts)), "",
+        tuple(files))
 
 
 def log_policy_status(
@@ -668,14 +772,14 @@ def log_policy_status(
     if status.ok:
         log.info("Planner routing policy: %s (%d chars, sha %s)",
                  status.path, status.chars, status.sha)
-    elif status.chars == 0:
-        log.error(
-            "Planner routing policy PROBLEM at %s: %s. Objective planning "
-            "parks with 'config' (refusing to plan blind) until it is fixed.",
-            status.path, status.problem)
-    else:
+    elif status.chars > POLICY_PROMPT_MAX_CHARS:
         log.error(
             "Planner routing policy PROBLEM at %s: %s. The planner would "
             "run with the truncated text (sha %s).",
             status.path, status.problem, status.sha)
+    else:
+        log.error(
+            "Planner routing policy PROBLEM at %s: %s. Objective planning "
+            "parks with 'config' (refusing to plan blind) until it is fixed.",
+            status.path, status.problem)
     return status

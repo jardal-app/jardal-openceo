@@ -9,7 +9,7 @@ assigns it.
 The classifier is deterministic and spends zero tokens: ordered
 heuristic rules over title + description + attachment names (Spanish and
 English), mirroring the normative tier semantics of
-``openceo-core/objectives/routing_policy.md`` §18-27 in S → A → B → C
+``openceo-core/objectives/routing_policy.d/dev.md`` §18-27 in S → A → B → C
 order (recalibrated by TASK-2026-00148: ``tier_c`` is the default).
 Every decision carries a ``tier_reason`` citing the fired signal, so a
 misclassification is auditable and tunable. A/B decisions also carry

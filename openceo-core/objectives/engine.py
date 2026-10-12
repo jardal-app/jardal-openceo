@@ -646,6 +646,28 @@ def objective_scratch(repo: Path, objective_id: str) -> Path:
     return scratch_root(repo) / "objectives" / objective_id
 
 
+def _stage_policy_details(
+        scratch: Path,
+        details: Sequence[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Stage per-agent policy texts where the fenced planner can read them.
+
+    The planner runs with the project repo as its workspace; the
+    install dir is outside its fence. Each detail is written verbatim
+    (the exact hashed bytes) to ``policy/<agent>.md`` under the
+    objective scratch; the paths ride the prompt index.
+    """
+    staged: list[tuple[str, str]] = []
+    if not details:
+        return staged
+    folder = scratch / "policy"
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, text in details:
+        target = folder / f"{name}.md"
+        target.write_text(text, encoding="utf-8")
+        staged.append((name, str(target)))
+    return staged
+
+
 def _planner_skills() -> tuple[str, dict[str, list[str]]]:
     """Skills index block + suggestable map for one planning cycle.
 
@@ -699,6 +721,7 @@ def _planner_prompt(
     tierless: Sequence[Mapping[str, Any]] = (),
     agents_md: str = "",
     policy_text: str = "",
+    policy_index: str = "",
     handoffs: Sequence[str] = (),
     roadmap: Sequence[str] = (),
     repo: Path | str | None = None,
@@ -922,6 +945,8 @@ def _planner_prompt(
     if policy_text.strip():
         lines.extend(["", "NORMATIVE ROUTING POLICY (authoritative):",
                       planner_mod.policy_prompt_text(policy_text)])
+    if policy_index.strip():
+        lines.extend(["", policy_index.strip()])
     return knowledge_mod.with_preamble("\n".join(lines), repo, "en")
 
 
@@ -1354,7 +1379,8 @@ async def _plan_objective_inner(
             env, objective, "config",
             "planner agent registry is empty "
             "(global objective_planner.agents)")
-    policy_text = planner_mod.load_policy_text(planner_cfg.get("policy_path"))
+    policy_path = planner_cfg.get("policy_path")
+    policy_text = planner_mod.load_policy_text(policy_path)
     if not policy_text:
         return await _objective_park(
             env, objective, "config",
@@ -1377,6 +1403,15 @@ async def _plan_objective_inner(
                 for entry in (objective.get("tickets_log") or [])[-3:]]
     handoffs = [item for item in reversed(handoffs) if item]
     skills_md, skill_map = _planner_skills()
+    scratch = objective_scratch(env.repo, objective_id)
+    scratch.mkdir(parents=True, exist_ok=True)
+    (scratch / "OBJECTIVE_CAPSULE.md").write_text(
+        (objective.get("capsule") or {}).get("text", "") or "(empty)\n",
+        encoding="utf-8")
+    (scratch / "INBOX.md").write_text(inbox_md or "INBOX\n(none)\n",
+                                      encoding="utf-8")
+    staged = _stage_policy_details(
+        scratch, planner_mod.load_policy_details(policy_path) or [])
     prompt = _planner_prompt(
         objective, (objective.get("capsule") or {}).get("text", ""),
         ready, inbox_md or "INBOX\n(none)\n", deferred,
@@ -1385,7 +1420,9 @@ async def _plan_objective_inner(
         tierless=[item for item in open_tickets
                   if not item.get("coding_tool")],
         agents_md=_agents_section(agents, skills_md),
-        policy_text=policy_text, handoffs=handoffs,
+        policy_text=planner_mod.load_policy_core(policy_path),
+        policy_index=planner_mod.policy_detail_index(staged),
+        handoffs=handoffs,
         roadmap=[str(item) for item in
                  objective.get("roadmap_remaining") or []],
         repo=env.repo,
@@ -1393,13 +1430,6 @@ async def _plan_objective_inner(
             str(objective.get("project") or ""),
             env.project_routing),
         spend_guide=spend_mod.spend_guide_section(env.mandate))
-    scratch = objective_scratch(env.repo, objective_id)
-    scratch.mkdir(parents=True, exist_ok=True)
-    (scratch / "OBJECTIVE_CAPSULE.md").write_text(
-        (objective.get("capsule") or {}).get("text", "") or "(empty)\n",
-        encoding="utf-8")
-    (scratch / "INBOX.md").write_text(inbox_md or "INBOX\n(none)\n",
-                                      encoding="utf-8")
     timeout_s = int(planner_cfg.get("timeout_minutes", 15)) * 60
     errors: list[str] = []
     result: planner_mod.PlannerResult | None = None

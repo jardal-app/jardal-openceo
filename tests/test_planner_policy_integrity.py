@@ -1,14 +1,16 @@
-"""Planner policy integrity (TASK-2026-00184).
+"""Planner policy integrity (TASK-2026-00184; split by TASK-2026-00201).
 
-The planner receives ``openceo-core/objectives/routing_policy.md`` whole in
-every planning cycle. Two cheap, deterministic safeguards (plain Python: no
-model call, nothing added to the prompt):
+The planner receives the policy core
+(``openceo-core/objectives/routing_policy.md``) plus an index of staged
+per-agent detail files in every planning cycle. Two cheap,
+deterministic safeguards (plain Python: no model call, nothing added
+to the prompt):
 
-- a boot-time check says early if the file is missing, empty or longer than
-  the prompt budget (it would be cut off, tail first, and the tail holds the
-  compact runtime kernel);
-- every planning run stores a short fingerprint of the exact policy text the
-  prompt carried, so a decision can be traced to the policy version it saw.
+- a boot-time check says early if a policy file is missing, empty, or
+  the core is longer than the prompt budget (it would be cut off,
+  tail first, and the tail holds the compact runtime kernel);
+- every planning run stores a short fingerprint of the composed core +
+  details, so a decision can be traced to the policy version it saw.
 
 No network, no CLI, no LLM.
 """

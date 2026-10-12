@@ -124,7 +124,7 @@ Contrato vigente: épico TASK-2026-00187, sección «Agentes por rol» de `docs/
 
 ### Planner único de objetivos (global)
 - El único que decide qué tickets deben existir para un Objetivo: Muse Code headless, un run fresco por ciclo, salida `PlannerResult` validada (Pydantic + validación determinista).
-- Normativo único: `openceo-core/objectives/routing_policy.md` (el planner lo lee). El porqué vive en el vault (`decisions/2026-10-06-objetivo-unico-ceo-autonomo`).
+- Normativo único: `openceo-core/objectives/routing_policy.md` (núcleo; el detalle por agente vive en `openceo-core/objectives/routing_policy.d/`). El porqué vive en el vault (`decisions/2026-10-06-objetivo-unico-ceo-autonomo`).
 - Sustituye a `claudej`/`TICKETS.yaml` (TASK-2026-00112; motor en `openceo-core/objectives/`, TASK-2026-00117).
 - El plan Claude/Codex de un ticket Tier S planifica cómo implementar ese ticket, no es un segundo planner; tampoco lo es el orden determinista del día en Horizon.
 
@@ -284,7 +284,7 @@ Cuando el Owner escriba **`sigue`** (o `sigue TASK-2026-000NN` para fijar el tic
    - Descripción y comentarios del ticket.
    - El workfile del épico y el del ticket, si existen.
    - El porqué, solo si hace falta: la decisión del vault del épico (`decisions/2026-10-11-agentes-por-rol-planner-unico`; adjunto de diseño del épico como acta) y, como base, `decisions/2026-10-06-objetivo-unico-ceo-autonomo`.
-   - El contrato normativo: `docs/ARCHITECTURE_REFERENCE_2026.md` §Proactive CEO y la sección «Agentes por rol» cuando exista (+ `openceo-core/objectives/routing_policy.md`, normativo del planner hasta que TASK-2026-00201 lo reparta).
+   - El contrato normativo: `docs/ARCHITECTURE_REFERENCE_2026.md` §Proactive CEO y la sección «Agentes por rol» cuando exista (+ `openceo-core/objectives/routing_policy.md` y `openceo-core/objectives/routing_policy.d/`, normativa del planner repartida por TASK-2026-00201).
    - Código: búsqueda dirigida + LSP.
 4. **Contrastar la observación antes de corregir.** Aplicar criterio técnico riguroso a cada afirmación del ticket: comprobar el contrato vigente, seguir el flujo completo de productores y consumidores y buscar evidencia que confirme o refute el problema. Las líneas citadas, el diagnóstico y el estado del ticket pueden haberse quedado atrás respecto al código.
    - Buscar duplicados en este proyecto por causa y comportamiento, no solo por título. Revisar comentarios, commits, merges y diffs pertinentes de otras sesiones. No suponer que un fallo sigue presente ni que ya fue corregido: demostrar qué cubre el código actual y qué falta.
