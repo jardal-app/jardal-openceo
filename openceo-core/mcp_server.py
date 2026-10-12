@@ -1171,22 +1171,25 @@ class _InternalOnlyBearerWrapper:
             await _send_json_error(send, 403, "MCP interno disponible solo desde loopback.")
             return
 
-        # Ticket identity mounts authenticate every method, streams
-        # included. Legacy mounts only: GET SSE streams may omit the
+        # Ticket identity mounts authenticate every presented badge,
+        # streams included. Calls with no badge pass to the default box
+        # (Owner order); a present but invalid badge still fails closed.
+        # Legacy mounts only: GET SSE streams may omit the
         # header and rely on the IP allowlist instead.
         if self._authenticator is not None:
             authorization = _decode_header(scope.get("headers", []), b"authorization")
             token = bearer_from_headers({"authorization": authorization})
-            try:
-                await self._authenticator.authenticate(token)
-            except McpAuthError as exc:
-                logger.warning(
-                    "MCP %s %s denied for %s (%s)",
-                    scope.get("method"), scope.get("path"),
-                    client_host or "unknown", exc.reason,
-                )
-                await _send_json_error(send, 401, "MCP ticket token missing or invalid.")
-                return
+            if token is not None:
+                try:
+                    await self._authenticator.authenticate(token)
+                except McpAuthError as exc:
+                    logger.warning(
+                        "MCP %s %s denied for %s (%s)",
+                        scope.get("method"), scope.get("path"),
+                        client_host or "unknown", exc.reason,
+                    )
+                    await _send_json_error(send, 401, "MCP ticket token invalid.")
+                    return
         elif self._bearer_token and scope.get("method") != "GET":
             authorization = _decode_header(scope.get("headers", []), b"authorization")
             expected = f"Bearer {self._bearer_token}"
