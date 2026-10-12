@@ -335,14 +335,15 @@ def wiring_with(tmp: Path, catalog: Catalog, factory: Any,
 
 class GenericAgentRunTest(unittest.TestCase):
     def _world(self, stdout: str, returncode: int = 0,
-               params: dict[str, Any] | None = None):
+               params: dict[str, Any] | None = None,
+               usage: dict[str, Any] | None = None):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
         catalog = tiny_catalog({"operations": {"enabled": True}})
         factory, recorded = scripted_executor(
             ExecResult(returncode=returncode, elapsed_s=1.0,
-                       output_tail=stdout))
+                       output_tail=stdout, usage=usage))
         wiring = wiring_with(root, catalog, factory)
         return root, wiring, recorded, generic_task(
             params=dict(params or {}))
@@ -409,14 +410,58 @@ class GenericAgentRunTest(unittest.TestCase):
         self.assertNotIn("agent_result", out["params"])
         self.assertIn("all done", out["result_comment"])
 
-    def test_crash_wins_over_hecho_claim(self) -> None:
+    def test_crash_invalidates_hecho_claim(self) -> None:
+        # Review 00006/agyd-H1: a stored hecho on a FAILED run skips
+        # _trigger_objective_return (only bloqueado/no_aplica return),
+        # so the crash rewrites the claim instead of preserving it.
         _, wiring, _, task = self._world(hecho_stdout(), returncode=1)
         out = asyncio.run(run_generic_agent("operations", task, wiring))
         self.assertEqual(TaskStatus.FAILED.value, out["status"])
         verdict = AgentResult.model_validate(
             out["params"]["agent_result"])
-        self.assertEqual("hecho", verdict.resultado.value)
+        self.assertEqual("bloqueado", verdict.resultado.value)
+        self.assertIn("returncode 1", verdict.motivo)
+        self.assertIn("hecho", verdict.motivo)
         self.assertIn("returncode 1", out["error"])
+        self.assertIn("bloqueado", out["result_comment"])
+
+    def test_crash_keeps_bloqueado_verdict(self) -> None:
+        _, wiring, _, task = self._world(
+            verdict_stdout("bloqueado", "ERPNext down"), returncode=1)
+        out = asyncio.run(run_generic_agent("operations", task, wiring))
+        self.assertEqual(TaskStatus.FAILED.value, out["status"])
+        verdict = AgentResult.model_validate(
+            out["params"]["agent_result"])
+        self.assertEqual("bloqueado", verdict.resultado.value)
+        self.assertEqual("ERPNext down", verdict.motivo)
+
+    def test_truncated_output_fails_closed_without_verdict(self) -> None:
+        # Review 00006/mimo-W1: output_tail keeps the head, so a
+        # truncated run lost its trailing verdict block (if any).
+        _, wiring, _, task = self._world(
+            "long log without any verdict block",
+            usage={"stdout_chars": 50000, "stderr_chars": 0,
+                   "truncated": True})
+        out = asyncio.run(run_generic_agent("operations", task, wiring))
+        self.assertEqual(TaskStatus.FAILED.value, out["status"])
+        verdict = AgentResult.model_validate(
+            out["params"]["agent_result"])
+        self.assertEqual("bloqueado", verdict.resultado.value)
+        self.assertIn("truncated", verdict.motivo)
+        self.assertIn("bloqueado", out["result_comment"])
+
+    def test_truncated_output_distrusts_parsed_claim(self) -> None:
+        _, wiring, _, task = self._world(
+            hecho_stdout("all green"),
+            usage={"stdout_chars": 60000, "stderr_chars": 0,
+                   "truncated": True})
+        out = asyncio.run(run_generic_agent("operations", task, wiring))
+        self.assertEqual(TaskStatus.FAILED.value, out["status"])
+        verdict = AgentResult.model_validate(
+            out["params"]["agent_result"])
+        self.assertEqual("bloqueado", verdict.resultado.value)
+        self.assertIn("truncated", verdict.motivo)
+        self.assertIn("all green", verdict.motivo)
 
     def test_crash_without_verdict_fails(self) -> None:
         _, wiring, _, task = self._world("traceback...", returncode=124)
@@ -753,6 +798,35 @@ class ResultCommentTest(unittest.TestCase):
         asyncio.run(service.run_task("task-205"))
         assert erp.comments is not None
         self.assertEqual([], erp.comments)
+
+    def test_run_task_comments_blocked_tool_wait(self) -> None:
+        # Review 00006/mimo-I1: a blocked-tool wait needs a human, so
+        # it gets the one-shot ERP comment like routing/config waits.
+        service, erp = self._service({
+            "selected_agent": "operations",
+            "status": TaskStatus.WAITING.value,
+            "waiting_reason": "workflow_blocked_tool",
+            "error": "Tool not registered: core.no_such_tool",
+            "steps": [],
+            "params": {"_mirrors": {"erpnext": {
+                "name": "TASK-2026-09999"}}},
+        })
+
+        async def _run():
+            updated = await service.run_task("task-205")
+            for _ in range(200):
+                if erp.comments:
+                    break
+                await asyncio.sleep(0.01)
+            return updated
+
+        updated = asyncio.run(_run())
+        assert updated is not None
+        self.assertEqual(TaskStatus.WAITING.value, updated["status"])
+        assert erp.comments is not None
+        self.assertEqual(1, len(erp.comments))
+        self.assertEqual("TASK-2026-09999", erp.comments[0][0])
+        self.assertIn("core.no_such_tool", erp.comments[0][1])
 
 
 if __name__ == "__main__":

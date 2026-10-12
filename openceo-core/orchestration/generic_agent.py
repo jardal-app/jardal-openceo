@@ -11,7 +11,10 @@ Two paths, no silent reclassification:
 Verdict semantics belong to TASK-2026-00202: hecho completes, bloqueado
 and no_aplica fail with the verdict stored (objective children return
 once to the planner through the existing funnel), and a missing verdict
-is legacy behavior, never a failure. The orchestrator owns the outcome:
+is legacy behavior, never a failure. Two harness exceptions, fail-closed:
+a crash invalidates a hecho claim (rewritten bloqueado, so the planner
+loop still runs), and a truncated output makes any parse untrustworthy
+(bloqueado, review 00006). The orchestrator owns the outcome:
 this runner returns ``result_comment`` and ``run_task`` posts it to
 ERPNext; the agent never changes ticket states.
 """
@@ -366,13 +369,31 @@ async def _run_llm(
             logger.warning("generic executor cleanup failed for %s",
                            task_id, exc_info=True)
     verdict = parse_agent_result(result.output_tail)
+    usage = result.usage if isinstance(result.usage, dict) else {}
+    truncated = bool(usage.get("truncated"))
     if result.returncode != 0:
         detail = (f"agent run failed (returncode {result.returncode})"
                   + (f": {result.output_tail.strip()[:500]}"
                      if result.output_tail and result.output_tail.strip()
                      else ""))
+        if verdict is not None \
+                and verdict.resultado is AgentOutcome.HECHO:
+            verdict = AgentResult(
+                resultado=AgentOutcome.BLOQUEADO,
+                motivo=(f"run crashed (returncode {result.returncode}); "
+                        f"the agent claimed hecho: {verdict.motivo}"))
         return _failed(agent_name, params, "LLM run", error=detail,
                        verdict=verdict)
+    if truncated:
+        motivo = (f"agent output truncated "
+                  f"({usage.get('stdout_chars', '?')} chars), verdict "
+                  "unreadable")
+        if verdict is not None:
+            motivo += f"; last parsed claim: {verdict.motivo}"
+        return _failed(agent_name, params, "LLM run",
+                       error=motivo,
+                       verdict=AgentResult(
+                           resultado=AgentOutcome.BLOQUEADO, motivo=motivo))
     if verdict is None:
         summary = (result.output_tail or "").strip() or "ok"
         return {

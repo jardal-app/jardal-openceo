@@ -3439,7 +3439,8 @@ class TaskService:
                     asyncio.create_task(self._revoke_ticket_badges(updated))
                 if final_status == TaskStatus.WAITING.value:
                     reason = str(updated.get("waiting_reason") or "")
-                    if reason.startswith(("routing_missing", "config")):
+                    if reason.startswith(("routing_missing", "config",
+                                          "workflow_blocked_tool")):
                         asyncio.create_task(self._comment_wait_on_erp(updated, reason))
                 result_comment = graph_out.get("result_comment")
                 if result_comment and str(result_comment).strip():
@@ -3468,10 +3469,10 @@ class TaskService:
     async def _comment_wait_on_erp(self, task: dict[str, Any], reason: str) -> None:
         """Post a one-shot ERP comment for waits that need the owner.
 
-        Only routing and config waits qualify: both mean a human (or the
-        tier authority) must fix something before the ticket can run.
-        Transient waits (quota, repo_busy, rate limits) heal alone and stay
-        silent. Never breaks execution.
+        Only routing, config and blocked-tool waits qualify: all mean a
+        human (or the tier authority) must fix something before the ticket
+        can run. Transient waits (quota, repo_busy, rate limits) heal
+        alone and stay silent. Never breaks execution.
         """
         try:
             adapter = getattr(self, "_erpnext", None)
@@ -3487,6 +3488,11 @@ class TaskService:
                 return
             if key == "routing_missing":
                 text = wait_comment_text(task, reason)
+            elif key == "workflow_blocked_tool":
+                detail = str(task.get("error") or reason).strip()
+                text = ("OpenCEO no puede ejecutar este ticket: su "
+                        "workflow necesita una tool inexistente "
+                        f"({detail}). Revisa la skill.")
             else:
                 text = f"OpenCEO no puede ejecutar este ticket: configuración inválida ({reason})."
             await adapter.add_comment(name, text)

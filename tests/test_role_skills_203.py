@@ -35,6 +35,7 @@ from catalog import (  # noqa: E402
     CatalogError,
     check_skill_links,
     check_skill_names_unique,
+    discover_role_skills,
     load_all_role_skills,
     load_catalog,
     load_role_skills,
@@ -513,6 +514,38 @@ class SyncSkillLinksTest(unittest.TestCase):
             root = Path(tmp)
             self.assertEqual([], sync_skill_links({}, root))
             self.assertFalse((root / ".codex").exists())
+
+
+class DiscoverRoleSkillsTest(unittest.TestCase):
+    """Review 00006/W2: recovery scan without loading the catalog."""
+
+    def test_discovers_skills_and_recovers_links(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_skill(root / "skills" / "dev", "triage")
+            write_skill(root / "skills" / "operations", "probe")
+            found = discover_role_skills(root)
+            self.assertEqual({"dev", "operations"}, set(found))
+            self.assertEqual(["triage"],
+                             [skill.name for skill in found["dev"]])
+            created = sync_skill_links(found, root)
+            self.assertEqual({".codex/skills/triage", ".codex/skills/probe"},
+                             set(created))
+            self.assertEqual([], check_skill_links(found, root))
+            self.assertEqual([], sync_skill_links(found, root))
+
+    def test_missing_skills_dir_discovers_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual({}, discover_role_skills(Path(tmp)))
+
+    def test_skips_stray_files_and_hidden_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "skills").mkdir()
+            (root / "skills" / "README.md").write_text("docs\n",
+                                                      encoding="utf-8")
+            (root / "skills" / ".hidden").mkdir()
+            self.assertEqual({}, discover_role_skills(root))
 
 
 class SkillsIndexTest(unittest.TestCase):

@@ -133,6 +133,34 @@ class ConsumerConsistencyTest(unittest.TestCase):
             ["dev"], catalog)
         self.assertTrue(any("pm" in line for line in mismatches))
 
+    def test_enabled_ai_missing_from_enum_fails_r6(self):
+        catalog = tiny_catalog({"dev": {"enabled": True}})
+        mismatches = find_consumer_mismatches(
+            ["ceo"], ["dev"], {"dev": {"enabled": True}}, ["dev"],
+            catalog)
+        self.assertTrue(any(line.startswith("R6:") and "dev" in line
+                            and "enum" in line for line in mismatches))
+
+    def test_enabled_ai_missing_from_aliases_fails_r6(self):
+        catalog = tiny_catalog({"dev": {"enabled": True}})
+        mismatches = find_consumer_mismatches(
+            ["ceo", "dev"], [], {"dev": {"enabled": True}}, ["dev"],
+            catalog)
+        self.assertTrue(any(line.startswith("R6:") and "dev" in line
+                            and "aliases" in line
+                            for line in mismatches))
+
+    def test_disabled_ai_is_exempt_from_r6(self):
+        catalog = tiny_catalog({"dev": {"enabled": True},
+                                "ops": {"enabled": False,
+                                        "reason": "no runner yet"}})
+        mismatches = find_consumer_mismatches(
+            ["ceo", "dev"], ["dev"],
+            {"dev": {"enabled": True},
+             "ops": {"enabled": False, "reason": "no runner yet"}},
+            ["dev"], catalog)
+        self.assertFalse(any(line.startswith("R6:") for line in mismatches))
+
 
 class PlannerRegistryDerivationTest(unittest.TestCase):
     def test_registry_is_catalog_agents_plus_staff(self):
@@ -273,6 +301,20 @@ class GraphWiringTest(unittest.TestCase):
         out = asyncio.run(graph._unsupported_agent_node(
             {"selected_agent": "ceo", "steps": []}))
         self.assertEqual(TaskStatus.WAITING.value, out["status"])
+
+    def test_enabled_ai_agents_have_routes(self):
+        # Review 00006/mimo-W3, route leg: an enabled AI agent the gate
+        # approves must land on a real node, never unsupported.
+        catalog = load_catalog()
+        graph = OpenCEOGraph(None, None, None, None, None)
+        routed = [name for name, card in catalog.agents.items()
+                  if card.enabled and card.type.value == "ai"]
+        self.assertTrue(routed)
+        for name in routed:
+            with self.subTest(agent=name):
+                self.assertNotEqual(
+                    "unsupported",
+                    graph._after_ceo_route({"selected_agent": name}))
 
 
 class WaitCommentTextTest(unittest.TestCase):

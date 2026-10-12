@@ -36,8 +36,13 @@ date: 2026-10-12
   code (TASK-2026-00210); until then, from `openceo-core/` run:
 
   ```bash
-  ../.venv/bin/python -c "from catalog import load_catalog, load_all_role_skills, sync_skill_links; c = load_catalog(); print(sync_skill_links(load_all_role_skills(c)))"
+  ../.venv/bin/python -c "from catalog import discover_role_skills, sync_skill_links; print(sync_skill_links(discover_role_skills()))"
   ```
+
+  The scan reads `skills/*/` straight from disk on purpose: `load_catalog`
+  fails closed on the card mismatch and the missing link, exactly when the
+  operator needs the map (review 00006). List the skill on its card as well,
+  or the service still refuses to boot.
 
 ## Exact skills (no LLM)
 
