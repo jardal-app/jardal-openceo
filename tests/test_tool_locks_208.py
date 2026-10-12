@@ -92,6 +92,33 @@ class EmailAllowanceTests(unittest.TestCase):
         self.assertEqual(split["allowed"], ["a@jardal.app"])
         self.assertEqual(split["blocked"], ["evil@evil.com"])
 
+    def test_comma_inside_list_element_splits(self) -> None:
+        # Review 00008: stricter than the sender on purpose — an
+        # element hiding several addresses locks on each one.
+        split = email_allowance(
+            ["evil@evil.com, a@jardal.app"], ["@jardal.app"])
+        self.assertEqual(split["allowed"], ["a@jardal.app"])
+        self.assertEqual(split["blocked"], ["evil@evil.com"])
+
+
+class CheckNonSimpleAddressTests(unittest.TestCase):
+    def test_space_joined_and_display_forms_escalate(self) -> None:
+        config = {"secretary": {"allowed_recipients": ["@jardal.app"]}}
+        for to in ("a@jardal.app b@evil.com",
+                   ["Jefe <a@jardal.app>"],
+                   ["a@@jardal.app"]):
+            with self.subTest(to=to):
+                decision = check_email_lock(
+                    to=to, project_config=config, mandate=_mandate())
+                self.assertTrue(decision["escalate"])
+
+    def test_plain_allowed_still_proceeds(self) -> None:
+        config = {"secretary": {"allowed_recipients": ["@jardal.app"]}}
+        decision = check_email_lock(
+            to=["a@jardal.app"], project_config=config,
+            mandate=_mandate())
+        self.assertFalse(decision["escalate"])
+
 
 class CheckEmailLockTests(unittest.TestCase):
     def _config(self, allowed: list[str] | None) -> dict[str, Any]:
@@ -847,6 +874,31 @@ class ToolSendEmailTests(unittest.IsolatedAsyncioTestCase):
                             second["question_task_id"])
         self.assertEqual(len(created), 2)
 
+    async def test_fingerprint_splits_distribution(self) -> None:
+        # Review 00008: the same set under another field is a different
+        # approved action, not a replay.
+        repo = _LockRepo()
+        repo.tasks["origin-1"] = _lock_task("origin-1")
+        service = _lock_service(repo, self._config())
+        created: list[dict[str, Any]] = []
+        _stub_create_question(service, repo, created)
+        sender = _FakeSmtp(None)
+        with patch("tools.email_sender.SMTPEmailSender",
+                   lambda settings: sender):
+            first = await service.tool_send_email(
+                from_email=None, to=["x@evil.com"],
+                subject="Hola", body_text="cuerpo",
+                project="jardal-openceo", origin_task_id="origin-1",
+            )
+            second = await service.tool_send_email(
+                from_email=None, to=[], bcc=["x@evil.com"],
+                subject="Hola", body_text="cuerpo",
+                project="jardal-openceo", origin_task_id="origin-1",
+            )
+        self.assertNotEqual(first["question_task_id"],
+                            second["question_task_id"])
+        self.assertEqual(len(created), 2)
+
     async def test_question_shows_what_owner_approves(self) -> None:
         # Review R1: from, body, reply_to and attachments render.
         repo = _LockRepo()
@@ -1251,6 +1303,29 @@ class AttachmentSnapshotTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["route"], "owner_question_lock_resume")
             self.assertEqual(len(sender.sent), 1)
 
+    async def test_transient_snapshot_error_fails_fast(self) -> None:
+        # Review 00008: a silent {} would hold every approval forever.
+        repo = _LockRepo()
+        repo.tasks["origin-1"] = _lock_task("origin-1")
+        service = self._service(repo)
+        created: list[dict[str, Any]] = []
+        _stub_create_question(service, repo, created)
+
+        class _FlakySmtp(_FakeSmtp):
+            def _normalize_attachments(self, items: Any) -> list[Any]:
+                raise PermissionError("io flaky")
+
+        with patch("tools.email_sender.SMTPEmailSender",
+                   lambda settings: _FlakySmtp(None)):
+            with self.assertRaises(PermissionError):
+                await service.tool_send_email(
+                    from_email=None, to=["x@evil.com"],
+                    subject="Hola", body_text="cuerpo",
+                    attachments=["/tmp/whatever.txt"],
+                    project="jardal-openceo", origin_task_id="origin-1",
+                )
+        self.assertEqual(created, [])
+
     async def test_missing_attachment_fails_fast(self) -> None:
         repo = _LockRepo()
         repo.tasks["origin-1"] = _lock_task("origin-1")
@@ -1595,6 +1670,21 @@ class SecretarySessionLockTests(unittest.IsolatedAsyncioTestCase):
             }),
             "project": "jardal-openceo",
         }
+
+    async def test_allowed_sends_off_loop(self) -> None:
+        import asyncio
+
+        sender = _FakeSmtp(None)
+        manager = self._manager(sender)
+        with patch("asyncio.to_thread",
+                   side_effect=asyncio.to_thread) as threaded:
+            output = await manager.run(
+                self._task(["a@jardal.app"]),
+                {"secretary": {"allowed_recipients": ["@jardal.app"]}},
+            )
+        self.assertEqual(output.status.value, "completed")
+        self.assertTrue(threaded.await_count >= 1)
+        self.assertEqual(len(sender.sent), 1)
 
     async def test_allowed_sends_without_service(self) -> None:
         sender = _FakeSmtp(None)

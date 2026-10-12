@@ -77,10 +77,24 @@ def _clean_addresses(values: Any) -> list[str]:
     for item in items:
         if item is None:
             continue
-        text = str(item).strip()
-        if text:
-            cleaned.append(text)
+        # Stricter than the sender on purpose (review 00008): an element
+        # hiding several addresses behind a comma locks on each one,
+        # never on the joined tail.
+        for part in str(item).split(","):
+            text = part.strip()
+            if text:
+                cleaned.append(text)
     return cleaned
+
+
+def _is_simple_address(value: str) -> bool:
+    """One plain address: exactly one @ and no whitespace. Pure."""
+    if not value or any(ch.isspace() for ch in value):
+        return False
+    if value.count("@") != 1:
+        return False
+    local, _, domain = value.partition("@")
+    return bool(local) and bool(domain)
 
 
 def email_allowance(
@@ -137,6 +151,12 @@ def check_email_lock(
     secretary = (project_config or {}).get("secretary")
     allowed = secretary.get("allowed_recipients") if isinstance(secretary, dict) else None
     split = email_allowance(envelope, allowed if isinstance(allowed, list) else [])
+    # Anything that is not one plain address (spaces, malformed,
+    # display-name forms) never rides the allowlist (review 00008).
+    split["blocked"].extend(
+        item for item in split["allowed"] if not _is_simple_address(item))
+    split["allowed"] = [
+        item for item in split["allowed"] if _is_simple_address(item)]
     if not split["blocked"]:
         return {
             "escalate": False,

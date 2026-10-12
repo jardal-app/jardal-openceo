@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -143,7 +144,9 @@ class SecretarySessionManager:
             mandate=self._mandate(),
         )
         if not decision.get("escalate"):
-            return self._email_sender.send_email(
+            # Off the event loop, like the service path (review 00008).
+            return await asyncio.to_thread(
+                self._email_sender.send_email,
                 from_email=payload.get("from_email"),
                 to=payload.get("to", []),
                 cc=payload.get("cc", []),
