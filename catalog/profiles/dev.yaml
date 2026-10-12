@@ -16,4 +16,4 @@ card:
     - commit, merge or push
 rules: AGENTS.md
 skills: []
-output_schema: objectives/agent_result.schema.json
+output_schema: openceo-core/objectives/agent_result.schema.json

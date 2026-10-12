@@ -180,6 +180,25 @@ class RoleProfileLoaderTests(unittest.TestCase):
             catalog = load_catalog(base)
             self.assertIsNone(catalog.agents["dev"].profile)
 
+    def test_profile_extra_keys_refused(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="catprof-") as tmp:
+            base = _minimal_catalog(Path(tmp))
+            _write(base / "profiles" / "dev.yaml",
+                   _dev_profile_text() + "skill: [typo]\n")
+            with self.assertRaises(CatalogError):
+                load_catalog(base)
+
+    def test_profile_paths_are_repo_relative(self) -> None:
+        for name in ("dev", "operations", "secretary", "finance",
+                     "research"):
+            with self.subTest(profile=name):
+                profile = load_role_profile(name)
+                assert profile.output_schema is not None
+                target = REPO / profile.output_schema
+                self.assertTrue(target.is_file(),
+                                f"{profile.output_schema} must exist")
+                self.assertTrue((REPO / profile.rules).is_file())
+
 
 class TranslatorTests(unittest.TestCase):
     def test_card_names_who_delivers_never(self) -> None:
@@ -316,6 +335,13 @@ class TranslatorTests(unittest.TestCase):
         off = {"bundled": ["bundled://muse-core/skills/git/SKILL.md"],
                "user": [], "plugin": [], "projects": {}}
         self.assertEqual(render_activation(off, allowed=["git"]), {})
+
+    def test_render_settings_empty_map_drops_owner_servers(self) -> None:
+        profile = load_role_profile("dev")
+        out = render_settings(profile,
+                              {"mcpServers": {"personal": {"url": "u"}}},
+                              {}, None)
+        self.assertEqual(out["mcpServers"], {})
 
     def test_render_settings_replaces_mcp_and_merges_skills(self) -> None:
         profile = load_role_profile("dev")
@@ -536,6 +562,27 @@ class SandboxOverlayTests(unittest.TestCase):
                         overlay={},
                         home_file_overlays={"../evil": b"x"})
 
+    def test_plan_agent_overlay_sources_are_unique_per_plan(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ws-") as tmp:
+            ws = Path(tmp)
+            (ws / "f.txt").write_text("x", encoding="utf-8")
+            with patch.object(agent_sandbox.BubblewrapBackend,
+                              "available", True):
+                first = agent_sandbox.plan_agent(
+                    argv=["muse"], workspace=ws, base={}, overlay={},
+                    home_file_overlays={".config/muse/settings.json":
+                                        b'{"run": 1}'})
+                second = agent_sandbox.plan_agent(
+                    argv=["muse"], workspace=ws, base={}, overlay={},
+                    home_file_overlays={".config/muse/settings.json":
+                                        b'{"run": 2}'})
+            dest = str(Path.home() / ".config/muse/settings.json")
+            srcs = [argv[argv.index(dest) - 1]
+                    for argv in (first.argv, second.argv)]
+            self.assertNotEqual(srcs[0], srcs[1])
+            self.assertEqual(Path(srcs[0]).read_bytes(), b'{"run": 1}')
+            self.assertEqual(Path(srcs[1]).read_bytes(), b'{"run": 2}')
+
     def test_sandboxed_shell_command_passes_overlays(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ws-") as tmp:
             with patch.object(agent_sandbox.BubblewrapBackend,
@@ -546,6 +593,126 @@ class SandboxOverlayTests(unittest.TestCase):
                     home_file_overlays={".config/muse/settings.json":
                                         b"{}"})
         self.assertIn(".config/muse/settings.json", line)
+
+
+class TierProfileThreadingTests(unittest.IsolatedAsyncioTestCase):
+    def _manager(self):
+        from agents.dev.session import DevSessionManager
+        return DevSessionManager(MagicMock(), MagicMock(), repo=None)
+
+    def _provider(self):
+        provider = MagicMock()
+        provider.mint = AsyncMock(return_value="badge-1")
+        provider.mcp_servers = MagicMock(return_value={})
+        provider.revoke = AsyncMock()
+        return provider
+
+    async def test_tier_overlays_use_configured_profile(self) -> None:
+        manager = self._manager()
+        with tempfile.TemporaryDirectory(prefix="ws-") as tmp:
+            with patch("agents.dev.session.settings_overlay_bytes",
+                       return_value=b"{}") as overlay_fn:
+                overlays, badge = await manager._muse_role_overlays(
+                    self._provider(), "tier_c:muse", tmp, "dev")
+        self.assertEqual(badge, "badge-1")
+        self.assertEqual(set(overlays), {SETTINGS_OVERLAY_RELPATH})
+        profile = overlay_fn.call_args[0][0]
+        self.assertEqual(profile.name, "dev")
+
+    async def test_tier_overlays_refuse_non_dev_profile(self) -> None:
+        manager = self._manager()
+        provider = self._provider()
+        with tempfile.TemporaryDirectory(prefix="ws-") as tmp:
+            with self.assertRaises(RoleProfileError):
+                await manager._muse_role_overlays(
+                    provider, "tier_c:muse", tmp, "planner")
+        provider.mint.assert_not_awaited()
+
+
+class InteractiveBadgeRevocationTests(unittest.IsolatedAsyncioTestCase):
+    def _service(self):
+        from dev_session_service import DevSessionService
+        from settings import Settings
+        settings = Settings(_env_file=None)
+        repo = MagicMock()
+        repo.set_selected_project = AsyncMock()
+        repo.find_active_project_session = AsyncMock(return_value=None)
+        repo.create_dev_session = AsyncMock(return_value={"session_id": "s"})
+        hub = MagicMock()
+        hub.broadcast = AsyncMock()
+        service = DevSessionService(settings, repo, MagicMock(),
+                                    MagicMock(), hub)
+        service._tmux = MagicMock()
+        service._tmux.wait_until_ready = AsyncMock(return_value=True)
+        return service
+
+    def _payload(self):
+        from state import DevSessionCreateRequest
+        return DevSessionCreateRequest(title="t", objective="o")
+
+    def _issuer(self):
+        issuer = MagicMock()
+        issuer.issue_service = AsyncMock(return_value="badge-1")
+        issuer.revoke = AsyncMock(return_value=True)
+        return issuer
+
+    def _prime(self, service, tmp: str):
+        from state import DevProvider
+        service._project_service.resolve_project = AsyncMock(
+            return_value="proj")
+        service._config_loader.load_project = MagicMock(return_value={})
+        service._config_loader.validate_project = MagicMock(
+            return_value=[])
+        service._resolve_provider = MagicMock(  # type: ignore[method-assign]
+            return_value=DevProvider.MUSE)
+        service._resolve_command = MagicMock(  # type: ignore[method-assign]
+            return_value=(["musej"], {}, tmp))
+        service._resolve_repo_path = MagicMock(  # type: ignore[method-assign]
+            return_value=tmp)
+
+    async def test_render_failure_revokes_badge(self) -> None:
+        service = self._service()
+        issuer = self._issuer()
+        with tempfile.TemporaryDirectory(prefix="ws-") as tmp:
+            self._prime(service, tmp)
+            with patch("dev_session_service.issuer_for_repo",
+                       return_value=issuer), \
+                 patch("dev_session_service.settings_overlay_bytes",
+                       side_effect=RoleProfileError("drift")):
+                with self.assertRaisesRegex(ValueError,
+                                            "role profile refused"):
+                    await service.create_session(self._payload())
+        issuer.revoke.assert_awaited_once()
+
+    async def test_start_failure_revokes_badge(self) -> None:
+        service = self._service()
+        issuer = self._issuer()
+        service._tmux.start_session = MagicMock(
+            side_effect=RuntimeError("boom"))
+        with tempfile.TemporaryDirectory(prefix="ws-") as tmp:
+            self._prime(service, tmp)
+            with patch("dev_session_service.issuer_for_repo",
+                       return_value=issuer), \
+                 patch("dev_session_service.settings_overlay_bytes",
+                       return_value=b"{}"):
+                with self.assertRaisesRegex(ValueError,
+                                            "Failed to start"):
+                    await service.create_session(self._payload())
+        issuer.revoke.assert_awaited_once()
+
+    async def test_existing_session_reconnect_revokes_badge(self) -> None:
+        service = self._service()
+        issuer = self._issuer()
+        service._tmux.start_session = MagicMock(
+            side_effect=ValueError("tmux session already exists"))
+        with tempfile.TemporaryDirectory(prefix="ws-") as tmp:
+            self._prime(service, tmp)
+            with patch("dev_session_service.issuer_for_repo",
+                       return_value=issuer), \
+                 patch("dev_session_service.settings_overlay_bytes",
+                       return_value=b"{}"):
+                await service.create_session(self._payload())
+        issuer.revoke.assert_awaited_once()
 
 
 def _session_fixture(path: Path) -> None:
@@ -604,6 +771,24 @@ class MeasureSessionLogTests(unittest.TestCase):
                            encoding="utf-8")
             with self.assertRaises(RoleProfileError):
                 measure_session_log(log)
+
+    def test_measure_refuses_trace_without_byte_count(self) -> None:
+        trace = {"payload_type": "runtime.session",
+                 "payload": {"event": {
+                     "kind": "model_input_trace_recorded",
+                     "bounded": {}}}}
+        garbage = {"payload_type": "runtime.session",
+                   "payload": {"event": {
+                       "kind": "model_input_trace_recorded",
+                       "bounded": {"total_lane_bytes": "many"}}}}
+        with tempfile.TemporaryDirectory(prefix="sess-") as tmp:
+            for name, record in (("empty.jsonl", trace),
+                                 ("garbage.jsonl", garbage)):
+                log = Path(tmp) / name
+                log.write_text(json.dumps(record) + "\n", encoding="utf-8")
+                with self.subTest(log=name):
+                    with self.assertRaises(RoleProfileError):
+                        measure_session_log(log)
 
     def test_measure_refuses_missing_log(self) -> None:
         with self.assertRaises(RoleProfileError):

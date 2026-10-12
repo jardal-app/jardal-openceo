@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 __all__ = [
     "CATALOG_VERSION",
@@ -241,6 +241,8 @@ class AgentCard(BaseModel):
 class RoleCard(BaseModel):
     """Who the role is, what it delivers, what it never does."""
 
+    model_config = ConfigDict(extra="forbid")
+
     who: str = Field(min_length=1)
     delivers: list[str] = Field(min_length=1)
     never: list[str] = Field(min_length=1)
@@ -258,7 +260,12 @@ class RoleProfile(BaseModel):
     here; each engine translator renders them for its own CLI. ``agent``
     is the catalog agent or the planner/ceo principal the profile
     belongs to; launch roles (builder, closer) share their agent file.
+    ``rules`` and ``output_schema`` are repo-relative paths; the schema
+    documents the verdict contract while TASK-2026-00202 owns the
+    ``--output-schema`` flag wiring.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(pattern=_NAME_PATTERN)
     agent: str = Field(pattern=_NAME_PATTERN)
