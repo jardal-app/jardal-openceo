@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
+import shlex
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -18,6 +20,9 @@ from typing import Any
 import libtmux
 
 from agents.dev.routing import resolved_tool_name
+from orchestration.agent_sandbox import (
+    ensure_ticket_dir, sandboxed_shell_command,
+)
 from settings import Settings
 from state import (
     WAIT_LIMIT_GLOBAL,
@@ -126,6 +131,9 @@ class RateMonitor:
         self._locks: dict[str, asyncio.Lock] = {}
         # Optional reference to MongoRepository – set after wiring
         self._repo: Any = None
+        # Monitor panes fenced by this process. Anything older predates
+        # the fence (or the restart) and is reaped on first touch.
+        self._owned_sessions: set[str] = set()
 
     def set_repo(self, repo: Any) -> None:
         self._repo = repo
@@ -148,7 +156,13 @@ class RateMonitor:
         try:
             session = self.server.sessions.get(session_name=name)
             if session is not None:
-                return session
+                if name in self._owned_sessions:
+                    return session
+                try:
+                    session.kill_session()
+                    logger.info("Reaped pre-fence monitor session '%s'", name)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -171,9 +185,17 @@ class RateMonitor:
         else:
             raise ValueError(f"No monitor support for provider: {provider}")
 
+        # Monitors only run /usage: a persistent per-provider dir, no repo.
+        monitor_dir = ensure_ticket_dir(f"monitor-{provider}")
+        command = shlex.split(cmd)
+        fenced = sandboxed_shell_command(
+            command=command, workspace=monitor_dir, base=os.environ,
+            overlay={}, config_args=command[:1])
         session = self.server.new_session(session_name=name)
         pane = session.active_window.active_pane
-        pane.send_keys(cmd, enter=True)
+        # No scratch cleanup: the pane execs async (H7 residue, bytes).
+        pane.send_keys(fenced, enter=True)
+        self._owned_sessions.add(name)
         logger.info("Created rate-monitor tmux session '%s'", name)
         # Let the CLI finish booting before we send slash commands.
         # Codex model loading takes ~25-30s even without MCP servers;

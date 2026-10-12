@@ -375,7 +375,13 @@ class PMSessionManager:
         from research.runtimes.base import IsolationUnavailable
         # PM reads nothing from disk (prompt via stdin): it runs in an
         # empty per-run ticket dir instead of the service checkout.
-        pm_dir = ensure_ticket_dir(source_id)
+        try:
+            pm_dir = ensure_ticket_dir(source_id)
+        except (ValueError, OSError) as exc:
+            return PMExtractionResult(
+                status=TaskStatus.FAILED,
+                error=f"ticket dir refused: {exc}",
+            )
         mcp_config_path: str | None = None
         if tool == "claude":
             mcp_config = build_mcp_provider_config(
