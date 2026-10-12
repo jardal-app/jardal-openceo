@@ -39,26 +39,31 @@ ALLOWLIST: dict[str, str] = {
 # Mounted sub-apps pin: a new mount needs an explicit auth review.
 KNOWN_MOUNTS = frozenset({"/internal/mcp", "/internal/mcp-global"})
 
+# Host-level surface: every method on these prefixes, plus the pinned voice
+# route, must be admin-only. Prefix matching (not a fixed list) so a future
+# dev/tmux route without require_admin fails the suite (review round 00004 H5).
+ADMIN_ONLY_PREFIXES = ("/api/dev/", "/api/tmux/")
+ADMIN_ONLY_PATHS = frozenset({"/api/voice/peer-programming"})
+
 ADMIN_ONLY_ROUTES = frozenset(
     {
         "POST /api/dev/sessions",
+        "GET /api/dev/sessions",
+        "GET /api/dev/sessions/{session_id}",
         "POST /api/dev/sessions/{session_id}/message",
         "POST /api/dev/sessions/{session_id}/control",
         "POST /api/voice/peer-programming",
+        "GET /api/tmux/sessions",
+        "GET /api/tmux/sessions/{name}/pane",
         "POST /api/tmux/sessions",
         "POST /api/tmux/sessions/{name}/keys",
         "DELETE /api/tmux/sessions/{name}",
     }
 )
 
-ADMIN_ONLY_GET_ROUTES = frozenset(
-    {
-        "GET /api/dev/sessions",
-        "GET /api/dev/sessions/{session_id}",
-        "GET /api/tmux/sessions",
-        "GET /api/tmux/sessions/{name}/pane",
-    }
-)
+
+def _is_host_route(path: str) -> bool:
+    return path in ADMIN_ONLY_PATHS or path.startswith(ADMIN_ONLY_PREFIXES)
 
 
 def _iter_write_routes() -> list[APIRoute]:
@@ -150,25 +155,20 @@ class RestAuthInventoryTests(unittest.TestCase):
             f"mount set changed: a new mounted sub-app needs an explicit auth review ({mounts})",
         )
 
-    def test_tmux_dev_voice_write_routes_require_admin(self) -> None:
-        by_key = {}
-        for route in _iter_write_routes():
-            for method in sorted(WRITE_METHODS.intersection(route.methods or set())):
-                by_key[f"{method} {route.path}"] = _route_auth_kind(route)
-        for key in sorted(ADMIN_ONLY_ROUTES):
-            self.assertIn(key, by_key, f"route disappeared: {key}")
-            self.assertEqual(by_key[key], "admin", f"{key} must be admin-only")
-
-    def test_tmux_dev_read_routes_require_admin(self) -> None:
+    def test_host_routes_require_admin(self) -> None:
         by_key = {}
         for route in main.app.routes:
             if not isinstance(route, APIRoute):
                 continue
-            for method in sorted((route.methods or set())):
+            if not _is_host_route(route.path):
+                continue
+            for method in sorted(route.methods or set()):
                 by_key[f"{method} {route.path}"] = _route_auth_kind(route)
-        for key in sorted(ADMIN_ONLY_GET_ROUTES):
+        self.assertTrue(by_key, "no host routes found")
+        for key in sorted(ADMIN_ONLY_ROUTES):
             self.assertIn(key, by_key, f"route disappeared: {key}")
-            self.assertEqual(by_key[key], "admin", f"{key} must be admin-only")
+        non_admin = sorted(key for key, kind in by_key.items() if kind != "admin")
+        self.assertEqual(non_admin, [], f"host routes without admin gate: {non_admin}")
 
     def test_pm_extract_requires_session(self) -> None:
         for route in _iter_write_routes():
