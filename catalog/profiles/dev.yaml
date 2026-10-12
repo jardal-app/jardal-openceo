@@ -15,5 +15,7 @@ card:
     - move real money
     - commit, merge or push
 rules: AGENTS.md
-skills: []
+skills:
+  - create-skill
+  - git
 output_schema: openceo-core/objectives/agent_result.schema.json

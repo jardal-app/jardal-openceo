@@ -981,10 +981,13 @@ class RoleProfileSmokeTests(unittest.IsolatedAsyncioTestCase):
             f"{name} prompt {measured.total_lane_bytes}B is "
             f"{ratio:.1%} of baseline {baseline_lanes}B")
         allowed = set(profile.skills)
-        foreign = {skill for skill in measured.skill_ids
-                   if skill.split(":")[-1] not in allowed}
+        present = {skill.split(":")[-1] for skill in measured.skill_ids}
+        foreign = {skill for skill in present if skill not in allowed}
         self.assertEqual(foreign, set(),
                          f"foreign skills loaded: {sorted(foreign)}")
+        missing = allowed - present
+        self.assertEqual(missing, set(),
+                         f"role skills not loaded: {sorted(missing)}")
         if expected_box is not None:
             self.assertEqual(set(measured.mcp_tool_names), expected_box,
                              f"{name} run must see exactly its box")

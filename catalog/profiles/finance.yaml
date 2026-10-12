@@ -11,5 +11,6 @@ card:
     - execute a transfer
     - decide business work
 rules: AGENTS.md
-skills: []
+skills:
+  - create-skill
 output_schema: openceo-core/objectives/agent_result.schema.json

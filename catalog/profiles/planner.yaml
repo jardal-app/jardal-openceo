@@ -12,5 +12,6 @@ card:
     - change ticket states
     - write outside the result path
 rules: AGENTS.md
-skills: []
+skills:
+  - create-skill
 output_schema: null
