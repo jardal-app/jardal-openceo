@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
+
+from pymongo.errors import DuplicateKeyError
 
 from company_mandate import (
     ESCALATION_PHASE,
@@ -74,6 +77,19 @@ from state import (
     WorkflowRunStatus,
     make_task_document,
     make_task_review_document,
+)
+from tool_locks import (
+    LOCK_WAITING_PREFIX,
+    ToolLockError,
+    action_fingerprint,
+    check_dns_delete_lock,
+    check_email_lock,
+    check_payment_lock,
+    lock_hold_action,
+    lock_question_spec,
+    lock_source_id,
+    lock_waiting_reason,
+    pending_lock_result,
 )
 from tools.erpnext_client import (
     ERPNextDateBoundError,
@@ -3405,6 +3421,60 @@ class TaskService:
                 params["modified_files"] = modified_files
                 updates["params"] = params
 
+            current_params = current.get("params") \
+                if isinstance(current, dict) else {}
+            if not isinstance(current_params, dict):
+                current_params = {}
+            lock_hold = (
+                current is not None
+                and str(current.get("status") or "")
+                == TaskStatus.WAITING.value
+                and str(current.get("waiting_reason") or "").startswith(
+                    LOCK_WAITING_PREFIX)
+                and bool(current_params.get("owner_question_id"))
+            )
+            if lock_hold and current is not None:
+                # A tool lock parked mid-run wins over the run outcome
+                # (TASK-2026-00208): the run that asked the Owner cannot
+                # complete above the hold. Its verdict still merges in.
+                final_status = TaskStatus.WAITING.value
+                updates["status"] = final_status
+                updates["waiting_reason"] = current.get("waiting_reason")
+                updates["resume_at"] = None
+                updates.pop("completed_at", None)
+                merged = dict(current_params)
+                graph_params = graph_out.get("params")
+                if isinstance(graph_params, dict):
+                    merged.update(graph_params)
+                merged["owner_question_id"] = current_params.get(
+                    "owner_question_id")
+                updates["params"] = merged
+            start_answer = (task.get("params") or {}).get("owner_answer")
+            fresh_answer = current_params.get("owner_answer")
+            resumed_mid_run = (
+                current is not None
+                and isinstance(fresh_answer, dict)
+                and (not isinstance(start_answer, dict)
+                     or fresh_answer.get("at") != start_answer.get("at"))
+                and str(current.get("status") or "")
+                in {TaskStatus.QUEUED.value,
+                    TaskStatus.IN_PROGRESS.value,
+                    TaskStatus.WAITING.value}
+                and not bool(current_params.get("owner_question_id"))
+            )
+            if not lock_hold and resumed_mid_run:
+                # The lock was answered in the run tail and the ticket
+                # moved on (resumed or relaunched): this outcome is
+                # stale. Compared against the run-start snapshot, so a
+                # re-run carrying an old answer still lands.
+                logger.info(
+                    "run_task: ticket %s was resumed mid-run; discarding "
+                    "%s result",
+                    task_id, graph_out.get("status"),
+                )
+                self._wake_dispatcher()
+                return current
+
             if final_status == TaskStatus.COMPLETED.value:
                 phase_updates = self._phase_completion_updates(task)
                 if phase_updates:
@@ -3691,6 +3761,489 @@ class TaskService:
             },
         )
         return parked or created
+
+    async def check_lock_state(self, source_id: str) -> dict[str, Any]:
+        """State of a lock question by its idempotency key. No side effects.
+
+        ``none`` (no question yet), ``pending``, ``approved`` (decided,
+        execution still owed), ``executed`` (with the stored outcome) or
+        ``denied``. Re-runs of a locked tool read this instead of
+        re-escalating; only the decision path executes. Store errors
+        propagate (fail-closed): a forged ``none`` would re-escalate
+        what is already decided.
+        """
+        key = str(source_id or "").strip()
+        if not key:
+            return {"state": "none", "question": None}
+        prior = await self._repo.find_task_by_source("api", key)
+        if prior is None or lock_hold_action(prior) is None:
+            return {"state": "none", "question": None}
+        block = owner_question_block(prior)
+        decision = block.get("decision") or {}
+        verdict = str(decision.get("decision") or "").strip()
+        if verdict == "denied":
+            return {"state": "denied", "question": prior}
+        execution = (dict(block.get("lock") or {}).get("execution")
+                     if isinstance(block.get("lock"), dict) else None)
+        if isinstance(execution, dict) and execution.get("status") == "executed":
+            return {
+                "state": "executed",
+                "question": prior,
+                "outcome": execution.get("outcome"),
+            }
+        if verdict == "approved":
+            return {"state": "approved", "question": prior}
+        return {"state": "pending", "question": prior}
+
+    async def request_tool_lock(
+        self,
+        *,
+        tool: str,
+        name: str,
+        question: str,
+        action: dict[str, Any],
+        fingerprint: str,
+        decision: dict[str, Any],
+        describe: dict[str, Any] | None = None,
+        context: str | None = None,
+        project: str,
+        origin_task_id: str | None = None,
+        origin_title: str | None = None,
+        source_id: str | None = None,
+        _duplicate_retry: bool = False,
+    ) -> dict[str, Any]:
+        """Raise a ``lock`` owner-question and park the origin. Idempotent.
+
+        A repeat call with the same ``source_id`` never duplicates the
+        question: pending/approved replays the hold, executed replays the
+        stored outcome, denied reports the denial. A concurrent duplicate
+        loses the unique index and replays the winner instead of failing.
+        The origin parks in ``waiting(tool_lock:*)`` with its params
+        merged (never wiped); without a live origin the question stands
+        alone and the approval still executes the stored action once.
+        """
+        clean_tool = str(tool or "").strip() or "tool"
+        origin: dict[str, Any] | None = None
+        if origin_task_id:
+            try:
+                origin = await self._repo.get_task(str(origin_task_id))
+            except Exception:
+                origin = None
+        origin_key = str(origin_task_id or "").strip() or "no-origin"
+        key = (str(source_id or "").strip()
+               or lock_source_id(origin_key, clean_tool, fingerprint))
+        seen = await self.check_lock_state(key)
+        reason = lock_waiting_reason(clean_tool)
+        if seen["state"] == "executed":
+            outcome = seen.get("outcome")
+            if isinstance(outcome, dict):
+                return dict(outcome)
+            return pending_lock_result(
+                tool=clean_tool,
+                question_task_id=str((seen.get("question") or {}).get("task_id") or ""),
+                waiting_reason=reason,
+                detail="Ya ejecutado; outcome ilegible, no se repite.",
+            )
+        if seen["state"] in {"pending", "approved"}:
+            prior = seen.get("question") or {}
+            return pending_lock_result(
+                tool=clean_tool,
+                question_task_id=str(prior.get("task_id") or ""),
+                waiting_reason=reason,
+                detail="Ya esta pendiente de aprobacion del dueno.",
+            )
+        if seen["state"] == "denied":
+            return {
+                "ok": False,
+                "status": "denied",
+                "tool": clean_tool,
+                "question_task_id": str((seen.get("question") or {}).get("task_id") or ""),
+                "reason": "El dueno denego esta accion.",
+            }
+        if not str(project or "").strip():
+            return {
+                "ok": False,
+                "status": "invalid_input",
+                "tool": clean_tool,
+                "reason": "lock needs a project: pass project with the call.",
+            }
+        live_origin = (
+            origin is not None
+            and str(origin.get("status") or "") in {
+                TaskStatus.QUEUED.value,
+                TaskStatus.IN_PROGRESS.value,
+                TaskStatus.WAITING.value,
+            }
+        )
+        spec = lock_question_spec(
+            tool=clean_tool,
+            name=name,
+            question=question,
+            action=action,
+            fingerprint=fingerprint,
+            decision=decision,
+            describe=describe,
+            context=context,
+            origin_task_id=str(origin_task_id) if live_origin else None,
+            origin_title=origin_title,
+            project=project,
+            source_id=key,
+        )
+        slot = spec["params"]["owner_question"]
+        try:
+            created = await self.create_owner_question(
+                kind=str(slot.get("kind") or "lock"),
+                question=str(slot.get("question") or ""),
+                human_action=str(slot.get("human_action") or ""),
+                project=project,
+                origin_task_id=slot.get("origin_task_id"),
+                origin_title=slot.get("origin_title"),
+                checkpoint=dict(slot.get("checkpoint") or {}),
+                context=context,
+                tool=dict(slot.get("tool") or {}),
+                source_id=key,
+            )
+        except DuplicateKeyError:
+            # A concurrent twin won the unique (source, source_id)
+            # index: replay the winner instead of failing. The check
+            # first makes this terminate after one retry.
+            if _duplicate_retry:
+                raise
+            logger.info("lock %s lost a creation race; replaying", key)
+            return await self.request_tool_lock(
+                tool=clean_tool, name=name, question=question,
+                action=action, fingerprint=fingerprint,
+                decision=decision, describe=describe, context=context,
+                project=project, origin_task_id=origin_task_id,
+                origin_title=origin_title, source_id=key,
+                _duplicate_retry=True,
+            )
+        question_id = str(created.get("task_id") or "")
+        if live_origin and origin is not None:
+            await self.patch_task(str(origin.get("task_id") or ""), {
+                "status": TaskStatus.WAITING.value,
+                "waiting_reason": reason,
+                "resume_at": None,
+                "params": {"owner_question_id": question_id},
+                "last_response_summary": (
+                    f"Candado ({clean_tool}): pendiente de aprobacion "
+                    f"del dueno ({question_id})."
+                ),
+            })
+            try:
+                await self.comment_on_ticket(
+                    str(origin.get("task_id") or ""),
+                    f"Candado ({clean_tool}): pedi aprobacion al dueno "
+                    f"({question_id}); el trabajo se reanuda solo.",
+                )
+            except Exception:
+                logger.warning("lock park comment failed for %s",
+                               origin.get("task_id"), exc_info=True)
+        return pending_lock_result(
+            tool=clean_tool,
+            question_task_id=question_id,
+            waiting_reason=reason,
+            detail=question,
+        )
+
+    def _lock_project_config(self, project: str | None) -> dict[str, Any]:
+        loader = getattr(self, "_config_loader", None)
+        if loader is None or not str(project or "").strip():
+            return {}
+        try:
+            config = loader.load_project(str(project).strip())
+        except Exception:
+            return {}
+        return dict(config) if isinstance(config, dict) else {}
+
+    async def _resolve_lock_origin(
+        self,
+        *,
+        origin_task_id: str | None = None,
+        ticket: str | None = None,
+    ) -> dict[str, Any] | None:
+        if origin_task_id:
+            try:
+                found = await self._repo.get_task(str(origin_task_id))
+            except Exception:
+                found = None
+            if found is not None:
+                return found
+        name = str(ticket or "").strip()
+        if name:
+            try:
+                return await self._repo.find_task_by_business_name(name)
+            except Exception:
+                logger.warning("lock origin lookup failed for %s", name,
+                               exc_info=True)
+        return None
+
+    async def _snapshot_attachments(
+        self, attachments: Any
+    ) -> dict[str, str]:
+        """sha256 of each attachment at request time (TOCTOU guard).
+
+        Keyed by resolved path, with the sender's own normalization, so
+        a swap or deletion between the request and the approval fails
+        the execution instead of sending something else. A missing file
+        fails fast; without SMTP configured there is nothing to hash
+        yet (the execution fails closed on its own).
+        """
+        from tools.email_sender import SMTPEmailSender
+
+        if not attachments:
+            return {}
+        try:
+            sender = SMTPEmailSender(self._settings)
+        except Exception:
+            return {}
+        items = attachments if isinstance(attachments, list) else [attachments]
+
+        def _hash() -> dict[str, str]:
+            out: dict[str, str] = {}
+            for item in sender._normalize_attachments(items):
+                out[str(item.path)] = hashlib.sha256(
+                    item.path.read_bytes()).hexdigest()
+            return out
+
+        try:
+            return await asyncio.to_thread(_hash)
+        except FileNotFoundError:
+            raise
+        except Exception:
+            return {}
+
+    def _verify_attachment_snapshot(self, action: dict[str, Any]) -> None:
+        """Refuse the send when attachments changed since the request."""
+        from tools.email_sender import SMTPEmailSender
+
+        attachments = action.get("attachments") or []
+        expected = action.get("_attachment_hashes") or {}
+        sender = SMTPEmailSender(self._settings)
+        items = attachments if isinstance(attachments, list) else [attachments]
+        current: dict[str, str] = {}
+        for item in sender._normalize_attachments(items):
+            current[str(item.path)] = hashlib.sha256(
+                item.path.read_bytes()).hexdigest()
+        if current != expected:
+            raise ToolLockError(
+                "attachments changed since the request; refusing to send")
+
+    async def tool_send_email(
+        self,
+        *,
+        from_email: str | None,
+        to: Any,
+        subject: str,
+        body_text: str,
+        body_html: str | None = None,
+        cc: Any = None,
+        bcc: Any = None,
+        reply_to: str | None = None,
+        attachments: Any = None,
+        language: str | None = None,
+        project: str | None = None,
+        origin_task_id: str | None = None,
+        ticket: str | None = None,
+    ) -> dict[str, Any]:
+        """Gated email send: the single email lock (TASK-2026-00208).
+
+        MCP, registry and session paths all enter here. On-allowlist
+        mail sends at once; anything else raises a ``lock`` question
+        and answers pending. Approvals execute the stored send exactly
+        once; re-runs replay its outcome.
+        """
+        from tools.email_sender import SMTPEmailSender
+
+        origin = await self._resolve_lock_origin(
+            origin_task_id=origin_task_id, ticket=ticket)
+        named = str(origin_task_id or "").strip() \
+            or str(ticket or "").strip()
+        if named and origin is None:
+            # A named origin that does not resolve is a caller error,
+            # never a standalone question: silently orphaning it would
+            # let the run complete above the hold.
+            return {
+                "ok": False,
+                "status": "invalid_input",
+                "tool": "email",
+                "reason": f"origin not found: {named}.",
+            }
+        project_name = (str(project or "").strip()
+                        or str((origin or {}).get("project") or "").strip()
+                        or None)
+        decision = check_email_lock(
+            to=to, cc=cc, bcc=bcc,
+            project_config=self._lock_project_config(project_name),
+            mandate=self._company_mandate(),
+        )
+        if not decision.get("escalate"):
+            sender = SMTPEmailSender(self._settings)
+            return await asyncio.to_thread(
+                sender.send_email,
+                from_email=from_email,
+                to=to,
+                subject=subject,
+                body_text=body_text,
+                body_html=body_html,
+                cc=cc,
+                bcc=bcc,
+                reply_to=reply_to,
+                attachments=attachments,
+                language=language,
+            )
+        blocked = decision.get("blocked") or []
+        action = {
+            "from_email": from_email,
+            "to": to if isinstance(to, list) else [to],
+            "subject": subject,
+            "body_text": body_text,
+            "body_html": body_html,
+            "cc": cc if isinstance(cc, list) else ([cc] if cc else []),
+            "bcc": bcc if isinstance(bcc, list) else ([bcc] if bcc else []),
+            "reply_to": reply_to,
+            "attachments": attachments or [],
+            "language": language,
+        }
+        action["_attachment_hashes"] = await self._snapshot_attachments(
+            attachments)
+        fingerprint = action_fingerprint({
+            "from": str(from_email or "").strip().lower(),
+            "to": sorted(str(item).strip().lower()
+                         for item in decision.get("recipients") or []),
+            "subject": str(subject or "").strip(),
+            "body": str(body_text or ""),
+            "body_html": str(body_html or ""),
+            "reply_to": str(reply_to or "").strip().lower(),
+            "attachments": action["_attachment_hashes"],
+            "language": str(language or ""),
+        })
+        attachment_names = ", ".join(
+            sorted(action["_attachment_hashes"].keys()))
+        return await self.request_tool_lock(
+            tool="email",
+            name="send_email",
+            question=(f"Enviar correo a {', '.join(blocked[:4])}?"[:200]),
+            action=action,
+            fingerprint=fingerprint,
+            decision=decision,
+            describe={
+                "from": from_email or "(defecto)",
+                "to": ", ".join(decision.get("recipients") or []),
+                "subject": subject,
+                "body": str(body_text or ""),
+                "reply_to": reply_to or "-",
+                "attachments": attachment_names or "-",
+            },
+            context=f"Motivo: {decision.get('reason')}",
+            project=project_name or "",
+            origin_task_id=str(origin.get("task_id") or "")
+            if origin is not None else None,
+            origin_title=str(origin.get("title") or "") if origin else None,
+        )
+
+    async def tool_dns_delete(
+        self,
+        *,
+        hostname: str,
+        project: str | None = None,
+        origin_task_id: str | None = None,
+        ticket: str | None = None,
+    ) -> dict[str, Any]:
+        """Gated DNS deletion: always through the Owner (TASK-2026-00208)."""
+        origin = await self._resolve_lock_origin(
+            origin_task_id=origin_task_id, ticket=ticket)
+        named = str(origin_task_id or "").strip() \
+            or str(ticket or "").strip()
+        if named and origin is None:
+            return {
+                "ok": False,
+                "status": "invalid_input",
+                "tool": "dns",
+                "reason": f"origin not found: {named}.",
+            }
+        project_name = (str(project or "").strip()
+                        or str((origin or {}).get("project") or "").strip()
+                        or None)
+        clean_host = str(hostname or "").strip()
+        decision = check_dns_delete_lock(
+            hostname=clean_host, mandate=self._company_mandate())
+        if not decision.get("escalate"):
+            return {
+                "ok": False,
+                "status": "refused",
+                "tool": "dns",
+                "reason": "DNS deletion refused without escalation.",
+            }
+        return await self.request_tool_lock(
+            tool="dns",
+            name="dns_delete",
+            question=f"Borrar el registro DNS de {clean_host}?"[:200],
+            action={"hostname": clean_host},
+            fingerprint=action_fingerprint(
+                {"hostname": clean_host.lower()}),
+            decision=decision,
+            describe={"hostname": clean_host},
+            context=f"Motivo: {decision.get('reason')}",
+            project=project_name or "",
+            origin_task_id=str(origin.get("task_id") or "")
+            if origin is not None else None,
+            origin_title=str(origin.get("title") or "") if origin else None,
+        )
+
+    async def tool_elfec_pay(
+        self,
+        *,
+        workflow: dict[str, Any] | None = None,
+        expected_row_label: str = "",
+        project: str | None = None,
+        origin_task_id: str | None = None,
+        ticket: str | None = None,
+    ) -> dict[str, Any]:
+        """Gated Elfec payment run: always through the Owner (00208)."""
+        origin = await self._resolve_lock_origin(
+            origin_task_id=origin_task_id, ticket=ticket)
+        named = str(origin_task_id or "").strip() \
+            or str(ticket or "").strip()
+        if named and origin is None:
+            return {
+                "ok": False,
+                "status": "invalid_input",
+                "tool": "elfec",
+                "reason": f"origin not found: {named}.",
+            }
+        project_name = (str(project or "").strip()
+                        or str((origin or {}).get("project") or "").strip()
+                        or None)
+        cfg = dict(workflow or {})
+        if expected_row_label and "expected_row_label" not in cfg:
+            cfg["expected_row_label"] = expected_row_label
+        decision = check_payment_lock(
+            summary="Ejecutar el pago Elfec House (practica)",
+            mandate=self._company_mandate(),
+            details={"workflow_id": str(cfg.get("id") or "pago_elfec_house")},
+        )
+        if not decision.get("escalate"):
+            return {
+                "ok": False,
+                "status": "refused",
+                "tool": "elfec",
+                "reason": "Payment refused without escalation.",
+            }
+        return await self.request_tool_lock(
+            tool="elfec",
+            name="elfec_pay",
+            question="Ejecutar el pago Elfec House (practica)?"[:200],
+            action={"workflow": cfg},
+            fingerprint=action_fingerprint({"workflow": cfg}),
+            decision=decision,
+            describe={"workflow": str(cfg.get("id") or "pago_elfec_house")},
+            context=f"Motivo: {decision.get('reason')}",
+            project=project_name or "",
+            origin_task_id=str(origin.get("task_id") or "")
+            if origin is not None else None,
+            origin_title=str(origin.get("title") or "") if origin else None,
+        )
 
     async def apply_owner_decision(
         self,
@@ -4083,6 +4636,11 @@ class TaskService:
             return await self._apply_spend_decision(
                 question or {}, spend_objective, approve=approve,
                 summary=summary)
+        lock = lock_hold_action(question)
+        if lock is not None:
+            return await self._apply_lock_decision(
+                question or {}, lock, origin_id=origin_id,
+                approve=approve, record=record, summary=summary)
         if kind == "new_tool" and approve:
             await self._deny_origin_from_question(origin_id, kind, summary)
             return "owner_question_tool"
@@ -4191,6 +4749,135 @@ class TaskService:
             "necesidad": "",
         })
         return "owner_question_spend_deny"
+
+    async def _apply_lock_decision(
+        self,
+        question: dict[str, Any],
+        lock: dict[str, Any],
+        *,
+        origin_id: str,
+        approve: bool,
+        record: dict[str, Any],
+        summary: str,
+    ) -> str:
+        """Continue a tool lock: execute once or fail the origin.
+
+        The approval executes the stored action exactly once (the
+        execution marker on the question guards retries), then resumes
+        the origin when it is still waiting; the denial fails the
+        origin with a bloqueado verdict for the planner. Without an
+        origin the question simply closes after executing or denying.
+        """
+        question_id = str(question.get("task_id") or "")
+        if not approve:
+            await self._deny_origin_from_question(
+                origin_id, "lock", summary)
+            return "owner_question_lock_deny"
+        # Fresh read: the lock above comes from a pre-record snapshot,
+        # so a sequential retry must see the marker it is owed. (An
+        # exactly-simultaneous double approval still races; approvals
+        # are human-speed and every decision path shares that class.)
+        fresh = await self._repo.get_task(question_id)
+        fresh_lock = lock_hold_action(fresh)
+        fresh_execution = (fresh_lock or {}).get("execution")
+        if not (isinstance(fresh_execution, dict)
+                and fresh_execution.get("status") == "executed"):
+            try:
+                outcome = await self._execute_locked_action(lock)
+            except Exception as exc:
+                logger.warning("locked action failed on %s: %s",
+                               question_id, exc, exc_info=True)
+                try:
+                    await self.comment_on_ticket(
+                        question_id,
+                        "La aprobacion no pudo ejecutarse "
+                        f"({type(exc).__name__}); se puede reintentar "
+                        "desde la bandeja.",
+                    )
+                except Exception:
+                    logger.warning("lock failure comment failed for %s",
+                                   question_id, exc_info=True)
+                return "owner_question_lock_held"
+            await self._record_lock_execution(question_id, outcome)
+        if origin_id and await self._resume_lock_origin(
+                origin_id, question_id, record, summary):
+            return "owner_question_lock_resume"
+        return "owner_question_lock_close"
+
+    async def _resume_lock_origin(
+        self,
+        origin_id: str,
+        question_id: str,
+        record: dict[str, Any],
+        summary: str,
+    ) -> bool:
+        """Resume the origin only while it waits on this question.
+
+        A second lock re-parks the origin under its own question; the
+        first approval executes but must not steal that hold — the
+        second approval resumes.
+        """
+        origin = await self._repo.get_task(origin_id)
+        if origin is None:
+            return False
+        current = (origin.get("params") or {}).get("owner_question_id")
+        if current != question_id:
+            return False
+        return await self._resume_origin_from_question(
+            origin_id, record, summary)
+
+    async def _record_lock_execution(
+        self, question_id: str, outcome: Any
+    ) -> None:
+        """Stamp the executed outcome on the lock question (once)."""
+        fresh = await self._repo.get_task(question_id)
+        if fresh is None:
+            return
+        block = owner_question_block(fresh)
+        stored = dict(block.get("lock") or {})
+        stored["execution"] = {
+            "status": "executed",
+            "at": datetime.now(timezone.utc).isoformat(),
+            "outcome": outcome,
+        }
+        block["lock"] = stored
+        await self.patch_task(question_id, {"params": {"owner_question": block}})
+
+    async def _execute_locked_action(self, lock: dict[str, Any]) -> Any:
+        """Run the stored action. Only the decision path calls this."""
+        tool = str(lock.get("tool") or "")
+        action = lock.get("action") or {}
+        if not isinstance(action, dict):
+            raise ToolLockError("locked action is not a mapping")
+        if tool == "email":
+            from tools.email_sender import SMTPEmailSender
+
+            await asyncio.to_thread(
+                self._verify_attachment_snapshot, dict(action))
+            sender = SMTPEmailSender(self._settings)
+            kwargs = {
+                key: action.get(key)
+                for key in ("from_email", "to", "subject", "body_text",
+                            "body_html", "cc", "bcc", "reply_to",
+                            "attachments", "language")
+            }
+            return await asyncio.to_thread(sender.send_email, **kwargs)
+        if tool == "dns":
+            from tools.cloudflare import CloudflareDNSManager
+
+            manager = CloudflareDNSManager(self._settings)
+            return await asyncio.to_thread(
+                manager.delete, str(action.get("hostname") or ""))
+        if tool == "elfec":
+            from agents.finance.elfec import run_elfec_house_payment_practice
+
+            workflow = action.get("workflow")
+            return await asyncio.to_thread(
+                run_elfec_house_payment_practice,
+                self._settings,
+                dict(workflow) if isinstance(workflow, dict) else None,
+            )
+        raise ToolLockError(f"unknown locked tool {tool!r}")
 
     async def _signal_orphan_spend_approval(
         self, question: dict[str, Any],

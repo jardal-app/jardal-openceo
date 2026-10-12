@@ -339,6 +339,7 @@ class PMBatchOwnerOnlyTests(unittest.TestCase):
 @unittest.skipUnless(FAST_MCP_AVAILABLE, "FastMCP is required")
 class DNSToolTests(unittest.IsolatedAsyncioTestCase):
     async def _call(self, calls: list[tuple[str, str]],
+                    task_service: Any = None,
                     **kwargs: Any) -> Any:
         from fastmcp import Client  # noqa: PLC0415
 
@@ -356,7 +357,7 @@ class DNSToolTests(unittest.IsolatedAsyncioTestCase):
 
         server: Any = FastMCP("boundary-dns-test")
         with patch("mcp_server.CloudflareDNSManager", _FakeManager):
-            _register_infra_tools(server, _settings())
+            _register_infra_tools(server, _settings(), task_service)
         async with Client(server) as client:
             return await client.call_tool("manage_dns_record", kwargs)
 
@@ -367,12 +368,30 @@ class DNSToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [("create", "h.example")])
         self.assertTrue(result.data["ok"])
 
-    async def test_delete_removes(self) -> None:
+    async def test_delete_escalates_through_service(self) -> None:
+        # TASK-2026-00208 redefines delete: it escalates to the Owner
+        # instead of deleting at once.
+        from unittest.mock import AsyncMock, MagicMock  # noqa: PLC0415
+
+        service = MagicMock()
+        service.tool_dns_delete = AsyncMock(return_value={
+            "ok": True, "status": "pending_approval"})
+        calls: list[tuple[str, str]] = []
+        result = await self._call(
+            calls, service, hostname="h.example", action="delete",
+            project="proj", ticket="TASK-2026-00208")
+        self.assertEqual(calls, [])
+        self.assertEqual(result.data["status"], "pending_approval")
+        kwargs = service.tool_dns_delete.await_args.kwargs
+        self.assertEqual(kwargs["hostname"], "h.example")
+
+    async def test_delete_without_service_refuses(self) -> None:
         calls: list[tuple[str, str]] = []
         result = await self._call(calls, hostname="h.example",
                                   action="delete")
-        self.assertEqual(calls, [("delete", "h.example")])
-        self.assertTrue(result.data["ok"])
+        self.assertEqual(calls, [])
+        self.assertFalse(result.data["ok"])
+        self.assertEqual(result.data["status"], "unavailable")
 
     async def test_old_dns_name_is_gone(self) -> None:
         from fastmcp import Client  # noqa: PLC0415
@@ -528,51 +547,44 @@ class BoundaryDelegationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.data["ok"])
         self.assertEqual(result.data["status"], "not_configured")
 
-    async def test_elfec_stays_practice(self) -> None:
+    async def test_elfec_escalates_through_service(self) -> None:
+        # TASK-2026-00208 redefines the MCP surface: the tool escalates
+        # to the Owner; practice-only moved to the approval executor
+        # (pinned in tests/test_tool_locks_208.py).
         from fastmcp import Client  # noqa: PLC0415
-        from unittest.mock import Mock  # noqa: PLC0415
+        from unittest.mock import AsyncMock, MagicMock  # noqa: PLC0415
 
-        server = self._server()
-        with patch.object(
-                WorkflowToolRegistry, "_finance_pago_elfec_house",
-                new=staticmethod(Mock(return_value={
-                    "ok": True, "practice_mode": True}))):
-            async with Client(server) as client:
-                result = await client.call_tool(
-                    "openceo_elfec_house_payment", {})
-        self.assertTrue(result.data["practice_mode"])
+        service = MagicMock()
+        service.tool_elfec_pay = AsyncMock(return_value={
+            "ok": True, "status": "pending_approval"})
+        server: Any = FastMCP("boundary-elfec-test")
+        _register_all_tools(server, _settings(), service, _FakeErpnext())
+        async with Client(server) as client:
+            result = await client.call_tool(
+                "openceo_elfec_house_payment", {})
+        self.assertEqual(result.data["status"], "pending_approval")
+        service.tool_elfec_pay.assert_awaited_once()
 
-    async def test_elfec_refuses_non_practice(self) -> None:
+    async def test_email_delegates_to_service(self) -> None:
+        # TASK-2026-00208: the MCP tool gates through TaskService; the
+        # off-loop SMTP leaf moved there with the lock.
         from fastmcp import Client  # noqa: PLC0415
-        from unittest.mock import Mock  # noqa: PLC0415
+        from unittest.mock import AsyncMock, MagicMock  # noqa: PLC0415
 
-        server = self._server()
-        with patch.object(
-                WorkflowToolRegistry, "_finance_pago_elfec_house",
-                new=staticmethod(Mock(return_value={
-                    "ok": True, "practice_mode": False}))):
-            async with Client(server) as client:
-                result = await client.call_tool(
-                    "openceo_elfec_house_payment", {})
-        self.assertFalse(result.data["ok"])
-        self.assertEqual(result.data["status"], "refused")
-
-    async def test_email_sends_off_loop(self) -> None:
-        from fastmcp import Client  # noqa: PLC0415
-        from unittest.mock import Mock  # noqa: PLC0415
-
-        server = self._server()
-        sender = Mock(return_value={"ok": True})
-        with patch("agents.secretary.tools.send_email", sender):
-            async with Client(server) as client:
-                result = await client.call_tool(
-                    "openceo_send_email",
-                    {"to": "t@example.com", "subject": "s",
-                     "body_text": "b"})
-        self.assertTrue(result.data["ok"])
-        sender.assert_called_once_with(
-            from_email=None, to="t@example.com", subject="s",
-            body_text="b", body_html=None, cc=None, bcc=None)
+        service = MagicMock()
+        service.tool_send_email = AsyncMock(return_value={
+            "ok": True, "status": "pending_approval"})
+        server: Any = FastMCP("boundary-email-test")
+        _register_all_tools(server, _settings(), service, _FakeErpnext())
+        async with Client(server) as client:
+            result = await client.call_tool(
+                "openceo_send_email",
+                {"to": "t@example.com", "subject": "s",
+                 "body_text": "b"})
+        self.assertEqual(result.data["status"], "pending_approval")
+        kwargs = service.tool_send_email.await_args.kwargs
+        self.assertEqual(kwargs["to"], "t@example.com")
+        self.assertEqual(kwargs["subject"], "s")
 
 
 @unittest.skipUnless(FAST_MCP_AVAILABLE, "FastMCP is required")

@@ -521,6 +521,11 @@ class MongoRepository:
             row = await self.tasks.find_one({"ticket_number": ticket_number})
         return self._clean(row)
 
+    async def find_task_by_business_name(self, name: str) -> dict[str, Any] | None:
+        """Execution task by its ERPNext mirror name (tool locks, 00208)."""
+        row = await self.tasks.find_one({"params._mirrors.erpnext.name": name})
+        return self._clean(row)
+
     async def list_tasks(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self.tasks.find({}, sort=[("created_at", -1)]).limit(limit)
         return [self._clean(row) async for row in rows]

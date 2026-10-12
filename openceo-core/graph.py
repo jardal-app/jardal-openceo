@@ -403,13 +403,19 @@ class OpenCEOGraph:
 
         result = await self._finance_session.run(task, state.get("project_config", {}))
 
-        return {
+        out: dict[str, Any] = {
             "selected_agent": AgentName.FINANCE.value,
             "status": result.status.value,
             "steps": [*(state.get("steps") or []), *result.steps],
             "last_response_summary": result.last_response_summary,
             "error": result.error,
         }
+        if result.status == TaskStatus.WAITING:
+            out["waiting_reason"] = result.waiting_reason
+            out["resume_at"] = None
+            if result.owner_question_id:
+                out["params"] = {"owner_question_id": result.owner_question_id}
+        return out
 
     async def _secretary_node(self, state: GraphState) -> GraphState:
         task = {
@@ -421,15 +427,22 @@ class OpenCEOGraph:
             "priority": state.get("priority", "medium"),
         }
 
-        result = await self._secretary_session.run(task)
+        result = await self._secretary_session.run(
+            task, state.get("project_config", {}))
 
-        return {
+        out: dict[str, Any] = {
             "selected_agent": AgentName.SECRETARY.value,
             "status": result.status.value,
             "steps": [*(state.get("steps") or []), *result.steps],
             "last_response_summary": result.last_response_summary,
             "error": result.error,
         }
+        if result.status == TaskStatus.WAITING:
+            out["waiting_reason"] = result.waiting_reason
+            out["resume_at"] = None
+            if result.owner_question_id:
+                out["params"] = {"owner_question_id": result.owner_question_id}
+        return out
 
     async def _generic_node(self, state: GraphState) -> GraphState:
         agent = str(state.get("selected_agent") or "")

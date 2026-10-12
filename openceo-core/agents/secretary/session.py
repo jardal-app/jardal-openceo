@@ -11,7 +11,12 @@ from langchain_openai import ChatOpenAI
 
 from settings import Settings
 from state import TaskStatus
+from tool_locks import is_lock_pending
 from tools.email_sender import SMTPEmailSender
+
+
+class EmailLockUnavailable(RuntimeError):
+    """Off-allowlist send without a TaskService to escalate through."""
 
 
 @dataclass
@@ -20,6 +25,8 @@ class SecretaryExecutionOutput:
     steps: list[dict[str, Any]] = field(default_factory=list)
     last_response_summary: str | None = None
     error: str | None = None
+    waiting_reason: str | None = None
+    owner_question_id: str | None = None
 
 
 class SecretarySessionManager:
@@ -28,6 +35,7 @@ class SecretarySessionManager:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._email_sender = SMTPEmailSender(settings)
+        self._task_service: Any | None = None
         self._llm: ChatOpenAI | None = None
         if settings.DEEPSEEK_API_KEY:
             self._llm = ChatOpenAI(
@@ -37,7 +45,23 @@ class SecretarySessionManager:
                 temperature=0,
             )
 
-    async def run(self, task: dict[str, Any]) -> SecretaryExecutionOutput:
+    def set_task_service(self, task_service: Any) -> None:
+        """Late-bound TaskService for the email lock (TASK-2026-00208)."""
+        self._task_service = task_service
+
+    def _mandate(self) -> Any | None:
+        from company_mandate import MandateError
+        from config_loader import ConfigLoader
+        try:
+            return ConfigLoader(self._settings).load_company_mandate()
+        except MandateError:
+            return None
+
+    async def run(
+        self,
+        task: dict[str, Any],
+        project_config: dict[str, Any] | None = None,
+    ) -> SecretaryExecutionOutput:
         output = SecretaryExecutionOutput(status=TaskStatus.IN_PROGRESS)
 
         payload = await self._extract_email_payload(task)
@@ -65,22 +89,30 @@ class SecretarySessionManager:
         )
 
         try:
-            result = self._email_sender.send_email(
-                from_email=payload.get("from_email"),
-                to=payload.get("to", []),
-                cc=payload.get("cc", []),
-                bcc=payload.get("bcc", []),
-                subject=str(payload.get("subject") or "").strip(),
-                body_text=str(payload.get("body_text") or "").strip(),
-                body_html=payload.get("body_html"),
-                reply_to=payload.get("reply_to"),
-                attachments=attachments,
-                language=payload.get("language"),
-            )
+            result = await self._gated_send(task, project_config, payload, attachments)
         except Exception as exc:
             output.steps.append(self._step("send_email", "failed", str(exc)))
             output.status = TaskStatus.FAILED
             output.error = str(exc)
+            return output
+
+        if is_lock_pending(result):
+            detail = (
+                "Candado: pendiente de aprobacion del dueno "
+                f"({result.get('question_task_id') or 'sin pregunta'})."
+            )
+            output.steps.append(self._step("send_email", "waiting_approval", detail))
+            output.status = TaskStatus.WAITING
+            output.waiting_reason = str(result.get("waiting_reason") or "tool_lock:email")
+            output.owner_question_id = result.get("question_task_id")
+            output.last_response_summary = detail
+            return output
+
+        if str(result.get("status") or "") == "denied":
+            detail = str(result.get("reason") or "El dueno denego el envio.")
+            output.steps.append(self._step("send_email", "failed", detail))
+            output.status = TaskStatus.FAILED
+            output.error = detail
             return output
 
         summary = (
@@ -92,6 +124,54 @@ class SecretarySessionManager:
         output.status = TaskStatus.COMPLETED
         output.last_response_summary = summary
         return output
+
+    async def _gated_send(
+        self,
+        task: dict[str, Any],
+        project_config: dict[str, Any] | None,
+        payload: dict[str, Any],
+        attachments: list[str],
+    ) -> dict[str, Any]:
+        """Email lock (TASK-2026-00208): allowlist sends, the rest locks."""
+        from tool_locks import check_email_lock
+
+        decision = check_email_lock(
+            to=payload.get("to", []),
+            cc=payload.get("cc", []),
+            bcc=payload.get("bcc", []),
+            project_config=project_config or {},
+            mandate=self._mandate(),
+        )
+        if not decision.get("escalate"):
+            return self._email_sender.send_email(
+                from_email=payload.get("from_email"),
+                to=payload.get("to", []),
+                cc=payload.get("cc", []),
+                bcc=payload.get("bcc", []),
+                subject=str(payload.get("subject") or "").strip(),
+                body_text=str(payload.get("body_text") or "").strip(),
+                body_html=payload.get("body_html"),
+                reply_to=payload.get("reply_to"),
+                attachments=attachments,
+                language=payload.get("language"),
+            )
+        if self._task_service is None:
+            raise EmailLockUnavailable(
+                "Candado sin TaskService: no enviado.")
+        return await self._task_service.tool_send_email(
+            from_email=payload.get("from_email"),
+            to=payload.get("to", []),
+            cc=payload.get("cc", []),
+            bcc=payload.get("bcc", []),
+            subject=str(payload.get("subject") or "").strip(),
+            body_text=str(payload.get("body_text") or "").strip(),
+            body_html=payload.get("body_html"),
+            reply_to=payload.get("reply_to"),
+            attachments=attachments,
+            language=payload.get("language"),
+            project=task.get("project"),
+            origin_task_id=task.get("task_id"),
+        )
 
     async def _extract_email_payload(self, task: dict[str, Any]) -> dict[str, Any] | None:
         text = str(task.get("description") or "").strip()
