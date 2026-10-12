@@ -561,7 +561,8 @@ class ConfigLoader:
                 "ticket_horizon": [1, 3],
                 "timeout_minutes": 15,
                 # None = openceo-core/objectives/routing_policy.md, next to
-                # the planner module (resolved by it).
+                # the planner module (resolved by it): the core file, with
+                # per-agent detail in routing_policy.d/ (TASK-2026-00201).
                 "policy_path": None,
                 # One-shot role spec (live executor shape): a fresh muse
                 # process per planning cycle, prompt via argv, result read
