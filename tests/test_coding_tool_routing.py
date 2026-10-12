@@ -331,11 +331,16 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
         calls = []
 
         async def fake_run_process(command, stdin_payload=None, timeout=120, cwd=None, env=None,
-                                   sandbox=True, config_argv=None):
+                                   sandbox=True, config_argv=None, home_file_overlays=None):
             calls.append({"command": command, "stdin": stdin_payload, "cwd": cwd, "env": env})
             return True, "did the thing", ""
 
+        async def fake_overlays(provider, role, workspace):
+            return {}, "badge-stub"
+
         manager._run_process = fake_run_process  # type: ignore[method-assign]
+        provider_stub = MagicMock()
+        provider_stub.revoke = AsyncMock()
         with tempfile.TemporaryDirectory(prefix="tier-preamble-") as tmp:
             repo = Path(tmp)
             (repo / "AGENTS.md").write_text("# rules\n", encoding="utf-8")
@@ -344,7 +349,11 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(DevSessionManager, "_resolve_tier_executor",
                               AsyncMock(return_value=MagicMock(
                                   argv=["musej", "exec"], prompt_via="argv",
-                                  cwd="/tmp/repo", env={}, label="tier_c:muse"))):
+                                  cwd="/tmp/repo", env={}, label="tier_c:muse"))), \
+                 patch.object(DevSessionManager, "_ticket_badge_provider",
+                              return_value=provider_stub), \
+                 patch.object(DevSessionManager, "_muse_role_overlays",
+                              AsyncMock(side_effect=fake_overlays)):
                 result = await manager._step_code(_task(), config, CodingTool.TIER_C)
         self.assertTrue(calls[0]["command"][-1].startswith("Lee AGENTS.md y "))
         self.assertIsNone(calls[0]["stdin"])
@@ -422,15 +431,24 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
         calls = []
 
         async def fake_run_process(command, stdin_payload=None, timeout=120, cwd=None, env=None,
-                                   sandbox=True, config_argv=None):
+                                   sandbox=True, config_argv=None, home_file_overlays=None):
             calls.append({"command": command, "stdin": stdin_payload})
             return True, "did the thing", ""
 
+        async def fake_overlays(provider, role, workspace):
+            return {}, "badge-stub"
+
         manager._run_process = fake_run_process  # type: ignore[method-assign]
+        provider_stub = MagicMock()
+        provider_stub.revoke = AsyncMock()
         with patch.object(DevSessionManager, "_resolve_tier_executor",
                           AsyncMock(return_value=MagicMock(
                               argv=["musej", "exec"], prompt_via="argv",
-                              cwd="/tmp/repo", env={}, label="tier_c:muse"))):
+                              cwd="/tmp/repo", env={}, label="tier_c:muse"))), \
+             patch.object(DevSessionManager, "_ticket_badge_provider",
+                          return_value=provider_stub), \
+             patch.object(DevSessionManager, "_muse_role_overlays",
+                          AsyncMock(side_effect=fake_overlays)):
             await manager._step_code(_task(), self._config(), CodingTool.TIER_C)
         # _config() points at /tmp/definitely-not-a-repo: nothing to name.
         self.assertTrue(calls[0]["command"][-1].startswith("TAREA"))

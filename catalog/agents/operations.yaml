@@ -2,7 +2,7 @@
 name: operations
 type: ai
 engine: muse-code
-profile: null
+profile: profiles/operations.yaml
 boundary_tools: []
 skills_dir: skills/operations
 skills: []

@@ -17,6 +17,7 @@ from typing import Any, Mapping
 from agents.dev.loose_tier import project_money_routing
 from orchestration.inbox import InMemoryInboxStore, MongoInboxStore
 from orchestration.live import AllowAllQuota, ProcessExecutor, RateMonitorQuota
+from orchestration.role_muse import ObjectiveBadgeProvider, issuer_for_repo
 from orchestration.review import (
     InMemoryReviewStore,
     InMemorySlotStore,
@@ -151,10 +152,12 @@ def objectives_wiring_config(
 
 def objectives_process_executor(
     project_config: Mapping[str, Any],
+    badge_provider: Any | None = None,
 ) -> ProcessExecutor:
     """One-shot executor for objective flows over the global wiring."""
     wiring = objectives_wiring_config(project_config)
-    return ProcessExecutor(roles=wiring["roles"], pool=wiring["pool"])
+    return ProcessExecutor(roles=wiring["roles"], pool=wiring["pool"],
+                           badge_provider=badge_provider)
 
 
 class ObjectiveService:
@@ -228,6 +231,10 @@ class ObjectiveService:
         except Exception:
             mandate = None
 
+        issuer = issuer_for_repo(repo)
+        provider = (ObjectiveBadgeProvider(
+            issuer, self._settings, project)
+            if issuer is not None else None)
         return ObjectiveEnv(
             objectives=(MongoObjectiveStore(repo) if repo is not None
                         else InMemoryObjectiveStore()),
@@ -235,7 +242,8 @@ class ObjectiveService:
                    else InMemoryTaskLister()),
             create_ticket=create_ticket,
             patch_task=patch_task,
-            executor=objectives_process_executor(project_config),
+            executor=objectives_process_executor(
+                project_config, badge_provider=provider),
             quota=self._quota(),
             slots=(MongoSlotStore(repo) if repo is not None
                    else InMemorySlotStore()),

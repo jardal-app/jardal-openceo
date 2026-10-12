@@ -2,7 +2,7 @@
 name: research
 type: ai
 engine: muse-code
-profile: null
+profile: profiles/research.yaml
 boundary_tools: []
 skills_dir: skills/research
 skills: []

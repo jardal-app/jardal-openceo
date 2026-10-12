@@ -1,0 +1,15 @@
+# Role profile: research (engine-neutral, TASK-2026-00197).
+# Profile ready; the agent enables in TASK-2026-00222 (profile != enabled).
+name: research
+agent: research
+engine: muse-code
+card:
+  who: "Company research agent: runs grounded research on demand."
+  delivers:
+    - grounded research brief with sources
+  never:
+    - decide business work
+    - change ticket states
+rules: AGENTS.md
+skills: []
+output_schema: objectives/agent_result.schema.json

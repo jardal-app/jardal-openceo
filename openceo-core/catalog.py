@@ -7,10 +7,12 @@ closed: :func:`load_catalog` raises :class:`CatalogError` naming every
 problem, and the service refuses to start on an invalid catalog
 (``main.py`` lifespan gate).
 
-Shape validated here; existence of future files is not: ``profile`` files
-(TASK-2026-00197), boundary tool names (TASK-2026-00199) and skill
-directories (TASK-2026-00203) do not exist yet, so only their form is
-checked. Consumers (TASK-2026-00195) validate at use.
+Shape validated here; existence of future files is not: boundary tool
+names (TASK-2026-00199) and skill directories (TASK-2026-00203) do not
+exist yet, so only their form is checked. Role ``profile`` files
+(TASK-2026-00197) exist under ``catalog/profiles/``: a card pointing at
+one loads and cross-checks it, and every file in that directory must
+parse. Consumers (TASK-2026-00195) validate at use.
 """
 
 from __future__ import annotations
@@ -39,7 +41,10 @@ __all__ = [
     "CatalogError",
     "CatalogStatus",
     "IndexEntry",
+    "KNOWN_ENGINES",
     "LEGACY_LIVE_DISABLED",
+    "RoleCard",
+    "RoleProfile",
     "StaffEntry",
     "StaffRoster",
     "TICKET_PATTERN",
@@ -49,7 +54,9 @@ __all__ = [
     "find_consumer_mismatches",
     "is_staff_active",
     "load_catalog",
+    "load_role_profile",
     "planner_registry_view",
+    "profiles_root",
     "short_index",
 ]
 
@@ -67,6 +74,10 @@ OWNER_SKILLS = ("decidir", "aprobar", "responder", "hacer")
 #: Never executors, never catalog names: the CEO strategy and the planner
 #: decide work, they do not run tickets.
 RESERVED_NAMES = ("ceo", "planner")
+
+#: Engines a role profile may name (TASK-2026-00197; TASK-2026-00200 adds
+#: translators, not engines: agents keep running muse-code by default).
+KNOWN_ENGINES = ("muse-code",)
 
 #: Every tool the MCP mounts may expose (TASK-2026-00199). A card box
 #: naming anything else fails the load; a registration outside this set
@@ -227,6 +238,66 @@ class AgentCard(BaseModel):
         return self
 
 
+class RoleCard(BaseModel):
+    """Who the role is, what it delivers, what it never does."""
+
+    who: str = Field(min_length=1)
+    delivers: list[str] = Field(min_length=1)
+    never: list[str] = Field(min_length=1)
+
+    @field_validator("delivers", "never")
+    @classmethod
+    def _lists_clean(cls, value: list[str], info: Any) -> list[str]:
+        return _nonempty_unique(value, str(info.field_name))
+
+
+class RoleProfile(BaseModel):
+    """One engine-neutral role profile (TASK-2026-00197).
+
+    The card identity, rules, allowed skills and output schema travel
+    here; each engine translator renders them for its own CLI. ``agent``
+    is the catalog agent or the planner/ceo principal the profile
+    belongs to; launch roles (builder, closer) share their agent file.
+    """
+
+    name: str = Field(pattern=_NAME_PATTERN)
+    agent: str = Field(pattern=_NAME_PATTERN)
+    engine: str
+    card: RoleCard
+    rules: str
+    skills: list[str] = Field(default_factory=list)
+    output_schema: str | None = None
+
+    @field_validator("engine")
+    @classmethod
+    def _engine_known(cls, value: str) -> str:
+        if value not in KNOWN_ENGINES:
+            raise ValueError(f"engine: unknown engine {value!r}")
+        return value
+
+    @field_validator("skills")
+    @classmethod
+    def _skills_clean(cls, value: list[str]) -> list[str]:
+        return _nonempty_unique(value, "skills")
+
+    @field_validator("rules", "output_schema")
+    @classmethod
+    def _repo_relpath(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value or value.startswith("/") or ".." in Path(value).parts:
+            raise ValueError("must be null or a relative path inside the repo")
+        return value
+
+    @model_validator(mode="after")
+    def _belongs_to_one(self) -> "RoleProfile":
+        if self.agent != self.name:
+            raise ValueError(
+                f"agent: {self.agent!r} must match the profile name "
+                f"{self.name!r}")
+        return self
+
+
 class StaffEntry(BaseModel):
     """One staff member: role, projects, active period."""
 
@@ -285,6 +356,42 @@ def _read_yaml(path: Path) -> tuple[Any, str | None]:
         return yaml.safe_load(text), None
     except yaml.YAMLError as exc:
         return None, f"invalid YAML ({exc})"
+
+
+def profiles_root(explicit: str | Path | None = None) -> Path:
+    """Role profiles directory (``profiles/`` under the catalog root)."""
+    return catalog_root(explicit) / "profiles"
+
+
+def load_role_profile(
+    name: str, root: str | Path | None = None,
+) -> RoleProfile:
+    """Load one role profile by name. Fail-closed, no partial profile."""
+    base = catalog_root(root)
+    cleaned = (name or "").strip()
+    if not cleaned:
+        raise CatalogError("invalid role profile name: empty")
+    candidate = (base / "profiles" / f"{cleaned}.yaml").resolve()
+    base_resolved = base.resolve()
+    if base_resolved not in candidate.parents:
+        raise CatalogError(
+            f"invalid role profile name {cleaned!r}: escapes the catalog")
+    data, problem = _read_yaml(candidate)
+    if problem is not None:
+        raise CatalogError(f"profiles/{cleaned}.yaml: {problem}")
+    if not isinstance(data, dict):
+        raise CatalogError(
+            f"profiles/{cleaned}.yaml: top level must be a mapping")
+    try:
+        profile = RoleProfile.model_validate(data)
+    except ValidationError as exc:
+        raise CatalogError(
+            f"profiles/{cleaned}.yaml: {_format_pydantic(exc)}") from exc
+    if profile.name != cleaned:
+        raise CatalogError(
+            f"profiles/{cleaned}.yaml: profile name {profile.name!r} must "
+            f"match the file name {cleaned!r}")
+    return profile
 
 
 def _format_pydantic(exc: ValidationError) -> str:
@@ -390,6 +497,70 @@ def load_catalog(root: str | Path | None = None) -> Catalog:
             if str(orphan.relative_to(base_resolved)) not in referenced:
                 errors.append(f"{rel(orphan)}: card file not listed in "
                               "index.yaml")
+
+    profiles_dir = base / "profiles"
+    if profiles_dir.is_dir():
+        for profile_file in sorted(profiles_dir.glob("*.yaml")):
+            data, problem = _read_yaml(profile_file)
+            if problem is not None:
+                errors.append(f"{rel(profile_file)}: {problem}")
+                continue
+            if not isinstance(data, dict):
+                errors.append(
+                    f"{rel(profile_file)}: top level must be a mapping")
+                continue
+            try:
+                parsed = RoleProfile.model_validate(data)
+            except ValidationError as exc:
+                errors.append(
+                    f"{rel(profile_file)}: {_format_pydantic(exc)}")
+                continue
+            if parsed.name != profile_file.stem:
+                errors.append(
+                    f"{rel(profile_file)}: profile name {parsed.name!r} "
+                    f"must match the file name {profile_file.stem!r}")
+    for entry in entries:
+        card = agents.get(entry.name)
+        if card is None or card.profile is None:
+            continue
+        pointed = card.profile.strip()
+        if (not pointed or pointed.startswith("/")
+                or ".." in Path(pointed).parts
+                or not pointed.endswith(".yaml")):
+            errors.append(
+                f"agents/{entry.name}.yaml: profile: must be a .yaml path "
+                "inside the catalog")
+            continue
+        target = (base / pointed).resolve()
+        if base_resolved not in target.parents or not target.is_file():
+            errors.append(
+                f"agents/{entry.name}.yaml: profile: {pointed!r} is missing "
+                "from the catalog")
+            continue
+        data, problem = _read_yaml(target)
+        if problem is not None or not isinstance(data, dict):
+            errors.append(f"{rel(target)}: unreadable profile")
+            continue
+        try:
+            linked = RoleProfile.model_validate(data)
+        except ValidationError as exc:
+            errors.append(f"{rel(target)}: {_format_pydantic(exc)}")
+            continue
+        if linked.name != entry.name:
+            errors.append(
+                f"{rel(target)}: profile name {linked.name!r} must match "
+                f"the card {entry.name!r}")
+        elif linked.engine != card.engine:
+            errors.append(
+                f"{rel(target)}: engine {linked.engine!r} disagrees with "
+                f"the card engine {card.engine!r}")
+        else:
+            foreign = [skill for skill in linked.skills
+                       if skill not in card.skills]
+            if foreign:
+                errors.append(
+                    f"{rel(target)}: skills {foreign!r} are not on the "
+                    f"card {entry.name!r}")
 
     staff_path = base / "staff.yaml"
     staff = StaffRoster()

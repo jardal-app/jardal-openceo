@@ -2,7 +2,7 @@
 name: finance
 type: ai
 engine: muse-code
-profile: null
+profile: profiles/finance.yaml
 boundary_tools: []
 skills_dir: skills/finance
 skills: []
