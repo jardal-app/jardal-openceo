@@ -49,3 +49,15 @@ def require_permissions(*required_perms: str):
         return user
 
     return checker
+
+
+def require_admin():
+    """Dependency factory for host-level endpoints (tmux, dev sessions)."""
+
+    async def checker(request: Request) -> UserDocument:
+        user = await get_current_user(request)
+        if not user.is_admin:
+            raise HTTPException(status_code=403, detail="Solo administradores")
+        return user
+
+    return checker

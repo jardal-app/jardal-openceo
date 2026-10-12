@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from auth.jwt import (
     cookie_settings,
@@ -131,11 +131,10 @@ async def me(request: Request) -> dict[str, Any]:
 
 
 @auth_router.post("/register")
-async def register(request: Request) -> dict[str, Any]:
-    current_user = await get_current_user(request)
-    if not current_user.is_admin and "manage_users" not in current_user.all_permissions:
-        raise HTTPException(status_code=403, detail="Permiso requerido: manage_users")
-
+async def register(
+    request: Request,
+    current_user: UserDocument = Depends(require_permissions("manage_users")),
+) -> dict[str, Any]:
     body = await request.json()
     db = _get_db(request)
 
