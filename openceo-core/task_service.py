@@ -3301,6 +3301,27 @@ class TaskService:
                 task_id, f"planner unavailable: {out.get('detail')}")
         return task, await self._plan_pedido_backoff(task, out)
 
+    async def _hold_decided_spend(
+        self, task: dict[str, Any], costs: Any, spend: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Hold a decided pedido with escalating spend; None on decline.
+
+        The base helper only holds queued/waiting tickets, but at this
+        point the dispatcher already claimed the ticket (in_progress)
+        or it failed (return replan), so revert it to queued first.
+        A decline (autorun-off) leaves it queued for its caller's
+        normal path; the position is never lost.
+        """
+        if not spend.get("escalate"):
+            return None
+        task_id = str(task.get("task_id") or "")
+        if str(task.get("status") or "") != TaskStatus.QUEUED.value:
+            reverted = await self._repo.patch_task(
+                task_id, {"status": TaskStatus.QUEUED.value})
+            if reverted is not None:
+                task = reverted
+        return await self._hold_loose_spend(task, costs, spend=spend)
+
     async def _plan_pedido_decided(
         self, task: dict[str, Any], out: dict[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -3309,18 +3330,20 @@ class TaskService:
         decision = out.get("decision") or {}
         refreshed = await self._repo.get_task(task_id) or task
         spend = out.get("spend") or {}
-        if spend.get("escalate"):
-            held = await self._hold_loose_spend(
-                refreshed, decision.get("costs"), spend=spend)
-            if held is not None:
-                return refreshed, held
+        held = await self._hold_decided_spend(
+            refreshed, decision.get("costs"), spend)
+        if held is not None:
+            return refreshed, held
         tier = str(decision.get("coding_tool") or "")
         if tier in {"tier_s", "tier_a", "tier_b"}:
             # The dispatch admitted this pedido tier-unaware; stop here
-            # (still queued, decision kept) so the next cycle re-admits
-            # with the exact tier: full concurrency, quota and reserve
-            # semantics, no partial re-check.
-            return refreshed, refreshed
+            # (decision kept) so the next cycle re-admits with the exact
+            # tier: full concurrency, quota and reserve semantics, no
+            # partial re-check. The ticket arrives claimed
+            # (in_progress): explicitly requeue, or it would strand.
+            stopped = await self._repo.patch_task(
+                task_id, {"status": TaskStatus.QUEUED.value})
+            return refreshed, stopped or refreshed
         return refreshed, None
 
     async def _plan_pedido_convert(
@@ -3480,8 +3503,10 @@ class TaskService:
                     return await self._stop_pedido_failed(
                         task_id, f"pedido planning failed: {exc}")
                 if stop is not None:
-                    # Planned holds and parks land before in_progress, so
-                    # the dispatcher sees them as ordinary waits.
+                    # Planned holds and parks patch waiting/queued
+                    # explicitly (the dispatch claimed in_progress
+                    # before launch), so the dispatcher sees them as
+                    # ordinary waits.
                     self._wake_dispatcher()
                     return stop
                 started_at = datetime.now(timezone.utc)
@@ -5887,6 +5912,31 @@ class TaskService:
                                task_id, exc_info=True)
                 return
         elif out.get("ok") and out.get("action") == "decided":
+            decision = out.get("decision") or {}
+            latest = None
+            try:
+                latest = await self._repo.get_task(task_id)
+            except Exception:
+                latest = None
+            try:
+                held = await self._hold_decided_spend(
+                    latest or current or ticket, decision.get("costs"),
+                    out.get("spend") or {})
+            except Exception:
+                logger.warning("loose return spend hold failed for %s",
+                               task_id, exc_info=True)
+                held = None
+            if held is not None:
+                note = (f"Agent {resultado}: returned once to the planner, "
+                        f"re-decided with declared spend, held for Owner "
+                        f"approval. Motivo: {motivo}")
+                self._wake_dispatcher()
+                try:
+                    await self.comment_on_ticket(task_id, note)
+                except Exception:
+                    logger.warning("loose return comment failed for %s",
+                                   task_id, exc_info=True)
+                return
             try:
                 # Fresh read: the planner patched its decision above and
                 # this requeue must keep it, not clobber it.
@@ -5905,7 +5955,6 @@ class TaskService:
                 logger.warning("loose return requeue failed for %s",
                                task_id, exc_info=True)
                 return
-            decision = out.get("decision") or {}
             note = (f"Agent {resultado}: returned once to the planner, "
                     f"re-decided ({decision.get('target_agent')}/"
                     f"{decision.get('coding_tool') or '-'}), requeued. "

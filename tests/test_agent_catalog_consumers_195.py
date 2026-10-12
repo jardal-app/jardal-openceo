@@ -332,7 +332,9 @@ class WaitCommentTextTest(unittest.TestCase):
         text = wait_comment_text({"objective_id": "OBJ-1"}, "routing_missing")
         self.assertIn("coding_tool", text)
 
-    def test_loose_tier_text_unchanged(self):
+    def test_loose_wait_text_unchanged(self):
+        # Loose routing_missing keeps telling the operator to fix an
+        # explicit agent or coding_tool (TASK-2026-00204).
         text = wait_comment_text({}, "routing_missing")
         self.assertIn("coding_tool", text)
 

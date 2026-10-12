@@ -634,10 +634,12 @@ class ExplicitSkipsPlannerTests(unittest.IsolatedAsyncioTestCase):
         service.comment_on_ticket.assert_awaited_once()
 
     async def test_spend_hold_stops_run(self) -> None:
+        # Production shape: the dispatcher already claimed the ticket
+        # (in_progress) before run_task; the hold must revert the claim.
         objectives = MagicMock()
         objectives.env_for.return_value = MagicMock()
         service, repo, graph = _run_service(
-            _pedido(status=TaskStatus.QUEUED.value), _completed_out())
+            _pedido(status=TaskStatus.IN_PROGRESS.value), _completed_out())
         service.set_objective_service(objectives)
         service.create_owner_question = AsyncMock(  # type: ignore[method-assign]
             return_value={"task_id": "q-spend"})
@@ -656,10 +658,11 @@ class ExplicitSkipsPlannerTests(unittest.IsolatedAsyncioTestCase):
         service.create_owner_question.assert_awaited_once()
 
     async def test_decided_abs_stops_queued_for_readmission(self) -> None:
+        # Production shape: claimed (in_progress) before run_task.
         objectives = MagicMock()
         objectives.env_for.return_value = MagicMock()
         service, repo, graph = _run_service(
-            _pedido(status=TaskStatus.QUEUED.value), _completed_out())
+            _pedido(status=TaskStatus.IN_PROGRESS.value), _completed_out())
         service.set_objective_service(objectives)
 
         async def fake_plan(env: Any, ticket: dict[str, Any],
@@ -775,15 +778,25 @@ class ExplicitSkipsPlannerTests(unittest.IsolatedAsyncioTestCase):
 class LooseReturnTests(unittest.IsolatedAsyncioTestCase):
     def _stub(self, ticket: dict[str, Any]):
         from task_service import TaskService  # noqa: E402
+        repo = _FakeRepo(ticket)
         stub = SimpleNamespace(
-            _repo=_FakeRepo(ticket),
+            _repo=repo,
             _objective_service=MagicMock(),
             comment_on_ticket=AsyncMock(),
             _wake_dispatcher=MagicMock(),
+            create_owner_question=AsyncMock(return_value={"task_id": "q-1"}),
+            patch_task=repo.patch_task,
+            _task_allows_autorun=lambda task: True,
         )
         stub._trigger_loose_return = (  # type: ignore[attr-defined]
             lambda *args, **kwargs:
             TaskService._trigger_loose_return(stub, *args, **kwargs))
+        stub._hold_decided_spend = (  # type: ignore[attr-defined]
+            lambda *args, **kwargs:
+            TaskService._hold_decided_spend(stub, *args, **kwargs))
+        stub._hold_loose_spend = (  # type: ignore[attr-defined]
+            lambda *args, **kwargs:
+            TaskService._hold_loose_spend(stub, *args, **kwargs))
         return TaskService, stub
 
     async def test_first_no_aplica_returns_to_planner(self) -> None:
@@ -856,6 +869,29 @@ class LooseReturnTests(unittest.IsolatedAsyncioTestCase):
         assert row is not None
         self.assertEqual(row["status"], TaskStatus.FAILED.value)
         stub.comment_on_ticket.assert_awaited()
+
+    async def test_return_replan_spend_is_held(self) -> None:
+        service_cls, stub = self._stub(
+            _pedido(status=TaskStatus.FAILED.value))
+        params = {"agent_result": {"resultado": "bloqueado",
+                                   "motivo": "needs paid api"}}
+        planned = {"ok": True, "action": "decided",
+                   "decision": {"target_agent": "dev",
+                                "coding_tool": "tier_c",
+                                "costs": [{"label": "objective: api",
+                                           "amount": "50"}]},
+                   "spend": {"escalate": True, "category": "gasto_nuevo",
+                             "reason": "declared", "human_action": "OK?",
+                             "amount": "50", "currency": "USD",
+                             "unknown": []}}
+        with patch.object(engine_mod, "plan_pedido",
+                          new=AsyncMock(return_value=planned)):
+            await service_cls._trigger_objective_return(
+                stub, _pedido(status=TaskStatus.FAILED.value), params)
+        row = await stub._repo.get_task("task-pedido-1")
+        assert row is not None
+        self.assertEqual(row["status"], TaskStatus.WAITING.value)
+        stub.create_owner_question.assert_awaited_once()
 
     async def test_hecho_is_noop(self) -> None:
         service_cls, stub = self._stub(_pedido())
