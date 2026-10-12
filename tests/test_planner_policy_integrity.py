@@ -71,15 +71,18 @@ class FingerprintTests(unittest.TestCase):
             with self.subTest(text=repr(text)):
                 self.assertEqual(policy_fingerprint(text), "")
 
-    def test_hashes_exactly_what_the_prompt_carries(self) -> None:
-        long = "a" * _LIMIT + "tail that the prompt cuts"
-        carried = long[:_LIMIT]
+    def test_follows_the_content_past_the_prompt_budget(self) -> None:
+        # TASK-2026-00201 review: the hash covers the whole composed
+        # policy (the prompt cut no longer bounds it), so a change in a
+        # detail past the budget still moves the stored fingerprint.
+        long = "a" * _LIMIT
         self.assertEqual(
             policy_fingerprint(long),
-            hashlib.sha256(carried.encode("utf-8")).hexdigest()[:12])
-        # Text past the budget is not part of what the planner saw.
-        self.assertEqual(policy_fingerprint(long),
-                         policy_fingerprint("a" * _LIMIT + "another tail"))
+            hashlib.sha256(long.encode("utf-8")).hexdigest()[:12])
+        self.assertNotEqual(policy_fingerprint(long + "rule A"),
+                            policy_fingerprint(long + "rule B"))
+        self.assertNotEqual(policy_fingerprint(long),
+                            policy_fingerprint(long + "another tail"))
 
     def test_prompt_text_is_stripped_and_capped(self) -> None:
         self.assertEqual(policy_prompt_text("  x  \n"), "x")
@@ -87,7 +90,7 @@ class FingerprintTests(unittest.TestCase):
         self.assertEqual(policy_prompt_text(""), "")
 
 
-class PromptCarriesExactlyTheFingerprintedTextTests(unittest.TestCase):
+class PromptCutTests(unittest.TestCase):
     def test_the_prompt_uses_the_shared_cut(self) -> None:
         kept = "☃" * _LIMIT           # inside the budget
         cut = "☄" * 40               # past the budget

@@ -501,10 +501,11 @@ Not validated deterministically at this point (prompt and policy only): that an 
 
 §18–§35 (DEV ROUTING: tier semantics, oracles, routing, failures)
 live in the dev detail file, not in this core. Before assigning work
-to an agent, read its detail file under
-`openceo-core/objectives/routing_policy.d/`; for `target_agent == dev`,
-reading `dev.md` is MANDATORY to choose the tier. The planning prompt
-carries this core plus the staged file paths.
+to an agent, read its detail file at the path given in the
+AGENT POLICY DETAIL section of this prompt; for
+`target_agent == dev`, reading it is MANDATORY to choose the tier.
+(In this repository that file is
+`openceo-core/objectives/routing_policy.d/dev.md`.)
 
 
 ## 36. Objective completion is not direct

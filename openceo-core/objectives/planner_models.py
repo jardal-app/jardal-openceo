@@ -653,7 +653,7 @@ def load_policy_details(
     return found
 
 
-def _compose_policy(core: str, details: list[str]) -> str:
+def compose_policy(core: str, details: list[str]) -> str:
     """Full normative text: parts joined by exactly one blank line."""
     parts = [core.rstrip("\n")] + [item.rstrip("\n") for item in details]
     return "\n\n".join(parts) + "\n"
@@ -668,7 +668,7 @@ def load_policy_text(policy_path: str | Path | None = None) -> str:
     details = load_policy_details(policy_path)
     if not core or details is None:
         return ""
-    return _compose_policy(core, [text for _, text in details])
+    return compose_policy(core, [text for _, text in details])
 
 
 def policy_detail_index(
@@ -700,13 +700,15 @@ def policy_fingerprint(policy_text: str) -> str:
     Each planning run stores it (``planning_runs[].policy_sha``) over the
     composed policy (core plus every per-agent detail), so a decision can
     be traced to the policy version it saw: the core pasted in the prompt
-    plus the detail files staged for on-demand reading. Plain hashing:
-    no model call, and it never enters the prompt.
+    plus the detail files staged for on-demand reading. The hash covers
+    the whole text, never the prompt cut (TASK-2026-00201 review): a
+    grown detail set must not hide changes past the prompt budget.
+    Plain hashing: no model call, and it never enters the prompt.
     """
-    carried = policy_prompt_text(policy_text)
-    if not carried:
+    text = (policy_text or "").strip()
+    if not text:
         return ""
-    return hashlib.sha256(carried.encode("utf-8")).hexdigest()[:12]
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
 @dataclass(frozen=True)
@@ -726,8 +728,9 @@ def check_policy(policy_path: str | Path | None = None) -> PolicyStatus:
 
     Covers the core file plus every per-agent detail: a broken detail
     fails the check like a broken core. ``chars`` counts the core (the
-    always-pasted part); ``sha`` fingerprints the composed whole;
-    ``files`` lists every covered file, core first.
+    always-pasted part); ``sha`` fingerprints the composed whole
+    (over the budget, the full core alone); ``files`` lists every
+    covered file, core first.
     """
     path = policy_file(policy_path)
     core = load_policy_core(policy_path)
@@ -755,7 +758,7 @@ def check_policy(policy_path: str | Path | None = None) -> PolicyStatus:
         texts.append(text)
     return PolicyStatus(
         True, str(path), chars,
-        policy_fingerprint(_compose_policy(core, texts)), "",
+        policy_fingerprint(compose_policy(core, texts)), "",
         tuple(files))
 
 
@@ -775,7 +778,7 @@ def log_policy_status(
     elif status.chars > POLICY_PROMPT_MAX_CHARS:
         log.error(
             "Planner routing policy PROBLEM at %s: %s. The planner would "
-            "run with the truncated text (sha %s).",
+            "run with the core truncated to the prompt budget (sha %s).",
             status.path, status.problem, status.sha)
     else:
         log.error(

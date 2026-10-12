@@ -36,6 +36,7 @@ DOCS = [
     "AGENTS.md",
     "docs/ARCHITECTURE_REFERENCE_2026.md",
     "openceo-core/objectives/routing_policy.md",
+    "openceo-core/objectives/routing_policy.d/dev.md",
 ]
 
 #: Prefixes that never resolve inside this repo (temporal trees, vault).
