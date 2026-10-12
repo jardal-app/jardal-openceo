@@ -60,6 +60,7 @@ __all__ = [
     "check_catalog",
     "check_skill_links",
     "check_skill_names_unique",
+    "discover_role_skills",
     "find_consumer_mismatches",
     "is_staff_active",
     "load_all_role_skills",
@@ -583,6 +584,34 @@ def load_all_role_skills(
             if card.type is AgentType.AI}
 
 
+def discover_role_skills(
+    repo_root: str | Path | None = None,
+) -> dict[str, list[RoleSkill]]:
+    """On-disk skills by role dir, without loading the catalog.
+
+    Recovery path (review 00006): after adding a skill, ``load_catalog``
+    fails closed on the card mismatch and the missing exposure link —
+    exactly when the operator needs the skill map to recreate the link.
+    This scan reads ``skills/*/`` straight from disk (fail-closed on
+    malformed skill content only), so ``sync_skill_links`` stays usable
+    while the catalog is red. The card must still list the skill before
+    the service boots.
+    """
+    root = Path(repo_root) if repo_root is not None \
+        else catalog_root().parent
+    target = root / "skills"
+    if not target.is_dir():
+        return {}
+    found: dict[str, list[RoleSkill]] = {}
+    for entry in sorted(target.iterdir(), key=lambda item: item.name):
+        if entry.name.startswith(".") or entry.is_symlink() \
+                or not entry.is_dir():
+            continue
+        found[entry.name] = load_role_skills(
+            entry.name, f"skills/{entry.name}", root)
+    return found
+
+
 def check_skill_names_unique(
     by_agent: Mapping[str, Collection[RoleSkill]],
 ) -> list[str]:
@@ -1033,6 +1062,9 @@ def find_consumer_mismatches(
     reasons.
     R4: every wired graph agent is a catalog agent.
     R5: the disabled-but-live legacy names stay in the enum until removal.
+    R6: every enabled AI agent is in the enum and the router aliases
+    (review 00006: the gate approves it from the catalog, and without
+    its alias the router would reclassify by text, silently).
     """
     problems: list[str] = []
     names = set(catalog.agents)
@@ -1079,4 +1111,19 @@ def find_consumer_mismatches(
             problems.append(
                 f"R5: disabled-but-live legacy agent {name!r} left the enum "
                 "before its removal (TASK-2026-00209)")
+    alias_names = set(alias_values)
+    for name in sorted(names):
+        card = catalog.agents[name]
+        if not card.enabled or card.type is not AgentType.AI:
+            continue
+        if name not in enum_names:
+            problems.append(
+                f"R6: enabled AI agent {name!r} is missing from the enum "
+                "(the gate would approve it, the router would reclassify "
+                "it by text)")
+        if name not in alias_names:
+            problems.append(
+                f"R6: enabled AI agent {name!r} is missing from the router "
+                "aliases (the gate would approve it, the router would "
+                "reclassify it by text)")
     return problems
