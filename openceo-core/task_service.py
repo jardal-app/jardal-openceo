@@ -3441,6 +3441,13 @@ class TaskService:
                     reason = str(updated.get("waiting_reason") or "")
                     if reason.startswith(("routing_missing", "config")):
                         asyncio.create_task(self._comment_wait_on_erp(updated, reason))
+                result_comment = graph_out.get("result_comment")
+                if result_comment and str(result_comment).strip():
+                    # The orchestrator reports the agent verdict on the
+                    # business mirror; agents never change states
+                    # (TASK-2026-00205). Never raises, never blocks long.
+                    await self.comment_on_ticket(
+                        task_id, str(result_comment).strip())
                 if (final_status == TaskStatus.COMPLETED.value
                         and updated.get("objective_id")):
                     # Single post-persist objective close (TASK-2026-00169):
