@@ -2,7 +2,8 @@
 
 Every agent reads CLAUDE.md, so a citation to a file that is not there sends
 work down a dead end. This test scans the backticked spans of CLAUDE.md plus
-the normative docs and fails on any cited repo path that resolves to nothing.
+the normative docs (AGENTS.md holds the executor contract since TASK-2026-00190)
+and fails on any cited repo path that resolves to nothing.
 
 Deliberately narrow so it stays cheap and stable:
 - STATUS.md is history and is never scanned.
@@ -32,6 +33,7 @@ REPO = Path(__file__).resolve().parents[1]
 
 DOCS = [
     "CLAUDE.md",
+    "AGENTS.md",
     "docs/ARCHITECTURE_REFERENCE_2026.md",
     "openceo-core/objectives/routing_policy.md",
 ]
