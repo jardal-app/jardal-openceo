@@ -1638,7 +1638,8 @@ class TaskService:
     #
     # El contrato exige que la actividad humana en ERPNext llegue a OpenCEO por eventos
     # explicitos (ARCHITECTURE_REFERENCE_2026.md §Read and Write Boundaries). Lo hace un
-    # webhook de Frappe, no un sondeo: AGENTS.md §5.1 prohibe los barridos periodicos.
+    # webhook de Frappe, no un sondeo: las reglas permanentes de AGENTS.md prohiben
+    # los barridos periodicos.
 
     async def find_task_for_business_ref(
         self, *, task_id: str | None = None, ref: str | None = None
@@ -2442,7 +2443,7 @@ class TaskService:
         empujado y no contra el estado anterior.
 
         Acotada y de una sola pasada, como la de Notion: no es un barrido periodico
-        (AGENTS.md §5.1).
+        (reglas permanentes de AGENTS.md).
         """
         adapter = getattr(self, "_erpnext", None)
         if adapter is None or not adapter.is_enabled:

@@ -54,7 +54,7 @@ scripts/openceo-core-host.sh restart|status
   `OBJECTIVE_CLOSURE.md`). `.tier-s/` is the orchestrator-wide scratch
   (TASK-2026-00136). Read them; write only the artifact your prompt names.
 - Gates are run by the orchestrator; report failures with file + line.
-- Reviewers: read-only worktrees, reports on stdout in §16.4 format.
+- Reviewers: read-only worktrees, reports on stdout in §16.4 format (specified in the review request).
 - One ticket = one session; no transcripts or diffs in prompts.
 
 ### Standing rules

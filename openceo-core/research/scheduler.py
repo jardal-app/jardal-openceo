@@ -5,7 +5,8 @@ Por que no reutiliza ``HorizonScheduler`` tal cual
 Se evaluo extraer su kernel, y se descarto **copiarlo sin mas** por un motivo medido:
 su ``_loop`` acota cada espera con ``DEFAULT_MAX_SLEEP_SECONDS = 3600`` y vuelve a
 consultar aunque no haya trabajo. Es una red de seguridad razonable para Horizon, pero
-para research es un barrido horario: AGENTS.md §5.1 lo prohibe y el plan del epico lo
+para research es un barrido horario: las reglas permanentes de AGENTS.md lo prohiben
+y el plan del epico lo
 señala expresamente ("Research debe esperar evento indefinidamente si no hay
 vencimiento"). Aqui el timer **duerme sin tope** cuando no hay vencimiento y solo
 despierta por evento (CRUD) o por el vencimiento exacto.

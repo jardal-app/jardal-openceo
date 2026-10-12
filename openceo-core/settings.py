@@ -379,8 +379,8 @@ class Settings(BaseSettings):
     # Scheduler persistido de research (TASK-2026-00068). El timer **no** sondea: sin
     # vencimiento espera indefinidamente (`RESEARCH_SCHEDULER_MAX_SLEEP_SECONDS = 0`
     # significa sin tope, que es el defecto correcto). Fijar un tope solo se justifica
-    # como red de seguridad explicita, nunca para reproducir el barrido que AGENTS.md
-    # §5.1 prohibe.
+    # como red de seguridad explicita, nunca para reproducir el barrido que las reglas
+    # permanentes de AGENTS.md prohiben.
     RESEARCH_SCHEDULER_ENABLED: bool = False
     RESEARCH_SCHEDULER_LEASE_SECONDS: int = 120
     RESEARCH_SCHEDULER_MAX_ATTEMPTS: int = 3
