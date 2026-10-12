@@ -335,7 +335,7 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
             calls.append({"command": command, "stdin": stdin_payload, "cwd": cwd, "env": env})
             return True, "did the thing", ""
 
-        async def fake_overlays(provider, role, workspace):
+        async def fake_overlays(provider, role, workspace, profile_name="dev"):
             return {}, "badge-stub"
 
         manager._run_process = fake_run_process  # type: ignore[method-assign]
@@ -435,7 +435,7 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
             calls.append({"command": command, "stdin": stdin_payload})
             return True, "did the thing", ""
 
-        async def fake_overlays(provider, role, workspace):
+        async def fake_overlays(provider, role, workspace, profile_name="dev"):
             return {}, "badge-stub"
 
         manager._run_process = fake_run_process  # type: ignore[method-assign]

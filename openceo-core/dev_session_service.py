@@ -153,6 +153,8 @@ class DevSessionService:
             else:
                 command, env_vars, cwd = self._resolve_command(provider, config)
                 overlays: dict[str, bytes] | None = None
+                interactive_badge: str | None = None
+                interactive_provider: ServiceBadgeProvider | None = None
                 if provider == DevProvider.MUSE:
                     try:
                         profile = load_role_profile("dev")
@@ -160,22 +162,28 @@ class DevSessionService:
                         if issuer is None:
                             raise RoleProfileError(
                                 "role badges need a bound repository")
-                        interactive = ServiceBadgeProvider(
+                        interactive_provider = ServiceBadgeProvider(
                             issuer, self._settings,
                             f"dev-interactive-{project}", project,
                             dev_box_tools(),
                             timedelta(days=7))
-                        badge = await interactive.mint("interactive")
+                        interactive_badge = await interactive_provider.mint(
+                            "interactive")
                         rendered = settings_overlay_bytes(
                             profile, Path(os.path.expanduser("~")),
                             cwd or os.getcwd(),
-                            interactive.mcp_servers(badge))
+                            interactive_provider.mcp_servers(
+                                interactive_badge))
                         overlays = {SETTINGS_OVERLAY_RELPATH: rendered}
                         command = [*command,
                                    *render_argv_extras(profile),
                                    *render_card_argv(profile)]
                     except (RoleProfileError, CatalogError, McpAuthError,
                             ValueError, OSError) as exc:
+                        if (interactive_badge is not None
+                                and interactive_provider is not None):
+                            await interactive_provider.revoke(
+                                interactive_badge)
                         raise ValueError(
                             f"role profile refused: {exc}") from exc
                 try:
@@ -195,11 +203,18 @@ class DevSessionService:
                 except ValueError as exc:
                     if "already exists" in str(exc):
                         # tmux session already exists (e.g., orphan from crash) — reconnect
+                        if (interactive_badge is not None
+                                and interactive_provider is not None):
+                            await interactive_provider.revoke(
+                                interactive_badge)
                         tmux_name = self._tmux._session_name(project)
                         logger.warning("tmux session '%s' already existed, reusing", tmux_name)
                     else:
                         raise
                 except Exception as exc:
+                    if (interactive_badge is not None
+                            and interactive_provider is not None):
+                        await interactive_provider.revoke(interactive_badge)
                     logger.error("Failed to start tmux session for '%s': %s", project, exc)
                     raise ValueError(f"Failed to start tmux session: {exc}") from exc
 

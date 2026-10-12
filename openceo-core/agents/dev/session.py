@@ -155,6 +155,7 @@ class TierExecutor:
     cwd: str | None
     env: dict[str, str]
     label: str
+    role_profile: str | None = None
 
 
 @dataclass
@@ -903,7 +904,8 @@ class DevSessionManager:
                 return
             try:
                 overlays, badge = await self._muse_role_overlays(
-                    badge_provider, str(executor.label), str(repo))
+                    badge_provider, str(executor.label), str(repo),
+                    executor.role_profile or "dev")
             except (RoleProfileError, CatalogError, McpAuthError,
                     ValueError, OSError) as exc:
                 logger.error("follow-up refused without role profile: %s",
@@ -1402,11 +1404,19 @@ class DevSessionManager:
         provider: TicketBadgeProvider,
         role: str,
         workspace: str,
+        profile_name: str,
     ) -> tuple[dict[str, bytes], str]:
-        """Badge + settings overlay for one muse tier run (refuses loudly)."""
+        """Badge + settings overlay for one muse tier run (refuses loudly).
+
+        The profile comes from the same config value as the argv card;
+        tier runs are dev-only by design.
+        """
+        profile = load_role_profile(profile_name)
+        if profile.agent != "dev":
+            raise RoleProfileError(
+                f"tier runs need the dev profile, not {profile_name!r}")
         badge = await provider.mint(role)
         try:
-            profile = load_role_profile("dev")
             rendered = settings_overlay_bytes(
                 profile, Path(os.path.expanduser("~")), workspace,
                 provider.mcp_servers(badge))
@@ -1470,7 +1480,8 @@ class DevSessionManager:
             try:
                 overlays, badge = await self._muse_role_overlays(
                     badge_provider, str(executor.label),
-                    executor.cwd or os.getcwd())
+                    executor.cwd or os.getcwd(),
+                    executor.role_profile or "dev")
             except (RoleProfileError, CatalogError, McpAuthError,
                     ValueError, OSError) as exc:
                 detail = f"role profile refused: {exc}"
@@ -1584,6 +1595,8 @@ class DevSessionManager:
                     cwd=self._provider_cwd(provider_cfg, repo_cwd),
                     env=self._provider_env(provider_cfg),
                     label="tier_c:muse",
+                    role_profile=(str(profile_name)
+                                  if profile_name else None),
                 )
             argv = self._as_argv(link_cfg.get("command")) or [link]
             if link == "claudep":

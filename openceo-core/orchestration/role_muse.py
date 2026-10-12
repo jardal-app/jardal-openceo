@@ -284,14 +284,15 @@ def load_global_settings(home: str | Path) -> dict[str, Any]:
 def render_settings(
     profile: RoleProfile,
     global_settings: Mapping[str, Any],
-    mcp_servers: Mapping[str, Any] | None,
+    mcp_servers: Mapping[str, Any],
     skills_activation: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     """Full settings for one role run (the fence overlays this file).
 
-    The MCP map is replaced, never merged: roles see exactly the badged
-    server, never the Owner's personal servers. Skill activation merges
-    over the Owner's, so an Owner-disabled skill stays off.
+    The MCP map is replaced, never merged: roles see exactly the given
+    servers, never the Owner's personal ones. Pass an empty map when
+    the run has no badge. Skill activation merges over the Owner's,
+    so an Owner-disabled skill stays off.
     """
     out = copy.deepcopy(dict(global_settings))
     run = dict(out.get("run") or {})
@@ -317,8 +318,7 @@ def render_settings(
                 activation[scope] = merged_scope
         skills["activation"] = activation
         out["skills"] = skills
-    if mcp_servers is not None:
-        out["mcpServers"] = copy.deepcopy(dict(mcp_servers))
+    out["mcpServers"] = copy.deepcopy(dict(mcp_servers))
     return out
 
 
@@ -326,7 +326,7 @@ def settings_overlay_bytes(
     profile: RoleProfile,
     home: str | Path,
     workspace: str | Path,
-    mcp_servers: Mapping[str, Any] | None,
+    mcp_servers: Mapping[str, Any],
     muse_bin: str | None = None,
 ) -> bytes:
     """Render + serialize the settings overlay for one role run."""
@@ -398,8 +398,16 @@ def measure_session_log(path: str | Path,
         event = payload.get("event") or {}
         kind = event.get("kind")
         if kind == "model_input_trace_recorded":
-            lanes = int((event.get("bounded") or {}).get(
-                "total_lane_bytes") or 0)
+            raw_lanes = (event.get("bounded") or {}).get(
+                "total_lane_bytes")
+            if raw_lanes is None:
+                lanes = None
+            else:
+                try:
+                    lanes = int(raw_lanes)
+                except (TypeError, ValueError) as exc:
+                    raise RoleProfileError(
+                        "model input trace has no byte count") from exc
         elif kind == "context_block_diagnostic":
             block_id = str(event.get("block_id") or "")
             if block_id:

@@ -22,6 +22,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -434,6 +435,7 @@ def plan_agent(
         overlay_dir = scratch / "overlays"
         overlay_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(overlay_dir, 0o700)
+        run_tag = uuid.uuid4().hex
         for index, key in enumerate(sorted(home_file_overlays)):
             relpath = Path(str(key))
             if relpath.is_absolute() or ".." in relpath.parts:
@@ -442,7 +444,9 @@ def plan_agent(
             content = home_file_overlays[key]
             data = (content.encode("utf-8") if isinstance(content, str)
                     else bytes(content))
-            target = overlay_dir / f"{index}.overlay"
+            # Unique per plan: concurrent runs in one workspace must
+            # never share the bind source (review 00003/F1).
+            target = overlay_dir / f"{run_tag}-{index}.overlay"
             with open(target, "wb") as handle:
                 handle.write(data)
             os.chmod(target, 0o600)
