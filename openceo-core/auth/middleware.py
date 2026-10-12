@@ -48,4 +48,18 @@ def require_permissions(*required_perms: str):
                 raise HTTPException(status_code=403, detail=f"Permiso requerido: {perm}")
         return user
 
+    checker._openceo_auth_kind = "permission"
+    return checker
+
+
+def require_admin():
+    """Dependency factory for host-level endpoints (tmux, dev sessions, voice)."""
+
+    async def checker(request: Request) -> UserDocument:
+        user = await get_current_user(request)
+        if not user.is_admin:
+            raise HTTPException(status_code=403, detail="Solo administradores")
+        return user
+
+    checker._openceo_auth_kind = "admin"
     return checker

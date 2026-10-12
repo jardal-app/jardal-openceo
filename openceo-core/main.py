@@ -26,7 +26,7 @@ from ceo.service import CEOService
 from agents.pm.session import PMSessionManager
 from agents.secretary.session import SecretarySessionManager
 from auth.router import auth_router
-from auth.middleware import get_current_user, require_permissions
+from auth.middleware import get_current_user, require_admin, require_permissions
 from auth.service import compute_user_permissions, get_groups_for_user, hash_password
 from config_loader import ConfigLoader
 from db.mongo import MongoRepository
@@ -753,7 +753,11 @@ async def get_discovery_run(discovery_id: str) -> dict:
 
 
 @app.post("/api/discovery-runs/{discovery_id}/approve")
-async def approve_discovery_run(discovery_id: str, payload: DiscoveryApprovalRequest) -> dict:
+async def approve_discovery_run(
+    discovery_id: str,
+    payload: DiscoveryApprovalRequest,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
     try:
         return await workflow_service.approve_discovery_run(
             discovery_id,
@@ -1366,7 +1370,11 @@ async def get_focused_ticket(user_id: str = Query(default="openwebui")):
 
 
 @app.post("/api/tasks/{task_id_or_number}/focus")
-async def set_focused_ticket(task_id_or_number: str, user_id: str = Query(default="openwebui")):
+async def set_focused_ticket(
+    task_id_or_number: str,
+    user_id: str = Query(default="openwebui"),
+    current_user: UserDocument = Depends(get_current_user),
+):
     """Set the focused ticket for a user by ticket number or task_id."""
     task = None
     if task_id_or_number.isdigit():
@@ -1382,7 +1390,10 @@ async def set_focused_ticket(task_id_or_number: str, user_id: str = Query(defaul
 
 
 @app.delete("/api/tasks/focus")
-async def clear_focused_ticket(user_id: str = Query(default="openwebui")):
+async def clear_focused_ticket(
+    user_id: str = Query(default="openwebui"),
+    current_user: UserDocument = Depends(get_current_user),
+):
     """Clear the focused ticket for a user."""
     await repo.clear_active_ticket(user_id)
     return {"status": "ok", "focused": False}
@@ -1600,7 +1611,11 @@ async def list_task_reviews(
 
 
 @app.post("/api/tasks/{task_id}/reviews")
-async def create_task_review(task_id: str, payload: TaskReviewCreateRequest) -> dict:
+async def create_task_review(
+    task_id: str,
+    payload: TaskReviewCreateRequest,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
     try:
         return await task_service.create_task_review(task_id, payload)
     except ValueError as exc:
@@ -1610,7 +1625,10 @@ async def create_task_review(task_id: str, payload: TaskReviewCreateRequest) -> 
 
 
 @app.post("/api/tasks/{task_id}/run")
-async def run_task(task_id: str) -> dict:
+async def run_task(
+    task_id: str,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
     task = await task_service.run_task(task_id, force=True)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -1827,7 +1845,11 @@ async def task_phase_kimi(
 
 
 @app.post("/api/tasks/{task_id}/discover-workflow")
-async def discover_task_workflow(task_id: str, body: dict[str, Any] | None = None) -> dict:
+async def discover_task_workflow(
+    task_id: str,
+    body: dict[str, Any] | None = None,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
     task = await task_service.get_task(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -1918,7 +1940,10 @@ async def qa_launch_kimi(
 
 
 @app.post("/api/projects/select")
-async def select_project(payload: ProjectSelectionRequest) -> dict:
+async def select_project(
+    payload: ProjectSelectionRequest,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
     try:
         return await project_service.select_project(payload.user_id, payload.project)
     except ValueError as exc:
@@ -2000,7 +2025,10 @@ async def delete_project_workflow_template(
 
 
 @app.post("/api/dev/sessions")
-async def create_dev_session(payload: DevSessionCreateRequest) -> dict:
+async def create_dev_session(
+    payload: DevSessionCreateRequest,
+    current_user: UserDocument = Depends(require_admin()),
+) -> dict:
     try:
         return await dev_session_service.create_session(payload)
     except ValueError as exc:
@@ -2013,13 +2041,17 @@ async def list_dev_sessions(
     user_id: str | None = None,
     status: DevSessionStatus | None = None,
     limit: int = Query(default=100, ge=1, le=500),
+    current_user: UserDocument = Depends(require_admin()),
 ) -> list[dict]:
     await dev_session_service.reconcile_open_sessions(user_id=user_id, project=project)
     return await dev_session_service.list_sessions(project=project, user_id=user_id, status=status, limit=limit)
 
 
 @app.get("/api/dev/sessions/{session_id}")
-async def get_dev_session(session_id: str) -> dict:
+async def get_dev_session(
+    session_id: str,
+    current_user: UserDocument = Depends(require_admin()),
+) -> dict:
     current = await dev_session_service.get_session(session_id)
     if current is not None and current.get("status") in _OPEN_DEV_SESSION_STATUSES:
         await dev_session_service.reconcile_open_sessions(
@@ -2033,7 +2065,11 @@ async def get_dev_session(session_id: str) -> dict:
 
 
 @app.post("/api/dev/sessions/{session_id}/message")
-async def send_dev_message(session_id: str, payload: DevSessionMessageRequest) -> dict:
+async def send_dev_message(
+    session_id: str,
+    payload: DevSessionMessageRequest,
+    current_user: UserDocument = Depends(require_admin()),
+) -> dict:
     try:
         return await dev_session_service.send_message(session_id, payload)
     except ValueError as exc:
@@ -2041,7 +2077,11 @@ async def send_dev_message(session_id: str, payload: DevSessionMessageRequest) -
 
 
 @app.post("/api/dev/sessions/{session_id}/control")
-async def control_dev_session(session_id: str, payload: DevSessionControlRequest) -> dict:
+async def control_dev_session(
+    session_id: str,
+    payload: DevSessionControlRequest,
+    current_user: UserDocument = Depends(require_admin()),
+) -> dict:
     try:
         return await dev_session_service.control_session(session_id, payload)
     except ValueError as exc:
@@ -2052,7 +2092,10 @@ async def control_dev_session(session_id: str, payload: DevSessionControlRequest
 
 
 @app.post("/api/voice/peer-programming")
-async def voice_peer_programming(payload: VoicePeerProgrammingRequest) -> dict:
+async def voice_peer_programming(
+    payload: VoicePeerProgrammingRequest,
+    current_user: UserDocument = Depends(require_admin()),
+) -> dict:
     try:
         return await dev_session_service.handle_voice_turn(
             user_id=payload.user_id,
@@ -2069,13 +2112,19 @@ async def voice_peer_programming(payload: VoicePeerProgrammingRequest) -> dict:
 
 
 @app.get("/api/tmux/sessions")
-async def list_host_tmux_sessions():
+async def list_host_tmux_sessions(
+    current_user: UserDocument = Depends(require_admin()),
+):
     """List all tmux sessions on the host system."""
     return dev_session_service._tmux.list_all_host_sessions()
 
 
 @app.get("/api/tmux/sessions/{name}/pane")
-async def get_host_tmux_pane(name: str, lines: int = Query(default=50, ge=1, le=500)):
+async def get_host_tmux_pane(
+    name: str,
+    lines: int = Query(default=50, ge=1, le=500),
+    current_user: UserDocument = Depends(require_admin()),
+):
     """Capture active pane content for a given tmux session."""
     output = dev_session_service._tmux.capture_pane_by_name(name, max_lines=lines)
     if output is None:
@@ -2084,7 +2133,11 @@ async def get_host_tmux_pane(name: str, lines: int = Query(default=50, ge=1, le=
 
 
 @app.post("/api/tmux/sessions/{name}/keys")
-async def send_host_tmux_keys(name: str, payload: dict[str, Any]):
+async def send_host_tmux_keys(
+    name: str,
+    payload: dict[str, Any],
+    current_user: UserDocument = Depends(require_admin()),
+):
     """Send keys to a host tmux session."""
     keys = str(payload.get("keys") or "").strip()
     enter = bool(payload.get("enter", True))
@@ -2097,7 +2150,10 @@ async def send_host_tmux_keys(name: str, payload: dict[str, Any]):
 
 
 @app.post("/api/tmux/sessions")
-async def create_host_tmux_session(payload: dict[str, Any]):
+async def create_host_tmux_session(
+    payload: dict[str, Any],
+    current_user: UserDocument = Depends(require_admin()),
+):
     """Create a new tmux session on the host."""
     name = str(payload.get("name") or "").strip()
     cwd = payload.get("cwd")
@@ -2111,7 +2167,10 @@ async def create_host_tmux_session(payload: dict[str, Any]):
 
 
 @app.delete("/api/tmux/sessions/{name}")
-async def kill_host_tmux_session(name: str):
+async def kill_host_tmux_session(
+    name: str,
+    current_user: UserDocument = Depends(require_admin()),
+):
     """Kill a host tmux session."""
     ok = dev_session_service._tmux.kill_by_name(name)
     if not ok:
@@ -5174,7 +5233,10 @@ async def _pm_execute_subprocess(
 
 
 @app.post("/api/pm/extract")
-async def pm_extract_tickets(payload: dict[str, Any]) -> dict:
+async def pm_extract_tickets(
+    payload: dict[str, Any],
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
     """Direct API for dashboard form. No guided flow needed — all params explicit."""
     project = str(payload.get("project") or "").strip()
     if not project:
