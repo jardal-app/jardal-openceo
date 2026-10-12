@@ -132,7 +132,6 @@ class CEOService:
                 getattr(self._settings, "DEFAULT_PROJECT", "")
                 or "jardal-openceo"
             ),
-            create_objective=self._create_objective,
             create_ticket=self._create_ticket,
             escalate=self._escalate,
             executor=ProcessExecutor(roles=wiring["roles"], pool=[],
@@ -276,9 +275,6 @@ class CEOService:
         return str(mirror.get("name") or "")
 
     # -- writers ------------------------------------------------------
-
-    async def _create_objective(self, **kwargs: Any) -> dict[str, Any]:
-        return await self._task_service.create_objective(**kwargs)
 
     async def _create_ticket(
         self, payload: dict[str, Any]

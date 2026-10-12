@@ -11,9 +11,9 @@ Business-state effects flow only through sanctioned channels
 observer). If a future CEO ever needs to close or cancel business
 work directly, it MUST go through ``TaskService.transition_ticket``
 (TASK-2026-00132) — never through a direct adapter write. No such
-call site exists in this ticket: the six-action contract creates,
-escalates or reports, and business acceptance stays an ERPNext
-decision.
+call site exists in this ticket: the four-action contract states a
+need (a pedido the single planner shapes), escalates or reports,
+and business acceptance stays an ERPNext decision.
 """
 
 from __future__ import annotations
@@ -127,7 +127,6 @@ class CEOEnv:
     read_kpi: Callable[[str], Awaitable[CEOKpiReading]]
     known_projects: Collection[str]
     ops_project: str
-    create_objective: Callable[..., Awaitable[dict[str, Any]]]
     create_ticket: Callable[[dict[str, Any]], Awaitable[dict[str, Any] | None]]
     escalate: Callable[..., Awaitable[dict[str, Any]]]
     executor: engine_mod.Runner
@@ -470,6 +469,7 @@ def _ceo_prompt(
     reasons: Sequence[str],
     review_id: str,
     repo_root: Path,
+    ops_project: str,
 ) -> str:
     """CEO prompt: bounded state + JSON contract (self-contained)."""
     reason_lines = "\n".join(
@@ -498,21 +498,29 @@ def _ceo_prompt(
             signals.escalations_unknown),
         "\n".join([
             "RULES",
-            "- One action only: keep_going | create_objective | "
-            "create_ticket | create_project | escalate | do_nothing.",
+            "- One action only: keep_going | crear_pedido | escalate | "
+            "do_nothing.",
             "- keep_going: open work suffices, nothing new needed now. "
             "do_nothing: no action is warranted at all.",
-            "- create_objective/create_ticket/create_project REQUIRE a "
-            "mandate eje with at least one KPI measured this review "
-            "(a reading, not UNKNOWN) linked via kpi_ids. An axis "
-            "without a measurable KPI yields a report, never new work.",
+            "- crear_pedido states a need, never its form: the single "
+            "planner decides ticket or objective, agent, skill and "
+            "(dev) tier. Never name the outcome ticket or objective; "
+            "describe the work.",
+            "- crear_pedido REQUIRES a mandate eje with at least one "
+            "KPI measured this review (a reading, not UNKNOWN) linked "
+            "via kpi_ids. An axis without a measurable KPI yields a "
+            "report, never new work.",
             "- Unknown is null: never invent readings, tickets, or "
             "owners. An unreadable source narrows what you may decide.",
-            "- No tier field anywhere: the single planner decides loose "
-            "tickets before dispatch and tiers objective children.",
-            "- create_project only carries key/display/description: the "
-            "project workflow resolves spend (it escalates by itself "
-            "when the mandate says so).",
+            "- No agent, skill or tier field anywhere: the single "
+            "planner decides them.",
+            "- Declare every new cost the work needs in costs (label "
+            "plus a decimal-string amount, null when unknown): the "
+            "spend gate holds it for the Owner before launch.",
+            f"- A new company project is a pedido filed in {ops_project} "
+            "with project_key and display_name; the operations skill "
+            "creates it. Other pedidos are filed in the project the "
+            "work belongs to.",
             "- escalate ONLY with a policy cause: new spend over the "
             "threshold (amount as a decimal string), an irreversible "
             "external action, a strategic replanning, a mandate change, "
@@ -520,27 +528,26 @@ def _ceo_prompt(
             "escalates. An already-open identical escalation needs no "
             "duplicate.",
             "- The deterministic validation rejects duplicates, "
-            "over-limit, unknown-project, unlinked and unmeasured "
-            "creations, and causeless escalations. Propose work that "
-            "survives it.",
+            "unknown-project, unlinked and unmeasured pedidos, and "
+            "causeless escalations. Propose work that survives it.",
         ]),
         "\n".join([
             f"OUTPUT: write {CEO_DECISION_FILE} under {repo_root}/.tier-s/ "
             "with exactly this JSON (no other file, no other text):",
-            '{"action": "<one of the six>", "summary": "<one line>", '
-            '"objective": {"project": "...", "goal": "...", '
-            '"acceptance": ["..."], "eje_id": "...", "kpi_ids": ["..."]} '
-            '| "ticket": {"project": "...", "title": "...", '
+            '{"action": "<one of the four>", "summary": "<one line>", '
+            '"pedido": {"project": "...", "title": "...", '
             '"description": "...", "acceptance": [...], "eje_id": "...", '
-            '"kpi_ids": ["..."]} | "project": {"project_key": "...", '
-            '"display_name": "...", "description": "...", '
-            '"eje_id": "...", "kpi_ids": ["..."]} | "escalation": '
+            '"kpi_ids": ["..."], "costs": [{"label": "...", "amount": '
+            '"..."|null}], "project_key": "...", "display_name": "..."} '
+            '| "escalation": '
             '{"kind": "...", "summary": "...", "project": null, '
             '"amount": null, "uses_paid_quota": false, '
             '"irreversible": false, "strategic_replan": false, '
             '"mandate_change": false, '
             '"policy_requires_human_review": false}}',
-            "keep_going and do_nothing carry action+summary only.",
+            "keep_going and do_nothing carry action+summary only; "
+            "costs and project_key/display_name are optional (omit the "
+            "keys when the pedido needs neither).",
         ]),
     ])
 
@@ -548,7 +555,7 @@ def _ceo_prompt(
 def _ceo_retry_prompt(errors: Sequence[str], repo_root: Path) -> str:
     return (
         f"Your {CEO_DECISION_FILE} is invalid: {'; '.join(errors)}\n"
-        "Fix exactly that (same six actions, same rules) and rewrite "
+        "Fix exactly that (same four actions, same rules) and rewrite "
         f"the file under {repo_root}/.tier-s/. No other text."
     )
 
@@ -564,6 +571,7 @@ def _validation_context(env: CEOEnv, signals: CEOSignals) -> CEOValidationContex
     return CEOValidationContext(
         mandate=env.mandate,
         known_projects=list(env.known_projects),
+        ops_project=str(env.ops_project or ""),
         open_titles=list(signals.open_titles),
         open_titles_unknown=signals.open_titles_unknown,
         active_objectives=[
@@ -753,92 +761,44 @@ async def _act_on_decision(
     """Perform exactly one validated action. Never raises for refusals."""
     if decision.action in (CEOAction.KEEP_GOING, CEOAction.DO_NOTHING):
         return {"ok": True, "action": decision.action.value}
-    if decision.action == CEOAction.CREATE_OBJECTIVE:
-        spec = decision.objective
-        assert spec is not None  # Shape-guarded.
-        try:
-            created = await env.create_objective(
-                project=str(spec.project),
-                goal=str(spec.goal),
-                acceptance=[str(item) for item in spec.acceptance],
-                entry="ceo_review",
-                source="api",
-                source_id=f"ceo:{review_id}:objective",
-                requester="ceo",
-            )
-        except engine_mod.ObjectiveRejected as exc:
-            return {
-                "ok": True, "action": "rejected",
-                "reason": f"objective refused: {exc}",
-            }
-        return {
-            "ok": True, "action": "objective_created",
-            "objective_id": created.get("objective_id"),
-        }
-    if decision.action == CEOAction.CREATE_TICKET:
-        spec = decision.ticket
+    if decision.action == CEOAction.CREAR_PEDIDO:
+        spec = decision.pedido
         assert spec is not None  # Shape-guarded.
         citation = (
             f"[CEO review {review_id} ({kind})] Eje {spec.eje_id}, "
             f"KPIs {', '.join(spec.kpi_ids)}."
         )
+        params: dict[str, Any] = {
+            "ceo_review": review_id,
+            "eje_id": str(spec.eje_id),
+            "kpi_ids": [str(item) for item in spec.kpi_ids],
+        }
+        if spec.costs:
+            params["costs"] = [
+                {"label": str(cost.label), "amount": cost.amount}
+                for cost in spec.costs
+            ]
+        if spec.project_key is not None:
+            params["project_key"] = str(spec.project_key)
+            params["display_name"] = str(spec.display_name or "")
         created = await env.create_ticket({
             "title": str(spec.title),
             "description": f"{citation}\n\n{spec.description}",
             "project": str(spec.project),
             "source": "api",
-            "source_id": f"ceo:{review_id}:ticket",
+            "source_id": f"ceo:{review_id}:pedido",
             "acceptance": [str(item) for item in spec.acceptance],
-            "params": {
-                "ceo_review": review_id,
-                "eje_id": str(spec.eje_id),
-                "kpi_ids": [str(item) for item in spec.kpi_ids],
-            },
+            "params": params,
             "tags": ["ceo-review"],
         })
         if created is None:
             return {
                 "ok": False, "action": "error",
-                "reason": "ticket creation failed",
+                "reason": "pedido creation failed",
             }
         return {
-            "ok": True, "action": "ticket_created",
+            "ok": True, "action": "pedido_created",
             "task_id": created.get("task_id"),
-        }
-    if decision.action == CEOAction.CREATE_PROJECT:
-        spec = decision.project
-        assert spec is not None  # Shape-guarded.
-        key = str(spec.project_key or "").strip()
-        citation = (
-            f"[CEO review {review_id} ({kind})] Eje {spec.eje_id}, "
-            f"KPIs {', '.join(spec.kpi_ids)}."
-        )
-        created = await env.create_ticket({
-            "title": f"[CEO] Crear proyecto {key}",
-            "description": f"{citation}\n\n{spec.description}",
-            "project": env.ops_project,
-            "source": "api",
-            "source_id": f"ceo:{review_id}:project:{key}",
-            "params": {
-                "workflow": "operations.create_project",
-                "project_key": key,
-                "display_name": str(spec.display_name),
-                "description": str(spec.description),
-                "ceo_review": review_id,
-                "eje_id": str(spec.eje_id),
-                "kpi_ids": [str(item) for item in spec.kpi_ids],
-            },
-            "tags": ["ceo-review"],
-        })
-        if created is None:
-            return {
-                "ok": False, "action": "error",
-                "reason": "project-creation ticket failed",
-            }
-        return {
-            "ok": True, "action": "project_creation_started",
-            "task_id": created.get("task_id"),
-            "project_key": key,
         }
     spec = decision.escalation
     assert spec is not None  # Shape-guarded.
@@ -888,6 +848,7 @@ async def run_review(
     prompt = _ceo_prompt(
         signals, kind=kind, reasons=clean_reasons,
         review_id=review_id, repo_root=env.repo_root,
+        ops_project=str(env.ops_project or ""),
     )
     scratch = env.repo_root / ".tier-s"
     scratch.mkdir(parents=True, exist_ok=True)
