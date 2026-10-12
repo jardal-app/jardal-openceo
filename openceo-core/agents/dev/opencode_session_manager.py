@@ -59,20 +59,26 @@ class OpenCodeSessionManager:
             context_prompt,
         ]
 
-        env = {
-            **os.environ,
+        from orchestration.agent_sandbox import (
+            cleanup_sandbox_scratch, plan_agent,
+        )
+        overlay = {
             "OPENCODE_GO_API_KEY": self._settings.OPENCODE_GO_API_KEY or os.environ.get("OPENCODE_GO_API_KEY", ""),
         }
+        # The QA session must land in the live opencode state: rw carve-out.
+        plan = plan_agent(argv=command, workspace=work_dir,
+                          base=os.environ, overlay=overlay,
+                          config_args=[cli_path], opencode_state_rw=True)
 
         logger.info("Creating OpenCode QA session: work_dir=%s title=%s", work_dir, session_title)
 
         process = await asyncio.create_subprocess_exec(
-            *command,
+            *plan.argv,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
-            cwd=work_dir,
-            env=env,
+            cwd=plan.cwd,
+            env=plan.env,
         )
 
         session_id: str | None = None
@@ -97,6 +103,7 @@ class OpenCodeSessionManager:
                 await asyncio.wait_for(process.wait(), timeout=10)
             except Exception:
                 pass
+            cleanup_sandbox_scratch(work_dir)
 
         if not session_id:
             raise ValueError("Failed to extract sessionID from OpenCode output")

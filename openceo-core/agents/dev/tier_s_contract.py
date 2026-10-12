@@ -14,24 +14,48 @@ from pathlib import Path
 from typing import Collection, Mapping
 
 
-# Orchestration credentials that must never leak into child CLI environments.
-# dsh resolves its DeepSeek key per request and ranks the inherited process
-# environment ABOVE $DSH_HOME/.credentials.yaml, so inheriting the service key
-# silently re-bills Tier S reviews to the orchestration account instead of the
-# operator's own dsh key (TASK-2026-00105).
-CHILD_ENV_CREDENTIAL_BLOCKLIST = frozenset({"DEEPSEEK_API_KEY"})
+# Child process environment (TASK-2026-00192): allowlist, not denylist.
+# Agent CLIs inherit only operational locale/terminal/identity vars; every
+# service credential stays out. The dsh re-billing trap (TASK-2026-00105) is
+# covered structurally: DEEPSEEK_API_KEY is not allowlisted, so dsh falls
+# back to the operator's own $DSH_HOME/.credentials.yaml.
+CHILD_ENV_ALLOWLIST = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM",
+    "LANG", "LC_ALL", "LANGUAGE", "TZ", "TMPDIR", "NO_COLOR",
+})
+
+# Backstop: a base key matching these never passes, even if allowlisted.
+# Mirrors research/runtimes/isolation.py, extended with agent-relevant
+# providers. The overlay is exempt: explicit config is operator intent.
+_SECRET_ENV_PREFIXES = (
+    "ANTHROPIC_", "AWS_", "BRAVE_", "CLOUDFLARE_", "DEEPSEEK_",
+    "ERPNEXT_", "FIRECRAWL_", "GROQ_", "JWT_", "MCP_", "META_",
+    "MONGODB_", "N8N_", "NOTION_", "OPENCEO_", "OPENCODE_",
+    "OPENWEBUI_", "R2_", "RESEARCH_", "SERPER_", "SMTP_",
+)
+_SECRET_ENV_SUFFIXES = (
+    "_API_KEY", "_TOKEN", "_SECRET", "_SECRETS", "_PASSWORD", "_PASS",
+    "_CREDENTIAL", "_CREDENTIALS", "_AUTH",
+)
+
+
+def _looks_like_secret(key: str) -> bool:
+    upper = str(key).upper()
+    return (upper.startswith(_SECRET_ENV_PREFIXES)
+            or upper.endswith(_SECRET_ENV_SUFFIXES))
 
 
 def child_env(base: Mapping[str, str], overlay: Mapping[str, str] | None = None) -> dict[str, str]:
     """Merge a child process env over ``base`` without leaking credentials.
 
-    Blocklisted keys are dropped unless the overlay sets them explicitly:
-    explicit config is operator intent and wins.
+    From ``base`` only allowlisted, non-secret-looking keys survive.
+    The overlay applies verbatim: explicit config is operator intent
+    (motor auth, ticket badges, per-slot env) and wins.
     """
     overlay = {str(k): str(v) for k, v in dict(overlay or {}).items()}
     merged = {
         str(k): str(v) for k, v in dict(base).items()
-        if k not in CHILD_ENV_CREDENTIAL_BLOCKLIST or k in overlay
+        if k in CHILD_ENV_ALLOWLIST and not _looks_like_secret(k)
     }
     merged.update(overlay)
     return merged

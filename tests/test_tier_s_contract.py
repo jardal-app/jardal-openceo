@@ -3,7 +3,7 @@
 Covers what the Tier S engine in :mod:`agents.dev.tier_s` still uses:
 snapshots, quorum (with self-review extras), TUI question handling, the
 non-blocking plan-review format, the global roster/pool config and the child
-environment credential blocklist. Old-orchestrator tests were removed with
+environment allowlist. Old-orchestrator tests were removed with
 ``consensus.py`` (owner order); the engine's behavior is proven by
 ``tests/test_tier_s_final.py``.
 """
@@ -283,7 +283,9 @@ class ChildEnvLeakTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "[REDACTED]"}):
             result = await mgr._run_process_detailed(
                 [sys.executable, "-c", _ENV_PROBE], cwd=str(self.cwd),
-                env={"DSH_HOME": "/home/develop/.dsh"})
+                env={"DSH_HOME": "/home/develop/.dsh"},
+                # Env-only probe: the FS fence has its own tests (00192).
+                sandbox=False)
         self.assertTrue(result.ok, result.stderr)
         self.assertEqual(result.stdout, "CLEAN")
 

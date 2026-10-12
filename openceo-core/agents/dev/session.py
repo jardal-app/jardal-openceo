@@ -875,7 +875,8 @@ class DevSessionManager:
             stdin_payload = prompt
         await self._run_process(
             command, stdin_payload=stdin_payload, timeout=1800,
-            cwd=str(repo), env=executor.env or None)
+            cwd=str(repo), env=executor.env or None,
+            config_argv=list(executor.argv))
 
     async def _task_cancelled(self, task_id: str) -> bool:
         """Fresh cancel check against the stored ticket (fail-open).
@@ -1362,6 +1363,7 @@ class DevSessionManager:
         ok, output, err = await self._run_process(
             command, stdin_payload=stdin_payload, timeout=1800,
             cwd=executor.cwd, env=executor.env or None,
+            config_argv=list(executor.argv),
         )
 
         if not ok:
@@ -1725,6 +1727,8 @@ class DevSessionManager:
         timeout: int = 120,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
+        sandbox: bool = True,
+        config_argv: list[str] | None = None,
     ) -> tuple[bool, str, str]:
         result = await self._run_process_detailed(
             command,
@@ -1732,6 +1736,8 @@ class DevSessionManager:
             timeout=timeout,
             cwd=cwd,
             env=env,
+            sandbox=sandbox,
+            config_argv=config_argv,
         )
         return result.ok, result.stdout, result.stderr
 
@@ -1742,20 +1748,46 @@ class DevSessionManager:
         timeout: int = 120,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
+        sandbox: bool = True,
+        config_argv: list[str] | None = None,
     ) -> "ProcessRunResult":
+        plan = None
+        if sandbox:
+            from orchestration.agent_sandbox import (
+                cleanup_sandbox_scratch, plan_agent,
+            )
+            from research.runtimes.base import IsolationUnavailable
+            try:
+                plan = plan_agent(
+                    argv=[str(token) for token in command],
+                    workspace=cwd or os.getcwd(),
+                    base=os.environ, overlay=env,
+                    config_args=(config_argv if config_argv is not None
+                                 else [str(command[0])] if command else []))
+            except (IsolationUnavailable, ValueError, OSError) as exc:
+                return ProcessRunResult(
+                    False, "", f"sandbox refused: {exc}", None)
         try:
             stdin_target = (
                 asyncio.subprocess.PIPE
                 if stdin_payload is not None
                 else asyncio.subprocess.DEVNULL
             )
+            if plan is None:
+                run_argv: list[str] = command
+                run_cwd: str | None = cwd
+                run_env: dict[str, str] | None = child_env(os.environ, env)
+            else:
+                run_argv = plan.argv
+                run_cwd = plan.cwd
+                run_env = plan.env
             process = await asyncio.create_subprocess_exec(
-                *command,
+                *run_argv,
                 stdin=stdin_target,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=child_env(os.environ, env),
+                cwd=run_cwd,
+                env=run_env,
             )
             input_bytes = None if stdin_payload is None else stdin_payload.encode("utf-8")
             stdout, stderr = await asyncio.wait_for(
@@ -1768,6 +1800,9 @@ class DevSessionManager:
             return ProcessRunResult(False, "", f"Command not found: {command[0]}", None)
         except Exception as exc:
             return ProcessRunResult(False, "", f"Command execution error: {exc}", None)
+        finally:
+            if plan is not None:
+                cleanup_sandbox_scratch(cwd or os.getcwd())
 
         output = (stdout or b"").decode("utf-8", errors="replace").strip()
         err = (stderr or b"").decode("utf-8", errors="replace").strip()

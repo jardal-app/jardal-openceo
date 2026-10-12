@@ -25,7 +25,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
-from agents.dev.tier_s_contract import child_env
+from orchestration.agent_sandbox import cleanup_sandbox_scratch, plan_agent
+from research.runtimes.base import IsolationUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -110,77 +111,93 @@ class ProcessExecutor:
             return ExecResult(
                 returncode=1, elapsed_s=0.0,
                 output_tail=f"unknown live role: {role}")
-        argv = [str(token) for token in spec.get("command", [])]
-        argv += [str(token) for token in spec.get("headless_args", [])]
-        argv += [str(token) for token in spec.get("model_args", [])]
-        if not argv:
+        config_argv = [str(token) for token in spec.get("command", [])]
+        config_argv += [str(token) for token in spec.get("headless_args", [])]
+        config_argv += [str(token) for token in spec.get("model_args", [])]
+        if not config_argv:
             return ExecResult(
                 returncode=1, elapsed_s=0.0,
                 output_tail=f"role {role} has no command")
         stdin_payload: str | None = None
+        full_argv = list(config_argv)
         if via == "stdin":
             stdin_payload = prompt
         else:
-            argv.append(prompt)
-        env = child_env(os.environ, {**extra_env, **{
+            full_argv.append(prompt)
+        overlay = {**extra_env, **{
             str(k): str(v)
-            for k, v in dict(spec.get("env") or {}).items()}})
+            for k, v in dict(spec.get("env") or {}).items()}}
         if role.startswith("review:"):
-            env = {**env, "GIT_OPTIONAL_LOCKS": "0"}
-        started = time.monotonic()
+            overlay["GIT_OPTIONAL_LOCKS"] = "0"
+        model = str(spec.get("model") or "")
+        slot = str(spec.get("account") or spec.get("label") or role)
         try:
-            process = await asyncio.create_subprocess_exec(
-                *argv,
-                stdin=(asyncio.subprocess.PIPE if stdin_payload is not None
-                       else asyncio.subprocess.DEVNULL),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=str(workdir),
-                env=env,
-            )
-        except FileNotFoundError:
+            plan = plan_agent(argv=full_argv, workspace=workdir,
+                              base=os.environ, overlay=overlay,
+                              config_args=config_argv)
+        except (IsolationUnavailable, ValueError, OSError) as exc:
             return ExecResult(
                 returncode=1, elapsed_s=0.0,
-                output_tail=f"command not found: {argv[0]}",
-                model=str(spec.get("model") or ""),
-                slot=str(spec.get("account") or spec.get("label") or role))
-        except OSError as exc:
-            return ExecResult(
-                returncode=1, elapsed_s=0.0, output_tail=str(exc)[:2000],
-                model=str(spec.get("model") or ""),
-                slot=str(spec.get("account") or spec.get("label") or role))
+                output_tail=f"sandbox refused: {exc}",
+                model=model, slot=slot)
+        started = time.monotonic()
         try:
-            raw_out, raw_err = await asyncio.wait_for(
-                process.communicate(
-                    stdin_payload.encode("utf-8")
-                    if stdin_payload is not None else None),
-                timeout=max(1, timeout_s),
-            )
-        except asyncio.TimeoutError:
             try:
-                process.kill()
-            except ProcessLookupError:
-                pass
+                process = await asyncio.create_subprocess_exec(
+                    *plan.argv,
+                    stdin=(asyncio.subprocess.PIPE
+                           if stdin_payload is not None
+                           else asyncio.subprocess.DEVNULL),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=plan.cwd,
+                    env=plan.env,
+                )
+            except FileNotFoundError:
+                return ExecResult(
+                    returncode=1, elapsed_s=0.0,
+                    output_tail=f"command not found: {plan.argv[0]}",
+                    model=model, slot=slot)
+            except OSError as exc:
+                return ExecResult(
+                    returncode=1, elapsed_s=0.0,
+                    output_tail=str(exc)[:2000],
+                    model=model, slot=slot)
+            try:
+                raw_out, raw_err = await asyncio.wait_for(
+                    process.communicate(
+                        stdin_payload.encode("utf-8")
+                        if stdin_payload is not None else None),
+                    timeout=max(1, timeout_s),
+                )
+            except asyncio.TimeoutError:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                return ExecResult(
+                    returncode=TIMEOUT_RETURNCODE,
+                    elapsed_s=float(timeout_s),
+                    output_tail=(f"timeout after {timeout_s}s: "
+                                 f"{' '.join(config_argv[:3])}"),
+                    model=model, slot=slot,
+                    usage={"timeout": True})
+            stdout = (raw_out or b"").decode("utf-8", errors="replace")
+            stderr = (raw_err or b"").decode("utf-8", errors="replace")
+            text = stdout.strip() or stderr.strip()
+            truncated = len(text) > OUTPUT_CAP_CHARS
+            signal = self._read_signal(workdir, text)
             return ExecResult(
-                returncode=TIMEOUT_RETURNCODE, elapsed_s=float(timeout_s),
-                output_tail=f"timeout after {timeout_s}s: {' '.join(argv[:3])}",
-                model=str(spec.get("model") or ""),
-                slot=str(spec.get("account") or spec.get("label") or role),
-                usage={"timeout": True})
-        stdout = (raw_out or b"").decode("utf-8", errors="replace")
-        stderr = (raw_err or b"").decode("utf-8", errors="replace")
-        text = stdout.strip() or stderr.strip()
-        truncated = len(text) > OUTPUT_CAP_CHARS
-        signal = self._read_signal(workdir, text)
-        return ExecResult(
-            returncode=int(process.returncode or 0),
-            elapsed_s=time.monotonic() - started,
-            signal=signal,
-            usage={"stdout_chars": len(stdout), "stderr_chars": len(stderr),
-                   "truncated": truncated},
-            output_tail=text[:OUTPUT_CAP_CHARS],
-            model=str(spec.get("model") or ""),
-            slot=str(spec.get("account") or spec.get("label") or role))
+                returncode=int(process.returncode or 0),
+                elapsed_s=time.monotonic() - started,
+                signal=signal,
+                usage={"stdout_chars": len(stdout),
+                       "stderr_chars": len(stderr),
+                       "truncated": truncated},
+                output_tail=text[:OUTPUT_CAP_CHARS],
+                model=model, slot=slot)
+        finally:
+            cleanup_sandbox_scratch(workdir)
 
     async def cleanup(self, role: str) -> None:
         """One-shot processes own nothing between calls."""

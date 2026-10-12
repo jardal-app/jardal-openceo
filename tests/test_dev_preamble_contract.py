@@ -376,7 +376,8 @@ class SimpleTierPromptsTests(_RepoCases):
         calls: list[dict] = []
 
         async def fake_run_process(command, stdin_payload=None, timeout=120,
-                                   cwd=None, env=None):
+                                   cwd=None, env=None, sandbox=True,
+                                   config_argv=None):
             calls.append({"command": command, "stdin": stdin_payload})
             return True, "ok", ""
 
