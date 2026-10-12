@@ -32,7 +32,9 @@ date: 2026-10-12
   activation keeps every non-role skill off. Never commit a second copy.
 - The exposure dir is local (`.codex/` is gitignored), so a fresh clone
   has no links: after adding a skill, recreate them with
-  `catalog.sync_skill_links`. The crystallization save step calls it in
+  `catalog.sync_skill_links` (the test suite recreates them itself via
+  `tests/conftest.py`; the service still needs them on disk to boot).
+  The crystallization save step calls it in
   code (TASK-2026-00210); until then, from `openceo-core/` run:
 
   ```bash

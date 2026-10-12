@@ -652,7 +652,8 @@ def check_skill_links(
         if not os.path.lexists(link):
             problems.append(
                 f"{PROJECT_SKILLS_DIR}/{name}: missing exposure symlink "
-                f"to {sources[name]}")
+                f"to {sources[name]} (local state: recreate with "
+                "catalog.sync_skill_links)")
         elif not link.is_symlink() or os.path.realpath(link) != sources[name]:
             problems.append(
                 f"{PROJECT_SKILLS_DIR}/{name}: must be a symlink to "

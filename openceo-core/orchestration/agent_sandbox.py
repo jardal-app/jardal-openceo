@@ -432,8 +432,10 @@ def plan_agent(
 
     ``extra_read_roots``/``extra_write_roots`` mount declared trees
     (TASK-2026-00214): shallow first so narrow mounts shadow broad ones,
-    the workspace rebound read-write when one covers it, secret masks
-    over every extra root. A missing or too-broad root refuses the run.
+    secret masks over every extra root, and the workspace rebound
+    read-write after the masks when one covers it (an ancestor mask
+    must not swallow it; its own masks re-apply last). A missing or
+    too-broad root refuses the run.
     """
     backend = BubblewrapBackend()
     if not backend.available:
@@ -466,14 +468,25 @@ def plan_agent(
         ops.append(["--bind" if writable else "--ro-bind",
                     str(path), str(path)])
     # The backend binds the workspace before extra_ops: a covering extra
-    # mount would shadow it back to read-only, so rebind it last.
+    # mount would shadow it back to read-only, so rebind it after the
+    # masks. Masks first matters the other way too: a mask over a
+    # workspace ancestor (tmpfs on <repo>/.runtime) must not swallow the
+    # workspace (review 00007); the workspace's own masks re-apply last.
     try:
         work_resolved = workdir.resolve()
     except OSError:
         work_resolved = workdir
-    if any(path == work_resolved or path in work_resolved.parents
-           for path, _writable in extras):
-        ops.append(["--bind", str(workdir), str(workdir)])
+    needs_rebind = any(
+        path == work_resolved or path in work_resolved.parents
+        for path, _writable in extras)
+
+    def _mask(root: Path) -> None:
+        for path, is_dir in _iter_nested_secrets(root):
+            if is_dir:
+                ops.append(["--tmpfs", str(path)])
+            else:
+                ops.append(["--ro-bind", str(scratch / "empty"), str(path)])
+
     mask_roots = [workdir]
     for op in config_ops:
         if op[0] == "--ro-bind":
@@ -482,11 +495,12 @@ def plan_agent(
                 mask_roots.append(candidate)
     mask_roots.extend(_prune_contained([path for path, _ in extras]))
     for masked in mask_roots:
-        for path, is_dir in _iter_nested_secrets(masked):
-            if is_dir:
-                ops.append(["--tmpfs", str(path)])
-            else:
-                ops.append(["--ro-bind", str(scratch / "empty"), str(path)])
+        if needs_rebind and masked == workdir:
+            continue
+        _mask(masked)
+    if needs_rebind:
+        ops.append(["--bind", str(workdir), str(workdir)])
+        _mask(workdir)
     if home_file_overlays:
         overlay_dir = scratch / "overlays"
         overlay_dir.mkdir(parents=True, exist_ok=True)

@@ -16,3 +16,25 @@ from __future__ import annotations
 
 import fastmcp  # noqa: F401  (se importa por su efecto en sys.modules)
 import motor.motor_asyncio  # noqa: F401  (se importa por su efecto en sys.modules)
+
+import sys  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_REPO = Path(__file__).resolve().parents[1]
+_CORE = _REPO / "openceo-core"
+if str(_CORE) not in sys.path:
+    sys.path.insert(0, str(_CORE))
+
+# Recrea los symlinks de exposicion de skills (estado local, .codex/ esta
+# ignorado): sin esto, un clon limpio falla en load_catalog antes de
+# empezar (review 00007). Solo crea los que faltan, nunca reemplaza, asi
+# que no enmascara derivas; en un checkout de solo lectura falla el test
+# que necesite el link, como antes.
+try:
+    from catalog import (  # noqa: E402
+        discover_role_skills,
+        sync_skill_links,
+    )
+    sync_skill_links(discover_role_skills())
+except OSError:
+    pass

@@ -54,7 +54,9 @@ def service_roots() -> dict[str, Path]:
     """Creation roots from the service configuration (same source).
 
     Absolute: the agent may call from the ticket folder and reuse the
-    ``roots`` output after changing directories.
+    ``roots`` output after changing directories. These must match the
+    fence mounts, which resolve the same Settings keys: the service
+    .env must not override them (review 00007).
     """
     from config_loader import ConfigLoader
     from settings import Settings

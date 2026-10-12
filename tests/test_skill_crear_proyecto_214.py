@@ -148,6 +148,36 @@ class SkillOnDiskTest(unittest.TestCase):
         self.assertLess(size, 4096, "the role prompt budget is shared")
 
 
+@unittest.skipUnless(shutil.which("bash"), "bash required")
+class RecipeTest(unittest.TestCase):
+    def _setup_fence(self) -> str:
+        text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+        start = text.index("```bash")
+        end = text.index("```", start + 7)
+        return text[start + 7:end].strip()
+
+    def test_setup_block_resolves_repo_python_and_repos(self) -> None:
+        script = (self._setup_fence()
+                  + '\nprintf "REPO=%s\\nPY=%s\\nREPOS=%s\\n" '
+                    '"$REPO" "$PY" "$REPOS"\n'
+                  + 'test -x "$PY"\n')
+        proc = subprocess.run(["bash", "-c", script],
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT,
+                              text=True, errors="replace", timeout=120,
+                              cwd=str(REPO))
+        self.assertEqual(0, proc.returncode, proc.stdout)
+        values = dict(line.split("=", 1)
+                      for line in proc.stdout.splitlines())
+        self.assertEqual(str(REPO), values["REPO"])
+        self.assertEqual(
+            str(REPO / ".venv" / "bin" / "python"), values["PY"])
+        self.assertEqual(
+            str(Path(Settings().PROJECT_REPOS_ROOT).expanduser()
+                .resolve()),
+            values["REPOS"])
+
+
 class PlannerSkillLiveTest(unittest.TestCase):
     def test_planner_sees_first_skill(self) -> None:
         block, mapping = _planner_skills()
@@ -479,6 +509,41 @@ class FenceMountsTest(unittest.TestCase):
         kinds = [binds[index][0] for index in positions]
         self.assertEqual("--bind", kinds[-1])
         self.assertEqual(str(root / "ws"), binds[positions[-1]][1])
+
+    def test_repo_runtime_mask_does_not_swallow_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            workspace = repo / ".runtime" / "agent-work" / "t1"
+            workspace.mkdir(parents=True)
+            home = root / "home"
+            home.mkdir()
+            plan = plan_agent(argv=["true"], workspace=workspace, base={},
+                              config_args=[], home=home,
+                              extra_write_roots=[root])
+        argv = plan.argv
+        masks = [index for index in range(len(argv) - 1)
+                 if argv[index] == "--tmpfs"
+                 and argv[index + 1] == str(repo / ".runtime")]
+        self.assertEqual(1, len(masks))
+        rebinds = [index for index in range(len(argv) - 2)
+                   if argv[index] == "--bind"
+                   and argv[index + 1] == str(workspace)
+                   and argv[index + 2] == str(workspace)]
+        self.assertGreaterEqual(len(rebinds), 2)
+        self.assertGreater(rebinds[-1], masks[0])
+
+    def test_same_depth_extras_keep_input_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "aaa"
+            second = root / "bbb"
+            first.mkdir()
+            second.mkdir()
+            plan = self._plan(root, extra_read_roots=[second, first])
+        binds = [value for _op, value in self._binds(plan)
+                 if value in (str(first), str(second))]
+        self.assertEqual([str(second), str(first)], binds)
 
     def test_disjoint_roots_skip_rebind(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
