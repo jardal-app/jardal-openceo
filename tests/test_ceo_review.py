@@ -1,12 +1,12 @@
-"""Autonomous company CEO (TASK-2026-00119, F4).
+"""Autonomous company CEO (TASK-2026-00119, F4; TASK-2026-00213).
 
 Acceptance with a simulated Muse run (recorded JSON, zero tokens): a
-review that creates nothing when nothing is needed; one that creates
-a measurable objective in an existing project and enqueues it; a
-rejected duplicate; an escalated cost case. Plus the decision
-contract, the deterministic anti-bloat rules, the no-mandate path
-(zero model runs), retry/park behavior and the Horizon status merge.
-No network, no CLI, no LLM.
+review that creates nothing when nothing is needed; one that emits a
+pedido the simulated single planner then decides; a rejected
+duplicate; an escalated cost case. Plus the decision contract, the
+deterministic anti-bloat rules, the no-mandate path (zero model
+runs), retry/park behavior and the Horizon status merge. No network,
+no CLI, no LLM.
 """
 
 from __future__ import annotations
@@ -52,6 +52,7 @@ from objectives.engine import (
     InMemoryTaskLister,
     ObjectiveEnv,
 )
+from objectives.pedido import is_pedido
 from settings import Settings
 
 
@@ -233,7 +234,6 @@ def _make_env(test: unittest.TestCase, repo: Path,
               **overrides: Any) -> tuple[CEOEnv, dict[str, Any]]:
     """CEOEnv with inert fakes; ``overrides`` replaces any field."""
     calls: dict[str, Any] = {
-        "created_objectives": [],
         "created_tickets": [],
         "escalations": [],
         "published": [],
@@ -253,10 +253,6 @@ def _make_env(test: unittest.TestCase, repo: Path,
     async def _kpi(fuente: str) -> CEOKpiReading:
         del fuente
         return CEOKpiReading(value=None, unknown=True)
-
-    async def _create_objective(**kwargs: Any) -> dict[str, Any]:
-        calls["created_objectives"].append(kwargs)
-        return {"objective_id": f"OBJ-{len(calls['created_objectives'])}"}
 
     async def _create_ticket(payload: dict[str, Any]) -> dict[str, Any]:
         calls["created_tickets"].append(payload)
@@ -282,7 +278,6 @@ def _make_env(test: unittest.TestCase, repo: Path,
         "read_kpi": _kpi,
         "known_projects": ["ops", "shop"],
         "ops_project": "ops",
-        "create_objective": _create_objective,
         "create_ticket": _create_ticket,
         "escalate": _escalate,
         "executor": _ExplodingExecutor(),
@@ -306,31 +301,15 @@ def _measured_kpis() -> Any:
 
 
 class DecisionContractTests(unittest.TestCase):
-    def test_parse_accepts_all_six_actions(self) -> None:
+    def test_parse_accepts_all_four_actions(self) -> None:
         bodies = {
             "keep_going": {"action": "keep_going", "summary": "Work suffices"},
             "do_nothing": {"action": "do_nothing", "summary": "Nothing due"},
-            "create_objective": {
-                "action": "create_objective", "summary": "New goal",
-                "objective": {
-                    "project": "shop", "goal": "Sell more",
-                    "acceptance": ["Checkout works"], "eje_id": "crecimiento",
-                    "kpi_ids": ["tickets_abiertos"],
-                },
-            },
-            "create_ticket": {
-                "action": "create_ticket", "summary": "Loose work",
-                "ticket": {
+            "crear_pedido": {
+                "action": "crear_pedido", "summary": "Shop needs checkout",
+                "pedido": {
                     "project": "shop", "title": "Fix checkout",
                     "description": "The button fails", "eje_id": "crecimiento",
-                    "kpi_ids": ["tickets_abiertos"],
-                },
-            },
-            "create_project": {
-                "action": "create_project", "summary": "New area",
-                "project": {
-                    "project_key": "tienda", "display_name": "Tienda",
-                    "description": "New shop", "eje_id": "crecimiento",
                     "kpi_ids": ["tickets_abiertos"],
                 },
             },
@@ -347,6 +326,14 @@ class DecisionContractTests(unittest.TestCase):
                 decision = parse_ceo_decision(json.dumps(body))
                 self.assertEqual(decision.action, CEOAction(action))
 
+    def test_parse_rejects_retired_creation_actions(self) -> None:
+        for action in ("create_objective", "create_ticket", "create_project"):
+            with self.subTest(action=action):
+                with self.assertRaises(ValueError) as raised:
+                    parse_ceo_decision(json.dumps(
+                        {"action": action, "summary": "Old shape"}))
+                self.assertIn("action", str(raised.exception))
+
     def test_parse_rejects_malformed_output(self) -> None:
         for text in ("", "not json {", "[1, 2]", "null", '"x"'):
             with self.subTest(text=text[:12]):
@@ -354,21 +341,21 @@ class DecisionContractTests(unittest.TestCase):
                     parse_ceo_decision(text)
 
     def test_action_spec_mismatch_is_rejected(self) -> None:
-        objective = {
-            "project": "shop", "goal": "Sell more",
-            "acceptance": ["Checkout works"], "eje_id": "crecimiento",
+        pedido = {
+            "project": "shop", "title": "Fix checkout",
+            "description": "The button fails", "eje_id": "crecimiento",
             "kpi_ids": ["tickets_abiertos"],
         }
         cases = [
-            ({"action": "create_objective", "summary": "x"},
+            ({"action": "crear_pedido", "summary": "x"},
              "requires exactly"),
             ({"action": "keep_going", "summary": "x",
-              "objective": objective}, "carries no spec"),
+              "pedido": pedido}, "carries no spec"),
             ({"action": "do_nothing", "summary": "x",
               "escalation": {"kind": "k", "summary": "s"}},
              "carries no spec"),
-            ({"action": "create_ticket", "summary": "x",
-              "objective": objective}, "requires exactly"),
+            ({"action": "escalate", "summary": "x",
+              "pedido": pedido}, "requires exactly"),
             ({"action": "other", "summary": "x"}, "action"),
             ({"action": "keep_going", "summary": "  "},
              "must not be blank"),
@@ -378,6 +365,45 @@ class DecisionContractTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as raised:
                     parse_ceo_decision(json.dumps(body))
                 self.assertIn(fragment, str(raised.exception))
+
+    def test_pedido_project_key_travels_with_display_name(self) -> None:
+        base = {
+            "project": "ops", "title": "New shop",
+            "description": "Open a second shop", "eje_id": "crecimiento",
+            "kpi_ids": ["tickets_abiertos"],
+        }
+        for spec in (
+            {**base, "project_key": "tienda"},
+            {**base, "display_name": "Tienda"},
+        ):
+            with self.subTest(spec=spec):
+                with self.assertRaises(ValueError) as raised:
+                    parse_ceo_decision(json.dumps(
+                        {"action": "crear_pedido", "summary": "x",
+                         "pedido": spec}))
+                self.assertIn("travel together", str(raised.exception))
+
+    def test_pedido_costs_follow_planner_money_rules(self) -> None:
+        base = {
+            "project": "shop", "title": "Fix checkout",
+            "description": "The button fails", "eje_id": "crecimiento",
+            "kpi_ids": ["tickets_abiertos"],
+        }
+        ok = parse_ceo_decision(json.dumps(
+            {"action": "crear_pedido", "summary": "x",
+             "pedido": {**base, "costs": [
+                 {"label": "domain", "amount": "12.00"},
+                 {"label": "vendor quote", "amount": None},
+             ]}}))
+        assert ok.pedido is not None
+        self.assertEqual(len(ok.pedido.costs), 2)
+        for amount in (10.5, True, "-3.00", "not money"):
+            with self.subTest(amount=amount):
+                with self.assertRaises(ValueError):
+                    parse_ceo_decision(json.dumps(
+                        {"action": "crear_pedido", "summary": "x",
+                         "pedido": {**base, "costs": [
+                             {"label": "bad", "amount": amount}]}}))
 
     def test_escalation_amount_accepts_json_numbers(self) -> None:
         body = {
@@ -415,24 +441,7 @@ class DecisionContractTests(unittest.TestCase):
         self.assertEqual(normalize_title(None), "")
 
 
-def _objective_decision(**overrides: Any) -> CEODecision:
-    spec: dict[str, Any] = {
-        "project": "shop",
-        "goal": "Sell more online",
-        "acceptance": ["Checkout converts"],
-        "eje_id": "crecimiento",
-        "kpi_ids": ["tickets_abiertos"],
-    }
-    spec.update(overrides.pop("spec", {}))
-    body: dict[str, Any] = {
-        "action": "create_objective", "summary": "New goal",
-        "objective": spec,
-    }
-    body.update(overrides)
-    return parse_ceo_decision(json.dumps(body))
-
-
-def _ticket_decision(**overrides: Any) -> CEODecision:
+def _pedido_decision(**overrides: Any) -> CEODecision:
     spec: dict[str, Any] = {
         "project": "shop",
         "title": "Fix the checkout button",
@@ -442,39 +451,39 @@ def _ticket_decision(**overrides: Any) -> CEODecision:
     }
     spec.update(overrides.pop("spec", {}))
     body: dict[str, Any] = {
-        "action": "create_ticket", "summary": "Loose work",
-        "ticket": spec,
+        "action": "crear_pedido", "summary": "Shop needs checkout",
+        "pedido": spec,
     }
     body.update(overrides)
     return parse_ceo_decision(json.dumps(body))
 
 
 class AntiBloatTests(unittest.TestCase):
-    def test_valid_objective_passes(self) -> None:
-        self.assertEqual(validate_ceo_decision(_objective_decision(), _ctx()), [])
+    def test_valid_pedido_passes(self) -> None:
+        self.assertEqual(validate_ceo_decision(_pedido_decision(), _ctx()), [])
 
     def test_unknown_project_rejected(self) -> None:
         errors = validate_ceo_decision(
-            _objective_decision(spec={"project": "nope"}), _ctx())
+            _pedido_decision(spec={"project": "nope"}), _ctx())
         self.assertEqual(len(errors), 1)
         self.assertIn("unknown project", errors[0])
 
     def test_unknown_eje_rejected(self) -> None:
         errors = validate_ceo_decision(
-            _objective_decision(spec={"eje_id": "nope"}), _ctx())
+            _pedido_decision(spec={"eje_id": "nope"}), _ctx())
         self.assertEqual(len(errors), 1)
         self.assertIn("unknown eje", errors[0])
 
     def test_eje_without_kpis_never_starts_work(self) -> None:
         errors = validate_ceo_decision(
-            _ticket_decision(spec={"eje_id": "vacio", "kpi_ids": ["x"]}),
+            _pedido_decision(spec={"eje_id": "vacio", "kpi_ids": ["x"]}),
             _ctx())
         self.assertEqual(len(errors), 1)
         self.assertIn("declares no KPI", errors[0])
 
     def test_undeclared_kpi_link_rejected(self) -> None:
         errors = validate_ceo_decision(
-            _ticket_decision(spec={"kpi_ids": ["inventado"]}), _ctx())
+            _pedido_decision(spec={"kpi_ids": ["inventado"]}), _ctx())
         self.assertEqual(len(errors), 1)
         self.assertIn("not declared", errors[0])
 
@@ -483,12 +492,12 @@ class AntiBloatTests(unittest.TestCase):
             "crecimiento:tickets_abiertos": CEOKpiReading(
                 value=None, unknown=True),
         })
-        errors = validate_ceo_decision(_ticket_decision(), ctx)
+        errors = validate_ceo_decision(_pedido_decision(), ctx)
         self.assertEqual(len(errors), 1)
         self.assertIn("no measured KPI", errors[0])
 
     def test_missing_reading_counts_as_unmeasured(self) -> None:
-        errors = validate_ceo_decision(_ticket_decision(), _ctx(kpi_readings={}))
+        errors = validate_ceo_decision(_pedido_decision(), _ctx(kpi_readings={}))
         self.assertEqual(len(errors), 1)
         self.assertIn("no measured KPI", errors[0])
 
@@ -497,59 +506,47 @@ class AntiBloatTests(unittest.TestCase):
             "crecimiento:tickets_abiertos": CEOKpiReading(
                 value=0, unknown=False),
         })
-        self.assertEqual(validate_ceo_decision(_ticket_decision(), ctx), [])
+        self.assertEqual(validate_ceo_decision(_pedido_decision(), ctx), [])
 
     def test_duplicate_open_title_rejected(self) -> None:
         ctx = _ctx(open_titles=["  FIX the Checkout Button "])
-        errors = validate_ceo_decision(_ticket_decision(), ctx)
+        errors = validate_ceo_decision(_pedido_decision(), ctx)
         self.assertIn("duplicates an open ticket", errors[0])
 
     def test_duplicate_active_objective_goal_rejected(self) -> None:
         ctx = _ctx(active_objectives=[
             {"objective_id": "OBJ-1", "project": "shop",
-             "goal": "sell MORE online"},
+             "goal": "FIX the Checkout Button"},
         ])
-        errors = validate_ceo_decision(_objective_decision(), ctx)
+        errors = validate_ceo_decision(_pedido_decision(), ctx)
         self.assertTrue(
             any("duplicates active objective" in error for error in errors))
 
-    def test_global_objective_limit_rejected(self) -> None:
+    def test_objective_caps_do_not_veto_a_pedido(self) -> None:
         ctx = _ctx(active_objectives=[
             {"objective_id": f"OBJ-{n}", "project": "shop",
              "goal": f"goal {n}"}
             for n in range(3)
         ])
-        errors = validate_ceo_decision(_objective_decision(), ctx)
-        self.assertTrue(any("3 active objectives" in e for e in errors))
+        self.assertEqual(validate_ceo_decision(_pedido_decision(), ctx), [])
 
-    def test_per_project_objective_limit_rejected(self) -> None:
-        ctx = _ctx(active_objectives=[
-            {"objective_id": "OBJ-1", "project": "shop", "goal": "g1"},
-            {"objective_id": "OBJ-2", "project": "shop", "goal": "g2"},
-        ])
-        errors = validate_ceo_decision(_objective_decision(), ctx)
-        self.assertTrue(any("in shop" in e for e in errors))
-
-    def test_other_project_limit_does_not_block(self) -> None:
-        ctx = _ctx(active_objectives=[
-            {"objective_id": "OBJ-1", "project": "ops", "goal": "g1"},
-            {"objective_id": "OBJ-2", "project": "ops", "goal": "g2"},
-        ])
-        self.assertEqual(validate_ceo_decision(_objective_decision(), _ctx()), [])
-
-    def test_blind_limits_and_titles_fail_closed(self) -> None:
+    def test_blind_duplicate_views_fail_closed(self) -> None:
         errors = validate_ceo_decision(
-            _objective_decision(),
+            _pedido_decision(),
             _ctx(objectives_unknown=True, open_titles_unknown=True))
-        self.assertTrue(any("blind limits" in e for e in errors))
-        self.assertTrue(any("blind duplicate" in e for e in errors))
-        ticket_errors = validate_ceo_decision(
-            _ticket_decision(), _ctx(open_titles_unknown=True))
-        self.assertTrue(any("blind duplicate" in e for e in ticket_errors))
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all("blind duplicate" in e for e in errors))
+        titles_only = validate_ceo_decision(
+            _pedido_decision(), _ctx(open_titles_unknown=True))
+        self.assertTrue(any("blind duplicate" in e for e in titles_only))
+        objectives_only = validate_ceo_decision(
+            _pedido_decision(), _ctx(objectives_unknown=True))
+        self.assertTrue(
+            any("blind duplicate" in e for e in objectives_only))
 
     def test_no_mandate_rejects_creation(self) -> None:
-        errors = validate_ceo_decision(_ticket_decision(), _ctx(mandate=None))
-        self.assertEqual(errors, ["create_ticket: no valid company mandate"])
+        errors = validate_ceo_decision(_pedido_decision(), _ctx(mandate=None))
+        self.assertEqual(errors, ["crear_pedido: no valid company mandate"])
 
     def test_keep_going_and_do_nothing_always_validate(self) -> None:
         ctx = _ctx(mandate=None, open_titles_unknown=True,
@@ -560,12 +557,13 @@ class AntiBloatTests(unittest.TestCase):
                     {"action": action, "summary": "Steady"}))
                 self.assertEqual(validate_ceo_decision(decision, ctx), [])
 
-    def test_new_project_rules(self) -> None:
+    def test_new_project_pedido_rules(self) -> None:
         def _project(key: str, **spec: Any) -> CEODecision:
             body = {
-                "action": "create_project", "summary": "New area",
-                "project": {
-                    "project_key": key, "display_name": "D",
+                "action": "crear_pedido", "summary": "New area",
+                "pedido": {
+                    "project": "ops", "title": "Open a new shop",
+                    "project_key": key, "display_name": "Tienda",
                     "description": "New", "eje_id": "crecimiento",
                     "kpi_ids": ["tickets_abiertos"],
                     **spec,
@@ -573,15 +571,18 @@ class AntiBloatTests(unittest.TestCase):
             }
             return parse_ceo_decision(json.dumps(body))
 
-        self.assertEqual(
-            validate_ceo_decision(_project("tienda"), _ctx()), [])
-        existing = validate_ceo_decision(_project("ops"), _ctx())
+        ctx = _ctx(ops_project="ops")
+        self.assertEqual(validate_ceo_decision(_project("tienda"), ctx), [])
+        existing = validate_ceo_decision(_project("ops"), ctx)
         self.assertTrue(any("already exists" in e for e in existing))
-        invalid = validate_ceo_decision(_project("BAD KEY!"), _ctx())
+        invalid = validate_ceo_decision(_project("BAD KEY!"), ctx)
         self.assertTrue(any("invalid project_key" in e for e in invalid))
         unmeasured = validate_ceo_decision(
-            _project("tienda"), _ctx(kpi_readings={}))
+            _project("tienda"), _ctx(ops_project="ops", kpi_readings={}))
         self.assertTrue(any("no measured KPI" in e for e in unmeasured))
+        elsewhere = validate_ceo_decision(
+            _project("tienda", project="shop"), ctx)
+        self.assertTrue(any("ops project" in e for e in elsewhere))
 
     def test_escalation_without_policy_cause_rejected(self) -> None:
         body = {
@@ -740,7 +741,6 @@ class AcceptanceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(outcome["ok"])
         self.assertEqual(outcome["action"], "do_nothing")
-        self.assertEqual(calls["created_objectives"], [])
         self.assertEqual(calls["created_tickets"], [])
         self.assertEqual(calls["escalations"], [])
         self.assertEqual(len(calls["published"]), 1)
@@ -755,66 +755,54 @@ class AcceptanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("crecimiento", prompt)
         self.assertIn(outcome["review_id"], prompt)
 
-    async def test_review_creates_measurable_objective_and_enqueues_it(
+    async def test_review_pedido_is_decided_by_the_simulated_planner(
         self,
     ) -> None:
         repo = _scratch_repo(self)
-        obj_env, created = _objective_env_for(self, repo, [
+        obj_env, _ = _objective_env_for(self, repo, [
             {"objective_status": "active", "state_summary": "go",
-             "tickets": [
-                 _dev_ticket("t1", "Build the checkout"),
-                 _dev_ticket("t2", "Test the checkout"),
-             ]},
+             "tickets": [_dev_ticket("pedido-1", "Fix the checkout")]},
         ])
         ceo = _RecordedCEO(repo, [
-            {"action": "create_objective", "summary": "Shop needs checkout",
-             "objective": {
+            {"action": "crear_pedido", "summary": "Shop needs checkout",
+             "pedido": {
                  "project": "shop",
-                 "goal": "Sell more online",
-                 "acceptance": ["Checkout converts"],
+                 "title": "Fix the checkout button",
+                 "description": "The button double-charges",
+                 "acceptance": ["Single charge"],
                  "eje_id": "crecimiento",
                  "kpi_ids": ["tickets_abiertos"],
              }},
         ])
-
-        async def _create_objective(**kwargs: Any) -> dict[str, Any]:
-            return await engine_mod.create_objective(obj_env, **kwargs)
-
         env, calls = _make_env(
-            self, repo, executor=ceo, read_kpi=_measured_kpis(),
-            create_objective=_create_objective)
+            self, repo, executor=ceo, read_kpi=_measured_kpis())
 
         outcome = await run_review(
             env, kind="reactive", reasons=["KPI tickets_abiertos moved"])
 
         self.assertTrue(outcome["ok"])
-        self.assertEqual(outcome["action"], "objective_created")
-        objective_id = outcome["objective_id"]
-        stored = await obj_env.objectives.get_objective(objective_id)
-        assert stored is not None
-        self.assertEqual(stored["entry"], "ceo_review")
-        self.assertEqual(stored["project"], "shop")
-        # Shell + two planned children went through creation; the
-        # children are queued with autorun so the dispatcher launches
-        # them (the CEO never launches directly).
-        children = [
-            item for item in created
-            if item.get("objective_id") == objective_id
-            and item.get("origin") != "objective_shell"
-        ]
-        self.assertEqual(len(children), 2)
-        for child in children:
-            self.assertTrue(child.get("autorun"))
-            self.assertEqual(child.get("parent_task"), "TASK-2026-00999")
+        self.assertEqual(outcome["action"], "pedido_created")
+        self.assertEqual(len(calls["created_tickets"]), 1)
+        payload = calls["created_tickets"][0]
+        self.assertTrue(is_pedido(payload))
+        self.assertNotIn("workflow", payload["params"])
         self.assertEqual(calls["escalations"], [])
         record = calls["published"][0]
-        self.assertEqual(record["outcome"]["action"], "objective_created")
+        self.assertEqual(record["outcome"]["action"], "pedido_created")
+        # The strategy states the need; the single planner gives it
+        # form (simulated run, zero tokens).
+        planned = await engine_mod.plan_pedido(obj_env, {
+            **payload, "task_id": outcome["task_id"],
+        })
+        self.assertTrue(planned["ok"])
+        self.assertEqual(planned["action"], "decided")
+        self.assertEqual(planned["decision"]["target_agent"], "dev")
 
     async def test_duplicate_creation_is_rejected(self) -> None:
         repo = _scratch_repo(self)
         ceo = _RecordedCEO(repo, [
-            {"action": "create_ticket", "summary": "Loose work",
-             "ticket": {
+            {"action": "crear_pedido", "summary": "Shop needs checkout",
+             "pedido": {
                  "project": "shop",
                  "title": "Fix the checkout button",
                  "description": "It double-charges",
@@ -871,7 +859,6 @@ class AcceptanceTests(unittest.IsolatedAsyncioTestCase):
             escalation["source_id"].startswith(
                 f"ceo:{outcome['review_id']}:escalation:"))
         self.assertEqual(calls["created_tickets"], [])
-        self.assertEqual(calls["created_objectives"], [])
 
 
 class ReviewFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -974,17 +961,18 @@ class ReviewFlowTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await run_review(env, kind="someday", reasons=[])
 
-    async def test_create_ticket_payload_shape(self) -> None:
+    async def test_crear_pedido_payload_shape(self) -> None:
         repo = _scratch_repo(self)
         ceo = _RecordedCEO(repo, [
-            {"action": "create_ticket", "summary": "Loose work",
-             "ticket": {
+            {"action": "crear_pedido", "summary": "Shop needs checkout",
+             "pedido": {
                  "project": "shop",
                  "title": "Fix the checkout button",
                  "description": "It double-charges",
                  "acceptance": ["Single charge"],
                  "eje_id": "crecimiento",
                  "kpi_ids": ["tickets_abiertos"],
+                 "costs": [{"label": "domain", "amount": "12.00"}],
              }},
         ])
         env, calls = _make_env(
@@ -993,21 +981,29 @@ class ReviewFlowTests(unittest.IsolatedAsyncioTestCase):
         outcome = await run_review(env, kind="scheduled", reasons=[])
 
         self.assertTrue(outcome["ok"])
+        self.assertEqual(outcome["action"], "pedido_created")
         payload = calls["created_tickets"][0]
         self.assertEqual(payload["project"], "shop")
         self.assertEqual(payload["source"], "api")
         self.assertEqual(
-            payload["source_id"], f"ceo:{outcome['review_id']}:ticket")
+            payload["source_id"], f"ceo:{outcome['review_id']}:pedido")
         self.assertEqual(payload["tags"], ["ceo-review"])
         self.assertEqual(payload["params"]["eje_id"], "crecimiento")
+        self.assertEqual(
+            payload["params"]["costs"],
+            [{"label": "domain", "amount": "12.00"}])
         self.assertIn("CEO review", payload["description"])
         self.assertNotIn("coding_tool", payload)
+        self.assertNotIn("workflow", payload["params"])
+        self.assertTrue(is_pedido(payload))
 
-    async def test_create_project_payload_shape(self) -> None:
+    async def test_new_project_pedido_payload_shape(self) -> None:
         repo = _scratch_repo(self)
         ceo = _RecordedCEO(repo, [
-            {"action": "create_project", "summary": "New area",
-             "project": {
+            {"action": "crear_pedido", "summary": "New area",
+             "pedido": {
+                 "project": "ops",
+                 "title": "Open a new shop",
                  "project_key": "tienda",
                  "display_name": "Tienda",
                  "description": "New shop",
@@ -1021,21 +1017,22 @@ class ReviewFlowTests(unittest.IsolatedAsyncioTestCase):
         outcome = await run_review(env, kind="scheduled", reasons=[])
 
         self.assertTrue(outcome["ok"])
-        self.assertEqual(outcome["action"], "project_creation_started")
+        self.assertEqual(outcome["action"], "pedido_created")
         payload = calls["created_tickets"][0]
         self.assertEqual(payload["project"], "ops")
-        self.assertEqual(
-            payload["params"]["workflow"], "operations.create_project")
+        self.assertNotIn("workflow", payload["params"])
         self.assertEqual(payload["params"]["project_key"], "tienda")
+        self.assertEqual(payload["params"]["display_name"], "Tienda")
         self.assertEqual(
             payload["source_id"],
-            f"ceo:{outcome['review_id']}:project:tienda")
+            f"ceo:{outcome['review_id']}:pedido")
+        self.assertTrue(is_pedido(payload))
 
-    async def test_failed_ticket_creation_is_an_error(self) -> None:
+    async def test_failed_pedido_creation_is_an_error(self) -> None:
         repo = _scratch_repo(self)
         ceo = _RecordedCEO(repo, [
-            {"action": "create_ticket", "summary": "Loose work",
-             "ticket": {
+            {"action": "crear_pedido", "summary": "Shop needs checkout",
+             "pedido": {
                  "project": "shop", "title": "T", "description": "D",
                  "eje_id": "crecimiento", "kpi_ids": ["tickets_abiertos"],
              }},
@@ -1053,31 +1050,8 @@ class ReviewFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(outcome["ok"])
         self.assertEqual(outcome["action"], "error")
+        self.assertIn("pedido", outcome["reason"])
         self.assertEqual(len(calls["published"]), 1)
-
-    async def test_refused_objective_is_rejected_not_raised(self) -> None:
-        repo = _scratch_repo(self)
-        ceo = _RecordedCEO(repo, [
-            {"action": "create_objective", "summary": "New goal",
-             "objective": {
-                 "project": "shop", "goal": "Sell more online",
-                 "acceptance": ["Checkout converts"],
-                 "eje_id": "crecimiento", "kpi_ids": ["tickets_abiertos"],
-             }},
-        ])
-
-        async def _refusing(**kwargs: Any) -> dict[str, Any]:
-            raise engine_mod.ObjectiveLimitReached("global cap hit")
-
-        env, _ = _make_env(
-            self, repo, executor=ceo, read_kpi=_measured_kpis(),
-            create_objective=_refusing)
-
-        outcome = await run_review(env, kind="scheduled", reasons=[])
-
-        self.assertTrue(outcome["ok"])
-        self.assertEqual(outcome["action"], "rejected")
-        self.assertIn("global cap hit", outcome["reason"])
 
     async def test_publish_failure_does_not_fail_the_review(self) -> None:
         repo = _scratch_repo(self)
@@ -1389,6 +1363,7 @@ class ServiceBindingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(env.ceo_cfg["timeout_minutes"], 9)
         self.assertEqual(list(env.known_projects), ["ops", "shop"])
         self.assertEqual(env.ops_project, "ops")
+        self.assertFalse(hasattr(env, "create_objective"))
         self.assertTrue(str(env.repo_root).endswith("jardal-openceo"))
 
     async def test_kpi_vocabulary_measures_and_ignores(self) -> None:

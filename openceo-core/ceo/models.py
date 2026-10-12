@@ -29,6 +29,7 @@ from company_mandate import (
     OwnerAction,
     requires_owner,
 )
+from objectives.planner_models import PlannedCost
 
 __all__ = [
     "CEOAction",
@@ -38,9 +39,7 @@ __all__ = [
     "CEOValidationContext",
     "DUPLICATE_ESCALATION_PREFIX",
     "EscalationSpec",
-    "NewObjectiveSpec",
-    "NewProjectSpec",
-    "NewTicketSpec",
+    "NewPedidoSpec",
     "normalize_title",
     "parse_ceo_decision",
     "validate_ceo_decision",
@@ -59,12 +58,10 @@ DUPLICATE_ESCALATION_PREFIX = "duplicate_escalation:"
 
 
 class CEOAction(str, Enum):
-    """The six review outcomes (ARCH §Proactive CEO, CEO loop)."""
+    """The four review outcomes (ARCH §Proactive CEO, CEO loop)."""
 
     KEEP_GOING = "keep_going"
-    CREATE_OBJECTIVE = "create_objective"
-    CREATE_TICKET = "create_ticket"
-    CREATE_PROJECT = "create_project"
+    CREAR_PEDIDO = "crear_pedido"
     ESCALATE = "escalate"
     DO_NOTHING = "do_nothing"
 
@@ -81,33 +78,26 @@ def _string_list_nonblank(value: list[str]) -> list[str]:
     return value
 
 
-class NewObjectiveSpec(BaseModel):
-    project: str = Field(min_length=1)
-    goal: str = Field(min_length=1)
-    acceptance: list[str] = Field(min_length=1)
-    eje_id: str = Field(min_length=1)
-    kpi_ids: list[str] = Field(min_length=1)
+class NewPedidoSpec(BaseModel):
+    """Work with no decided form (TASK-2026-00213).
 
-    @field_validator("project", "goal", "eje_id")
-    @classmethod
-    def _fields_nonblank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("must not be blank")
-        return value
+    The strategy states the need; the single planner decides ticket or
+    objective, agent, skill and (dev) tier. ``project`` is a known
+    project where the pedido is filed; ``costs`` reuses the planner
+    shape so the spend gate reads it unchanged; ``project_key`` (with
+    ``display_name``) marks a new-project pedido for the operations
+    ``crear-proyecto`` skill.
+    """
 
-    @field_validator("acceptance", "kpi_ids")
-    @classmethod
-    def _lists_nonblank(cls, value: list[str]) -> list[str]:
-        return _string_list_nonblank(value)
-
-
-class NewTicketSpec(BaseModel):
     project: str = Field(min_length=1)
     title: str = Field(min_length=1)
     description: str = Field(min_length=1)
     acceptance: list[str] = Field(default_factory=list)
     eje_id: str = Field(min_length=1)
     kpi_ids: list[str] = Field(min_length=1)
+    costs: list[PlannedCost] = Field(default_factory=list)
+    project_key: str | None = None
+    display_name: str | None = None
 
     @field_validator("project", "title", "description", "eje_id")
     @classmethod
@@ -121,27 +111,21 @@ class NewTicketSpec(BaseModel):
     def _lists_nonblank(cls, value: list[str]) -> list[str]:
         return _string_list_nonblank(value)
 
-
-class NewProjectSpec(BaseModel):
-    project_key: str = Field(min_length=1)
-    display_name: str = Field(min_length=1)
-    description: str = Field(min_length=1)
-    eje_id: str = Field(min_length=1)
-    kpi_ids: list[str] = Field(min_length=1)
-
-    @field_validator(
-        "project_key", "display_name", "description", "eje_id"
-    )
+    @field_validator("project_key", "display_name")
     @classmethod
-    def _fields_nonblank(cls, value: str) -> str:
-        if not value.strip():
+    def _optional_nonblank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
             raise ValueError("must not be blank")
         return value
 
-    @field_validator("kpi_ids")
-    @classmethod
-    def _lists_nonblank(cls, value: list[str]) -> list[str]:
-        return _string_list_nonblank(value)
+    @model_validator(mode="after")
+    def validate_project_request(self) -> "NewPedidoSpec":
+        if (self.project_key is None) != (self.display_name is None):
+            raise ValueError(
+                "project_key and display_name travel together "
+                "(a new-project pedido names both, other pedidos neither)"
+            )
+        return self
 
 
 class EscalationSpec(BaseModel):
@@ -192,9 +176,7 @@ class EscalationSpec(BaseModel):
 class CEODecision(BaseModel):
     action: CEOAction
     summary: str = Field(min_length=1)
-    objective: NewObjectiveSpec | None = None
-    ticket: NewTicketSpec | None = None
-    project: NewProjectSpec | None = None
+    pedido: NewPedidoSpec | None = None
     escalation: EscalationSpec | None = None
 
     @field_validator("summary")
@@ -207,16 +189,12 @@ class CEODecision(BaseModel):
     @model_validator(mode="after")
     def validate_action_contract(self) -> "CEODecision":
         specs = {
-            "objective": self.objective,
-            "ticket": self.ticket,
-            "project": self.project,
+            "pedido": self.pedido,
             "escalation": self.escalation,
         }
         present = {name for name, spec in specs.items() if spec is not None}
         expected = {
-            CEOAction.CREATE_OBJECTIVE: {"objective"},
-            CEOAction.CREATE_TICKET: {"ticket"},
-            CEOAction.CREATE_PROJECT: {"project"},
+            CEOAction.CREAR_PEDIDO: {"pedido"},
             CEOAction.ESCALATE: {"escalation"},
             CEOAction.KEEP_GOING: set(),
             CEOAction.DO_NOTHING: set(),
@@ -279,6 +257,7 @@ class CEOValidationContext:
 
     mandate: MandatoEmpresa | None = None
     known_projects: Collection[str] = field(default_factory=list)
+    ops_project: str = ""
     open_titles: Collection[str] = field(default_factory=list)
     open_titles_unknown: bool = False
     active_objectives: Sequence[Mapping[str, Any]] = field(
@@ -339,55 +318,28 @@ def _check_axis_kpis(
         )
 
 
-def _check_objective_limits(
-    decision_label: str,
-    project: str,
-    ctx: CEOValidationContext,
-    errors: list[str],
-) -> None:
-    mandate = ctx.mandate
-    if mandate is None:  # Covered by the axis check; no pile-on.
-        return
-    active = list(ctx.active_objectives)
-    if len(active) >= mandate.limites.objetivos_activos:
-        errors.append(
-            f"{decision_label}: {len(active)} active objectives "
-            f"(mandate max {mandate.limites.objetivos_activos})"
-        )
-    per_project = sum(
-        1 for item in active if str(item.get("project") or "") == project
-    )
-    cap = mandate.limites.objetivos_activos_por_proyecto
-    if per_project >= cap:
-        errors.append(
-            f"{decision_label}: {per_project} active objectives in "
-            f"{project} (mandate max {cap})"
-        )
-
-
-def _validate_new_objective(
-    spec: NewObjectiveSpec, ctx: CEOValidationContext
+def _validate_new_pedido(
+    spec: NewPedidoSpec, ctx: CEOValidationContext
 ) -> list[str]:
     errors: list[str] = []
-    label = "create_objective"
-    if ctx.objectives_unknown:
-        errors.append(
-            f"{label}: active objectives unreadable: refusing to "
-            "create against blind limits"
-        )
+    label = "crear_pedido"
     if ctx.open_titles_unknown:
         errors.append(
             f"{label}: open titles unreadable: refusing to create "
             "against a blind duplicate check"
         )
+    if ctx.objectives_unknown:
+        errors.append(
+            f"{label}: active objectives unreadable: refusing to "
+            "create against a blind duplicate check"
+        )
     if str(spec.project) not in set(ctx.known_projects):
         errors.append(
-            f"{label}: unknown project {spec.project!r}: an objective "
-            "needs exactly one known project"
+            f"{label}: unknown project {spec.project!r}: a pedido "
+            "is filed in exactly one known project"
         )
     _check_axis_kpis(label, spec.eje_id, spec.kpi_ids, ctx, errors)
-    _check_objective_limits(label, str(spec.project), ctx, errors)
-    normalized = normalize_title(spec.goal)
+    normalized = normalize_title(spec.title)
     if normalized in {normalize_title(t) for t in ctx.open_titles}:
         errors.append(f"{label}: duplicates an open ticket")
     for item in ctx.active_objectives:
@@ -397,56 +349,31 @@ def _validate_new_objective(
                 f"{item.get('objective_id')}"
             )
             break
-    return errors
-
-
-def _validate_new_ticket(
-    spec: NewTicketSpec, ctx: CEOValidationContext
-) -> list[str]:
-    errors: list[str] = []
-    label = "create_ticket"
-    if ctx.open_titles_unknown:
-        errors.append(
-            f"{label}: open titles unreadable: refusing to create "
-            "against a blind duplicate check"
-        )
-    if str(spec.project) not in set(ctx.known_projects):
-        errors.append(
-            f"{label}: unknown project {spec.project!r}: a loose ticket "
-            "needs exactly one known project"
-        )
-    _check_axis_kpis(label, spec.eje_id, spec.kpi_ids, ctx, errors)
-    if normalize_title(spec.title) in {
-        normalize_title(t) for t in ctx.open_titles
-    }:
-        errors.append(f"{label}: duplicates an open ticket")
-    return errors
-
-
-def _validate_new_project(
-    spec: NewProjectSpec, ctx: CEOValidationContext
-) -> list[str]:
-    errors: list[str] = []
-    label = "create_project"
-    key = str(spec.project_key or "").strip()
-    try:
-        from ops.create_project import normalize_key
-    except ImportError:  # pragma: no cover - packaging guard
-        normalize_key = None  # type: ignore[assignment]
-    if normalize_key is not None:
+    if spec.project_key is not None:
+        assert spec.display_name is not None  # Shape-guarded.
+        key = str(spec.project_key or "").strip()
         try:
-            normalized = normalize_key(key)
-        except ValueError as exc:
-            errors.append(f"{label}: invalid project_key: {exc}")
-            normalized = ""
-    else:  # pragma: no cover - packaging guard
-        normalized = key
-    if normalized and normalized in set(ctx.known_projects):
-        errors.append(
-            f"{label}: project {normalized!r} already exists: "
-            "the CEO extends it instead of recreating it"
-        )
-    _check_axis_kpis(label, spec.eje_id, spec.kpi_ids, ctx, errors)
+            from ops.create_project import normalize_key
+        except ImportError:  # pragma: no cover - packaging guard
+            normalize_key = None  # type: ignore[assignment]
+        if normalize_key is not None:
+            try:
+                normalized_key = normalize_key(key)
+            except ValueError as exc:
+                errors.append(f"{label}: invalid project_key: {exc}")
+                normalized_key = ""
+        else:  # pragma: no cover - packaging guard
+            normalized_key = key
+        if normalized_key and normalized_key in set(ctx.known_projects):
+            errors.append(
+                f"{label}: project {normalized_key!r} already exists: "
+                "the CEO extends it instead of recreating it"
+            )
+        if str(spec.project) != str(ctx.ops_project or "").strip():
+            errors.append(
+                f"{label}: a new-project pedido is filed in the ops "
+                f"project {ctx.ops_project!r} (got {spec.project!r})"
+            )
     return errors
 
 
@@ -502,20 +429,16 @@ def validate_ceo_decision(
     """Deterministic anti-bloat validation. Returns errors (pure, sync).
 
     ``keep_going``/``do_nothing`` always validate (they persist nothing
-    but the review record). Creation validates project, axis/KPI link
-    with a measured KPI, mandate limits and duplicates; escalation
-    validates the policy cause through the single mandate policy and
-    dedupes against already-open escalations.
+    but the review record). A pedido validates project, axis/KPI link
+    with a measured KPI, and duplicates against open tickets and active
+    objectives; form limits apply where the form materializes (objective
+    admission, ticket dispatch). Escalation validates the policy cause
+    through the single mandate policy and dedupes against already-open
+    escalations.
     """
-    if decision.action == CEOAction.CREATE_OBJECTIVE:
-        assert decision.objective is not None  # Shape-guarded.
-        return _validate_new_objective(decision.objective, ctx)
-    if decision.action == CEOAction.CREATE_TICKET:
-        assert decision.ticket is not None  # Shape-guarded.
-        return _validate_new_ticket(decision.ticket, ctx)
-    if decision.action == CEOAction.CREATE_PROJECT:
-        assert decision.project is not None  # Shape-guarded.
-        return _validate_new_project(decision.project, ctx)
+    if decision.action == CEOAction.CREAR_PEDIDO:
+        assert decision.pedido is not None  # Shape-guarded.
+        return _validate_new_pedido(decision.pedido, ctx)
     if decision.action == CEOAction.ESCALATE:
         assert decision.escalation is not None  # Shape-guarded.
         return _validate_escalation(decision.escalation, ctx)
