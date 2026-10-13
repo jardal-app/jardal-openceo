@@ -203,6 +203,7 @@ class LocalBoundaryTests(unittest.TestCase):
             account = "soc_" + "0" * 32
             p = sessions.path(account, must_exist=False)
             p.touch(mode=0o644)
+            os.chmod(p, 0o644)
             with self.assertRaises(SocialError):
                 sessions.path(account)
             p.unlink()
