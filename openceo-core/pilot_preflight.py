@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -196,11 +197,17 @@ def check_repo_main_sync(
         return Check("repo-main-sync", False,
                      f"rama {branch}, se necesita main")
     code, dirty = git(["status", "--porcelain"], root)
-    if code == 0 and dirty:
+    if code != 0:
+        return Check("repo-main-sync", False,
+                     "repo ilegible (git status fallo)")
+    if dirty:
         first = dirty.splitlines()[0].strip()
         return Check("repo-main-sync", False,
                      f"arbol sucio ({first}...)")
     code, head = git(["rev-parse", "HEAD"], root)
+    if code != 0 or not head:
+        return Check("repo-main-sync", False,
+                     "repo ilegible (rev-parse HEAD fallo)")
     code_origin, origin = git(["rev-parse", "refs/remotes/origin/main"], root)
     if code_origin != 0 or not origin:
         return Check("repo-main-sync", False,
@@ -242,7 +249,8 @@ def check_catalog_skills(
     skill_dir = root / "skills" / "operations" / "crear-proyecto"
     runner = run or subprocess.run
     result = runner([muse, "skills", "validate", str(skill_dir)],
-                    capture_output=True, text=True, timeout=120)
+                    capture_output=True, text=True, timeout=120,
+                    env={**os.environ, "MUSE_NO_AUTO_UPDATE": "1"})
     if result.returncode != 0:
         out = (result.stderr or result.stdout or "").strip()[:300]
         return Check("catalog-skills", False,
@@ -392,9 +400,18 @@ def _live_dotenv() -> dict[str, str]:
 def check_credentials(
     *,
     dotenv: Mapping[str, str] | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> Check:
-    """Required credentials are present, named but never shown."""
+    """Required credentials are present, named but never shown.
+
+    Both Settings sources count: the dotenv files and the process
+    environment (pydantic-settings reads env too).
+    """
     values = dict(dotenv) if dotenv is not None else _live_dotenv()
+    env = dict(environ) if environ is not None else dict(os.environ)
+    for name in REQUIRED_CREDENTIALS:
+        if str(env.get(name) or "").strip():
+            values[name] = env[name]
     missing = [name for name in REQUIRED_CREDENTIALS
                if not str(values.get(name) or "").strip()]
     if missing:
@@ -404,6 +421,8 @@ def check_credentials(
     return Check("credentials", True,
                  f"{len(REQUIRED_CREDENTIALS)}/{len(REQUIRED_CREDENTIALS)} "
                  "presentes (nombres)")
+
+
 def check_health(
     *,
     port: int = 18765,
@@ -463,9 +482,18 @@ def check_skill_dry_run(
                  "roots+templates+project-config+vault-entry ok (dry-run)")
 
 
+def _default_port() -> int:
+    """Service port the launcher way: OPENCEO_HOST_PORT, OPENCEO_PORT."""
+    for name in ("OPENCEO_HOST_PORT", "OPENCEO_PORT"):
+        raw = str(os.environ.get(name) or "").strip()
+        if raw.isdigit():
+            return int(raw)
+    return 18765
+
+
 def run_preflight(
     *,
-    port: int = 18765,
+    port: int | None = None,
     proc_cmdlines: Mapping[int, str] | None = None,
     ss_text: str | None = None,
     venv_python: str | None = None,
@@ -474,10 +502,12 @@ def run_preflight(
     is_file: Callable[[str], bool] | None = None,
     config: Mapping[str, Any] | None = None,
     dotenv: Mapping[str, str] | None = None,
+    environ: Mapping[str, str] | None = None,
     health_get: Callable[[str], int] | None = None,
     skill_run: Callable[..., Any] | None = None,
 ) -> PreflightResult:
     """Run every check with live probes unless fakes are injected."""
+    port = _default_port() if port is None else port
     checks = (
         check_single_instance(port=port, proc_cmdlines=proc_cmdlines,
                               ss_text=ss_text, venv_python=venv_python),
@@ -485,7 +515,7 @@ def run_preflight(
         check_catalog_skills(which=which, run=skill_run),
         check_mcp_identity(),
         check_roster_clis(config=config, which=which, is_file=is_file),
-        check_credentials(dotenv=dotenv),
+        check_credentials(dotenv=dotenv, environ=environ),
         check_health(port=port, get=health_get),
         check_skill_dry_run(run=skill_run),
     )
@@ -496,7 +526,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI: print ``listo`` or the missing list, exit 0/1."""
     parser = argparse.ArgumentParser(
         description="Pilot 1 preflight: listo o la lista exacta de faltas")
-    parser.add_argument("--port", type=int, default=18765)
+    parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     result = run_preflight(port=args.port)

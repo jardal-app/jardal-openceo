@@ -111,6 +111,26 @@ class RepoSyncTests(unittest.TestCase):
         self.assertFalse(check.ok)
         self.assertIn("sucio", check.detail)
 
+    def test_status_failure_is_unreadable_repo(self) -> None:
+        def run(args: Sequence[str], cwd: Path) -> tuple[int, str]:
+            if list(args[:1]) == ["status"]:
+                return 128, ""
+            return _git_ok(args, cwd)
+
+        check = check_repo_main_sync(run=run)
+        self.assertFalse(check.ok)
+        self.assertIn("ilegible", check.detail)
+
+    def test_head_failure_is_unreadable_repo(self) -> None:
+        def run(args: Sequence[str], cwd: Path) -> tuple[int, str]:
+            if list(args) == ["rev-parse", "HEAD"]:
+                return 128, ""
+            return _git_ok(args, cwd)
+
+        check = check_repo_main_sync(run=run)
+        self.assertFalse(check.ok)
+        self.assertIn("ilegible", check.detail)
+
     def test_missing_origin_ref_fails(self) -> None:
         def run(args: Sequence[str], cwd: Path) -> tuple[int, str]:
             if args[-1] == "refs/remotes/origin/main":
@@ -133,9 +153,23 @@ class RepoSyncTests(unittest.TestCase):
 
 
 class CatalogSkillsTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("muse"), "muse required")
     def test_live_catalog_and_skill_validate(self) -> None:
         check = check_catalog_skills()
         self.assertTrue(check.ok, check.detail)
+
+    def test_validate_disables_muse_autoupdate(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def run(*args: Any, **kwargs: Any) -> Any:
+            seen.update(kwargs)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        check = check_catalog_skills(
+            which=lambda name: "/bin/muse" if name == "muse" else None,
+            run=run)
+        self.assertTrue(check.ok, check.detail)
+        self.assertEqual(seen["env"]["MUSE_NO_AUTO_UPDATE"], "1")
 
     def test_missing_muse_fails(self) -> None:
         check = check_catalog_skills(which=lambda name: None)
@@ -192,9 +226,28 @@ class RosterClisTests(unittest.TestCase):
         self.assertIn("absent-x234", check.detail)
         self.assertNotIn("present", check.detail)
 
+    @unittest.skipUnless(
+        shutil.which("musej") and shutil.which("claudej")
+        and shutil.which("codexj"), "roster required")
     def test_live_roster_present(self) -> None:
         check = check_roster_clis()
         self.assertTrue(check.ok, check.detail)
+
+
+class DefaultPortTests(unittest.TestCase):
+    def test_env_overrides(self) -> None:
+        import os
+        from unittest.mock import patch
+
+        from pilot_preflight import _default_port
+
+        with patch.dict(os.environ, {"OPENCEO_HOST_PORT": "9999"}):
+            self.assertEqual(_default_port(), 9999)
+        with patch.dict(os.environ, {"OPENCEO_HOST_PORT": "",
+                                     "OPENCEO_PORT": "8000"}):
+            self.assertEqual(_default_port(), 8000)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_default_port(), 18765)
 
 
 class CredentialsTests(unittest.TestCase):
@@ -208,6 +261,10 @@ class CredentialsTests(unittest.TestCase):
 
     def test_full_set_is_ok(self) -> None:
         self.assertTrue(check_credentials(dotenv=dict(self._FULL)).ok)
+
+    def test_env_only_set_is_ok(self) -> None:
+        check = check_credentials(dotenv={}, environ=dict(self._FULL))
+        self.assertTrue(check.ok, check.detail)
 
     def test_missing_named_exact(self) -> None:
         dotenv = dict(self._FULL)
@@ -226,6 +283,8 @@ class CredentialsTests(unittest.TestCase):
         for value in dotenv.values():
             self.assertNotIn(value, check.detail)
 
+    @unittest.skipUnless(
+        (REPO / "openceo-core" / ".env").is_file(), "dotenv required")
     def test_live_dotenv_has_the_set(self) -> None:
         check = check_credentials()
         self.assertTrue(check.ok, check.detail)
@@ -267,14 +326,29 @@ class SkillDryRunTests(unittest.TestCase):
 class RunPreflightTests(unittest.TestCase):
     def _probes(self) -> dict[str, Any]:
         dotenv = dict(CredentialsTests._FULL)
+
+        def skill_run(cmd: Any, **kwargs: Any) -> Any:
+            del kwargs
+            if "validate" in cmd:
+                return SimpleNamespace(returncode=0, stdout="",
+                                       stderr="")
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"ok": true, "dry_run": true, "result": {}}',
+                stderr="")
+
         return {
             "proc_cmdlines": dict(_PROC_ONE),
             "ss_text": _SS_ONE,
             "venv_python": _VENV,
             "git_run": _git_ok,
-            "which": shutil.which,
+            "which": lambda name: f"/bin/{name}" if name
+            in ("present-cli", "git", "muse") else None,
+            "is_file": lambda path: False,
+            "config": {"a": {"command": ["present-cli"]}},
             "dotenv": dotenv,
             "health_get": lambda url: 200,
+            "skill_run": skill_run,
         }
 
     def test_all_fake_ok_says_listo(self) -> None:
