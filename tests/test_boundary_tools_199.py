@@ -62,14 +62,6 @@ EXPECTED_REGISTRY = frozenset({
     "ceo.get_next_action",
     "ceo.capture_context",
     "ceo.record_progress",
-    "ops.check_project_spend",
-    "ops.escalate_project_spend",
-    "ops.ensure_erpnext_project",
-    "ops.ensure_git_repo",
-    "ops.ensure_repo_templates",
-    "ops.ensure_project_config",
-    "ops.ensure_vault_entry",
-    "ops.ensure_dns_record",
 })
 
 REMOVED_TOOLS = (
@@ -82,6 +74,15 @@ REMOVED_TOOLS = (
     # TASK-2026-00220: notes left the registry with the third memory.
     "secretary.save_note",
     "secretary.query_notes",
+    # TASK-2026-00223: project creation left the registry for the skill.
+    "ops.check_project_spend",
+    "ops.escalate_project_spend",
+    "ops.ensure_erpnext_project",
+    "ops.ensure_git_repo",
+    "ops.ensure_repo_templates",
+    "ops.ensure_project_config",
+    "ops.ensure_vault_entry",
+    "ops.ensure_dns_record",
 )
 
 RESEARCH_TOOLS = (

@@ -10,9 +10,8 @@ date: 2026-10-12
 
 First real case of the role model: a known process as an operations
 skill. Every step is idempotent — re-running reports `existed` and
-duplicates nothing. Never touch the legacy Tier-0 YAML
-(`workflows/operations/create_project.yaml`): it retires in
-TASK-2026-00223.
+duplicates nothing. This skill is the only way to create a project:
+the legacy Tier-0 flow retired in TASK-2026-00223.
 
 ## Inputs (ticket title, description, params)
 

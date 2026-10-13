@@ -223,12 +223,11 @@ If no agent can perform required work, return `capability_gap`.
 Creating a company project end-to-end is an `operations` ticket, not a
 gap: route it to `operations` with the `crear-proyecto` skill and the
 project spec in the ticket (`project_key`, display name, org,
-description, and `is_web`/`hostname` for web projects). The
-deterministic `operations.create_project` workflow stays until
-TASK-2026-00223 retires it after the tokenless rehearsal
-(TASK-2026-00234); project creation now arrives as a CEO
-`crear_pedido` pedido routed here, and the planner never launches
-workflows directly (`PlannedTicket` carries no `params.workflow`).
+description, and `is_web`/`hostname` for web projects). The legacy
+Tier-0 workflow retired in TASK-2026-00223; project creation now
+arrives as a CEO `crear_pedido` pedido routed here, and the planner
+never launches workflows directly (`PlannedTicket` carries no
+`params.workflow`).
 
 A ticket that asks to send or draft email routes to `secretary`
 with the `enviar-correo` skill; recipients, subject, and body or

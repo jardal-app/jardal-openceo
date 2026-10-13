@@ -111,8 +111,9 @@ def check_plan_spend(
     With no costs declared the work launches without even reading the
     mandate. Otherwise ``requires_owner`` decides; an unknown amount
     escalates fail-closed, and without a valid mandate any declared
-    spend escalates too. Returns the ``check_spend`` shape plus the
-    ``unknown`` labels.
+    spend escalates too. Returns the spend verdict (``escalate``,
+    ``category``, ``reason``, ``human_action``, ``amount``,
+    ``currency``) plus the ``unknown`` labels.
     """
     from company_mandate import EscalationCategory, OwnerAction, requires_owner
 

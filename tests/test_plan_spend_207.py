@@ -1072,12 +1072,12 @@ class LooseSpendGateTests(unittest.IsolatedAsyncioTestCase):
         assert stored is not None
         self.assertEqual(stored["status"], "waiting")
 
-    async def test_workflow_ticket_keeps_its_legacy_gate(self) -> None:
+    async def test_workflow_ticket_skips_creation_gate(self) -> None:
         repo = _SvcRepo()
         service = _make_service(repo)
 
         created = await self._create(service, {
-            "workflow": "operations.create_project",
+            "workflow": "finance.register_expense",
             "costs": [{"label": "domain", "amount": "12"}],
         })
 
