@@ -551,8 +551,8 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("Not validated deterministically at this point", text)
         # §6 / §10 / §34: project creation, the research agent, spec authoring.
         self.assertIn("carries no `params.workflow`", text)
-        self.assertIn("launched by the CEO review's `create_project` action",
-                      text)
+        self.assertIn("arrives as a CEO `crear_pedido` pedido", text)
+        self.assertNotIn("`create_project` action", text)
         # (blockquote: each wrapped line starts with "> ")
         self.assertIn("is registered but disabled in the agent", text)
         self.assertIn("It declares; it does not write", text)
