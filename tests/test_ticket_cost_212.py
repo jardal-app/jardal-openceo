@@ -386,7 +386,8 @@ class SimpleTierCostTests(unittest.IsolatedAsyncioTestCase):
         manager = self._manager()
         manager._resolve_tier_executor = AsyncMock(  # type: ignore[method-assign]
             return_value=MagicMock(argv=["x"], prompt_via="argv",
-                                   cwd=None, env={}, label="tier_a"))
+                                   cwd=None, env={}, label="tier_a",
+                                   role_profile=None))
 
         async def _fail(command, stdin_payload=None, timeout=120, cwd=None,
                         env=None, sandbox=True, config_argv=None,

@@ -448,9 +448,11 @@ class ConfigLoader:
                 # values (-m gpt-6.1-sol, effort xhigh).
                 "tiers": {
                     "tier_a": {"account": "claudej", "model": "opusplan", "effort": "xhigh",
-                               "model_args": ["--model", "opusplan", "--effort", "xhigh"]},
+                               "model_args": ["--model", "opusplan", "--effort", "xhigh"],
+                               "role_profile": "dev"},
                     "tier_b": {"account": "codexj", "model": "gpt-6.1-sol", "effort": "xhigh",
-                               "model_args": []},
+                               "model_args": [],
+                               "role_profile": "dev"},
                     "tier_c": {"chain": ["muse", "dsh", "claudep"],
                                "muse": {"model": "muse-spark-1.3-contributor", "effort": "max",
                                         "command": ["musej", "exec", "--model", "muse-spark-1.3-contributor"],

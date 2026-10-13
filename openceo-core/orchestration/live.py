@@ -27,12 +27,26 @@ from typing import Any, Mapping, Protocol, Sequence
 
 from catalog import CatalogError, load_role_profile
 from orchestration.agent_sandbox import cleanup_sandbox_scratch, plan_agent
+from orchestration.role_claude import (
+    CLAUDE_MCP_OVERLAY_RELPATH,
+    claude_config_bytes,
+    ensure_mcp_placeholder,
+    profile_box_tools,
+)
+from orchestration.role_claude import render_argv_extras as claude_argv_extras
 from orchestration.role_muse import (
     SETTINGS_OVERLAY_RELPATH,
     RoleProfileError,
     render_argv_extras,
     render_card_argv,
     settings_overlay_bytes,
+)
+from orchestration.role_opencode import (
+    OPENCODE_OVERLAY_RELPATH,
+    opencode_config_bytes,
+)
+from orchestration.role_opencode import (
+    render_argv_extras as opencode_argv_extras,
 )
 from research.runtimes.base import IsolationUnavailable
 
@@ -161,9 +175,31 @@ class ProcessExecutor:
             try:
                 servers = self._badge_provider.mcp_servers(badge)
                 home = Path(os.path.expanduser("~"))
-                rendered = settings_overlay_bytes(
-                    profile, home, workdir, servers)
-            except (RoleProfileError, ValueError, OSError) as exc:
+                provider = str(spec.get("provider") or "muse")
+                if provider == "muse":
+                    rendered = settings_overlay_bytes(
+                        profile, home, workdir, servers)
+                    file_overlays = {SETTINGS_OVERLAY_RELPATH: rendered}
+                    config_argv += render_argv_extras(profile)
+                    config_argv += render_card_argv(profile)
+                elif provider == "claude":
+                    box = profile_box_tools(profile)
+                    mcp_path = ensure_mcp_placeholder(home)
+                    rendered = claude_config_bytes(servers)
+                    file_overlays = {CLAUDE_MCP_OVERLAY_RELPATH: rendered}
+                    config_argv += claude_argv_extras(
+                        profile, box, str(mcp_path))
+                elif provider == "opencode":
+                    rendered = opencode_config_bytes(
+                        profile, home, servers)
+                    file_overlays = {OPENCODE_OVERLAY_RELPATH: rendered}
+                    config_argv += opencode_argv_extras(profile.name)
+                else:
+                    raise RoleProfileError(
+                        f"no translator for provider {provider!r}: "
+                        "profile runs support muse, claude and opencode")
+            except (RoleProfileError, CatalogError, ValueError,
+                    OSError) as exc:
                 await self._badge_provider.revoke(badge)
                 return ExecResult(
                     returncode=1, elapsed_s=0.0,
@@ -171,9 +207,6 @@ class ProcessExecutor:
                     model=str(spec.get("model") or ""),
                     slot=str(spec.get("account") or spec.get("label")
                              or role))
-            file_overlays = {SETTINGS_OVERLAY_RELPATH: rendered}
-            config_argv += render_argv_extras(profile)
-            config_argv += render_card_argv(profile)
         stdin_payload: str | None = None
         full_argv = list(config_argv)
         if via == "stdin":
