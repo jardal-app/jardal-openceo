@@ -231,6 +231,16 @@ def _measured_cost_sentence(objectives: Any) -> str:
 def describe_company(company: Mapping[str, Any]) -> str:
     """Parrafo de voz con el status de empresa."""
     parts: list[str] = []
+    missions = company.get("missions") or []
+    if missions:
+        names = ", ".join(
+            str(m.get("goal") or m.get("mission_id") or "")
+            for m in missions[:3]
+        )
+        if len(missions) > 1:
+            parts.append(f"Tenemos {len(missions)} misiones activas: {names}.")
+        else:
+            parts.append(f"Tenemos una misión activa: {names}.")
     objectives = company.get("objectives") or []
     if objectives:
         names = ", ".join(
@@ -272,6 +282,8 @@ def describe_company(company: Mapping[str, Any]) -> str:
         parts.append("No pudimos leer el registro de negocio ahora mismo.")
     if company.get("objectives_unknown"):
         parts.append("No pudimos leer los objetivos ahora mismo.")
+    if company.get("missions_unknown"):
+        parts.append("No pudimos leer las misiones ahora mismo.")
     return " ".join(parts)
 
 

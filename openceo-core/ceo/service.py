@@ -20,6 +20,7 @@ from objectives.engine import (
     MongoObjectiveStore,
     MongoObjectiveTaskLister,
 )
+from objectives.missions import InMemoryMissionStore, MongoMissionStore
 from objectives.service import create_internal_ticket
 from orchestration.live import ProcessExecutor
 from orchestration.role_muse import ReadonlyBadgeProvider, issuer_for_repo
@@ -139,6 +140,12 @@ class CEOService:
             repo_root=Path(__file__).resolve().parents[2],
             publish=self._publish,
             ceo_cfg={"timeout_minutes": wiring["timeout_minutes"]},
+            missions=(
+                MongoMissionStore(repo) if repo is not None
+                else InMemoryMissionStore()
+            ),
+            patch_task=self._patch_task,
+            close_mission=self._close_mission,
         )
 
     # -- readers ------------------------------------------------------
@@ -283,6 +290,17 @@ class CEOService:
 
     async def _escalate(self, **kwargs: Any) -> dict[str, Any]:
         return await self._task_service.create_owner_escalation(**kwargs)
+
+    async def _patch_task(
+        self, task_id: str, updates: dict[str, Any]
+    ) -> None:
+        await self._task_service.patch_task(task_id, updates)
+
+    async def _close_mission(
+        self, mission_id: str, reason: str = ""
+    ) -> dict[str, Any]:
+        return await self._task_service.close_mission(
+            mission_id, reason=reason)
 
     async def _publish(self, record: dict[str, Any]) -> None:
         await self._repo.save_ceo_review(record)

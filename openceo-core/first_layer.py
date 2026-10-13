@@ -408,6 +408,7 @@ PERSONALIDAD Y TONO DE VOZ (CRÍTICO):
    - '¿por qué falló?', '¿qué falta?', '¿qué cambios pide?' con ticket en foco -> intent="ticket_query".
    - 'reintenta el ticket', 'ejecuta el ticket' -> intent="ticket_retry".
    - 'crea un objetivo para ...', 'nuevo objetivo: ...', 'quiero un objetivo que ...' -> intent="objective_create" con dictation igual al objetivo pedido y project (el proyecto actual salvo que nombre otro). Un objetivo genera sus tickets solo; no pidas aprobación por ticket.
+   - 'crea una misión para ...', 'nueva misión: ...', 'haz andar ...', 'quiero una misión que ...' -> intent="mission_create" con dictation igual a la misión pedida y project (el proyecto actual salvo que nombre otro). Una misión encadena sus objetivos sola; no pidas aprobación por objetivo.
 9. SESIONES DEV (CÓDIGO/PROGRAMACIÓN) Y TERMINALES TMUX:
    - 'crea una sesión en jardal-trading', 'cree una sesión en jardal-trading', 'abre una sesión en trading', 'crea una sesión dev', 'abre sesión con codex|claude|muse|opencode' -> SIEMPRE intent="dev_session_start" con project y opcional provider. Toda petición de crear/abrir sesión para un proyecto de código es una sesión dev.
    - 'crea una sesión en el proyecto nro 1', 'crea sesión en el 1', 'crea una sesión en el proyecto 1', 'abre sesión en el 2', 'crea sesión en el nro 1' -> intent="dev_session_start" con el project correspondiente al número según la lista 'PROYECTOS DISPONIBLES' (ej: 1 -> jardal-openceo, 2 -> jardal-trading, etc.).
@@ -588,6 +589,25 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
                 f"Tenemos un objetivo nuevo en marcha en {target_proj}: "
                 "el planificador ya está creando sus tickets. "
                 "Te aviso cuando cierre por revisión final.")
+
+        # ------------------- 3b2. MISSION CREATE (00218) -------------------
+        if intent == "mission_create":
+            goal = str(dictation_param or "").strip() or text.strip()
+            try:
+                await self.task_service.create_mission(
+                    project=target_proj,
+                    goal=goal,
+                    source="voice",
+                    requester=user_id,
+                )
+            except Exception as exc:
+                return True, (
+                    "No pudimos crear la misión en "
+                    f"{target_proj}: {str(exc)[:160]}. ¿La replanteamos?")
+            return True, (
+                f"Tenemos una misión nueva en marcha en {target_proj}: "
+                "la estrategia ya está encadenando sus objetivos. "
+                "Te aviso cuando cierre con su evidencia.")
 
         # ------------------- 3c. FINANCE SKILL (explicit voice/chat) -------------------
         if intent == "finance_skill":

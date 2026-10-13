@@ -861,6 +861,70 @@ class HorizonService:
                     }
                 )
 
+        missions: list[dict[str, Any]] = []
+        missions_unknown = False
+        try:
+            active_missions = await self._repo.list_active_missions()
+        except Exception:
+            logger.warning("cockpit: misiones no legibles", exc_info=True)
+            active_missions = None
+        if active_missions is None:
+            missions_unknown = True
+        else:
+            for mission in list(active_missions)[:10]:
+                mission_id = str(mission.get("mission_id") or "")
+                ledger = [
+                    item for item in mission.get("objectives") or []
+                    if isinstance(item, dict)
+                ]
+                open_count = 0
+                closed_count = 0
+                costs: list[Any] = []
+                for item in ledger[:20]:
+                    objective_id = str(item.get("objective_id") or "")
+                    try:
+                        objective = await self._repo.get_objective(
+                            objective_id)
+                    except Exception:
+                        logger.warning(
+                            "cockpit: objetivo %s de la mision no legible",
+                            objective_id,
+                            exc_info=True,
+                        )
+                        objective = None
+                    status = str((objective or {}).get("status") or "")
+                    if status == "closed":
+                        closed_count += 1
+                    elif status:
+                        open_count += 1
+                    try:
+                        children = await self._repo.list_tasks_by_objective(
+                            objective_id, limit=100
+                        )
+                    except Exception:
+                        logger.warning(
+                            "cockpit: hijos del objetivo %s no legibles",
+                            objective_id,
+                            exc_info=True,
+                        )
+                        continue
+                    costs.extend(c.get("cost") for c in children)
+                missions.append(
+                    {
+                        "mission_id": mission_id,
+                        "project": mission.get("project"),
+                        "goal": _short_text(
+                            str(mission.get("goal") or ""), 200),
+                        "erp_group_ref": mission.get("erp_group_ref"),
+                        "status": mission.get("status"),
+                        "acceptance_status": mission.get(
+                            "acceptance_status"),
+                        "open_objectives": open_count,
+                        "closed_objectives": closed_count,
+                        "cost": cost_mod.aggregate_mission_cost(costs),
+                    }
+                )
+
         closed: list[dict[str, Any]] = []
         closed_unknown = False
         try:
@@ -965,6 +1029,8 @@ class HorizonService:
         company = {
             "objectives": objectives,
             "objectives_unknown": objectives_unknown,
+            "missions": missions,
+            "missions_unknown": missions_unknown,
             "recently_closed": closed,
             "closed_unknown": closed_unknown,
             "blocked": blocked,
@@ -1657,11 +1723,14 @@ class HorizonService:
             }
 
         resolved_kind = str(kind or "ticket").strip().lower()
-        if resolved_kind not in ("ticket", "objective"):
+        if resolved_kind not in ("ticket", "objective", "mission"):
             return {
                 "promoted": False,
                 "reason": "unknown_kind",
-                "message": f"Destino desconocido: {kind}. Usa ticket u objective.",
+                "message": (
+                    f"Destino desconocido: {kind}. "
+                    "Usa ticket, objective o mission."
+                ),
             }
 
         classification = promotion_module.classify_action(
@@ -1882,6 +1951,54 @@ class HorizonService:
                 "project": company_project,
                 "kind": "objective",
                 "message": f"Promoví «{spec['title']}» a objetivo de {company_project}.",
+            }
+
+        if resolved_kind == "mission":
+            from objectives.missions import MissionErpError, MissionRejected
+
+            acceptance = " ".join(str(target_action.get("acceptance") or "").split())
+            try:
+                created_mis = await svc.create_mission(
+                    project=company_project,
+                    goal=spec["title"],
+                    acceptance=[acceptance] if acceptance else None,
+                    entry="horizon_promotion",
+                    source=TaskSource.API.value,
+                    source_id=promotion_module.promotion_mission_source_id(aid),
+                    requester=user_id,
+                )
+            except (MissionRejected, MissionErpError) as exc:
+                return {
+                    "promoted": False,
+                    "reason": "mission_rejected",
+                    "action_id": aid,
+                    "detail": str(exc)[:300],
+                    "message": "La misión no fue admitida; no se creó nada.",
+                }
+            mission_id = str(created_mis.get("mission_id") or "")
+            updates = {
+                **declarations,
+                "task_id": str(created_mis.get("conversion_source_task_id") or "") or None,
+                "status": ActionStatus.IN_PROGRESS.value,
+                "owner": ActionOwner.AGENT.value,
+                "delegated_at": _now(),
+                "delegated_project": company_project,
+                "delivered_at": None,
+                "result_summary": None,
+                "promoted_at": _now(),
+                "promotion_kind": "mission",
+                "promotion_ref": mission_id or None,
+            }
+            await self._repo.patch_horizon_action(aid, updates)
+            return {
+                "promoted": True,
+                "already_promoted": False,
+                "action_id": aid,
+                "mission_id": mission_id,
+                "task_id": updates["task_id"],
+                "project": company_project,
+                "kind": "mission",
+                "message": f"Promoví «{spec['title']}» a misión de {company_project}.",
             }
 
         parent_task, objective_id = await self._promotion_objective_link(

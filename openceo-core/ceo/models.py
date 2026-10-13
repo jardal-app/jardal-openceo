@@ -39,6 +39,7 @@ __all__ = [
     "CEOValidationContext",
     "DUPLICATE_ESCALATION_PREFIX",
     "EscalationSpec",
+    "MissionCloseSpec",
     "NewPedidoSpec",
     "normalize_title",
     "parse_ceo_decision",
@@ -58,12 +59,13 @@ DUPLICATE_ESCALATION_PREFIX = "duplicate_escalation:"
 
 
 class CEOAction(str, Enum):
-    """The four review outcomes (ARCH §Proactive CEO, CEO loop)."""
+    """The five review outcomes (ARCH §Proactive CEO, CEO loop)."""
 
     KEEP_GOING = "keep_going"
     CREAR_PEDIDO = "crear_pedido"
     ESCALATE = "escalate"
     DO_NOTHING = "do_nothing"
+    CLOSE_MISSION = "close_mission"
 
 
 def normalize_title(value: Any) -> str:
@@ -88,6 +90,8 @@ class NewPedidoSpec(BaseModel):
     ``display_name``) marks a new-project pedido for the operations
     ``crear-proyecto`` skill. The mandate link (TASK-2026-00193) is a
     measured KPI or, when none is measured, a written ``justificacion``.
+    ``mission_id`` (TASK-2026-00218) chains the pedido as the next
+    objective of that mission.
     """
 
     project: str = Field(min_length=1)
@@ -97,6 +101,7 @@ class NewPedidoSpec(BaseModel):
     eje_id: str | None = None
     kpi_ids: list[str] = Field(default_factory=list)
     justificacion: str | None = None
+    mission_id: str | None = None
     costs: list[PlannedCost] = Field(default_factory=list)
     project_key: str | None = None
     display_name: str | None = None
@@ -113,7 +118,10 @@ class NewPedidoSpec(BaseModel):
     def _lists_nonblank(cls, value: list[str]) -> list[str]:
         return _string_list_nonblank(value)
 
-    @field_validator("eje_id", "justificacion", "project_key", "display_name")
+    @field_validator(
+        "eje_id", "justificacion", "mission_id", "project_key",
+        "display_name",
+    )
     @classmethod
     def _optional_nonblank(cls, value: str | None) -> str | None:
         if value is not None and not value.strip():
@@ -175,11 +183,29 @@ class EscalationSpec(BaseModel):
         return value
 
 
+class MissionCloseSpec(BaseModel):
+    """Mission the CEO declares complete (TASK-2026-00218).
+
+    The review judged the mission acceptance met; the engine closes
+    with evidence (every mission objective and its delivery record).
+    """
+
+    mission_id: str = Field(min_length=1)
+
+    @field_validator("mission_id")
+    @classmethod
+    def _mission_nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+
 class CEODecision(BaseModel):
     action: CEOAction
     summary: str = Field(min_length=1)
     pedido: NewPedidoSpec | None = None
     escalation: EscalationSpec | None = None
+    mission: MissionCloseSpec | None = None
 
     @field_validator("summary")
     @classmethod
@@ -193,11 +219,13 @@ class CEODecision(BaseModel):
         specs = {
             "pedido": self.pedido,
             "escalation": self.escalation,
+            "mission": self.mission,
         }
         present = {name for name, spec in specs.items() if spec is not None}
         expected = {
             CEOAction.CREAR_PEDIDO: {"pedido"},
             CEOAction.ESCALATE: {"escalation"},
+            CEOAction.CLOSE_MISSION: {"mission"},
             CEOAction.KEEP_GOING: set(),
             CEOAction.DO_NOTHING: set(),
         }[self.action]
@@ -269,6 +297,10 @@ class CEOValidationContext:
         default_factory=list)
     escalations_unknown: bool = False
     kpi_readings: Mapping[str, CEOKpiReading] = field(default_factory=dict)
+    missions: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    mission_objectives: Mapping[str, Sequence[Mapping[str, Any]]] = field(
+        default_factory=dict)
+    missions_unknown: bool = False
 
     def reading_known(self, eje_id: str, kpi_id: str) -> bool:
         reading = self.kpi_readings.get(f"{eje_id}:{kpi_id}")
@@ -333,6 +365,42 @@ def _check_axis_kpis(
         )
 
 
+#: Objective statuses that end a mission entry (00218).
+_MISSION_TERMINAL_OBJECTIVE = frozenset({"closed", "cancelled"})
+
+
+def _check_mission_link(
+    decision_label: str,
+    mission_id: str,
+    ctx: CEOValidationContext,
+    errors: list[str],
+) -> Mapping[str, Any] | None:
+    """Mission exists, is active, and its shell takes children."""
+    if ctx.missions_unknown:
+        errors.append(
+            f"{decision_label}: missions unreadable: refusing to chain "
+            "against a blind mission check"
+        )
+        return None
+    mission = ctx.missions.get(str(mission_id or "").strip())
+    if mission is None:
+        errors.append(
+            f"{decision_label}: unknown mission {str(mission_id)!r}")
+        return None
+    if str(mission.get("status") or "") != "active":
+        errors.append(
+            f"{decision_label}: mission {mission_id} is not active "
+            f"({mission.get('status')})")
+        return None
+    shell = str(mission.get("shell_status") or "").strip()
+    if shell in {"cancelled", "completed"}:
+        errors.append(
+            f"{decision_label}: mission {mission_id} shell is {shell} "
+            "in ERP: no new objectives chain under it")
+        return None
+    return mission
+
+
 def _validate_new_pedido(
     spec: NewPedidoSpec, ctx: CEOValidationContext
 ) -> list[str]:
@@ -354,6 +422,9 @@ def _validate_new_pedido(
             "is filed in exactly one known project"
         )
     _check_axis_kpis(label, spec, ctx, errors)
+    if str(spec.mission_id or "").strip():
+        _check_mission_link(
+            label, str(spec.mission_id or "").strip(), ctx, errors)
     normalized = normalize_title(spec.title)
     if normalized in {normalize_title(t) for t in ctx.open_titles}:
         errors.append(f"{label}: duplicates an open ticket")
@@ -438,6 +509,49 @@ def _validate_escalation(
     return errors
 
 
+def _validate_mission_close(
+    spec: MissionCloseSpec, ctx: CEOValidationContext
+) -> list[str]:
+    errors: list[str] = []
+    label = "close_mission"
+    if ctx.missions_unknown:
+        return [f"{label}: missions unreadable: refusing to close blind"]
+    mission_id = str(spec.mission_id or "").strip()
+    mission = ctx.missions.get(mission_id)
+    if mission is None:
+        return [f"{label}: unknown mission {mission_id!r}"]
+    if str(mission.get("status") or "") != "active":
+        return [f"{label}: mission {mission_id} is not active "
+                f"({mission.get('status')})"]
+    if str(mission.get("shell_status") or "") == "cancelled":
+        return [f"{label}: mission {mission_id} shell is cancelled "
+                "in ERP: engine convergence needs a cancel flow"]
+    if not [str(item).strip()
+            for item in mission.get("acceptance") or []
+            if str(item).strip()]:
+        errors.append(
+            f"{label}: mission {mission_id} has no acceptance "
+            "criteria: nothing judges completion")
+    children = list(ctx.mission_objectives.get(mission_id) or [])
+    open_children = [
+        str(item.get("objective_id") or "")
+        for item in children
+        if str(item.get("status") or "") not in _MISSION_TERMINAL_OBJECTIVE
+    ]
+    if open_children:
+        errors.append(
+            f"{label}: mission {mission_id} still runs "
+            f"{len(open_children)} objectives "
+            f"({', '.join(open_children[:5])}): close_mission needs "
+            "every mission objective closed or cancelled")
+    if not any(str(item.get("status") or "") == "closed"
+               for item in children):
+        errors.append(
+            f"{label}: mission {mission_id} closed no objective yet: "
+            "a mission closes on delivered evidence, never empty")
+    return errors
+
+
 def validate_ceo_decision(
     decision: CEODecision, ctx: CEOValidationContext
 ) -> list[str]:
@@ -450,6 +564,8 @@ def validate_ceo_decision(
     the form materializes (objective admission, ticket dispatch).
     Escalation validates the policy cause through the single mandate
     policy and dedupes against already-open escalations.
+    ``close_mission`` validates the mission is active with acceptance,
+    every mission objective terminal, and at least one closed.
     """
     if decision.action == CEOAction.CREAR_PEDIDO:
         assert decision.pedido is not None  # Shape-guarded.
@@ -457,4 +573,7 @@ def validate_ceo_decision(
     if decision.action == CEOAction.ESCALATE:
         assert decision.escalation is not None  # Shape-guarded.
         return _validate_escalation(decision.escalation, ctx)
+    if decision.action == CEOAction.CLOSE_MISSION:
+        assert decision.mission is not None  # Shape-guarded.
+        return _validate_mission_close(decision.mission, ctx)
     return []

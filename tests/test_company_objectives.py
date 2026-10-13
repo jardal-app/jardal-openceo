@@ -1181,6 +1181,21 @@ class McpSurfaceTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("bad", result["message"])
 
+    def test_create_mission_tool(self) -> None:
+        import asyncio
+
+        task_service = _FakeTaskService()
+        task_service.create_mission = AsyncMock(  # type: ignore[attr-defined]
+            return_value={"mission_id": "MIS-1"})
+        tools = self._tools(task_service)
+        result = asyncio.run(tools["openceo_create_mission"](
+            project="proj", goal="Ship it", acceptance=["works"]))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["mission_id"], "MIS-1")
+        _args, kwargs = task_service.create_mission.call_args
+        self.assertEqual(kwargs["project"], "proj")
+        self.assertEqual(kwargs["acceptance"], ["works"])
+
 
 class VoiceSurfaceTests(unittest.IsolatedAsyncioTestCase):
     def _gateway(self, intent_json: dict[str, Any],

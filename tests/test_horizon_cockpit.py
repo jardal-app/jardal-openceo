@@ -100,6 +100,7 @@ class CockpitRepo(FakeHorizonRepo):
         super().__init__()
         self.company_tasks: dict[str, dict[str, Any]] = {}
         self.company_objectives: list[dict[str, Any]] = []
+        self.company_missions: list[dict[str, Any]] = []
         self.runs: dict[str, dict[str, Any]] = {}
         self.fail_on: set[str] = set()
 
@@ -176,6 +177,20 @@ class CockpitRepo(FakeHorizonRepo):
             deepcopy(o)
             for o in self.company_objectives
             if str(o.get("status")) == "active" and (not project or o.get("project") == project)
+        ]
+
+    async def get_objective(self, objective_id: str) -> dict[str, Any] | None:
+        for row in self.company_objectives:
+            if str(row.get("objective_id")) == str(objective_id):
+                return deepcopy(row)
+        return None
+
+    async def list_active_missions(self, project: str | None = None) -> list[dict[str, Any]]:
+        self._maybe_fail("list_active_missions")
+        return [
+            deepcopy(m)
+            for m in self.company_missions
+            if str(m.get("status")) == "active" and (not project or m.get("project") == project)
         ]
 
     async def list_tasks_by_objective(
@@ -403,6 +418,43 @@ class CompanyStatusTests(CockpitBase):
         )
         self.assertEqual([t["task_id"] for t in company["blocked"]], ["t2"])
         self.assertIn("Vender mas", company["message"])
+
+    async def test_missions_rollup_progress_and_cost(self) -> None:
+        self.repo.company_missions.append(
+            {
+                "mission_id": "MIS-1",
+                "project": "jardal-openceo",
+                "goal": "Haz andar la tienda",
+                "status": "active",
+                "acceptance": ["Vende."],
+                "acceptance_status": "confirmed",
+                "erp_group_ref": "TASK-2026-00999",
+                "objectives": [
+                    {"objective_id": "OBJ-1", "status": "closed"},
+                    {"objective_id": "OBJ-2", "status": "active"},
+                ],
+            }
+        )
+        self.repo.company_objectives.append(
+            {"objective_id": "OBJ-1", "status": "closed"}
+        )
+        self.repo.company_objectives.append(
+            {"objective_id": "OBJ-2", "status": "active"}
+        )
+        self.repo.company_tasks["t1"] = _task(
+            "t1", status="completed", objective_id="OBJ-1",
+            cost={"runs": 2})
+
+        company = await self.service.company_status()
+
+        self.assertFalse(company["missions_unknown"])
+        self.assertEqual(len(company["missions"]), 1)
+        mission = company["missions"][0]
+        self.assertEqual(mission["goal"], "Haz andar la tienda")
+        self.assertEqual(mission["open_objectives"], 1)
+        self.assertEqual(mission["closed_objectives"], 1)
+        self.assertEqual(mission["cost"]["runs"], 2)
+        self.assertIn("Haz andar la tienda", company["message"])
 
     async def test_business_lists_only_desk_created_tickets(self) -> None:
         self.reader.rows = [

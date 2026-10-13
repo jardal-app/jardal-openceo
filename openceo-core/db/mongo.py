@@ -100,6 +100,10 @@ class MongoRepository:
         return self.db["objectives"]
 
     @property
+    def dev_missions(self):
+        return self.db["missions"]
+
+    @property
     def repo_locks(self):
         return self.db["repo_locks"]
 
@@ -265,6 +269,8 @@ class MongoRepository:
         await self.tier_s_runs.create_index([("owner_id", ASCENDING), ("updated_at", DESCENDING)])
         await self.findings_inbox.create_index([("project", ASCENDING), ("status", ASCENDING)])
         await self.findings_inbox.create_index([("project", ASCENDING), ("file", ASCENDING)])
+        await self.dev_missions.create_index([("mission_id", ASCENDING)], unique=True)
+        await self.dev_missions.create_index([("project", ASCENDING), ("status", ASCENDING)])
         await self.dev_objectives.create_index([("objective_id", ASCENDING)], unique=True)
         await self.dev_objectives.create_index([("project", ASCENDING), ("status", ASCENDING)])
         await self.ceo_reviews.create_index([("review_id", ASCENDING)], unique=True)
@@ -1173,6 +1179,38 @@ class MongoRepository:
             {"status": "open", "file": {"$in": files}},
             sort=[("severity_max", ASCENDING)],
         ).limit(max(1, limit))
+        return [self._clean(row) async for row in rows]
+
+    # ------------------------- Missions (00218) -------------------------
+
+    async def create_mission(self, doc: dict[str, Any]) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        stored = {**doc, "created_at": now, "updated_at": now}
+        await self.dev_missions.insert_one(stored)
+        return self._clean(stored)
+
+    async def get_mission(self, mission_id: str) -> dict[str, Any] | None:
+        return self._clean(
+            await self.dev_missions.find_one({"mission_id": mission_id}))
+
+    async def patch_mission(
+        self, mission_id: str, updates: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        patch = {**updates, "updated_at": datetime.now(timezone.utc)}
+        await self.dev_missions.update_one(
+            {"mission_id": mission_id}, {"$set": patch})
+        return await self.get_mission(mission_id)
+
+    async def list_active_missions(
+        self, project: str | None = None, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Active missions, optionally scoped to one project."""
+        query: dict[str, Any] = {"status": "active"}
+        if project:
+            query["project"] = project
+        rows = self.dev_missions.find(
+            query, sort=[("created_at", ASCENDING)],
+        ).limit(limit)
         return [self._clean(row) async for row in rows]
 
     # ------------------------- Dev objectives (F6) -------------------------

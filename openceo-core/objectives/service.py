@@ -19,9 +19,14 @@ from catalog import (
     load_catalog,
     suggestable_skills,
 )
+from objectives import missions as missions_mod
 from objectives import playbooks as playbooks_mod
 from objectives.delivery_verification import generic_agent_verifiers
 from objectives.money_guide import project_money_routing
+from objectives.missions import (
+    InMemoryMissionStore,
+    MongoMissionStore,
+)
 from orchestration.inbox import InMemoryInboxStore, MongoInboxStore
 from orchestration.live import AllowAllQuota, ProcessExecutor, RateMonitorQuota
 from orchestration.role_muse import ObjectiveBadgeProvider, issuer_for_repo
@@ -297,6 +302,21 @@ class ObjectiveService:
             dispatcher_wake=(getattr(task_service, "wake_dispatcher", None)
                              if task_service is not None else None),
             mandate=mandate,
+            missions=(MongoMissionStore(repo) if repo is not None
+                      else InMemoryMissionStore()),
+        )
+
+    def mission_env_for(self, project: str) -> missions_mod.MissionEnv:
+        """Bind the mission flows to production for one project."""
+        base = self.env_for(project)
+        return missions_mod.MissionEnv(
+            missions=base.missions,
+            objectives=base.objectives,
+            tasks=base.tasks,
+            create_ticket=base.create_ticket,
+            patch_task=base.patch_task,
+            notify=base.notify,
+            ceo_wake=self._ceo_wake,
         )
 
     @staticmethod
@@ -345,6 +365,58 @@ class ObjectiveService:
         if self._repo is None:
             return None
         return await self._repo.get_objective(objective_id)
+
+    async def create_mission(
+        self,
+        *,
+        project: str,
+        goal: str,
+        acceptance: list[str] | None = None,
+        entry: str = "top_down",
+        source: str = "api",
+        source_id: str | None = None,
+        requester: str | None = None,
+    ) -> dict[str, Any]:
+        """Top-down entry: validate the project, then run the flow."""
+        name = str(project or "").strip()
+        if not name or not self._config.has_project(name):
+            raise missions_mod.MissionRejected(
+                f"unknown project {name or '<empty>'}: a mission "
+                "needs exactly one known project")
+        return await missions_mod.create_mission(
+            self.mission_env_for(name),
+            project=name,
+            goal=goal,
+            acceptance=acceptance,
+            entry=entry,
+            source=source,
+            source_id=source_id,
+            requester=requester,
+        )
+
+    async def get_mission(self, mission_id: str) -> dict[str, Any] | None:
+        """Read one mission document (API/MCP status surface)."""
+        if self._repo is None:
+            return None
+        return await self._repo.get_mission(mission_id)
+
+    async def close_mission(
+        self, mission_id: str, reason: str = ""
+    ) -> dict[str, Any]:
+        """Close a mission the CEO declared complete (00218)."""
+        if self._repo is None:
+            return {"ok": False, "reason": "no-store"}
+        mission = await self._repo.get_mission(mission_id)
+        if mission is None:
+            return {"ok": False, "reason": "no-mission"}
+        project = str(mission.get("project") or "")
+        if not project or not self._config.has_project(project):
+            return {"ok": False, "reason": "unknown-project"}
+        try:
+            return await missions_mod.close_mission(
+                self.mission_env_for(project), mission_id, reason=reason)
+        except missions_mod.MissionRejected as exc:
+            return {"ok": False, "reason": str(exc)[:300]}
 
     async def request_playbook(self, objective_id: str) -> dict[str, Any]:
         """Owner-asked playbook proposal for a closed objective (00217)."""

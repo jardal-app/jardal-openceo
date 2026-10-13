@@ -54,6 +54,11 @@ from objectives.engine import (
     ObjectiveLimitReached,
     ObjectiveRejected,
 )
+from objectives.missions import (
+    MissionDuplicate,
+    MissionErpError,
+    MissionRejected,
+)
 from objectives.service import ObjectiveService
 from phase_workflows import merge_workflow_templates
 from project_service import ProjectService
@@ -73,6 +78,7 @@ from state import (
     DevSessionStatus,
     DiscoveryApprovalRequest,
     GroupDocument,
+    MissionCreateRequest,
     ObjectiveCreateRequest,
     ProjectDocument,
     ProjectSelectionRequest,
@@ -1113,6 +1119,43 @@ async def get_objective(
     doc = await task_service.get_objective(objective_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="objective not found")
+    return doc
+
+
+@app.post("/api/missions")
+async def create_mission(
+    payload: MissionCreateRequest,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Top-down mission entry (00218): shell group + CEO chain, ERP first."""
+    try:
+        return await task_service.create_mission(
+            project=payload.project,
+            goal=payload.goal,
+            acceptance=payload.acceptance,
+            entry=payload.entry,
+            source=payload.source or "api",
+            source_id=payload.source_id,
+            requester=current_user.user_id,
+        )
+    except MissionDuplicate as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except MissionRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except MissionErpError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/missions/{mission_id}")
+async def get_mission(
+    mission_id: str,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Read one mission document (execution state; business lives in ERP)."""
+    del current_user
+    doc = await task_service.get_mission(mission_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="mission not found")
     return doc
 
 
