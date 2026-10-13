@@ -1116,8 +1116,7 @@ class TaskService:
         if not isinstance(params, dict):
             return None
         if any(params.get(key) for key in (
-                "workflow", "workflow_id", "workflow_ref", "use_workflow",
-                "discover_workflow", "workflow_discovery")):
+                "workflow", "workflow_id", "workflow_ref", "use_workflow")):
             return None
         costs = params.get("costs")
         if costs is None:
@@ -1297,8 +1296,6 @@ class TaskService:
             or params.get("workflow_id")
             or params.get("workflow_ref")
             or params.get("use_workflow")
-            or params.get("discover_workflow")
-            or params.get("workflow_discovery")
         )
         if explicit_yaml_target and not doc.workflow_key:
             return
@@ -3553,15 +3550,13 @@ class TaskService:
                 try:
                     # Tickets with manual approval phases (e.g. dev_work -> qa_review -> client_signoff)
                     # should execute directly via the agent graph, not via the YAML workflow service,
-                    # unless the task explicitly targeted a YAML workflow or discovery.
+                    # unless the task explicitly targeted a YAML workflow.
                     params = self._task_params(task)
                     explicit_yaml_target = bool(
                         params.get("workflow")
                         or params.get("workflow_id")
                         or params.get("workflow_ref")
                         or params.get("use_workflow")
-                        or params.get("discover_workflow")
-                        or params.get("workflow_discovery")
                     )
                     has_approval_phases = bool(task.get("workflow_phases")) and not explicit_yaml_target
                     # Explicit routing first: the persisted hint, else the

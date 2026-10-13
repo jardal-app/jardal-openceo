@@ -120,10 +120,6 @@ class MongoRepository:
         return self.db["ceo_review_trigger"]
 
     @property
-    def discovery_runs(self):
-        return self.db["discovery_runs"]
-
-    @property
     def users(self):
         return self.db["users"]
 
@@ -301,10 +297,6 @@ class MongoRepository:
         # backstop for crashed holders; live code takes over expired locks
         # directly in acquire_repo_lock.
         await self.repo_locks.create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
-
-        await self.discovery_runs.create_index([("discovery_id", ASCENDING)], unique=True)
-        await self.discovery_runs.create_index([("task_id", ASCENDING), ("created_at", DESCENDING)])
-        await self.discovery_runs.create_index([("status", ASCENDING), ("updated_at", DESCENDING)])
 
         # Auth indexes
         await self.users.create_index([("user_id", ASCENDING)], unique=True)
@@ -1353,38 +1345,6 @@ class MongoRepository:
         updates["updated_at"] = datetime.now(timezone.utc)
         await self.workflow_runs.update_one({"run_id": run_id}, {"$set": updates})
         return await self.get_workflow_run(run_id)
-
-    # ------------------------- discovery runs -------------------------
-
-    async def create_discovery_run(self, doc: dict[str, Any]) -> dict[str, Any]:
-        await self.discovery_runs.insert_one(doc)
-        return await self.get_discovery_run(doc["discovery_id"])
-
-    async def get_discovery_run(self, discovery_id: str) -> dict[str, Any] | None:
-        row = await self.discovery_runs.find_one({"discovery_id": discovery_id})
-        return self._clean(row)
-
-    async def list_discovery_runs(
-        self,
-        *,
-        task_id: str | None = None,
-        status: str | None = None,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        query: dict[str, Any] = {}
-        if task_id:
-            query["task_id"] = task_id
-        if status:
-            query["status"] = status
-        rows = self.discovery_runs.find(query, sort=[("created_at", -1)]).limit(limit)
-        return [self._clean(row) async for row in rows]
-
-    async def patch_discovery_run(self, discovery_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
-        if not updates:
-            return await self.get_discovery_run(discovery_id)
-        updates["updated_at"] = datetime.now(timezone.utc)
-        await self.discovery_runs.update_one({"discovery_id": discovery_id}, {"$set": updates})
-        return await self.get_discovery_run(discovery_id)
 
     # ------------------------- dev sessions -------------------------
 

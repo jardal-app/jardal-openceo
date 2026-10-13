@@ -87,17 +87,6 @@ class WorkflowRunStatus(str, Enum):
     CANCELED = "canceled"
 
 
-class DiscoveryRunStatus(str, Enum):
-    PENDING = "pending"
-    PROPOSED = "proposed"
-    PENDING_APPROVAL = "pending_approval"
-    BLOCKED_TOOL = "blocked_tool"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
 class ApprovalState(str, Enum):
     NOT_REQUIRED = "not_required"
     PENDING = "pending"
@@ -482,14 +471,6 @@ class TaskReviewDocument(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     approval_state_after: ApprovalState | None = None
     created_at: datetime = Field(default_factory=utc_now)
-
-
-class DiscoveryApprovalRequest(BaseModel):
-    actor_id: str = "workflow-api"
-    approve: bool = True
-    comment: str = ""
-    execute: bool = False
-    workflow_yaml: str | None = None
 
 
 class SessionMessage(BaseModel):

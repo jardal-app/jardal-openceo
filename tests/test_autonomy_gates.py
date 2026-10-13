@@ -99,9 +99,6 @@ class WaitingResolveTests(unittest.TestCase):
             # YAML human_in_the_loop gate.
             {"approval_required": True, "approval_state": "pending",
              "waiting_reason": "phase:qa_review"},
-            # Workflow discovery proposal awaiting approval.
-            {"approval_required": True, "approval_state": "pending",
-             "waiting_reason": "workflow_discovery_pending_approval"},
             # Explicit human phase.
             {"approval_required": True, "approval_state": "pending",
              "phase": "client_signoff",
