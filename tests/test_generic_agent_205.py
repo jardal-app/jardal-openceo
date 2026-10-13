@@ -2,9 +2,9 @@
 
 Any catalog agent runs the same: one headless process per ticket with its
 profile (LLM path), or the YAML engine when its suggested skill is exact
-(skill dir carries ``workflow.yaml``) and the ticket targets it. Legacy
-nodes (dev tiers, pm sessions) are untouched: the
-generic rule only admits enabled, unwired AI agents.
+(skill dir carries ``workflow.yaml``) and the ticket targets it. The
+legacy dev node is untouched: the generic rule only admits enabled,
+unwired AI agents.
 
 No network, no CLI, no LLM: scripted executors, a dict-backed workflow
 store, and the real YAML parser/engine for the exact-skill path.
@@ -258,9 +258,10 @@ class GenericGateTest(unittest.TestCase):
 
     def test_wired_names_keep_legacy_routing(self) -> None:
         # TASK-2026-00220 moved secretary and TASK-2026-00221 finance to
-        # the generic node (their gate assertions live in their files).
+        # the generic node (their gate assertions live in their files);
+        # TASK-2026-00209 removed the pm node. Only dev stays wired.
         catalog = load_catalog()
-        for name in ("dev", "pm"):
+        for name in ("dev",):
             with self.subTest(agent=name):
                 decision = resolve_agent_gate(name, {}, None, catalog)
                 self.assertTrue(decision.proceed)

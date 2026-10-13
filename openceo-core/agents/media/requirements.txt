@@ -1,9 +1,0 @@
-# Media skill-specific Python dependencies.
-#
-# Backs the shared tool openceo-core/tools/media_transcribe.py
-# (audio extraction + Groq Whisper STT).
-groq>=0.11.0
-yt-dlp>=2026.8.19
-# TLS impersonation target. Required by sites with bot detection (TikTok, Instagram);
-# without it yt-dlp reports "Impersonation target: None".
-curl_cffi>=0.7

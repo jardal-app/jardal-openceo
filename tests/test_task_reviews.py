@@ -60,7 +60,7 @@ class TaskReviewServiceTests(unittest.IsolatedAsyncioTestCase):
                 self.task = {
                     "task_id": "task-1",
                     "project": "melanyryr",
-                    "agent": AgentName.PM.value,
+                    "agent": AgentName.DEV.value,
                     "source": TaskSource.API.value,
                     "title": "Ticket",
                     "description": "Descripcion",

@@ -28,7 +28,6 @@ from agents.dev.session import (  # noqa: E402
     CodingStepResult,
     DevSessionManager,
 )
-from graph import OpenCEOGraph  # noqa: E402
 from objectives import planner_models as planner_mod  # noqa: E402
 from objectives.agent_result import (  # noqa: E402
     AGENT_RESULT_JSON_SCHEMA,
@@ -347,58 +346,6 @@ class SimpleToolVerdictTests(unittest.IsolatedAsyncioTestCase):
              "entregables": [], "evidencia": ""})
         # No repo: legacy single code step completes.
         self.assertEqual(output.status, TaskStatus.COMPLETED)
-
-
-class LegacyGraphMappingTests(unittest.TestCase):
-    # TASK-2026-00221 moved finance off the legacy mapping (its
-    # no-verdict assertion lives in test_finance_agent_221.py); pm is
-    # the last legacy agent.
-    def test_pm_failed_maps_to_bloqueado(self) -> None:
-        out = OpenCEOGraph._attach_legacy_agent_result(
-            {"task_id": "t", "params": {}},
-            {"status": TaskStatus.FAILED.value,
-             "selected_agent": "pm",
-             "error": "PM agent not configured",
-             "params": {"target_agent": "pm"}})
-        assert isinstance(out["params"], dict)
-        verdict = out["params"]["agent_result"]
-        self.assertEqual(verdict["resultado"], "bloqueado")
-        self.assertIn("not configured", verdict["motivo"])
-        self.assertEqual(out["params"]["target_agent"], "pm")
-
-    def test_failed_without_detail_falls_back(self) -> None:
-        out = OpenCEOGraph._attach_legacy_agent_result(
-            {"task_id": "t", "params": {}},
-            {"status": TaskStatus.FAILED.value,
-             "selected_agent": "pm", "params": {}})
-        assert isinstance(out["params"], dict)
-        AgentResult.model_validate(out["params"]["agent_result"])
-
-    def test_completed_is_untouched(self) -> None:
-        params = {"target_agent": "finance"}
-        out = OpenCEOGraph._attach_legacy_agent_result(
-            {"task_id": "t", "params": {}},
-            {"status": TaskStatus.COMPLETED.value,
-             "selected_agent": "finance", "params": params})
-        self.assertNotIn("agent_result", out["params"])
-
-    def test_dev_failed_is_untouched(self) -> None:
-        out = OpenCEOGraph._attach_legacy_agent_result(
-            {"task_id": "t", "params": {}},
-            {"status": TaskStatus.FAILED.value,
-             "selected_agent": "dev", "error": "infra",
-             "params": {}})
-        self.assertNotIn("agent_result", out["params"])
-
-    def test_existing_verdict_is_preserved(self) -> None:
-        params = {"agent_result": {"resultado": "no_aplica",
-                                  "motivo": "m", "necesidad": "",
-                                  "entregables": [], "evidencia": ""}}
-        out = OpenCEOGraph._attach_legacy_agent_result(
-            {"task_id": "t", "params": {}},
-            {"status": TaskStatus.FAILED.value,
-             "selected_agent": "pm", "error": "other", "params": params})
-        self.assertEqual(out["params"]["agent_result"]["motivo"], "m")
 
 
 class _RecordedPlanner:

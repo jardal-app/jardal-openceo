@@ -10,8 +10,7 @@ motor itself) and are named in the prompt, never inlined.
 
 Control surface verified against Claude Code 2.1.296 (``claude --help``)
 plus the headless MCP conventions (``mcp__<server>__<tool>`` naming,
-``--strict-mcp-config``); the PM extraction path already ships the same
-``--mcp-config`` shape. Live runs land in the epic Acceptance.
+``--strict-mcp-config``). Live runs land in the epic Acceptance.
 """
 
 from __future__ import annotations

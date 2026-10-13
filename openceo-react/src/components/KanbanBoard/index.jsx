@@ -11,7 +11,6 @@ import {
   CodeBracketIcon,
   BanknotesIcon,
   EnvelopeIcon,
-  ClipboardDocumentListIcon,
   SparklesIcon,
   CpuChipIcon,
   ArrowTopRightOnSquareIcon,
@@ -56,15 +55,6 @@ export const AGENT_CONFIG = {
     color: '#c084fc',
     icon: EnvelopeIcon,
     accent: '#A855F7',
-  },
-  pm: {
-    label: 'PM Agent',
-    short: 'PM',
-    key: 'pm',
-    badgeClass: 'badge-agent-pm',
-    color: '#fbbf24',
-    icon: ClipboardDocumentListIcon,
-    accent: '#F5A524',
   },
   ceo: {
     label: 'CEO Supervisor',
@@ -258,13 +248,12 @@ export default function KanbanBoard({
         { key: 'dev', config: AGENT_CONFIG.dev },
         { key: 'finance', config: AGENT_CONFIG.finance },
         { key: 'secretary', config: AGENT_CONFIG.secretary },
-        { key: 'pm', config: AGENT_CONFIG.pm },
         { key: 'ceo', config: AGENT_CONFIG.ceo },
       ]
 
       const otherTickets = filteredTickets.filter((t) => {
         const k = getAgentData(t).key
-        return !['dev', 'finance', 'secretary', 'pm', 'ceo'].includes(k)
+        return !['dev', 'finance', 'secretary', 'ceo'].includes(k)
       })
 
       const cols = agentCols.map(({ key, config }) => {

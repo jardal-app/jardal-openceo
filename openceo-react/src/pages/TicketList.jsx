@@ -328,7 +328,8 @@ export default function TicketList() {
                     <option value="dev">Dev</option>
                     <option value="finance">Finanzas</option>
                     <option value="secretary">Secretaría</option>
-                    <option value="pm">PM</option>
+                    <option value="operations">Operaciones</option>
+                    <option value="research">Investigación</option>
                     <option value="ceo">CEO</option>
                   </select>
                 </div>

@@ -23,7 +23,6 @@ from agents.dev.session import DevSessionManager
 from ceo.loop import CEOLoop
 from ceo.review import run_review as run_ceo_review
 from ceo.service import CEOService
-from agents.pm.session import PMSessionManager
 from agents.secretary.session import SecretarySessionManager
 from auth.router import auth_router
 from auth.middleware import get_current_user, require_admin, require_permissions
@@ -125,16 +124,11 @@ router = CEORouter(settings)
 rate_monitor = RateMonitor(settings)
 rate_monitor.set_repo(repo)
 dev_step_manager = DevSessionManager(settings, config_loader, rate_monitor=rate_monitor, repo=repo)
-pm_step_manager = PMSessionManager(
-    settings,
-    config_loader=config_loader,
-)
 secretary_step_manager = SecretarySessionManager(settings)
 graph = OpenCEOGraph(
     router=router,
     config_loader=config_loader,
     dev_session=dev_step_manager,
-    pm_session=pm_step_manager,
     notion=None,  # set after notion_manager is created
 )
 realtime_hub = RealtimeHub()
@@ -188,8 +182,6 @@ mcp_token_issuer = TokenIssuer(
     _identity_catalog.agents)
 mcp_audit_sink = MongoAuditSink(db_provider=lambda: repo.db)
 task_service.set_token_issuer(mcp_token_issuer)
-pm_step_manager.set_token_issuer(mcp_token_issuer)
-pm_step_manager.set_task_service(task_service)
 workflow_service.set_task_service(task_service)
 dev_step_manager.set_task_service(task_service)  # Tier S notices + internal tickets (F3–F6)
 secretary_step_manager.set_task_service(task_service)  # email lock (00208)
@@ -298,7 +290,6 @@ async def _run_finance_skill(skill: str, text: str) -> str | None:
 
 # La voz nombra la skill exacta; el catalogo la valida (TASK-2026-00221).
 first_layer_gateway.set_finance_handler(_run_finance_skill)
-_PM_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 
 @asynccontextmanager
@@ -378,7 +369,6 @@ async def lifespan(_: FastAPI):
             app.mount(_research_broker.path, _research_broker.mount.app)
             await stack.enter_async_context(_research_broker.mount.lifespan())
             logger.info("Broker de research montado en %s", _research_broker.url)
-        await repo.mark_interrupted_pm_states()
         await repo.mark_interrupted_tasks()
         # One bounded pass, never a sweep loop: Tier S runs left waiting on
         # an already-ended task can never resume (TASK-2026-00162).
@@ -2186,12 +2176,6 @@ async def list_models() -> dict:
                 "created": int(time.time()),
                 "owned_by": "jardal",
             },
-            {
-                "id": "pm",
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "jardal",
-            },
         ],
     }
 
@@ -2218,21 +2202,13 @@ async def chat_completions(payload: ChatCompletionRequest):
     if direct_agent:
         if direct_agent == "dev":
             return await _handle_openceo_dev_direct(payload, user_id, message)
-        if direct_agent == "pm":
-            return await _handle_openceo_pm_direct(payload, user_id, message)
         return await _direct_agent_session(payload, user_id, message, direct_agent)
-
-    pm_state = await repo.get_pm_state(user_id)
-    if pm_state and not message.startswith("@") and _should_route_to_pm_state(pm_state, message):
-        return await _handle_openceo_pm_direct(payload, user_id, message)
 
     # --- CEO model: full routing with @agent hints and LLM classification ---
     if message.startswith("@"):
         agent_hint = parse_agent_hint(message)
         if agent_hint and agent_hint.value != "dev":
             dispatch_message = _strip_agent_prefix(message)
-            if agent_hint == AgentName.PM:
-                return await _handle_openceo_pm_direct(payload, user_id, dispatch_message)
             task_payload = TaskCreateRequest(
                 project=payload.project or settings.DEFAULT_PROJECT,
                 source=TaskSource.API,
@@ -2514,12 +2490,12 @@ def _resolve_direct_agent(model: str) -> str | None:
     normalized = (model or "").strip().lower()
     if not normalized or normalized in {"ceo", "openceo"}:
         return None
-    if normalized in {"dev", "secretary", "finance", "pm"}:
+    if normalized in {"dev", "secretary", "finance"}:
         return normalized
     prefix = "openceo-"
     if normalized.startswith(prefix):
         candidate = normalized[len(prefix):]
-        if candidate in {"dev", "secretary", "finance", "pm"}:
+        if candidate in {"dev", "secretary", "finance"}:
             return candidate
     return None
 
@@ -2537,12 +2513,8 @@ def _build_task_dispatch_text(agent: AgentName | str | None) -> str:
         return "Registrado; el planner decide quién lo hace."
     value = agent.value if isinstance(agent, AgentName) else str(agent or "").strip().lower()
     mapping = {
-        AgentName.PM.value: "Te paso con PM.",
         AgentName.FINANCE.value: "Lo paso a finanzas.",
         AgentName.SECRETARY.value: "Lo paso a secretaría.",
-        AgentName.MARKETING.value: "Lo paso a marketing.",
-        AgentName.SALES.value: "Lo paso a ventas.",
-        AgentName.MEDIA.value: "Lo paso a media.",
         AgentName.DEV.value: "Lo paso a desarrollo.",
     }
     return mapping.get(value, "Lo pongo en marcha.")
@@ -3037,9 +3009,6 @@ async def _handle_openceo_ceo_model(
             open_sessions=await _list_user_open_sessions(user_id),
         )
         return _maybe_stream(payload, text)
-    if selected == AgentName.PM:
-        return await _handle_openceo_pm_direct(payload, user_id, _strip_agent_prefix(message))
-
     task_payload = TaskCreateRequest(
         project=project,
         source=TaskSource.API,
@@ -4610,583 +4579,7 @@ def _latest_assistant_message(session: dict) -> str | None:
     return None
 
 
-# ------------------------- PM guided interview flow -------------------------
-
-_PM_TOOL_OPTIONS = [
-    ("1", "langraph", "Básica (rápida, económica)"),
-    ("2", "codex", "Media (Codex CLI)"),
-    ("3", "claude", "Máxima potencia (Claude Code)"),
-]
-
-_PM_TOOL_REGEX = re.compile(
-    r"\b(codex|claude|claude\s*code|deepseek|langraph|langgraph|basica|básica|media|maxima|máxima)\b",
-    re.IGNORECASE,
-)
-
-_PM_TOOL_WORD_MAP = {
-    "codex": "codex",
-    "claude": "claude",
-    "claude code": "claude",
-    "deepseek": "langraph",
-    "langraph": "langraph",
-    "langgraph": "langraph",
-    "basica": "langraph",
-    "básica": "langraph",
-    "media": "codex",
-    "maxima": "claude",
-    "máxima": "claude",
-}
-
-_PM_CANCEL_RE = re.compile(
-    r"^(cancelar?|salir|exit|cancel|volver|regresa)\b",
-    re.IGNORECASE,
-)
-_PM_GUIDED_STEPS = {"initial", "need_project", "need_tool", "need_interview", "confirm"}
-_PM_BACKGROUND_STEPS = {"background_running", "background_done", "background_failed"}
-_PM_BACKGROUND_PROGRESS_PATTERNS = [
-    re.compile(r"^\s*(ya\s+)?termin[oó]\??\s*$", re.IGNORECASE),
-    re.compile(r"^\s*(c[oó]mo|como)\s+va\??\s*$", re.IGNORECASE),
-    re.compile(r"\b(ya\s+)?termin[oó]\b.*\b(tickets?|entrevista|planificaci[oó]n|requerimiento)\b", re.IGNORECASE),
-    re.compile(r"\b(c[oó]mo|como)\s+va\b.*\b(tickets?|entrevista|planificaci[oó]n|requerimiento)\b", re.IGNORECASE),
-    re.compile(r"\b(sigue|estado)\b.*\b(tickets?|entrevista|planificaci[oó]n|requerimiento)\b", re.IGNORECASE),
-]
-_PM_BACKGROUND_OUTPUT_PATTERNS = [
-    re.compile(r"\b(qu[eé]|que)\s+tickets?\s+(cre[oó]|gener[oó]|salieron|hay)\b", re.IGNORECASE),
-    re.compile(r"\b(qu[eé]|que)\s+extrajo\b", re.IGNORECASE),
-    re.compile(r"\b(resultado|resumen)\b.*\b(entrevista|tickets?|planificaci[oó]n)\b", re.IGNORECASE),
-]
-
-
-def _wants_pm_background_progress(message: str) -> bool:
-    text = message.strip()
-    if not text:
-        return False
-    return any(pattern.search(text) for pattern in _PM_BACKGROUND_PROGRESS_PATTERNS)
-
-
-def _wants_pm_background_output(message: str) -> bool:
-    text = message.strip()
-    if not text:
-        return False
-    return any(pattern.search(text) for pattern in _PM_BACKGROUND_OUTPUT_PATTERNS)
-
-
-def _pm_tool_label(tool: str) -> str:
-    return next((label for _, current_tool, label in _PM_TOOL_OPTIONS if current_tool == tool), tool)
-
-
-def _pm_preview_text(text: str, max_chars: int = 200) -> str:
-    cleaned = " ".join(str(text or "").split())
-    if len(cleaned) <= max_chars:
-        return cleaned
-    return f"{cleaned[:max_chars].rstrip()}..."
-
-
-def _pm_build_background_ack(project: str, tool: str) -> str:
-    return "Listo. Ya mandé a generar los tickets."
-
-
-def _pm_build_background_progress_text(pm_state: dict[str, Any]) -> str:
-    project = str(pm_state.get("project") or "este proyecto")
-    tool_label = _pm_tool_label(str(pm_state.get("tool") or "langraph"))
-    job = pm_state.get("job") or {}
-    status = str(job.get("status") or pm_state.get("step") or "").strip().lower()
-    created = int(job.get("tickets_created") or pm_state.get("tickets_created") or 0)
-    failed = int(job.get("tickets_failed") or pm_state.get("tickets_failed") or 0)
-
-    if status == "completed":
-        parts = [f"La planificación de {project} con {tool_label} ya terminó."]
-        if created >= 0:
-            parts.append(f"Se crearon {created} ticket(s).")
-        if failed:
-            parts.append(f"{failed} quedaron con error.")
-        return " ".join(parts)
-
-    if status == "failed":
-        detail = _voice_friendly(
-            str(pm_state.get("error") or job.get("error") or "No pude completar la extracción."),
-            max_len=220,
-        )
-        return f"La planificación de {project} con {tool_label} terminó con error. {detail}"
-
-    return f"La planificación de {project} con {tool_label} sigue trabajando en segundo plano."
-
-
-def _pm_build_background_output_text(pm_state: dict[str, Any]) -> str:
-    job = pm_state.get("job") or {}
-    status = str(job.get("status") or pm_state.get("step") or "").strip().lower()
-    if status != "completed":
-        return _pm_build_background_progress_text(pm_state)
-
-    project = str(pm_state.get("project") or "este proyecto")
-    tool_label = _pm_tool_label(str(pm_state.get("tool") or "langraph"))
-    created = int(job.get("tickets_created") or pm_state.get("tickets_created") or 0)
-    tickets = list(pm_state.get("ticket_summaries") or [])
-    lines = [f"La planificación de {project} con {tool_label} ya terminó. Se crearon {created} ticket(s)."]
-    if tickets:
-        lines.append("Tickets principales:")
-        for idx, ticket in enumerate(tickets[:5], 1):
-            title = _voice_friendly(str(ticket.get("title") or "Sin título"), max_len=120)
-            lines.append(f"{idx}. {title}")
-        if len(tickets) > 5:
-            lines.append(f"... y {len(tickets) - 5} más.")
-    else:
-        summary = str(pm_state.get("summary") or "").strip()
-        if summary:
-            lines.append(_voice_friendly(summary, max_len=260))
-    return "\n".join(lines)
-
-
-def _pm_looks_like_new_request(message: str, project_names: list[str]) -> bool:
-    raw = _strip_agent_prefix(str(message or "")).strip()
-    if not raw or _PM_CANCEL_RE.match(raw):
-        return False
-    normalized = " ".join(raw.lower().split())
-    if normalized in {"1", "2", "si", "sí", "ok", "okay", "vale", "listo", "confirma", "confirmar"}:
-        return False
-    if _pm_detect_project_from_text(raw, project_names):
-        return True
-    if _pm_detect_tool_from_text(raw):
-        return True
-    if _pm_extract_interview_candidate(raw, project_names):
-        return True
-    return bool(
-        re.search(
-            r"\b(entrevista|requerimiento|requerimientos|brief|tickets?|planifica|planificar|extrae|extraer)\b",
-            raw,
-            flags=re.IGNORECASE,
-        )
-    )
-
-
-def _should_route_to_pm_state(pm_state: dict[str, Any], message: str) -> bool:
-    step = str(pm_state.get("step") or "initial").strip().lower()
-    if step in _PM_GUIDED_STEPS:
-        return True
-    if step in _PM_BACKGROUND_STEPS:
-        return _wants_pm_background_progress(message) or _wants_pm_background_output(message)
-    return False
-
-
-def _pm_detect_tool_from_text(text: str) -> str | None:
-    match = _PM_TOOL_REGEX.search(text)
-    if match:
-        return _PM_TOOL_WORD_MAP.get(match.group(1).lower().strip())
-    return None
-
-
-def _pm_detect_project_from_text(text: str, project_names: list[str]) -> str | None:
-    lowered = text.lower()
-    for name in project_names:
-        if name.lower() in lowered:
-            return name
-    return None
-
-
-_AUTORUN_KEYWORDS = re.compile(
-    r"\b(autorun|ejecutar|programar|correr|schedule|run\s*now|no\s*esperar)\b",
-    re.IGNORECASE,
-)
-
-
-def _pm_detect_autorun_from_text(text: str) -> bool:
-    return bool(_AUTORUN_KEYWORDS.search(text))
-
-
-def _pm_extract_number_choice(text: str, max_n: int) -> int | None:
-    stripped = text.strip()
-    if stripped.isdigit():
-        n = int(stripped)
-        if 1 <= n <= max_n:
-            return n
-    return None
-
-
-def _pm_build_tool_menu() -> str:
-    lines = ["¿Qué herramienta quieres usar para planificar?\n"]
-    for num, _, label in _PM_TOOL_OPTIONS:
-        lines.append(f"  {num}. {label}")
-    lines.append("\nResponde con el número.")
-    return "\n".join(lines)
-
-
-def _pm_build_project_menu(project_names: list[str]) -> str:
-    lines = ["¿De qué proyecto es esta entrevista?\n"]
-    for i, name in enumerate(project_names, 1):
-        lines.append(f"  {i}. {name}")
-    lines.append("\nResponde con el número.")
-    return "\n".join(lines)
-
-
-def _pm_build_confirmation(project: str, tool: str, interview_preview: str) -> str:
-    tool_label = next((label for num, t, label in _PM_TOOL_OPTIONS if t == tool), tool)
-    preview = interview_preview[:200].replace("\n", " ")
-    if len(interview_preview) > 200:
-        preview += "..."
-    return (
-        f"Confirma antes de procesar:\n\n"
-        f"  Proyecto: **{project}**\n"
-        f"  Herramienta: **{tool_label}**\n"
-        f"  Entrevista: _{preview}_\n\n"
-        f"  1. Confirmar\n"
-        f"  2. Cancelar\n\n"
-        f"Responde con el número."
-    )
-
-
-def _pm_build_interview_prompt(project: str, tool: str) -> str:
-    tool_label = next((label for num, t, label in _PM_TOOL_OPTIONS if t == tool), tool)
-    return (
-        f"Perfecto. Ya registré el proyecto {project} y la herramienta {tool_label}. "
-        "Ahora envíame solo la entrevista o el requerimiento en un solo mensaje."
-    )
-
-
-def _pm_extract_interview_candidate(text: str, project_names: list[str]) -> str | None:
-    raw = _strip_agent_prefix(str(text or "")).strip()
-    if not raw:
-        return None
-    if _PM_CANCEL_RE.match(raw):
-        return None
-
-    normalized = " ".join(raw.lower().split())
-    if normalized in {"si", "sí", "ok", "okay", "vale", "listo", "confirma", "confirmar"}:
-        return None
-    if raw.isdigit():
-        return None
-
-    candidate = normalized
-    for project in sorted(project_names, key=len, reverse=True):
-        project_name = str(project or "").strip().lower()
-        if project_name:
-            candidate = re.sub(rf"\b{re.escape(project_name)}\b", " ", candidate, flags=re.IGNORECASE)
-    candidate = _PM_TOOL_REGEX.sub(" ", candidate)
-    candidate = re.sub(
-        r"\b(pm|tool|herramienta|proyecto|cliente|entrevista|requerimiento|requerimientos|brief|documento|tickets?|"
-        r"tengo|quiero|quisiera|necesito|paso|pasar|manda|mandar|mando|envia|enviar|envío|procesa|procesar|"
-        r"planifica|planificar|gestiona|gestionar|crea|crear|genera|generar|extrae|extraer|usa|usar|"
-        r"con|para|de|del|el|la|los|las|un|una|mi|tu|este|esta|esto|es|hay|por|favor)\b",
-        " ",
-        candidate,
-        flags=re.IGNORECASE,
-    )
-    content_words = [
-        word
-        for word in re.findall(r"[a-záéíóúñ0-9][a-záéíóúñ0-9_-]*", candidate, flags=re.IGNORECASE)
-        if len(word) > 1
-    ]
-    has_structure = any(token in raw for token in ("\n", ":", ";", "."))
-
-    if len(content_words) >= 2:
-        return raw
-    if len(content_words) == 1 and (has_structure or len(raw) >= 40):
-        return raw
-    if len(raw) >= 120:
-        return raw
-    return None
-
-
-def _pm_absorb_message(
-    pm_state: dict[str, Any],
-    message: str,
-    project_names: list[str],
-    active_step: str,
-) -> dict[str, Any]:
-    updated = dict(pm_state)
-
-    if not updated.get("project"):
-        choice = _pm_extract_number_choice(message, len(project_names)) if active_step == "need_project" else None
-        if choice is not None:
-            updated["project"] = project_names[choice - 1]
-        else:
-            detected_project = _pm_detect_project_from_text(message, project_names)
-            if detected_project:
-                updated["project"] = detected_project
-
-    if not updated.get("tool"):
-        choice = _pm_extract_number_choice(message, len(_PM_TOOL_OPTIONS)) if active_step == "need_tool" else None
-        if choice is not None:
-            updated["tool"] = _PM_TOOL_OPTIONS[choice - 1][1]
-        else:
-            detected_tool = _pm_detect_tool_from_text(message)
-            if detected_tool:
-                updated["tool"] = detected_tool
-
-    if not updated.get("interview"):
-        interview = _pm_extract_interview_candidate(message, project_names)
-        if interview:
-            updated["interview"] = interview
-
-    if _pm_detect_autorun_from_text(message):
-        updated["autorun"] = True
-
-    return updated
-
-
-def _pm_next_step(pm_state: dict[str, Any], project_names: list[str]) -> tuple[dict[str, Any], str]:
-    updated = dict(pm_state)
-
-    if not updated.get("project") and len(project_names) == 1:
-        updated["project"] = project_names[0]
-
-    if not updated.get("project"):
-        return updated, "need_project"
-    if not updated.get("tool"):
-        return updated, "need_tool"
-    if not updated.get("interview"):
-        return updated, "need_interview"
-    return updated, "confirm"
-
-
-async def _pm_start_background_job(
-    user_id: str,
-    project: str,
-    tool: str,
-    interview: str,
-    autorun: bool = False,
-) -> str:
-    job_id = f"pm-job-{uuid4().hex[:12]}"
-    pm_state = {
-        "step": "background_running",
-        "project": project,
-        "tool": tool,
-        "autorun": autorun,
-        "interview_preview": _pm_preview_text(interview, max_chars=240),
-        "job": {
-            "id": job_id,
-            "status": "running",
-            "project": project,
-            "tool": tool,
-            "started_at": datetime.now(timezone.utc),
-        },
-    }
-    await repo.set_pm_state(user_id, pm_state)
-    task = asyncio.create_task(
-        _pm_run_background_job(
-            user_id=user_id,
-            job_id=job_id,
-            project=project,
-            tool=tool,
-            interview=interview,
-            autorun=autorun,
-        ),
-        name=job_id,
-    )
-    _PM_BACKGROUND_TASKS.add(task)
-    task.add_done_callback(_PM_BACKGROUND_TASKS.discard)
-    await realtime_hub.broadcast(
-        "pm_job_updated",
-        {
-            "user_id": user_id,
-            "job_id": job_id,
-            "status": "running",
-            "project": project,
-            "tool": tool,
-        },
-    )
-    return _pm_build_background_ack(project, tool)
-
-
-async def _pm_run_background_job(
-    user_id: str,
-    job_id: str,
-    project: str,
-    tool: str,
-    interview: str,
-    autorun: bool = False,
-) -> None:
-    try:
-        if tool == "langraph":
-            result = await pm_step_manager.extract_tickets(
-                interview_text=interview,
-                project=project,
-                autorun=autorun,
-            )
-        else:
-            result = await pm_step_manager.extract_tickets_subprocess(
-                interview_text=interview,
-                project=project,
-                tool=tool,
-                autorun=autorun,
-            )
-    except Exception as exc:
-        logger.exception("PM background job failed unexpectedly: %s", job_id)
-        result = None
-        error = f"Error inesperado: {exc}"
-    else:
-        error = result.error if result is not None else "Error no especificado."
-
-    current_state = await repo.get_pm_state(user_id) or {}
-    current_job = current_state.get("job") or {}
-    if current_job.get("id") != job_id:
-        return
-
-    updated = dict(current_state)
-    updated["project"] = project
-    updated["tool"] = tool
-    updated["interview_preview"] = updated.get("interview_preview") or _pm_preview_text(interview, max_chars=240)
-    updated.pop("interview", None)
-
-    job_state = dict(current_job)
-    job_state["completed_at"] = datetime.now(timezone.utc)
-
-    if result is not None and result.status == TaskStatus.COMPLETED:
-        updated["step"] = "background_done"
-        updated["summary"] = result.summary
-        updated["tickets_created"] = result.tickets_created
-        updated["tickets_failed"] = result.tickets_failed
-        updated["ticket_summaries"] = list(result.ticket_summaries[:20])
-        updated.pop("error", None)
-        job_state["status"] = "completed"
-        job_state["tickets_created"] = result.tickets_created
-        job_state["tickets_failed"] = result.tickets_failed
-    else:
-        updated["step"] = "background_failed"
-        updated["error"] = error or "No pude completar la extracción."
-        updated["summary"] = error or "No pude completar la extracción."
-        updated["tickets_created"] = 0
-        updated["tickets_failed"] = 0
-        updated["ticket_summaries"] = []
-        job_state["status"] = "failed"
-        job_state["error"] = updated["error"]
-
-    updated["job"] = job_state
-    await repo.set_pm_state(user_id, updated)
-    await realtime_hub.broadcast(
-        "pm_job_updated",
-        {
-            "user_id": user_id,
-            "job_id": job_id,
-            "status": job_state["status"],
-            "project": project,
-            "tool": tool,
-            "tickets_created": updated.get("tickets_created", 0),
-            "tickets_failed": updated.get("tickets_failed", 0),
-            "error": updated.get("error"),
-        },
-    )
-
-
-async def _handle_openceo_pm_direct(
-    payload: ChatCompletionRequest,
-    user_id: str,
-    message: str,
-) -> dict:
-    """Guided PM flow: collect project + tool + interview in any order, then extract tickets."""
-    project_rows = project_service.list_projects()
-    project_names = [p["name"] for p in project_rows]
-
-    # Load existing state
-    pm_state = await repo.get_pm_state(user_id) or {}
-    step = pm_state.get("step", "initial")
-
-    if step in _PM_BACKGROUND_STEPS:
-        if step in {"background_done", "background_failed"} and _PM_CANCEL_RE.match(message.strip()):
-            await repo.clear_pm_state(user_id)
-            return _maybe_stream(payload, "Listo. Limpié el último resultado de PM.")
-        if _wants_pm_background_output(message):
-            return _maybe_stream(payload, _pm_build_background_output_text(pm_state))
-        if _wants_pm_background_progress(message):
-            return _maybe_stream(payload, _pm_build_background_progress_text(pm_state))
-        if step in {"background_done", "background_failed"} and _pm_looks_like_new_request(message, project_names):
-            pm_state = {}
-            step = "initial"
-        else:
-            return _maybe_stream(payload, _pm_build_background_progress_text(pm_state))
-
-    # Check for cancel
-    if _PM_CANCEL_RE.match(message.strip()):
-        await repo.clear_pm_state(user_id)
-        return _maybe_stream(payload, "Flujo PM cancelado.")
-
-    if step == "confirm":
-        choice = _pm_extract_number_choice(message, 2)
-        if choice == 2 or _PM_CANCEL_RE.match(message.strip()):
-            await repo.clear_pm_state(user_id)
-            return _maybe_stream(payload, "Cancelado. Puedes enviar otra entrevista cuando quieras.")
-
-        if choice != 1 and "confirma" not in message.lower() and "si" not in message.lower() and "sí" not in message.lower():
-            return _maybe_stream(payload, "Responde 1 para confirmar o 2 para cancelar.")
-
-        project = pm_state["project"]
-        tool = pm_state.get("tool", "langraph")
-        interview = pm_state.get("interview", "")
-        autorun = bool(pm_state.get("autorun", False))
-        ack = await _pm_start_background_job(
-            user_id=user_id,
-            project=project,
-            tool=tool,
-            interview=interview,
-            autorun=autorun,
-        )
-        return _maybe_stream(payload, ack)
-
-    pm_state = _pm_absorb_message(pm_state, message, project_names, step)
-    pm_state, next_step = _pm_next_step(pm_state, project_names)
-    pm_state["step"] = next_step
-    await repo.set_pm_state(user_id, pm_state)
-
-    if next_step == "need_project":
-        return _maybe_stream(payload, _pm_build_project_menu(project_names))
-    if next_step == "need_tool":
-        return _maybe_stream(payload, _pm_build_tool_menu())
-    if next_step == "need_interview":
-        return _maybe_stream(payload, _pm_build_interview_prompt(pm_state["project"], pm_state["tool"]))
-    if next_step == "confirm":
-        return _maybe_stream(
-            payload,
-            _pm_build_confirmation(pm_state["project"], pm_state["tool"], pm_state.get("interview", "")),
-        )
-
-    # Unknown step — reset
-    await repo.clear_pm_state(user_id)
-    return _maybe_stream(payload, "Sesión PM reiniciada. Envía tu entrevista para comenzar.")
-
-
-async def _pm_execute_langraph(
-    payload: ChatCompletionRequest,
-    project: str,
-    interview: str,
-    autorun: bool = False,
-) -> dict:
-    """DeepSeek extracts tickets and creates MongoDB tasks (autorun=False by default)."""
-    result = await pm_step_manager.extract_tickets(
-        interview_text=interview,
-        project=project,
-        autorun=autorun,
-    )
-    return _maybe_stream(payload, result.summary)
-
-
-async def _pm_execute_subprocess(
-    payload: ChatCompletionRequest,
-    user_id: str,
-    project: str,
-    tool: str,
-    interview: str,
-    autorun: bool = False,
-) -> dict:
-    """Run Claude/Codex in headless subprocess to extract tickets, create MongoDB tasks."""
-    result = await pm_step_manager.extract_tickets_subprocess(
-        interview_text=interview,
-        project=project,
-        tool=tool,
-        autorun=autorun,
-    )
-    if result.status == TaskStatus.COMPLETED:
-        created_text = (
-            f"Se registraron {result.tickets_created} ticket(s) en MongoDB."
-            if result.tickets_created >= 0
-            else "Los tickets fueron registrados."
-        )
-        return _maybe_stream(
-            payload,
-            f"Extracción con {tool} completada en {project}. {created_text}",
-        )
-    return _maybe_stream(payload, result.summary)
-
-
-# ------------------------- PM API endpoint for dashboard -------------------------
+# ------------------------- Pedido entry (retired PM extract path) -------------------------
 
 
 @app.post("/api/pm/extract")
@@ -5194,7 +4587,11 @@ async def pm_extract_tickets(
     payload: dict[str, Any],
     current_user: UserDocument = Depends(get_current_user),
 ) -> dict:
-    """Direct API for dashboard form. No guided flow needed — all params explicit."""
+    """Pedido entry (TASK-2026-00209): one undecided ticket, planner decides.
+
+    PM extraction retired: the interview text becomes a single pedido and
+    the single planner decomposes it. ``tool`` is accepted and ignored.
+    """
     project = str(payload.get("project") or "").strip()
     if not project:
         raise HTTPException(status_code=400, detail="project is required")
@@ -5203,71 +4600,21 @@ async def pm_extract_tickets(
     if not interview:
         raise HTTPException(status_code=400, detail="interview text is required")
 
-    tool = str(payload.get("tool") or "langraph").strip().lower()
-    if tool not in {"langraph", "claude", "codex"}:
-        raise HTTPException(status_code=400, detail="tool must be langraph, claude, or codex")
-
-    autorun = bool(payload.get("autorun", False))
-
     if not config_loader.has_project(project):
         raise HTTPException(status_code=400, detail=f"project '{project}' not found")
 
-    if tool == "langraph":
-        result = await pm_step_manager.extract_tickets(
-            interview_text=interview,
-            project=project,
-            autorun=autorun,
-        )
-        return {
-            "status": result.status.value,
-            "tickets_created": result.tickets_created,
-            "tickets_failed": result.tickets_failed,
-            "ticket_summaries": result.ticket_summaries,
-            "task_ids": result.task_ids,
-            "error": result.error,
-            "summary": result.summary,
-        }
-
-    result = await pm_step_manager.extract_tickets_subprocess(
-        interview_text=interview,
+    task = await task_service.create_task(TaskCreateRequest(
         project=project,
-        tool=tool,
-        autorun=autorun,
-    )
-
+        source=TaskSource.API,
+        title=interview.splitlines()[0][:120] if interview else "Pedido",
+        description=interview,
+        priority=TaskPriority.MEDIUM,
+        autorun=bool(payload.get("autorun", False)),
+    ))
     return {
-        "status": result.status.value,
-        "tool": tool,
-        "project": project,
-        "tickets_created": result.tickets_created,
-        "tickets_failed": result.tickets_failed,
-        "ticket_summaries": result.ticket_summaries,
-        "task_ids": result.task_ids,
-        "error": result.error,
-        "summary": result.summary if result.status == TaskStatus.COMPLETED else result.error,
-    }
-
-
-@app.get("/api/pm/status")
-async def pm_status(user_id: str = Query(default="openwebui")) -> dict:
-    pm_state = await repo.get_pm_state(user_id)
-    if not pm_state:
-        return {"user_id": user_id, "status": "idle"}
-
-    job = pm_state.get("job") or {}
-    return {
-        "user_id": user_id,
-        "step": pm_state.get("step"),
-        "status": job.get("status") or pm_state.get("step"),
-        "project": pm_state.get("project"),
-        "tool": pm_state.get("tool"),
-        "interview_preview": pm_state.get("interview_preview"),
-        "tickets_created": pm_state.get("tickets_created", 0),
-        "tickets_failed": pm_state.get("tickets_failed", 0),
-        "ticket_summaries": pm_state.get("ticket_summaries", []),
-        "error": pm_state.get("error"),
-        "summary": pm_state.get("summary"),
-        "job": job,
+        "task_id": task.get("task_id"),
+        "status": task.get("status", "queued"),
+        "summary": "Pedido registrado; el planner decide el agente y la forma.",
     }
 
 

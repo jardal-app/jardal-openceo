@@ -204,18 +204,20 @@ class IssuerTests(unittest.IsolatedAsyncioTestCase):
             grant.check("openceo_transition_ticket", {"ticket": "t"})
 
     async def test_service_token_is_explicit_and_project_scoped(self) -> None:
+        # TASK-2026-00209 narrowed the batch tool to OWNER alone, so
+        # the service-scope assertions run on openceo_create_ticket.
         issuer, _ = _issuer()
         token = await issuer.issue_service(
-            "pm-extract", DEV_PROJECT,
-            tools=("openceo_create_pm_tickets_batch",))
+            "batch-creator", DEV_PROJECT,
+            tools=("openceo_create_ticket",))
         grant = await issuer.authenticate(token)
-        grant.check("openceo_create_pm_tickets_batch",
-                    {"project": DEV_PROJECT, "source_id": "s", "tickets": "[]"})
+        grant.check("openceo_create_ticket",
+                    {"project": DEV_PROJECT, "title": "x"})
         with self.assertRaises(McpAuthError):
-            grant.check("openceo_create_pm_tickets_batch",
-                        {"project": "other", "source_id": "s", "tickets": "[]"})
+            grant.check("openceo_create_ticket",
+                        {"project": "other", "title": "x"})
         with self.assertRaises(McpAuthError):
-            grant.check("openceo_create_ticket", {"title": "x"})
+            grant.check("openceo_search_tickets", {"project": DEV_PROJECT})
 
     async def test_expired_token_rejected(self) -> None:
         now = datetime.now(timezone.utc)
@@ -617,147 +619,6 @@ class CatalogBoxConsistencyTests(unittest.TestCase):
         self.assertTrue(dev_box <= registered)
         self.assertNotIn("openceo_transition_ticket", dev_box)
         self.assertNotIn("openceo_create_ticket", dev_box)
-
-
-class PMTokenWiringTests(unittest.IsolatedAsyncioTestCase):
-    async def test_claude_path_carries_service_token(self) -> None:
-        from agents.pm.session import PMSessionManager  # noqa: PLC0415
-        from config_loader import ConfigLoader  # noqa: PLC0415
-        from state import TaskStatus  # noqa: PLC0415
-
-        settings = Settings(PROJECTS_DIR="projects",
-                            DEFAULT_PROJECT="jardal-openceo",
-                            MCP_SERVER_ENABLED=True)
-        manager = PMSessionManager(
-            settings, config_loader=ConfigLoader(settings))
-        manager.set_task_service(_FakePMTaskService())
-        issuer, _ = _issuer()
-        manager.set_token_issuer(issuer)
-        captured: dict[str, object] = {}
-
-        class FakeProc:
-            returncode = 0
-
-            async def communicate(self, input=None):  # type: ignore[no-untyped-def]
-                return (b"OK: 1 ticket creado\n"
-                        b'{"tickets": [{"title": "Ticket A"}]}', b"")
-
-        async def fake_exec(*args, **kwargs):  # type: ignore[no-untyped-def]
-            captured["args"] = args
-            captured["kwargs"] = kwargs
-            config_at = list(args).index("--mcp-config") + 1
-            captured["config_path"] = list(args)[config_at]
-            import json as _json
-
-            captured["config"] = _json.loads(
-                Path(str(captured["config_path"])).read_text())
-            return FakeProc()
-
-        with patch("agents.pm.session.asyncio.create_subprocess_exec",
-                   side_effect=fake_exec):
-            result = await manager.extract_tickets_subprocess(
-                interview_text="login con Google", project="melanyryr",
-                tool="claude")
-        self.assertEqual(result.status, TaskStatus.COMPLETED)
-        args = list(captured["args"])  # type: ignore[arg-type]
-        self.assertNotIn("mcp_", " ".join(str(a) for a in args))
-        headers = captured["config"]["mcpServers"][  # type: ignore[index]
-            "openceo-internal"]["headers"]
-        grant = await issuer.authenticate(
-            headers["Authorization"].removeprefix("Bearer "))
-        self.assertEqual(grant.kind, TokenKind.SERVICE)
-        self.assertEqual(grant.project, "melanyryr")
-        self.assertFalse(Path(str(captured["config_path"])).exists())
-
-    async def test_codex_path_carries_token_env_override(self) -> None:
-        from agents.pm.session import PMSessionManager  # noqa: PLC0415
-        from config_loader import ConfigLoader  # noqa: PLC0415
-        from state import TaskStatus  # noqa: PLC0415
-
-        settings = Settings(PROJECTS_DIR="projects",
-                            DEFAULT_PROJECT="jardal-openceo",
-                            MCP_SERVER_ENABLED=True)
-        manager = PMSessionManager(
-            settings, config_loader=ConfigLoader(settings))
-        manager.set_task_service(_FakePMTaskService())
-        issuer, _ = _issuer()
-        manager.set_token_issuer(issuer)
-        captured: dict[str, object] = {}
-
-        class FakeProc:
-            returncode = 0
-
-            async def communicate(self, input=None):  # type: ignore[no-untyped-def]
-                return (b"OK: 1 ticket creado\n"
-                        b'{"tickets": [{"title": "Ticket A"}]}', b"")
-
-        async def fake_exec(*args, **kwargs):  # type: ignore[no-untyped-def]
-            captured["args"] = args
-            captured["kwargs"] = kwargs
-            return FakeProc()
-
-        with patch("agents.pm.session.asyncio.create_subprocess_exec",
-                   side_effect=fake_exec):
-            result = await manager.extract_tickets_subprocess(
-                interview_text="login con Google", project="melanyryr",
-                tool="codex")
-        self.assertEqual(result.status, TaskStatus.COMPLETED)
-        args = list(captured["args"])  # type: ignore[arg-type]
-        override = next(
-            a for a in args if "bearer_token_env_var" in str(a))
-        self.assertTrue(override.startswith("mcp_servers.openceo-internal."))
-        env = captured["kwargs"]["env"]  # type: ignore[index]
-        var = override.split("=", 1)[1].strip().strip('"')
-        grant = await issuer.authenticate(env[var])
-        self.assertEqual(grant.kind, TokenKind.SERVICE)
-
-    async def test_missing_issuer_fails_closed(self) -> None:
-        from agents.pm.session import PMSessionManager  # noqa: PLC0415
-        from config_loader import ConfigLoader  # noqa: PLC0415
-        from state import TaskStatus  # noqa: PLC0415
-
-        settings = Settings(PROJECTS_DIR="projects",
-                            DEFAULT_PROJECT="jardal-openceo",
-                            MCP_SERVER_ENABLED=True)
-        manager = PMSessionManager(
-            settings, config_loader=ConfigLoader(settings))
-        manager.set_task_service(_FakePMTaskService())
-        result = await manager.extract_tickets_subprocess(
-            interview_text="login con Google", project="melanyryr",
-            tool="claude")
-        self.assertEqual(result.status, TaskStatus.FAILED)
-        self.assertIn("token issuer", (result.error or "").lower())
-
-    async def test_mcp_disabled_needs_no_issuer(self) -> None:
-        from agents.pm.session import PMSessionManager  # noqa: PLC0415
-        from config_loader import ConfigLoader  # noqa: PLC0415
-        from state import TaskStatus  # noqa: PLC0415
-
-        settings = Settings(PROJECTS_DIR="projects",
-                            DEFAULT_PROJECT="jardal-openceo",
-                            MCP_SERVER_ENABLED=False)
-        manager = PMSessionManager(
-            settings, config_loader=ConfigLoader(settings))
-        manager.set_task_service(_FakePMTaskService())
-        with patch("agents.pm.session.asyncio.create_subprocess_exec",
-                   side_effect=FileNotFoundError("no-binary")):
-            result = await manager.extract_tickets_subprocess(
-                interview_text="login con Google", project="melanyryr",
-                tool="claude")
-        self.assertEqual(result.status, TaskStatus.FAILED)
-        self.assertIn("Binary not found", result.error or "")
-
-
-class _FakePMTaskService:
-    def __init__(self) -> None:
-        self.requests: list[Any] = []
-
-    async def create_task(self, req: Any) -> dict[str, Any]:
-        self.requests.append(req)
-        return {"task_id": f"task-{len(self.requests)}", "status": "queued"}
-
-    async def get_task(self, task_id: str) -> None:
-        return None
 
 
 class MongoStoreTests(unittest.IsolatedAsyncioTestCase):

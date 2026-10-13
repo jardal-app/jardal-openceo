@@ -48,12 +48,8 @@ class CEORouter:
         "dev": AgentName.DEV,
         "developer": AgentName.DEV,
         "devops": AgentName.DEV,
-        "pm": AgentName.PM,
-        "marketing": AgentName.MARKETING,
         "finance": AgentName.FINANCE,
         "secretary": AgentName.SECRETARY,
-        "sales": AgentName.SALES,
-        "media": AgentName.MEDIA,
         "operations": AgentName.OPERATIONS,
         "research": AgentName.RESEARCH,
     }

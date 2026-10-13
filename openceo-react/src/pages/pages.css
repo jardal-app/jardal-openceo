@@ -2123,12 +2123,6 @@
   border: 1px solid rgba(168, 85, 247, 0.4);
 }
 
-.badge-agent-pm {
-  background: rgba(245, 165, 36, 0.16);
-  color: #fbbf24;
-  border: 1px solid rgba(245, 165, 36, 0.4);
-}
-
 .badge-agent-ceo {
   background: rgba(148, 163, 184, 0.16);
   color: #cbd5e1;

@@ -127,9 +127,11 @@ class RealCatalogTest(unittest.TestCase):
     def test_loads(self):
         catalog = load_catalog()
         self.assertEqual(CATALOG_VERSION, catalog.version)
+        # TASK-2026-00209 retired the pm, marketing, sales and media
+        # cards: only live agents ship.
         self.assertEqual(
             {"dev", "owner", "operations", "secretary", "finance",
-             "research", "pm", "marketing", "sales", "media"},
+             "research"},
             set(catalog.agents))
 
     def test_enabled_set(self):
@@ -168,7 +170,8 @@ class RealCatalogTest(unittest.TestCase):
 
     def test_short_index_is_few_lines(self):
         rendered = short_index(load_catalog()).splitlines()
-        self.assertEqual(10, len(rendered))
+        # TASK-2026-00209 retired 4 cards: 6 lines ship.
+        self.assertEqual(6, len(rendered))
         for line in rendered:
             name, _, summary = line.partition(": ")
             self.assertTrue(name and summary)
@@ -182,7 +185,8 @@ class RealCatalogTest(unittest.TestCase):
     def test_check_catalog_ok_on_real_tree(self):
         status = check_catalog()
         self.assertTrue(status.ok, status.problem)
-        self.assertEqual(10, status.agents)
+        # TASK-2026-00209 retired 4 cards: 6 agents ship.
+        self.assertEqual(6, status.agents)
         self.assertRegex(status.sha, r"^[0-9a-f]{12}$")
 
 

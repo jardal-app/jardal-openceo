@@ -20,15 +20,3 @@ agents:
   - name: research
     summary: Runs grounded research on demand through the ticket bridge.
     card: agents/research.yaml
-  - name: pm
-    summary: Extracted tickets from interviews. Retired, the single planner takes new work.
-    card: agents/pm.yaml
-  - name: marketing
-    summary: Never connected to a runner. Retired with the unconnected agents.
-    card: agents/marketing.yaml
-  - name: sales
-    summary: Never connected to a runner. Retired with the unconnected agents.
-    card: agents/sales.yaml
-  - name: media
-    summary: Never connected to a runner. Retired with the unconnected agents.
-    card: agents/media.yaml
