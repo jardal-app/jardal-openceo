@@ -15,7 +15,8 @@ target = 10%; deterministic `Decimal` arithmetic.
 ## Inputs (ticket title, description, params)
 
 - The question (`cómo vamos con el diezmo`).
-- Optional `date_from` / `date_to` / `cost_center`.
+- Optional `date_from` / `date_to` / `cost_center`. Without explicit
+  bounds the dictated period wins (`el mes pasado`).
 
 ## Steps
 

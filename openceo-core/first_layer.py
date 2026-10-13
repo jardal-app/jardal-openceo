@@ -605,7 +605,11 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
                 return True, (
                     "No pude validar la operación de finanzas ahora "
                     "mismo. Lo intentamos de nuevo.")
-            if not valid or self._finance_handler is None:
+            if self._finance_handler is None:
+                return True, (
+                    spoken_reply
+                    or "Finanzas no está disponible ahora mismo.")
+            if not valid:
                 return True, (
                     spoken_reply
                     or "No reconocí esa operación de finanzas. "
@@ -623,7 +627,8 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
                 return True, str(summary)
             return True, (
                 spoken_reply
-                or "Finanzas ejecutó la solicitud, pero no devolvió detalle.")
+                or "No pude resolver eso con finanzas ahora mismo. "
+                "Lo intentamos de nuevo.")
 
         # ------------------- 4. TICKET COUNT & LIST TICKETS -------------------
         if intent in ("ticket_count", "list_tickets"):
