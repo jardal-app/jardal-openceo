@@ -1,5 +1,11 @@
 version: 1
 ejes: []
+principios:
+- maximizar la ganancia
+- reducir el gasto
+- no hacer trabajo que no rinda
+- reutilizar lo que ya existe
+- nunca elegir el tier ni el modelo por precio
 presupuesto:
   moneda: USD
   gasto_nuevo_sin_preguntar: '0.00'

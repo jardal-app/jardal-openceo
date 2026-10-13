@@ -245,7 +245,7 @@ class ShippedPolicyTests(unittest.TestCase):
     def test_every_section_survives_exactly_once(self) -> None:
         composed = planner_mod.load_policy_text()
         self.assertTrue(composed)
-        for num in list(range(0, 43)):
+        for num in list(range(0, 44)):
             with self.subTest(section=num):
                 self.assertEqual(composed.count(f"## {num}. "), 1)
         self.assertEqual(composed.count("# DEV ROUTING"), 1)

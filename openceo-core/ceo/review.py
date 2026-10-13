@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Collection, Mapping, Sequence
 
 from company_mandate import (
+    MANDATE_PRINCIPLES,
     SECRET_BLOCK_PARAM,
     MandatoEmpresa,
     OwnerAction,
@@ -145,6 +146,7 @@ class CEOSignals:
     """Bounded company state compiled for one review."""
 
     axes: list[dict[str, Any]] = field(default_factory=list)
+    principios: list[str] = field(default_factory=list)
     limits: dict[str, Any] = field(default_factory=dict)
     spend_threshold: str = ""
     spend_currency: str = ""
@@ -261,6 +263,7 @@ async def compile_signals(env: CEOEnv) -> CEOSignals:
     signals = CEOSignals()
     mandate = env.mandate
     if mandate is not None:
+        signals.principios = [str(item) for item in mandate.principios]
         for eje in mandate.ejes:
             kpis = []
             for kpi in eje.kpis:
@@ -371,8 +374,14 @@ async def compile_signals(env: CEOEnv) -> CEOSignals:
 
 def _mandate_section(signals: CEOSignals) -> str:
     lines = ["MANDATE"]
+    lines.append("PRINCIPLES (optimize every decision for these):")
+    for item in signals.principios or list(MANDATE_PRINCIPLES):
+        lines.append(f"- {item}")
     if not signals.axes:
-        lines.append("(no axes declared: report only, never new work)")
+        lines.append(
+            "(no axes declared: pedidos carry a written justificacion "
+            "instead of a KPI link)"
+        )
     for eje in signals.axes:
         lines.append(f"- eje {eje['id']}: {_short(eje['meta'], 160)}")
         if not eje["kpis"]:
@@ -517,10 +526,14 @@ def _ceo_prompt(
             "planner decides ticket or objective, agent, skill and "
             "(dev) tier. Never name the outcome ticket or objective; "
             "describe the work.",
-            "- crear_pedido REQUIRES a mandate eje with at least one "
-            "KPI measured this review (a reading, not UNKNOWN) linked "
-            "via kpi_ids. An axis without a measurable KPI yields a "
-            "report, never new work.",
+            "- crear_pedido links the mandate: when a KPI is measured "
+            "this review (a reading, not UNKNOWN), link it via eje_id "
+            "and kpi_ids; otherwise write why the work matters in "
+            "justificacion. One of the two is REQUIRED; kpi_ids "
+            "without eje_id is rejected.",
+            "- acceptance carries the Owner's criteria when the "
+            "trigger states them; otherwise propose them yourself: "
+            "every pedido registers how its outcome is judged.",
             "- Unknown is null: never invent readings, tickets, or "
             "owners. An unreadable source narrows what you may decide.",
             "- No agent, skill or tier field anywhere: the single "
@@ -539,16 +552,18 @@ def _ceo_prompt(
             "escalates. An already-open identical escalation needs no "
             "duplicate.",
             "- The deterministic validation rejects duplicates, "
-            "unknown-project, unlinked and unmeasured pedidos, and "
-            "causeless escalations. Propose work that survives it.",
+            "unknown-project, unjustified pedidos, and causeless "
+            "escalations. Propose work that survives it.",
         ]),
         "\n".join([
             f"OUTPUT: write {CEO_DECISION_FILE} under {repo_root}/.tier-s/ "
             "with exactly this JSON (no other file, no other text):",
             '{"action": "<one of the four>", "summary": "<one line>", '
             '"pedido": {"project": "...", "title": "...", '
-            '"description": "...", "acceptance": [...], "eje_id": "...", '
-            '"kpi_ids": ["..."], "costs": [{"label": "...", "amount": '
+            '"description": "...", "acceptance": [...], '
+            '"eje_id?": "...", "kpi_ids?": ["..."], '
+            '"justificacion?": "<why, when no KPI is measured>", '
+            '"costs": [{"label": "...", "amount": '
             '"..."|null}], "project_key": "...", "display_name": "..."} '
             '| "escalation": '
             '{"kind": "...", "summary": "...", "project": null, '
@@ -558,7 +573,8 @@ def _ceo_prompt(
             '"policy_requires_human_review": false}}',
             "keep_going and do_nothing carry action+summary only; "
             "costs and project_key/display_name are optional (omit the "
-            "keys when the pedido needs neither).",
+            "keys when the pedido needs neither); eje_id/kpi_ids or "
+            "justificacion is REQUIRED (omit the keys you do not use).",
         ]),
     ])
 
@@ -775,15 +791,23 @@ async def _act_on_decision(
     if decision.action == CEOAction.CREAR_PEDIDO:
         spec = decision.pedido
         assert spec is not None  # Shape-guarded.
-        citation = (
-            f"[CEO review {review_id} ({kind})] Eje {spec.eje_id}, "
-            f"KPIs {', '.join(spec.kpi_ids)}."
-        )
-        params: dict[str, Any] = {
-            "ceo_review": review_id,
-            "eje_id": str(spec.eje_id),
-            "kpi_ids": [str(item) for item in spec.kpi_ids],
-        }
+        eje_id = str(spec.eje_id or "").strip()
+        if eje_id:
+            citation = (
+                f"[CEO review {review_id} ({kind})] Eje {eje_id}, "
+                f"KPIs {', '.join(str(item) for item in spec.kpi_ids)}."
+            )
+        else:
+            citation = (
+                f"[CEO review {review_id} ({kind})] "
+                f"Justificación: {_short(spec.justificacion, 160)}"
+            )
+        params: dict[str, Any] = {"ceo_review": review_id}
+        if eje_id:
+            params["eje_id"] = eje_id
+            params["kpi_ids"] = [str(item) for item in spec.kpi_ids]
+        if str(spec.justificacion or "").strip():
+            params["justificacion"] = str(spec.justificacion)
         if spec.costs:
             params["costs"] = [
                 {"label": str(cost.label), "amount": cost.amount}
