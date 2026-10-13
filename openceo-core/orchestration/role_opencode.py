@@ -9,7 +9,10 @@ server (never merged with the Owner's). The run selects it with
 
 Config surface verified against the official docs (agents, permissions,
 remote MCP servers with ``headers``); the binary on this host is
-``opencode v2.0.22``. Live runs land in the epic Acceptance.
+``opencode v2.0.22``. The overlay starts from the host global config, so a
+host that never initialized OpenCode (no ``~/.config/opencode/``) refuses
+with :class:`RoleProfileError` — fail-closed, never a bare defaults-only
+config. Live runs land in the epic Acceptance.
 """
 
 from __future__ import annotations

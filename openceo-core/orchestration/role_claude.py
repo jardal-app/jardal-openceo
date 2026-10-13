@@ -115,11 +115,14 @@ def ensure_mcp_placeholder(home: str | Path) -> Path:
     if not target.exists():
         try:
             fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            pass  # a concurrent run created it first (review 00019)
         except OSError as exc:
             raise RoleProfileError(
                 f"claude mcp placeholder refused: {exc}") from exc
-        with os.fdopen(fd, "wb"):
-            pass
+        else:
+            with os.fdopen(fd, "wb"):
+                pass
     return target
 
 
