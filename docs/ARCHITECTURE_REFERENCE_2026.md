@@ -1140,8 +1140,6 @@ Work whose result gains materially from orchestrating independent model families
 - **Large work:** decomposition belongs to the single objective planner (§Proactive CEO; TASK-2026-00112/00117), not to Tier S.
 - **Review quorum (TASK-2026-00162):** reviewer reports are parsed tolerant to prose and strict on findings: a line that opens with a severity must be a full §16.4 header, line anchors keep their literal quote, and every finding is still verified against git. One round machinery (`orchestration/review.py`, `run_quorum_round`) serves ticket rounds and the objective final review: relief with untried families, then one retry per slot for timeouts (×1.5), malformed reports and unclassified errors. Every attempt lands in `task_reviews` with its kind and the finding text. A no-quorum park checkpoints the run, and the next launch resumes it at review, reusing the plan, the responses and the handoff (no new planning or build). Retries back off 15/30/60 min, then park as `needs_owner`. A new run supersedes the task's other open runs, and terminal tasks and boot close the rest. The final review targets the objective's integration ref, never the live checkout.
 
-Still-live settings from the retired section:
-
 Superseded by TASK-2026-00138: the numeric tiers (`tier1`→B, `tier2`→A, `tier3`/`tier4`→C), the LLM tier selector, the MCP `coding_tier` parameter, the `dev.coding_tier` default and every deprecated routing source were retired once the migration ran dry. `coding_tool` (tier_s/a/b/c) is the only routing; the previous sentence about `coding_tier: tier3` mapping to a one-shot OpenCode run no longer applies and lives only in Git history.
 
 Retired by TASK-2026-00209: the `pm.default_tool` setting (extraction engine `langraph` | `claude` | `codex`, overridable per-request via `params.pm_tool`) is gone with the PM agent. It lives only in Git history.
@@ -1778,21 +1776,6 @@ openceo/
 │   │   │   ├── prompt.md
 │   │   │   ├── tools.py
 │   │   │   ├── session.py
-│   │   │   ├── requirements.txt
-│   │   │   └── .env.example
-│   │   ├── sales/
-│   │   │   ├── prompt.md
-│   │   │   ├── tools.py
-│   │   │   ├── requirements.txt
-│   │   │   └── .env.example
-│   │   ├── marketing/
-│   │   │   ├── prompt.md
-│   │   │   ├── tools.py
-│   │   │   ├── requirements.txt
-│   │   │   └── .env.example
-│   │   ├── media/
-│   │   │   ├── prompt.md
-│   │   │   ├── tools.py
 │   │   │   ├── requirements.txt
 │   │   │   └── .env.example
 │   │   └── __init__.py

@@ -29,9 +29,6 @@ COPY requirements.txt .
 COPY agents/ceo/requirements.txt agents/ceo/requirements.txt
 COPY agents/dev/requirements.txt agents/dev/requirements.txt
 COPY agents/finance/requirements.txt agents/finance/requirements.txt
-COPY agents/marketing/requirements.txt agents/marketing/requirements.txt
-COPY agents/media/requirements.txt agents/media/requirements.txt
-COPY agents/sales/requirements.txt agents/sales/requirements.txt
 COPY agents/secretary/requirements.txt agents/secretary/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt \
     && find /app/agents -mindepth 2 -maxdepth 2 -type f -name requirements.txt | sort | while read -r req_file; do pip install --no-cache-dir -r "$req_file"; done
