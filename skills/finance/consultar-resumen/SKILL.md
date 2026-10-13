@@ -10,6 +10,8 @@ inputs:
   - dictated_period
 outputs:
   - scope_summary
+evidence:
+  - measured_period
 ---
 
 # Consultar resumen

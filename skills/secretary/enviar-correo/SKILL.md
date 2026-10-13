@@ -18,6 +18,8 @@ inputs:
 outputs:
   - send_confirmation
   - approval_question
+evidence:
+  - send_confirmation
 ---
 
 # Enviar correo

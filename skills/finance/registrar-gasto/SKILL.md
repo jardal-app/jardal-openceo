@@ -9,6 +9,8 @@ inputs:
   - exchange_rate
 outputs:
   - journal_entry
+evidence:
+  - journal_entry
 ---
 
 # Registrar gasto

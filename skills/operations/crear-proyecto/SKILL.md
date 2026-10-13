@@ -19,6 +19,9 @@ outputs:
   - project_config
   - vault_hub
   - dns_hostname
+evidence:
+  - project_key
+  - repo_path
 ---
 
 # Crear proyecto

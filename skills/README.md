@@ -19,6 +19,8 @@ inputs:                 # optional handoff contract (TASK-2026-00211)
   - inbox_slice
 outputs:
   - triage_report
+evidence:               # required evidence names (TASK-2026-00216)
+  - report_path
 ---
 ```
 
@@ -77,6 +79,16 @@ the `blocked_by` predecessors and delivers their recorded outputs —
 staged files under `upstream/<task_id>/` plus a prompt section (LLM
 path) or the `upstream_outputs` params (exact path). See
 `openceo-core/orchestration/ticket_handoff.py`.
+
+`evidence` names what the skill's verdict must cite as proof
+(TASK-2026-00216): the final review verifies each declared output is
+named in the structured result and each required evidence in its
+`evidencia` (normalized, case- and separator-blind). A skill needing a
+stricter domain check ships `verify.py` with `verify(child, outputs)`
+returning the `{ok, missing_artifacts, unmet_criteria}` report; it
+runs after the generic check passed, and a broken one parks the
+objective instead of passing silently. See
+`openceo-core/objectives/delivery_verification.py`.
 
 ## Crystallization drafts (TASK-2026-00210)
 
