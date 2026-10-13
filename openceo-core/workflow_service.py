@@ -880,6 +880,14 @@ class WorkflowService:
             return None
         return WorkflowResolution(workflow=scored[0][1], tier="tier1", reason=scored[0][2])
 
+    async def latest_workflow_outputs(self, task_id: str) -> dict[str, Any]:
+        """Step outputs of the latest run for one task, {} when none."""
+        run = await self._repo.latest_workflow_run_for_task(task_id)
+        if not isinstance(run, dict):
+            return {}
+        outputs = run.get("outputs")
+        return dict(outputs) if isinstance(outputs, dict) else {}
+
     async def execute_task_workflow(
         self,
         task: dict[str, Any],

@@ -10,6 +10,8 @@ inputs:
 outputs:
   - practice_result
   - approval_question
+evidence:
+  - practice_result
 ---
 
 # Pago Elfec

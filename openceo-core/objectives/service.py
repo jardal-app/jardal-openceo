@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any, Mapping
 
+from objectives.delivery_verification import generic_agent_verifiers
 from objectives.money_guide import project_money_routing
 from orchestration.inbox import InMemoryInboxStore, MongoInboxStore
 from orchestration.live import AllowAllQuota, ProcessExecutor, RateMonitorQuota
@@ -36,6 +37,15 @@ from objectives.engine import (
 from state import AgentName, TaskCreateRequest, TaskSource
 
 logger = logging.getLogger(__name__)
+
+
+def _generic_verifiers_or_empty() -> dict[str, Any]:
+    """Generic map, or {} when the catalog cannot load (legacy parks)."""
+    try:
+        return generic_agent_verifiers()
+    except Exception as exc:  # noqa: BLE001 - boot gate owns fail-closed
+        logger.error("generic delivery verifiers unavailable: %s", exc)
+        return {}
 
 
 class ObjectiveErpAdapter:
@@ -271,10 +281,12 @@ class ObjectiveService:
             if dev_cfg.get("vault_project") else None,
             ceo_wake=self._ceo_wake,
             project_routing=project_money_routing(project_config),
-            # No deterministic non-dev runner exists (research has no
-            # bridge), so unverified non-dev work parks as
+            # Generic delivery check per enabled AI agent
+            # (TASK-2026-00216): declared skill outputs plus required
+            # evidence, with optional stricter per-skill verify.py.
+            # Domains outside the catalog still park as
             # capability_gap (TASK-2026-00175).
-            delivery_verifiers={},
+            delivery_verifiers=_generic_verifiers_or_empty(),
             dispatcher_wake=(getattr(task_service, "wake_dispatcher", None)
                              if task_service is not None else None),
             mandate=mandate,

@@ -11,6 +11,8 @@ inputs:
   - cost_center
 outputs:
   - contribution_status
+evidence:
+  - measured_period
 ---
 
 # Regla 10

@@ -163,9 +163,9 @@ class ObjectiveEnv:
     project_routing: dict[str, Any] = field(default_factory=dict)
     # Deterministic delivery verifiers by non-dev domain
     # (TASK-2026-00175): ``domain -> DeliveryVerifier``. Dev work verifies
-    # through the reviewer pool, never here. Empty in prod (no non-dev
-    # runner exists — research has no bridge), so unverified non-dev
-    # work parks as capability_gap.
+    # through the reviewer pool, never here. Prod registers the generic
+    # check per enabled AI agent (TASK-2026-00216); domains outside the
+    # catalog still park as capability_gap.
     delivery_verifiers: dict[str, DeliveryVerifier] = field(
         default_factory=dict)
     # Company mandate for the spend gate (TASK-2026-00207): declared

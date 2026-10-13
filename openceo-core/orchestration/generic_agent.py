@@ -36,7 +36,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from catalog import (
     AgentType,
@@ -231,6 +231,8 @@ def build_agent_prompt(
     profile: RoleProfile, task: Mapping[str, Any],
     skill: str | None = None,
     upstream_section: str = "",
+    skill_outputs: Sequence[str] = (),
+    skill_evidence: Sequence[str] = (),
 ) -> str:
     """Ticket + upstream outputs + suggested skill + verdict block."""
     lines = [
@@ -256,6 +258,16 @@ def build_agent_prompt(
             f"Suggested skill: {skill} — read its SKILL.md and follow it; "
             "you decide how.",
         ])
+        declared: list[str] = []
+        if list(skill_outputs):
+            declared.append(
+                f"It declares outputs: {', '.join(skill_outputs)} — "
+                "name each one in your entregables.")
+        if list(skill_evidence):
+            declared.append(
+                f"Required evidence: {', '.join(skill_evidence)} — "
+                "include it in your evidencia.")
+        lines.extend(declared)
     lines.extend(["", CRYSTALLIZATION_PROMPT, "", AGENT_RESULT_PROMPT])
     return "\n".join(lines)
 
@@ -353,6 +365,48 @@ async def run_generic_agent(
                           wiring, skills, upstream=upstream)
 
 
+#: Exact verdict citations stay bounded: lines, then chars per value.
+_EXACT_CITE_LINES = 20
+_EXACT_CITE_VALUE_CHARS = 200
+
+
+def _cite_workflow_outputs(outputs: Mapping[str, Any]) -> list[str]:
+    """One citation line per scalar step output, dotted and bounded."""
+    lines: list[str] = []
+
+    def visit(prefix: str, value: Any, depth: int) -> None:
+        if len(lines) >= _EXACT_CITE_LINES or depth > 2:
+            return
+        if isinstance(value, Mapping):
+            for key in sorted(str(item) for item in value):
+                visit(f"{prefix}.{key}" if prefix else str(key),
+                      value[key], depth + 1)
+        elif isinstance(value, (str, int, float, bool)) or value is None:
+            text = str(value)
+            if len(text) > _EXACT_CITE_VALUE_CHARS:
+                text = text[:_EXACT_CITE_VALUE_CHARS] + "…"
+            lines.append(f"{prefix}: {text}")
+
+    if isinstance(outputs, Mapping):
+        for step in sorted(str(item) for item in outputs):
+            visit(str(step), outputs[step], 0)
+    return lines
+
+
+async def _read_workflow_cites(service: Any, task_id: str) -> list[str]:
+    """Latest run outputs as verdict citations, [] when unreadable."""
+    latest = getattr(service, "latest_workflow_outputs", None)
+    if latest is None or not task_id:
+        return []
+    try:
+        outputs = await latest(task_id)
+    except Exception:  # noqa: BLE001 - citations never fail a run
+        return []
+    if not isinstance(outputs, Mapping):
+        return []
+    return _cite_workflow_outputs(outputs)
+
+
 async def _run_exact_skill(
     agent_name: str, task: dict[str, Any], params: dict[str, Any],
     profile: RoleProfile, skill_name: str, workflow_path: Path,
@@ -411,7 +465,13 @@ async def _run_exact_skill(
     if status == TaskStatus.COMPLETED.value:
         summary = str(outcome.last_response_summary or "").strip() \
             or f"workflow {workflow_id} completed"
-        verdict = AgentResult(resultado=AgentOutcome.HECHO, motivo=summary)
+        cites = await _read_workflow_cites(
+            service, str(task.get("task_id") or ""))
+        evidence = summary if not cites \
+            else f"{summary} | {' | '.join(cites)}"
+        verdict = AgentResult(resultado=AgentOutcome.HECHO, motivo=summary,
+                              entregables=cites,
+                              evidencia=evidence[:2000])
         out_params = {**flow_params,
                       "agent_result": verdict.model_dump(mode="json")}
         if isinstance(outcome.params, dict):
@@ -529,8 +589,20 @@ async def _run_llm(
     provider = badge_factory(agent_name, badge_ticket or task_id,
                              str(task.get("project") or ""))
     executor = factory(agent_name, spec, provider)
-    prompt = build_agent_prompt(profile, task, skill=skill_name,
-                                upstream_section=section)
+    declared_outputs: list[str] = []
+    declared_evidence: list[str] = []
+    if skill_name and skills:
+        found = skills.get(skill_name)
+        if found is not None:
+            declared_outputs = [str(item)
+                                for item in
+                                (getattr(found, "outputs", []) or [])]
+            declared_evidence = [str(item)
+                                 for item in
+                                 (getattr(found, "evidence", []) or [])]
+    prompt = build_agent_prompt(
+        profile, task, skill=skill_name, upstream_section=section,
+        skill_outputs=declared_outputs, skill_evidence=declared_evidence)
     try:
         result = await executor.run(agent_name, prompt, workdir,
                                     wiring.timeout_s)

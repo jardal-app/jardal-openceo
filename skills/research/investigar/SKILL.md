@@ -15,6 +15,9 @@ inputs:
 outputs:
   - research_brief
   - research_id
+evidence:
+  - research_id
+  - brief_path
 ---
 
 # Investigar
