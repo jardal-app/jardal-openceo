@@ -1,15 +1,23 @@
-# Agent card: research (disabled until bridged).
+# Agent card: research (enabled with its investigar skill).
 name: research
 type: ai
 engine: muse-code
 profile: profiles/research.yaml
-boundary_tools: []
+boundary_tools:
+  - openceo_search_tickets
+  - openceo_get_ticket
+  - openceo_add_ticket_comment
+  - openceo_attach_ticket_file
+  - openceo_research_submit
+  - openceo_research_get
 skills_dir: skills/research
-skills: []
+skills:
+  - investigar
 inputs:
   - research question with budget
 outputs:
   - grounded report with sources
-enabled: false
-disabled_reason: no ticket execution bridge yet
-decided_by_ticket: TASK-2026-00222
+  - hecho / bloqueado / no_aplica result with reason
+enabled: true
+disabled_reason: null
+decided_by_ticket: null

@@ -81,6 +81,7 @@ def build_internal_mcp_mount(
     erpnext: Any | None = None,
     issuer: Any | None = None,
     audit: Any | None = None,
+    research_bridge: Any | None = None,
 ) -> MountedMCPServer | None:
     """Build the shared internal MCP for managed runs and manual CLI sessions."""
     if not settings.MCP_SERVER_ENABLED:
@@ -89,7 +90,8 @@ def build_internal_mcp_mount(
         settings=settings,
         path=_normalize_path(settings.MCP_SERVER_PATH),
         name="OpenCEO Internal MCP",
-        register_fn=lambda s, st: _register_all_tools(s, st, task_service, erpnext),
+        register_fn=lambda s, st: _register_all_tools(s, st, task_service, erpnext,
+                                                      research_bridge),
         stateless_http=True,
         json_response=True,
         issuer=issuer,
@@ -272,6 +274,7 @@ def _register_openceo_tools(
     settings: Settings,
     task_service: "TaskService",
     erpnext: Any | None = None,
+    research_bridge: Any | None = None,
 ) -> tuple[str, ...]:
 
     async def _enrich_with_execution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -811,6 +814,8 @@ def _register_openceo_tools(
     # and these wrappers expose it to agents. Each description documents the
     # criterion that justifies it: (a) secret, (b) lock, (c) business record.
     boundary = WorkflowToolRegistry(settings=settings)
+    if research_bridge is not None:
+        boundary.set_research_bridge(research_bridge)
 
     def _senders_text() -> str:
         try:
@@ -960,6 +965,42 @@ def _register_openceo_tools(
         except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
             return _classify(exc)
 
+    async def openceo_research_submit(
+        ticket: str = "",
+        project: str = "",
+        purpose: str = "",
+        question: str = "",
+        mode: str = "quick",
+        seed_urls: list[str] | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return await boundary.call("research.submit_job", {
+                "ticket": ticket,
+                "project": project,
+                "purpose": purpose,
+                "question": question,
+                "mode": mode,
+                "seed_urls": seed_urls,
+                "idempotency_key": idempotency_key,
+            }, {})
+        except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
+            return _classify(exc)
+
+    async def openceo_research_get(
+        ticket: str = "",
+        project: str = "",
+        research_id: str = "",
+    ) -> dict[str, Any]:
+        try:
+            return await boundary.call("research.get_job", {
+                "ticket": ticket,
+                "project": project,
+                "research_id": research_id,
+            }, {})
+        except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
+            return _classify(exc)
+
     server.tool(
         openceo_send_email,
         name="openceo_send_email",
@@ -1008,6 +1049,21 @@ def _register_openceo_tools(
         "Needs Owner approval (pass project, ticket). "
         "Boundary (a): Elfec credentials. Boundary (b): payment lock.",
     )
+    server.tool(
+        openceo_research_submit,
+        name="openceo_research_submit",
+        description="Admit one investigation under this ticket's research "
+        "consumer (idempotent by idempotency_key; poll it with "
+        "openceo_research_get). "
+        "Boundary (a): reads through the research provider credentials.",
+    )
+    server.tool(
+        openceo_research_get,
+        name="openceo_research_get",
+        description="Status and result of one of this ticket's investigations "
+        "(other tickets read as not_found). "
+        "Boundary (a): reads through the research provider credentials.",
+    )
     return (
         "openceo_create_ticket",
         "openceo_create_tickets_batch",
@@ -1032,6 +1088,8 @@ def _register_openceo_tools(
         "openceo_scope_summary",
         "openceo_contribution_10_status",
         "openceo_elfec_house_payment",
+        "openceo_research_submit",
+        "openceo_research_get",
     )
 
 
@@ -1040,10 +1098,12 @@ def _register_all_tools(
     settings: Settings,
     task_service: "TaskService",
     erpnext: Any | None = None,
+    research_bridge: Any | None = None,
 ) -> tuple[str, ...]:
     """Internal MCP: infra + OpenCEO-specific tools."""
     infra = _register_infra_tools(server, settings, task_service)
-    openceo = _register_openceo_tools(server, settings, task_service, erpnext)
+    openceo = _register_openceo_tools(server, settings, task_service, erpnext,
+                                      research_bridge)
     return infra + openceo
 
 

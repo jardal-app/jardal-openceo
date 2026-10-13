@@ -28,6 +28,8 @@ boundary_tools:
   - openceo_scope_summary
   - openceo_contribution_10_status
   - openceo_elfec_house_payment
+  - openceo_research_submit
+  - openceo_research_get
 skills_dir: skills/owner
 skills:
   - decidir

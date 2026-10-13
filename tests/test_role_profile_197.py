@@ -935,6 +935,8 @@ class RoleProfileSmokeTests(unittest.IsolatedAsyncioTestCase):
         ).agents["secretary"].boundary_tools)
         finance_box = set(load_catalog(
         ).agents["finance"].boundary_tools)
+        research_box = set(load_catalog(
+        ).agents["research"].boundary_tools)
         matrix = (("dev", "agent", set(dev_box_tools())),
                   ("planner", "readonly", set(READONLY_BOX)),
                   ("ceo", "readonly", set(READONLY_BOX)),
@@ -943,7 +945,8 @@ class RoleProfileSmokeTests(unittest.IsolatedAsyncioTestCase):
                   ("secretary", "agent", secretary_box),
                   # TASK-2026-00221 enabled finance with its box.
                   ("finance", "agent", finance_box),
-                  ("research", "none", None))
+                  # TASK-2026-00222 enabled research with its box.
+                  ("research", "agent", research_box))
         for name, kind, expected_box in matrix:
             with self.subTest(profile=name):
                 await self._smoke_one_profile(

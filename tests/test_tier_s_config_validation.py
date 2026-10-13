@@ -140,7 +140,8 @@ class ValidateProjectTests(unittest.TestCase):
         self.assertNotIn("--reasoning-effort", role["command"])
         self.assertNotIn("--yolo", role["command"])
         self.assertTrue(planner["agents"]["dev"]["enabled"])
-        self.assertFalse(planner["agents"]["research"]["enabled"])
+        # TASK-2026-00222 enabled research through the ticket bridge.
+        self.assertTrue(planner["agents"]["research"]["enabled"])
         # Moved out of Tier S: no planner role or timeout under dev.tier_s.
         self.assertNotIn("objective_planner",
                          cfg["dev"]["tier_s"]["roles"])

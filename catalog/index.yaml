@@ -18,7 +18,7 @@ agents:
     summary: Answers and records dated finance against ERPNext, never executes a transfer by itself.
     card: agents/finance.yaml
   - name: research
-    summary: Runs grounded research on demand. Disabled, no ticket execution bridge yet.
+    summary: Runs grounded research on demand through the ticket bridge.
     card: agents/research.yaml
   - name: pm
     summary: Extracted tickets from interviews. Retired, the single planner takes new work.

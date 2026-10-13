@@ -133,6 +133,8 @@ MCP_BOUNDARY_TOOLS = frozenset({
     "openceo_scope_summary",
     "openceo_contribution_10_status",
     "openceo_elfec_house_payment",
+    "openceo_research_submit",
+    "openceo_research_get",
 })
 
 _NAME_PATTERN = r"^[a-z][a-z0-9_]*$"

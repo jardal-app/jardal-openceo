@@ -245,6 +245,12 @@ lock. Voice and chat dictation is an explicit Owner source: the
 chat layer names the exact skill, code validates it against the
 catalog, and no planner runs (criterio 1).
 
+A ticket that asks a research question routes to `research`
+with the `investigar` skill; the question and the decision it
+unlocks travel in the ticket. The run admits one investigation
+under the ticket's consumer, polls it, attaches the brief, and
+returns to the planner — never through providers from the agent.
+
 ## 7. Domain ownership is separate from execution mechanism
 
 `target_agent` answers:
@@ -330,13 +336,13 @@ Put later work in `roadmap_remaining`.
 
 ## 10. Research returns to the Objective Planner
 
-> **Status.** The `research` agent is registered but disabled in the agent
-> registry (`no ticket execution bridge yet`, §6): the prompt lists it as
-> DISABLED and the planner must not route to it. §10 and §11 describe the
-> flow for when it is enabled. Until then, discovery the DEV agent can do
-> inside the repository (root cause, architecture, compatibility) is a DEV
-> `tier_a` ticket (§21), and an investigation that needs an agent that is
-> not enabled is a `capability_gap` (§6, §37).
+> **Status.** The `research` agent is enabled: route research tickets
+> to it with the `investigar` skill (§6). The run admits one
+> investigation through the ticket bridge (`openceo_research_submit`),
+> polls it (`openceo_research_get`), attaches the brief to the ticket,
+> and returns to the planner below. Discovery the DEV agent can do
+> inside the repository (root cause, architecture, compatibility)
+> stays a DEV `tier_a` ticket (§21).
 
 Canonical flow:
 
@@ -356,8 +362,6 @@ Research does **not** automatically return to DEV.
 After research, the next ticket may belong to DEV, Finance, Payments, Research again, Operations, Creative, another registered agent, or nobody if the Objective is ready for final review.
 
 ## 11. Research ticket quality
-
-Applies when the `research` agent is enabled (see the status note in §10).
 
 A research ticket should identify:
 
@@ -459,7 +463,7 @@ Wired today (each of these starts a planning cycle):
 
 Reserved, not wired yet (the planner only sees these at the next cycle one of the triggers above starts):
 
-- research/discovery returns (the `research` agent is disabled, §6);
+- research/discovery returns;
 - a durable decision is produced;
 - a material out-of-scope finding affects the Objective (findings reach the planner as the INBOX of the next cycle);
 - evidence invalidates a previous assumption;
@@ -601,7 +605,7 @@ Objective
  -> bounded implementation tickets
 ```
 
-While the `research` agent is disabled (§10), the first step is a DEV `tier_a` discovery ticket instead of a Research ticket.
+The first step is a Research ticket; a DEV `tier_a` discovery ticket covers only what the repository itself can answer (§21).
 
 ### Financial analysis
 
@@ -716,8 +720,7 @@ You run as one fresh Muse Code / Muse Spark 1.3 Contributor headless planning cy
    artifact, or action.
 
 3. If missing information prevents correct downstream planning,
-   create a research/discovery ticket first (today a DEV tier_a discovery
-   ticket: the research agent is disabled, §10).
+   create a research/discovery ticket first.
 
 4. Research results return to YOU. Route again from first principles.
 

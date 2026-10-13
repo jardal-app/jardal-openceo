@@ -195,6 +195,16 @@ class TicketGrant:
             # design, so the box is the whole rule. Elfec stays ticket
             # bound under LOCKABLE_MCP_TOOLS.
             return
+        if tool in ("openceo_research_submit", "openceo_research_get"):
+            # Ticket research bridge (TASK-2026-00222): the server maps
+            # the badge to the ticket's consumer, so the params must
+            # name exactly this grant. No Owner lock: reads run through
+            # the server-held provider credentials.
+            if params.get("ticket") != self.ticket:
+                raise McpDenied("Research tools need your own ticket")
+            if params.get("project") != self.project:
+                raise McpDenied("Research tools need your own project")
+            return
         if tool in LOCKABLE_MCP_TOOLS:
             # The dangerous action locks through the Owner (TASK-2026-00208)
             # and parks the caller's ticket: the params must name exactly

@@ -36,6 +36,7 @@ from first_layer import FirstLayerGateway
 from graph import OpenCEOGraph
 from research.consumers import ConsumerRegistry
 from research.mcp_facade import build_research_mcp_facade
+from research.ticket_bridge import TicketResearchBridge
 from research.router import build_research_router
 from research.wiring import build_research_service, build_social_broker, close_research_service
 from research.subscriptions import ResearchSubscriptions
@@ -249,9 +250,20 @@ ceo_loop = CEOLoop(
 )
 task_service.set_ceo_wake(ceo_loop.wake)
 objective_service.set_ceo_wake(ceo_loop.wake)
+# Ticket research bridge (TASK-2026-00222): per-ticket consumers over the
+# in-process service. Lazy lookups: the service and the dispatcher wake
+# live below this line; the registry is ours, separate from the facade's.
+_ticket_research_consumers = ConsumerRegistry()
+_ticket_research_bridge = TicketResearchBridge(
+    consumers=_ticket_research_consumers,
+    get_service=lambda: getattr(app.state, "research_service", None),
+    project_cfg_for=lambda project: config_loader.load_project(project),
+    on_admitted=lambda research_id: _wake_research_dispatcher(research_id),
+)
 internal_mcp = build_internal_mcp_mount(
     settings, task_service, erpnext_adapter,
-    issuer=mcp_token_issuer, audit=mcp_audit_sink)
+    issuer=mcp_token_issuer, audit=mcp_audit_sink,
+    research_bridge=_ticket_research_bridge)
 horizon_service = HorizonService(settings=settings, repo=repo)
 # El timer unico de Horizon: duerme hasta el proximo vencimiento y lo despierta
 # cada encolado. No es un barrido (reglas permanentes de AGENTS.md).

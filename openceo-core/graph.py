@@ -312,7 +312,8 @@ class OpenCEOGraph:
             return "pm"
         if state.get("selected_agent") in {AgentName.OPERATIONS.value,
                                            AgentName.SECRETARY.value,
-                                           AgentName.FINANCE.value}:
+                                           AgentName.FINANCE.value,
+                                           AgentName.RESEARCH.value}:
             return "generic_agent"
         return "unsupported"
 

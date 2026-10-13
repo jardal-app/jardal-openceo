@@ -136,9 +136,10 @@ class RealCatalogTest(unittest.TestCase):
         catalog = load_catalog()
         enabled = {name for name, card in catalog.agents.items()
                    if card.enabled}
-        # TASK-2026-00220 enabled secretary, TASK-2026-00221 finance.
+        # TASK-2026-00220 enabled secretary, TASK-2026-00221 finance,
+        # TASK-2026-00222 research.
         self.assertEqual({"dev", "owner", "operations", "secretary",
-                          "finance"},
+                          "finance", "research"},
                          enabled)
 
     def test_owner_card(self):
