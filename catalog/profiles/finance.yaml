@@ -1,5 +1,5 @@
 # Role profile: finance (engine-neutral, TASK-2026-00197).
-# Profile ready; the agent enables in TASK-2026-00221 (profile != enabled).
+# Enabled in TASK-2026-00221 (profile != enabled).
 name: finance
 agent: finance
 engine: muse-code
@@ -14,4 +14,9 @@ card:
 rules: AGENTS.md
 skills:
   - create-skill
+  - consultar-resumen
+  - pago-elfec
+  - registrar-gasto
+  - registrar-ingreso
+  - regla-10
 output_schema: openceo-core/objectives/agent_result.schema.json

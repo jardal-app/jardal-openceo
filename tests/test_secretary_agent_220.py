@@ -333,8 +333,9 @@ class GenericRunLiveTest(unittest.TestCase):
 
 
 class GraphRemovalTest(unittest.TestCase):
-    def test_wired_agents_are_the_three_nodes(self) -> None:
-        self.assertEqual({"dev", "pm", "finance"}, set(WIRED_AGENTS))
+    def test_wired_agents_are_the_two_nodes(self) -> None:
+        # TASK-2026-00221 retired the finance node.
+        self.assertEqual({"dev", "pm"}, set(WIRED_AGENTS))
 
     def test_secretary_routes_to_the_generic_node(self) -> None:
         graph = OpenCEOGraph(None, None, None, None)
@@ -345,7 +346,7 @@ class GraphRemovalTest(unittest.TestCase):
     def test_secretary_hint_waits_without_wiring(self) -> None:
         loader = mock.MagicMock()
         loader.load_project.return_value = {}
-        graph = OpenCEOGraph(None, loader, None, None)
+        graph = OpenCEOGraph(None, loader, None)
         out = asyncio.run(graph.execute(
             _live_task(), agent_hint="secretary"))
         self.assertEqual(TaskStatus.WAITING.value, out["status"])

@@ -1,0 +1,9 @@
+workflow: finance.registrar_gasto
+name: Registrar gasto (exact skill)
+agent: finance
+description: "Exact part of the registrar-gasto skill: one registry tool, no LLM."
+steps:
+  - id: register_expense
+    tool: finance.register_expense
+    params:
+      text: "{{task.description}}"

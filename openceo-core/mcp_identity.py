@@ -187,6 +187,14 @@ class TicketGrant:
             # Creation tools carry no ticket/project params to bind, so the
             # box on the token is the whole rule.
             return
+        if tool in ("openceo_register_expense", "openceo_register_income",
+                    "openceo_scope_summary",
+                    "openceo_contribution_10_status"):
+            # Dated finance reads/writes (TASK-2026-00221): idempotent by
+            # caller ref with their own booking rules, ticket-agnostic by
+            # design, so the box is the whole rule. Elfec stays ticket
+            # bound under LOCKABLE_MCP_TOOLS.
+            return
         if tool in LOCKABLE_MCP_TOOLS:
             # The dangerous action locks through the Owner (TASK-2026-00208)
             # and parks the caller's ticket: the params must name exactly

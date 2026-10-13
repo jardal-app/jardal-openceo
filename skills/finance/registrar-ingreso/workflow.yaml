@@ -1,0 +1,9 @@
+workflow: finance.registrar_ingreso
+name: Registrar ingreso (exact skill)
+agent: finance
+description: "Exact part of the registrar-ingreso skill: one registry tool, no LLM."
+steps:
+  - id: register_income
+    tool: finance.register_income
+    params:
+      text: "{{task.description}}"

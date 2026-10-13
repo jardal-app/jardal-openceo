@@ -190,10 +190,11 @@ class FirstLayerGateway:
             )
 
     def set_finance_handler(self, handler: Any | None) -> None:
-        """Derivacion CEO -> Finance para gasto ocasional por voz/chat.
+        """Voz/chat -> skill exacta de finanzas (TASK-2026-00221).
 
-        El handler ejecuta Finance de forma determinista y devuelve el
-        resumen breve para voz. Sin handler, el turno sigue su curso normal.
+        El handler recibe `(skill, texto)` y corre la skill exacta de
+        forma sincrona; devuelve un resumen breve para voz. Sin handler,
+        el turno sigue su curso normal.
         """
         self._finance_handler = handler
 
@@ -362,22 +363,6 @@ class FirstLayerGateway:
                 if handled:
                     return True, reply
 
-        # Finanzas por voz (TASK-2026-00032/00044/00053/00054): el dueno habla
-        # con el CEO y el CEO deriva a Finance. Detector determinista antes del
-        # LLM: no cuesta tokens, funciona con presupuesto agotado y responde en
-        # el mismo turno para poder apagar la app. No crea tickets: el registro
-        # (o la consulta) en ERPNext es el efecto.
-        if self._finance_handler is not None:
-            try:
-                from agents.finance.intent import is_finance_text
-
-                if is_finance_text(text):
-                    summary = await self._finance_handler(text)
-                    if summary:
-                        return True, str(summary)
-            except Exception:
-                logger.warning("Finance voice handling failed", exc_info=True)
-
         if self._llm is None:
             return False, ""
 
@@ -456,15 +441,25 @@ PERSONALIDAD Y TONO DE VOZ (CRÍTICO):
    - 'aprueba la decisión', 'rechaza el escalado', 'aprueba la primera', 'rechaza el ticket 170' -> intent="horizon_decide" con dictation igual al texto original. Solo con verbo aprueba/rechaza MÁS sustantivo (decisión/escalado/aprobación), ordinal o 'ticket N'. Un 'sí'/'dale' suelto NUNCA es horizon_decide. 'Autorizo ...' es un compromiso personal -> horizon_capture, nunca horizon_decide.
    REGLA DE ORO: una frase sobre tu vida personal NUNCA es una instrucción de código. Ante duda entre dev_instruction y horizon_capture, si la frase habla de tu vida, tu familia, tu dinero, tu salud, tu voz, tus clientes o una idea tuya, elige horizon_capture. NUNCA envíes notas personales a tmux.
 
+12. FINANZAS (Jardal, ERPNext) — intent="finance_skill" con skill y dictation igual al texto original:
+   Traduce el pedido a una skill exacta de finance; el código la valida contra el catálogo y la corre sin tickets (el registro o la consulta es el efecto).
+   - Dinero que SALE con monto (gastar, pagar, comprar, "pago de sueldo 3000") -> skill="registrar-gasto".
+   - Dinero que ENTRA con monto y señal real de cobro ("me pagaron", "cobré", "recibí", "sueldo 6200") -> skill="registrar-ingreso". Ojo: "pagaron" desnudo y sustantivos con complemento ("honorarios del contador", "sueldo del empleado") son GASTO, no ingreso.
+   - Diezmo, diez por ciento, aporte, donación -> skill="regla-10" (gana sobre gasto: "registra mi diezmo 500" es regla-10).
+   - Preguntas de saldo, totales o resúmenes de gasto ("cuánto gastamos este mes", "dame el saldo") -> skill="consultar-resumen". Una pregunta NUNCA registra.
+   - Pagar la luz de la casa (Elfec House, práctica segura, nunca paga de verdad) -> skill="pago-elfec".
+   - Sin monto no hay registro: "registra gasto carne" (sin monto) también es finance_skill con skill="registrar-gasto" y el dictado completo; el flujo pide el monto.
+
 Responde SIEMPRE en formato JSON estricto con esta estructura:
 {{
-  "intent": "focus_ticket" | "ticket_query" | "ticket_count" | "ticket_retry" | "objective_create" | "list_tickets" | "preset_load" | "preset_dictate" | "preset_list" | "tmux_enter" | "preset_cancel" | "list_tmux" | "tmux_inspect" | "tmux_send" | "tmux_create" | "tmux_kill" | "dev_session_start" | "dev_session_stop" | "dev_instruction" | "dev_output" | "switch_project" | "list_projects" | "horizon_capture" | "horizon_next_action" | "horizon_progress" | "horizon_plan_query" | "horizon_capacity" | "horizon_plan_day" | "horizon_review" | "horizon_import" | "horizon_delegate" | "horizon_delivery" | "horizon_metrics" | "horizon_brief" | "horizon_decisions" | "horizon_decide" | "guidance" | "chat_response",
+  "intent": "focus_ticket" | "ticket_query" | "ticket_count" | "ticket_retry" | "objective_create" | "list_tickets" | "preset_load" | "preset_dictate" | "preset_list" | "tmux_enter" | "preset_cancel" | "list_tmux" | "tmux_inspect" | "tmux_send" | "tmux_create" | "tmux_kill" | "dev_session_start" | "dev_session_stop" | "dev_instruction" | "dev_output" | "switch_project" | "list_projects" | "horizon_capture" | "horizon_next_action" | "horizon_progress" | "horizon_plan_query" | "horizon_capacity" | "horizon_plan_day" | "horizon_review" | "horizon_import" | "horizon_delegate" | "horizon_delivery" | "horizon_metrics" | "horizon_brief" | "horizon_decisions" | "horizon_decide" | "finance_skill" | "guidance" | "chat_response",
   "ticket_number": int | null,
   "session_name": string | null,
   "project": string | null,
   "provider": string | null,
   "preset_name": string | null,
   "dictation": string | null,
+  "skill": string | null,
   "send_enter": bool,
   "keys": string | null,
   "instruction": string | null,
@@ -497,6 +492,7 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
         provider_param = parsed.get("provider")
         preset_name = parsed.get("preset_name")
         dictation_param = parsed.get("dictation")
+        skill_param = parsed.get("skill")
         send_enter_param = parsed.get("send_enter", False)
         keys_param = parsed.get("keys")
         instruction_param = parsed.get("instruction")
@@ -592,6 +588,42 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
                 f"Tenemos un objetivo nuevo en marcha en {target_proj}: "
                 "el planificador ya está creando sus tickets. "
                 "Te aviso cuando cierre por revisión final.")
+
+        # ------------------- 3c. FINANCE SKILL (explicit voice/chat) -------------------
+        if intent == "finance_skill":
+            skill_name = str(skill_param or "").strip()
+            said = str(dictation_param or "").strip() or text.strip()
+            try:
+                from catalog import load_catalog
+
+                card = load_catalog().agents.get("finance")
+                valid = bool(card is not None and card.enabled
+                             and skill_name in list(card.skills or []))
+            except Exception:
+                logger.warning("Finance skill validation failed",
+                               exc_info=True)
+                return True, (
+                    "No pude validar la operación de finanzas ahora "
+                    "mismo. Lo intentamos de nuevo.")
+            if not valid or self._finance_handler is None:
+                return True, (
+                    spoken_reply
+                    or "No reconocí esa operación de finanzas. "
+                    "Dime por ejemplo: registra un gasto, anota un "
+                    "ingreso, cuánto gastamos este mes o cómo vamos "
+                    "con el diezmo.")
+            try:
+                summary = await self._finance_handler(skill_name, said)
+            except Exception:
+                logger.warning("Finance skill run failed", exc_info=True)
+                return True, (
+                    "No pude resolver eso con finanzas ahora mismo. "
+                    "Lo intentamos de nuevo.")
+            if summary:
+                return True, str(summary)
+            return True, (
+                spoken_reply
+                or "Finanzas ejecutó la solicitud, pero no devolvió detalle.")
 
         # ------------------- 4. TICKET COUNT & LIST TICKETS -------------------
         if intent in ("ticket_count", "list_tickets"):

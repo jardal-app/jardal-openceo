@@ -211,9 +211,9 @@ class AgentGateTest(unittest.TestCase):
         self.assertEqual("dev", decision.hint)
 
     def test_disabled_but_wired_stays_alive(self):
-        # TASK-2026-00220 enabled secretary on the generic node; pm and
-        # finance stay alive on their legacy sessions until removal.
-        for name in ("pm", "finance"):
+        # TASK-2026-00220 enabled secretary and TASK-2026-00221 finance;
+        # pm stays alive on its legacy session until removal.
+        for name in ("pm",):
             with self.subTest(agent=name):
                 decision = self.gate(hint=name)
                 self.assertTrue(decision.proceed)
@@ -244,9 +244,12 @@ class AgentGateTest(unittest.TestCase):
         self.assertIn("no ticket execution bridge yet", decision.reason)
 
     def test_planner_wired_target_routes_by_name(self):
-        decision = self.gate(target="finance")
+        # TASK-2026-00221 moved finance to the generic node (its gate
+        # assertions live in test_finance_agent_221.py); pm still
+        # exercises the wired path.
+        decision = self.gate(target="pm")
         self.assertTrue(decision.proceed)
-        self.assertEqual("finance", decision.hint)
+        self.assertEqual("pm", decision.hint)
 
     def test_planner_unknown_target_waits(self):
         decision = self.gate(target="frobnicate")
@@ -275,21 +278,21 @@ class AgentGateTest(unittest.TestCase):
 
 
 class GraphWiringTest(unittest.TestCase):
-    def test_wired_agents_are_the_three_nodes(self):
-        # TASK-2026-00220 retired the secretary node: enabled catalog
-        # agents run on the generic node.
-        self.assertEqual({"dev", "pm", "finance"},
+    def test_wired_agents_are_the_two_nodes(self):
+        # TASK-2026-00220 retired the secretary node and TASK-2026-00221
+        # the finance node: enabled catalog agents run on the generic node.
+        self.assertEqual({"dev", "pm"},
                          set(WIRED_AGENTS))
 
     def test_after_route_maps_wired_to_nodes(self):
-        graph = OpenCEOGraph(None, None, None, None)
+        graph = OpenCEOGraph(None, None, None)
         for name in WIRED_AGENTS:
             with self.subTest(agent=name):
                 self.assertEqual(
                     name, graph._after_ceo_route({"selected_agent": name}))
 
     def test_after_route_sends_rest_to_unsupported(self):
-        graph = OpenCEOGraph(None, None, None, None)
+        graph = OpenCEOGraph(None, None, None)
         for name in ("marketing", "ceo", "unknown"):
             with self.subTest(agent=name):
                 self.assertEqual(
@@ -297,14 +300,14 @@ class GraphWiringTest(unittest.TestCase):
                     graph._after_ceo_route({"selected_agent": name}))
 
     def test_unsupported_disabled_agent_waits(self):
-        graph = OpenCEOGraph(None, None, None, None)
+        graph = OpenCEOGraph(None, None, None)
         out = asyncio.run(graph._unsupported_agent_node(
             {"selected_agent": "marketing", "steps": []}))
         self.assertEqual(TaskStatus.WAITING.value, out["status"])
         self.assertIn("routing_missing", out["waiting_reason"])
 
     def test_unsupported_ceo_waits(self):
-        graph = OpenCEOGraph(None, None, None, None)
+        graph = OpenCEOGraph(None, None, None)
         out = asyncio.run(graph._unsupported_agent_node(
             {"selected_agent": "ceo", "steps": []}))
         self.assertEqual(TaskStatus.WAITING.value, out["status"])
@@ -313,7 +316,7 @@ class GraphWiringTest(unittest.TestCase):
         # Review 00006/mimo-W3, route leg: an enabled AI agent the gate
         # approves must land on a real node, never unsupported.
         catalog = load_catalog()
-        graph = OpenCEOGraph(None, None, None, None)
+        graph = OpenCEOGraph(None, None, None)
         routed = [name for name, card in catalog.agents.items()
                   if card.enabled and card.type.value == "ai"]
         self.assertTrue(routed)

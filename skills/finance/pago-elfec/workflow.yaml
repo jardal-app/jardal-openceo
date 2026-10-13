@@ -1,0 +1,14 @@
+workflow: finance.pago_elfec
+name: Pago Elfec (exact skill)
+agent: finance
+description: "Exact part of the pago-elfec skill: practice run under the Owner lock, no LLM."
+steps:
+  - id: run_payment_practice
+    tool: finance.pago_elfec_house
+    params:
+      workflow:
+        id: pago_elfec_house
+        name: Pago Elfec House
+        handler: elfec_house_payment
+        expected_row_label: House
+        stop_before_card: true

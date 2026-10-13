@@ -350,26 +350,27 @@ class SimpleToolVerdictTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LegacyGraphMappingTests(unittest.TestCase):
-    def test_finance_failed_maps_to_bloqueado(self) -> None:
+    # TASK-2026-00221 moved finance off the legacy mapping (its
+    # no-verdict assertion lives in test_finance_agent_221.py); pm is
+    # the last legacy agent.
+    def test_pm_failed_maps_to_bloqueado(self) -> None:
         out = OpenCEOGraph._attach_legacy_agent_result(
             {"task_id": "t", "params": {}},
             {"status": TaskStatus.FAILED.value,
-             "selected_agent": "finance",
-             "error": "No encontré un workflow",
-             "params": {"target_agent": "finance"}})
+             "selected_agent": "pm",
+             "error": "PM agent not configured",
+             "params": {"target_agent": "pm"}})
         assert isinstance(out["params"], dict)
         verdict = out["params"]["agent_result"]
         self.assertEqual(verdict["resultado"], "bloqueado")
-        self.assertIn("workflow", verdict["motivo"])
-        self.assertEqual(out["params"]["target_agent"], "finance")
+        self.assertIn("not configured", verdict["motivo"])
+        self.assertEqual(out["params"]["target_agent"], "pm")
 
     def test_failed_without_detail_falls_back(self) -> None:
-        # TASK-2026-00220 moved secretary off the legacy mapping; finance
-        # still exercises the empty-detail fallback.
         out = OpenCEOGraph._attach_legacy_agent_result(
             {"task_id": "t", "params": {}},
             {"status": TaskStatus.FAILED.value,
-             "selected_agent": "finance", "params": {}})
+             "selected_agent": "pm", "params": {}})
         assert isinstance(out["params"], dict)
         AgentResult.model_validate(out["params"]["agent_result"])
 

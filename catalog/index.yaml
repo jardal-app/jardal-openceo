@@ -15,7 +15,7 @@ agents:
     summary: Sends email and coordinates lightly.
     card: agents/secretary.yaml
   - name: finance
-    summary: Answers and records dated finance against ERPNext. Disabled until migrated, never executes a transfer by itself.
+    summary: Answers and records dated finance against ERPNext, never executes a transfer by itself.
     card: agents/finance.yaml
   - name: research
     summary: Runs grounded research on demand. Disabled, no ticket execution bridge yet.

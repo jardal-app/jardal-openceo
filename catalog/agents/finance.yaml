@@ -1,16 +1,30 @@
-# Agent card: finance (disabled until migrated).
+# Agent card: finance (enabled with its five finance skills).
 name: finance
 type: ai
 engine: muse-code
 profile: profiles/finance.yaml
-boundary_tools: []
+boundary_tools:
+  - openceo_search_tickets
+  - openceo_get_ticket
+  - openceo_add_ticket_comment
+  - openceo_attach_ticket_file
+  - openceo_register_expense
+  - openceo_register_income
+  - openceo_scope_summary
+  - openceo_contribution_10_status
+  - openceo_elfec_house_payment
 skills_dir: skills/finance
-skills: []
+skills:
+  - consultar-resumen
+  - pago-elfec
+  - registrar-gasto
+  - registrar-ingreso
+  - regla-10
 inputs:
   - ticket with dated financial request
 outputs:
   - ERPNext-backed answer or record
   - hecho / bloqueado / no_aplica result with reason
-enabled: false
-disabled_reason: migrates to a catalog agent with its finance skills and explicit voice route
-decided_by_ticket: TASK-2026-00221
+enabled: true
+disabled_reason: null
+decided_by_ticket: null

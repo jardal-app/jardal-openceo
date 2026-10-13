@@ -20,7 +20,6 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from agents.dev.session import DevSessionManager
-from agents.finance.session import FinanceSessionManager
 from ceo.loop import CEOLoop
 from ceo.review import run_review as run_ceo_review
 from ceo.service import CEOService
@@ -109,6 +108,7 @@ from horizon.models import (
 )
 from horizon.triggers import HorizonScheduler, HorizonTriggerStore
 from horizon.service import HorizonService
+from orchestration.finance_voice import FinanceVoiceWiring, run_finance_skill
 from orchestration.generic_agent import GenericAgentWiring
 from task_service import TaskService
 from tools.notion import NotionTicketManager
@@ -124,7 +124,6 @@ router = CEORouter(settings)
 rate_monitor = RateMonitor(settings)
 rate_monitor.set_repo(repo)
 dev_step_manager = DevSessionManager(settings, config_loader, rate_monitor=rate_monitor, repo=repo)
-finance_step_manager = FinanceSessionManager(settings)
 pm_step_manager = PMSessionManager(
     settings,
     config_loader=config_loader,
@@ -134,7 +133,6 @@ graph = OpenCEOGraph(
     router=router,
     config_loader=config_loader,
     dev_session=dev_step_manager,
-    finance_session=finance_step_manager,
     pm_session=pm_step_manager,
     notion=None,  # set after notion_manager is created
 )
@@ -194,7 +192,6 @@ pm_step_manager.set_task_service(task_service)
 workflow_service.set_task_service(task_service)
 dev_step_manager.set_task_service(task_service)  # Tier S notices + internal tickets (F3–F6)
 secretary_step_manager.set_task_service(task_service)  # email lock (00208)
-finance_step_manager.set_task_service(task_service)  # Elfec lock (00208)
 # Company-level objectives (F2): top-down entries + inverse group propagation.
 objective_service = ObjectiveService(
     repo=repo,
@@ -280,66 +277,16 @@ first_layer_gateway = FirstLayerGateway(
 )
 
 
-async def _run_finance_voice(text: str) -> str | None:
-    """Resuelve por voz/chat los flujos deterministas de Finance, sin tickets.
-
-    Ingreso, gasto, saldo y regla del 10%: el registro en ERPNext (o la
-    consulta) es el efecto, asi que la app puede apagarse despues. El despacho
-    lo decide `agents.finance.intent`, un solo orden para los cuatro flujos.
-    Devuelve el resumen breve apto para TTS, o None si no es texto financiero.
-    """
-    clean = str(text or "").strip()
-    try:
-        from agents.finance.intent import classify as _classify_finance
-
-        if _classify_finance(clean) is None:
-            return None
-    except Exception:
-        logger.warning("Finance intent classification failed", exc_info=True)
-        return None
-    task = {
-        "task_id": f"finance-voice-{uuid4().hex}",
-        "project": settings.DEFAULT_PROJECT,
-        "title": clean.splitlines()[0][:120] if clean else "Finanzas por voz",
-        "description": clean,
-        "attachments": [],
-        "priority": TaskPriority.MEDIUM.value,
-    }
-    try:
-        result = await finance_step_manager.run(task, {})
-    except Exception as exc:
-        logger.warning("Finance voice flow failed: %s", exc)
-        return "No pude resolver eso con finanzas ahora mismo. Lo intentamos de nuevo."
-    return result.last_response_summary or result.error
+async def _run_finance_skill(skill: str, text: str) -> str | None:
+    """Voice/chat entry: one exact finance skill, service wiring."""
+    return await run_finance_skill(
+        skill, text,
+        FinanceVoiceWiring(settings=settings,
+                           workflow_service=workflow_service, repo=repo))
 
 
-def _is_finance_text(text: str) -> bool:
-    """Ruteo del agente Finance: delegado en el detector unico de `intent`.
-
-    Incluye la lectura de saldo (a diferencia de la guarda de Horizon, que solo
-    reclama escritura y regla del 10%). Un fallo de import degrada a "no es
-    finanzas", pero deja registro: el fail-open silencioso ocultaba que el
-    libro mayor no se enteraba de una orden.
-    """
-    try:
-        from agents.finance.intent import is_finance_text
-    except Exception as exc:  # pragma: no cover - depende del arbol de imports
-        logger.warning("Finance intent guard unavailable (%s)", exc)
-        return False
-    try:
-        return bool(is_finance_text(text))
-    except Exception:
-        logger.warning("Finance intent guard failed", exc_info=True)
-        return False
-
-
-async def _handle_finance_direct(payload: ChatCompletionRequest, message: str) -> dict:
-    summary = await _run_finance_voice(_strip_agent_prefix(message))
-    return _maybe_stream(payload, summary or "No pude resolver eso con finanzas.")
-
-
-# El dueno habla con el CEO y el CEO deriva a Finance (TASK-2026-00032).
-first_layer_gateway.set_finance_handler(_run_finance_voice)
+# La voz nombra la skill exacta; el catalogo la valida (TASK-2026-00221).
+first_layer_gateway.set_finance_handler(_run_finance_skill)
 _PM_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 
@@ -2258,9 +2205,6 @@ async def chat_completions(payload: ChatCompletionRequest):
             dispatch_message = _strip_agent_prefix(message)
             if agent_hint == AgentName.PM:
                 return await _handle_openceo_pm_direct(payload, user_id, dispatch_message)
-            if agent_hint == AgentName.FINANCE and _is_finance_text(dispatch_message):
-                # Flujo determinista de finanzas: se resuelve directo, sin ticket.
-                return await _handle_finance_direct(payload, dispatch_message)
             task_payload = TaskCreateRequest(
                 project=payload.project or settings.DEFAULT_PROJECT,
                 source=TaskSource.API,
@@ -3068,12 +3012,6 @@ async def _handle_openceo_ceo_model(
     if selected == AgentName.PM:
         return await _handle_openceo_pm_direct(payload, user_id, _strip_agent_prefix(message))
 
-    if selected == AgentName.FINANCE and _is_finance_text(message):
-        # Finanzas por voz/chat: el CEO deriva a Finance y el flujo se resuelve
-        # directo en ERPNext, sin ticket por cada movimiento (TASK-2026-00032,
-        # TASK-2026-00044, TASK-2026-00053, TASK-2026-00054).
-        return await _handle_finance_direct(payload, message)
-
     task_payload = TaskCreateRequest(
         project=project,
         source=TaskSource.API,
@@ -3142,32 +3080,6 @@ async def _direct_agent_session(
             if detail:
                 return _maybe_stream(payload, detail)
         return _maybe_stream(payload, "Secretaría ejecutó la solicitud, pero no devolvió detalle.")
-
-    if agent == "finance":
-        try:
-            project = await project_service.resolve_project(user_id=user_id, explicit_project=payload.project)
-        except ValueError:
-            project = settings.DEFAULT_PROJECT
-
-        task = {
-            "task_id": f"finance-direct-{uuid4().hex}",
-            "project": project,
-            "title": message.splitlines()[0][:120] if message else "Finance task",
-            "description": message,
-            "attachments": [],
-            "priority": TaskPriority.MEDIUM.value,
-        }
-        result = await finance_step_manager.run(task, config_loader.load_project(project))
-        if result.last_response_summary:
-            return _maybe_stream(payload, result.last_response_summary)
-        if result.error:
-            return _maybe_stream(payload, result.error)
-        if result.steps:
-            last_step = result.steps[-1]
-            detail = str(last_step.get("detail") or "").strip()
-            if detail:
-                return _maybe_stream(payload, detail)
-        return _maybe_stream(payload, "Finanzas ejecutó la solicitud, pero no devolvió detalle.")
 
     if agent != "dev":
         # Future agents: marketing, sales, media, etc.

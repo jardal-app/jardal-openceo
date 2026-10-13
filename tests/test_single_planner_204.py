@@ -942,11 +942,14 @@ class RouterRetirementTests(unittest.TestCase):
 
 
 class GraphFailClosedTests(unittest.IsolatedAsyncioTestCase):
+    # TASK-2026-00221 retired the finance node: the question-wait merge
+    # now travels the generic exact path (params preserved, owner
+    # question id added by the engine; see test_finance_agent_221.py).
     def _graph(self):
         from graph import OpenCEOGraph  # noqa: E402
         loader = MagicMock()
         loader.load_project.return_value = {}
-        return OpenCEOGraph(MagicMock(), loader, None, None)
+        return OpenCEOGraph(MagicMock(), loader, None)
 
     async def test_execute_undecided_loose_waits(self) -> None:
         graph = self._graph()
@@ -961,24 +964,18 @@ class GraphFailClosedTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("routing_missing", out["waiting_reason"])
         self.assertIn("unknown", out["waiting_reason"])
 
-    async def test_question_wait_merges_over_decision_params(self) -> None:
+    async def test_decided_finance_without_wiring_waits(self) -> None:
         from graph import OpenCEOGraph  # noqa: E402
-        waiting = SimpleNamespace(
-            status=TaskStatus.WAITING, waiting_reason="owner_lock",
-            owner_question_id="q-1", steps=[], last_response_summary=None,
-            error=None)
-        session = MagicMock()
-        session.run = AsyncMock(return_value=waiting)
         loader = MagicMock()
         loader.load_project.return_value = {}
-        graph = OpenCEOGraph(MagicMock(), loader, None, session)
-        out = await graph._finance_node({
+        graph = OpenCEOGraph(MagicMock(), loader, None)
+        out = await graph._generic_node({
             "task_id": "task-pedido-1", "title": "t", "description": "d",
+            "selected_agent": "finance",
             "params": {"target_agent": "finance",
                        "decided_by": "planner"}})
-        self.assertEqual(out["params"]["owner_question_id"], "q-1")
-        self.assertEqual(out["params"]["target_agent"], "finance")
-        self.assertEqual(out["params"]["decided_by"], "planner")
+        self.assertEqual(out["status"], TaskStatus.WAITING.value)
+        self.assertIn("config:", out["waiting_reason"])
 
 
 class ExplicitDevDefaultTests(unittest.IsolatedAsyncioTestCase):
