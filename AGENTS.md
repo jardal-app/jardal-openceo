@@ -49,9 +49,9 @@ scripts/openceo-core-host.sh restart|status
 
 - Work on the checked-out branch; NEVER commit, push, rebase, stash, or
   change branches. Only the orchestrator commits (squash) and merges.
-- Orchestrator files live in `.tier-s/` (PLAN, FINDINGS, FIX, HANDOFF,
+- Orchestrator files live in `.openceo/` (PLAN, FINDINGS, FIX, HANDOFF,
   status; objectives engine: `objectives/<id>/`, `PLANNER_RESULT.json`,
-  `OBJECTIVE_CLOSURE.md`). `.tier-s/` is the orchestrator-wide scratch
+  `OBJECTIVE_CLOSURE.md`). `.openceo/` is the orchestrator-wide scratch
   (TASK-2026-00136). Read them; write only the artifact your prompt names.
 - Gates are run by the orchestrator; report failures with file + line.
 - Reviewers: read-only worktrees, reports on stdout in §16.4 format (specified in the review request).

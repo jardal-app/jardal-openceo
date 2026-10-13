@@ -179,7 +179,7 @@ class ParseReport162Tests(unittest.TestCase):
 class PilotReport162Tests(unittest.TestCase):
     """The pilot failure mode, replayed on a synthetic repo (0 tokens).
 
-    Shape of the real ``.tier-s/REVIEW-qwen-glm-*.md`` pilot reports (prose
+    Shape of the real ``.openceo/REVIEW-qwen-glm-*.md`` pilot reports (prose
     preamble, §16.4 findings, ``REVIEW_DONE_*`` trailer), with anchors and
     quotes adapted to the scratch repo so ``verify_report`` runs for real.
     """
@@ -458,7 +458,7 @@ class _QuorumExecutor:
                   timeout_s: int) -> ExecResult:
         del timeout_s
         self.calls.append(role)
-        tier_dir = Path(workdir) / ".tier-s"
+        tier_dir = Path(workdir) / ".openceo"
         tier_dir.mkdir(exist_ok=True)
         if role == "planner" and "PLAN_RESPONSE.md is incomplete" not in prompt and "Answer each plan observation" not in prompt and "Your PLAN.md is invalid" not in prompt:
             (tier_dir / "PLAN.md").write_text(PLAN_MD, encoding="utf-8")
@@ -958,7 +958,7 @@ class FinalReview162Tests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("changed line is bare",
                       findings_file.read_text(encoding="utf-8"))
         self.assertIsNone(stored.get("last_final_review_sha"))
-        self.assertIn(".tier-s/objectives/OBJ-1/OBJECTIVE_FINDINGS.md",
+        self.assertIn(".openceo/objectives/OBJ-1/OBJECTIVE_FINDINGS.md",
                       fake.prompts["closer"])
         self.assertTrue(stale_root.exists())
         self.assertFalse(stale_own.exists())

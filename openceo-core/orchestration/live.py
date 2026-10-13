@@ -3,7 +3,7 @@
 :class:`ProcessExecutor` runs every engine role as a one-shot OS process:
 role and pool commands come from the global config (``command`` +
 ``headless_args``), the prompt travels per ``prompt_via``, and the report or
-signal is read back from stdout / ``.tier-s/status``. No tmux, no lingering
+signal is read back from stdout / ``.openceo/status``. No tmux, no lingering
 sessions: each call starts and reaps exactly one process.
 
 :class:`RateMonitorQuota` adapts the service :class:`RateMonitor` to the
@@ -59,7 +59,7 @@ class ExecResult:
 
     returncode: int
     elapsed_s: float
-    signal: str | None = None  # last signal read from .tier-s/status
+    signal: str | None = None  # last signal read from .openceo/status
     usage: dict[str, Any] | None = None
     output_tail: str = ""
     model: str = ""
@@ -328,9 +328,9 @@ class ProcessExecutor:
 
     @staticmethod
     def _read_signal(workdir: Path, stdout_text: str) -> str | None:
-        """Last ``.tier-s/status`` line, else a trailing ``REVIEW_DONE_*``."""
+        """Last ``.openceo/status`` line, else a trailing ``REVIEW_DONE_*``."""
         try:
-            status = (workdir / ".tier-s" / "status").read_text(
+            status = (workdir / ".openceo" / "status").read_text(
                 encoding="utf-8", errors="replace")
             lines = [line.strip() for line in status.splitlines()
                      if line.strip()]

@@ -734,7 +734,7 @@ async def convert_ticket(
 
 #: Planner/closer result file names (TASK-2026-00176). Each lives under
 #: the objective's own scratch dir
-#: (``.tier-s/objectives/<id>/<name>``), never under the scratch root:
+#: (``.openceo/objectives/<id>/<name>``), never under the scratch root:
 #: concurrent cycles of one repo must not share an output file. The
 #: legacy global files are neither written nor read anymore.
 PLANNER_RESULT_FILE = "PLANNER_RESULT.json"
@@ -749,16 +749,16 @@ CLOSURE_FILE = "OBJECTIVE_CLOSURE.md"
 #: ``OBJECTIVE_CLOSURE.md`` under this same root. Deliberately a local
 #: constant, not imported from ``tier_s``: the root is shared, the engines
 #: are not (decoupling: TASK-2026-00141).
-SCRATCH_DIRNAME = ".tier-s"
+SCRATCH_DIRNAME = ".openceo"
 
 
 def scratch_root(repo: Path) -> Path:
-    """Canonical objectives scratch root: ``repo/.tier-s`` (see above)."""
+    """Canonical objectives scratch root: ``repo/.openceo`` (see above)."""
     return repo / SCRATCH_DIRNAME
 
 
 def objective_scratch(repo: Path, objective_id: str) -> Path:
-    """Per-objective scratch dir: ``repo/.tier-s/objectives/<id>``."""
+    """Per-objective scratch dir: ``repo/.openceo/objectives/<id>``."""
     return scratch_root(repo) / "objectives" / objective_id
 
 
@@ -1663,7 +1663,7 @@ async def _plan_objective_inner(
 
 
 def pedido_scratch(repo: Path, task_id: str) -> Path:
-    """Per-pedido scratch dir: ``repo/.tier-s/loose/<task_id>``."""
+    """Per-pedido scratch dir: ``repo/.openceo/loose/<task_id>``."""
     return scratch_root(repo) / "loose" / task_id
 
 

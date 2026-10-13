@@ -965,7 +965,7 @@ def fenced_skill_tests(*, skill_rel: str, worktree: str | Path,
     except subprocess.TimeoutExpired:
         return False, "skill tests timed out"
     finally:
-        shutil.rmtree(root / ".tier-s", ignore_errors=True)
+        shutil.rmtree(root / ".openceo", ignore_errors=True)
     if proc.returncode != 0:
         detail = (proc.stdout or "").strip()
         tail = detail[-800:] if detail else "tests failed"

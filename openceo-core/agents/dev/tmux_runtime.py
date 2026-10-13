@@ -1255,7 +1255,7 @@ class TmuxRuntime:
         """Check pane content for Tier-S signal patterns (P1 TUI fallback).
 
         When an AI agent prints the completion signal to the TUI but does NOT
-        write it to the .tier-s/status file, this fallback detects the signal
+        write it to the .openceo/status file, this fallback detects the signal
         in the captured pane content so the orchestrator can continue.
         """
         if not patterns or not content.strip():

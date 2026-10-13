@@ -16,7 +16,7 @@ LONG_PROMPT = (
     "Read CLAUDE.md and AGENTS.md in the repo root and follow all applicable\n"
     "rules before doing anything else.\n"
     "\n"
-    "Implement ONLY sub-plan 1 from .tier-s/CURRENT_PLAN.md."
+    "Implement ONLY sub-plan 1 from .openceo/CURRENT_PLAN.md."
 )
 
 
@@ -37,7 +37,7 @@ class NeedsExtraEnterTests(unittest.TestCase):
             "❯ Read CLAUDE.md and AGENTS.md in the repo root and follow all applicab\n"
             "le\n"
             "  rules before doing anything else.\n"
-            "  Implement ONLY sub-plan 1 from .tier-s/CURRENT_PLAN.md.\n"
+            "  Implement ONLY sub-plan 1 from .openceo/CURRENT_PLAN.md.\n"
             "  muse-spark-1.3-contributor · max · YOLO"
         )
         self.assertTrue(TmuxRuntime._needs_extra_enter(content, LONG_PROMPT))

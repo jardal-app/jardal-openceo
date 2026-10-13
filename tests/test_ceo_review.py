@@ -147,7 +147,7 @@ class _RecordedCEO:
         self.prompts.append(prompt)
         payload = self._payloads[min(self.runs, len(self._payloads) - 1)]
         self.runs += 1
-        target = self._repo / ".tier-s" / "CEO_DECISION.json"
+        target = self._repo / ".openceo" / "CEO_DECISION.json"
         target.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(payload, str):
             target.write_text(payload, encoding="utf-8")

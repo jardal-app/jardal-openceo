@@ -677,7 +677,7 @@ def muse_fix_prompt(
         "especially solid reason to discard. Real but out-of-scope problems: "
         "`DESCARTADO — fuera de alcance` (the orchestrator routes them to "
         "the inbox). Do not rewrite uninvolved code.\n"
-        f"Then emit FIX_DONE_{round_no} in .tier-s/status."
+        f"Then emit FIX_DONE_{round_no} in .openceo/status."
     )
     return with_preamble(body, repo, "en")
 
@@ -758,7 +758,7 @@ def arbiter_prompt(
         f"Code:\n{quote[:2000]}\n"
         f"muse discarded it: {muse_reason[:1000]}\n"
         "Reply exactly one line: `REAL — <why>` or `FALSO — <verifiable "
-        "technical reason>`. Then emit ARBITRATED in .tier-s/status."
+        "technical reason>`. Then emit ARBITRATED in .openceo/status."
     )
     return with_preamble(body, repo, "en")
 

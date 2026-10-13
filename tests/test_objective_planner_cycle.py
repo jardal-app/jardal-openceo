@@ -474,11 +474,11 @@ class PlannerCycleTests(unittest.IsolatedAsyncioTestCase):
             "objective_status": "active", "state_summary": "old cycle",
             "tickets": [_dev_ticket("old", "Stale child")],
         }
-        target = (repo / ".tier-s" / "objectives" / "OBJ-1"
+        target = (repo / ".openceo" / "objectives" / "OBJ-1"
                   / "PLANNER_RESULT.json")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(stale), encoding="utf-8")
-        legacy = repo / ".tier-s" / "PLANNER_RESULT.json"
+        legacy = repo / ".openceo" / "PLANNER_RESULT.json"
         legacy.write_text(json.dumps(stale), encoding="utf-8")
         env, _planner, created, _patches = _planner_env(self, repo, [stale])
 

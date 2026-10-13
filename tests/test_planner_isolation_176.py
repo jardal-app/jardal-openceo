@@ -3,7 +3,7 @@
 Contract fixed here:
 
 - Exclusive per-objective output: the planner/closer prompt names
-  ``.tier-s/objectives/<id>/PLANNER_RESULT.json`` (resp.
+  ``.openceo/objectives/<id>/PLANNER_RESULT.json`` (resp.
   ``OBJECTIVE_CLOSURE.md``); each run reads only its objective's file,
   so concurrent cycles of one repo can neither feed each other nor eat
   each other's output. The legacy global files are never read.
@@ -347,12 +347,12 @@ class PlannerIsolationTests(unittest.IsolatedAsyncioTestCase):
         prompt = _planner_prompt(
             {"objective_id": "OBJ-9", "anchor": {"goal": "g"}},
             "", [], "INBOX\n(none)\n", [], repo=repo)
-        self.assertIn(".tier-s/objectives/OBJ-9/PLANNER_RESULT.json", prompt)
+        self.assertIn(".openceo/objectives/OBJ-9/PLANNER_RESULT.json", prompt)
         judge = _closure_judge_prompt(
             1, "goal", "capsule", repo,
-            findings_path=".tier-s/objectives/OBJ-9/OBJECTIVE_FINDINGS.md",
-            result_path=".tier-s/objectives/OBJ-9/OBJECTIVE_CLOSURE.md")
-        self.assertIn(".tier-s/objectives/OBJ-9/OBJECTIVE_CLOSURE.md", judge)
+            findings_path=".openceo/objectives/OBJ-9/OBJECTIVE_FINDINGS.md",
+            result_path=".openceo/objectives/OBJ-9/OBJECTIVE_CLOSURE.md")
+        self.assertIn(".openceo/objectives/OBJ-9/OBJECTIVE_CLOSURE.md", judge)
 
 
 def _finding(item_id: int) -> SimpleNamespace:

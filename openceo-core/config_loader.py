@@ -577,7 +577,7 @@ class ConfigLoader:
                 "policy_path": None,
                 # One-shot role spec (live executor shape): a fresh muse
                 # process per planning cycle, prompt via argv, result read
-                # back from .tier-s/objectives/<id>/PLANNER_RESULT.json
+                # back from .openceo/objectives/<id>/PLANNER_RESULT.json
                 # (per-objective exclusive output, TASK-2026-00176).
                 # musej (full access): the planner writes the result
                 # file, it is not an isolated reviewer.

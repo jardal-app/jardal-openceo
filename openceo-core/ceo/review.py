@@ -707,7 +707,7 @@ def _ceo_prompt(
             "escalations. Propose work that survives it.",
         ]),
         "\n".join([
-            f"OUTPUT: write {CEO_DECISION_FILE} under {repo_root}/.tier-s/ "
+            f"OUTPUT: write {CEO_DECISION_FILE} under {repo_root}/.openceo/ "
             "with exactly this JSON (no other file, no other text):",
             '{"action": "<one of the five>", "summary": "<one line>", '
             '"pedido": {"project": "...", "title": "...", '
@@ -736,7 +736,7 @@ def _ceo_retry_prompt(errors: Sequence[str], repo_root: Path) -> str:
     return (
         f"Your {CEO_DECISION_FILE} is invalid: {'; '.join(errors)}\n"
         "Fix exactly that (same five actions, same rules) and rewrite "
-        f"the file under {repo_root}/.tier-s/. No other text."
+        f"the file under {repo_root}/.openceo/. No other text."
     )
 
 
@@ -1160,7 +1160,7 @@ async def run_review(
         review_id=review_id, repo_root=env.repo_root,
         ops_project=str(env.ops_project or ""),
     )
-    scratch = env.repo_root / ".tier-s"
+    scratch = env.repo_root / ".openceo"
     scratch.mkdir(parents=True, exist_ok=True)
     target = scratch / CEO_DECISION_FILE
     timeout_s = int((env.ceo_cfg or {}).get("timeout_minutes", 15)) * 60

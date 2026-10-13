@@ -561,7 +561,7 @@ class DevSessionManager:
             if len(fields) < 3 or not fields[2]:
                 continue
             path = fields[2]
-            if path == ".tier-s" or path.startswith(".tier-s/"):
+            if path == ".openceo" or path.startswith(".openceo/"):
                 continue
             try:
                 added = int(fields[0]) if fields[0] != "-" else 0
@@ -586,7 +586,7 @@ class DevSessionManager:
             branch.repo, "ls-files", "--others", "--exclude-standard", "-z")
         names.extend(part for part in untracked.stdout.split("\0") if part)
         return sorted({name for name in names
-                       if name != ".tier-s" and not name.startswith(".tier-s/")})
+                       if name != ".openceo" and not name.startswith(".openceo/")})
 
     async def _oracle_integrity(
         self,
@@ -772,7 +772,7 @@ class DevSessionManager:
                 prior_steps=output.steps, params_base=output.params,
                 cost_runs=output.cost_runs)
 
-        handoff_path = repo / ".tier-s" / "HANDOFF.md"
+        handoff_path = repo / ".openceo" / "HANDOFF.md"
         handoff = ""
         try:
             handoff = handoff_path.read_text(encoding="utf-8", errors="replace")
@@ -781,7 +781,7 @@ class DevSessionManager:
         if not handoff or len(handoff.split()) > 600:
             followup = await self._simple_followup(
                 tool, project_config, repo,
-                "Write .tier-s/HANDOFF.md (executor sections ≤300 words). "
+                "Write .openceo/HANDOFF.md (executor sections ≤300 words). "
                 "Do not touch code.",
                 task_id=str(task.get("task_id") or ""),
                 project=str(task.get("project") or ""),
@@ -800,7 +800,7 @@ class DevSessionManager:
                 return output
 
         # Squash + merge (§12): only the orchestrator commits.
-        self._simple_git(repo, "add", "-A", "--", ".", ":!.tier-s")
+        self._simple_git(repo, "add", "-A", "--", ".", ":!.openceo")
         identity: list[str] = []
         name = self._simple_git(repo, "config", "user.name").stdout.strip()
         email = self._simple_git(repo, "config", "user.email").stdout.strip()
@@ -1922,7 +1922,7 @@ class DevSessionManager:
                 "",
                 "REGLAS DE EJECUCIÓN (Tier S v2, F5)",
                 "Do NOT commit, push, rebase, stash, or change branches: leave your work uncommitted; the orchestrator integrates it.",
-                "Write .tier-s/HANDOFF.md (§16.6: HANDOFF <ref>, Contracts introduced/changed, Behavior implemented, Deviations from plan, Discovered work, Gotchas; executor sections ≤300 words).",
+                "Write .openceo/HANDOFF.md (§16.6: HANDOFF <ref>, Contracts introduced/changed, Behavior implemented, Deviations from plan, Discovered work, Gotchas; executor sections ≤300 words).",
                 "",
                 "FORMATO FINAL OBLIGATORIO",
                 "Al final de tu respuesta incluye exactamente un bloque REVIEW_LINKS con los links directos para QA/cliente de las vistas afectadas.",

@@ -209,7 +209,7 @@ def _gitignore() -> str:
         "build/\n"
         "\n"
         "# Agents\n"
-        ".tier-s/\n"
+        ".openceo/\n"
         ".runtime/\n"
     )
 

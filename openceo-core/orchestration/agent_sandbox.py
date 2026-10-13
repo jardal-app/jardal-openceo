@@ -90,7 +90,7 @@ _WALK_PRUNE_DIRS = frozenset({
 })
 _ENV_DOC_MARKERS = ("example", "sample", "template", "dist")
 
-_SCRATCH_DIRNAME = ".tier-s"
+_SCRATCH_DIRNAME = ".openceo"
 _SCRATCH_SUBDIR = "sandbox"
 _TICKET_WORK_BASE = "agent-work"
 

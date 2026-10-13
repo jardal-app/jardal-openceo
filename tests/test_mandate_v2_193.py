@@ -339,7 +339,7 @@ class _RecordedCEO:
         del workdir, timeout_s
         assert role == "ceo_reviewer", role
         self.prompts.append(prompt)
-        target = self._repo / ".tier-s" / "CEO_DECISION.json"
+        target = self._repo / ".openceo" / "CEO_DECISION.json"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(self._payload), encoding="utf-8")
         return SimpleNamespace(returncode=0, output_tail="CEO_READY")
