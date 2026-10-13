@@ -131,15 +131,27 @@ def _note_title(content: str) -> str:
     return "Nota migrada"
 
 
+def _file_holds_note(path: Path, note_id: str) -> bool:
+    """True when an existing vault file is this very note's migration."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as stream:
+            head = stream.read(2048)
+    except OSError:
+        return False
+    return f"migrated_from: notes/{note_id}" in head
+
+
 def write_company_note(vault_root: Path | str, mapping: str, slug: str, *,
                        project: str, date: str, tags: list[str],
                        note_id: str, content: str) -> str:
     """Write one migrated company note; never overwrite, never follow links.
 
     Returns the vault-relative path. Raises :class:`NoteDuplicateError`
-    when the file already exists and :class:`NoteMigrationError` (or its
-    ``NoteRefusedError`` with ``reason``) when the destination or the
-    content is unacceptable.
+    when the destination already holds this note (marker-verified) and
+    :class:`NoteMigrationError` (or its ``NoteRefusedError`` with
+    ``reason``) when the destination or the content is unacceptable — a
+    file of a *different* note under the same slug is a ``slug_collision``
+    refusal, never a duplicate (review 00015).
     """
     if not re.fullmatch(_SLUG_PATTERN, slug):
         raise NoteMigrationError(f"invalid_note_slug: {slug!r}")
@@ -157,7 +169,9 @@ def write_company_note(vault_root: Path | str, mapping: str, slug: str, *,
         raise NoteMigrationError("destination_outside_vault")
     target = resolved / f"{slug}.md"
     if target.is_symlink() or target.exists():
-        raise NoteDuplicateError(str(target))
+        if _file_holds_note(target, note_id):
+            raise NoteDuplicateError(str(target))
+        raise NoteRefusedError("slug_collision")
     tags_line = "[" + ", ".join(f'"{tag}"' for tag in tags) + "]"
     body = (
         "---\n"
@@ -179,7 +193,9 @@ def write_company_note(vault_root: Path | str, mapping: str, slug: str, *,
     try:
         fd = os.open(target, flags, 0o666)
     except FileExistsError:
-        raise NoteDuplicateError(str(target)) from None
+        if _file_holds_note(target, note_id):
+            raise NoteDuplicateError(str(target)) from None
+        raise NoteRefusedError("slug_collision") from None
     except OSError as exc:
         raise NoteMigrationError(f"destination_unavailable: {exc}") from None
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
@@ -217,6 +233,8 @@ async def migrate_notes(notes: Any, *, horizon: Any, tickets: Any,
     if channel is None:
         from horizon.models import CaptureChannel
         channel = CaptureChannel.IMPORT
+    from horizon.service import _MAX_TEXT_CHARS as horizon_text_limit
+
     result: dict[str, Any] = {
         "total": 0, "personal": 0, "company_vault": 0,
         "company_ticket": 0, "duplicates": 0,
@@ -242,6 +260,14 @@ async def migrate_notes(notes: Any, *, horizon: Any, tickets: Any,
             result["refused"].append({"note_id": note_id,
                                       "reason": "secrets_suspect",
                                       "target": sink})
+            continue
+        # Horizon capture truncates at its text limit: a longer personal
+        # note refuses (kept) instead of migrating without its tail.
+        if (target == "personal"
+                and len(content.strip()) > horizon_text_limit):
+            result["refused"].append({"note_id": note_id,
+                                      "reason": "overlong",
+                                      "target": "personal"})
             continue
         ticket = ticket_tag_target(note) if target == "company" else None
         if dry_run:
@@ -373,14 +399,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = get_settings()
         repo = MongoRepository(settings)
         await repo.connect()
+        tickets = ERPNextTicketAdapter(settings)
         try:
             horizon = HorizonService(settings, repo)
-            tickets = ERPNextTicketAdapter(settings)
             return await migrate_notes(
                 repo.db[NOTES_COLLECTION], horizon=horizon,
                 tickets=tickets, vault_root=settings.VAULT_ROOT,
                 mappings=mappings, dry_run=not args.apply)
         finally:
+            await tickets.aclose()
             await repo.close()
 
     result = asyncio.run(_run())

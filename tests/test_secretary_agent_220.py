@@ -554,6 +554,54 @@ class NotesMigrationTest(unittest.TestCase):
             self.assertEqual(before, target.read_text(encoding="utf-8"))
             self.assertEqual({}, notes2.docs)
 
+    def test_vault_slug_collision_refuses_and_keeps(self) -> None:
+        # Review 00015/mimo-1: same slug prefix, different note: a
+        # collision is not a proven duplicate; the note must stay.
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = Path(tmp)
+            mappings = {"demo": "projects/jardal/demo"}
+            first_id = "0123456789abXX-aaaa"
+            second_id = "0123456789abYY-bbbb"
+            first, _h, _t, _n = self._run(
+                [_note(first_id, "first note text", project="demo")],
+                vault, mappings=mappings)
+            self.assertEqual(1, first["company_vault"])
+            result, _h2, _t2, notes2 = self._run(
+                [_note(second_id, "second note text", project="demo")],
+                vault, mappings=mappings)
+            self.assertEqual(
+                [{"note_id": second_id, "reason": "slug_collision",
+                  "target": "vault"}],
+                result["refused"])
+            self.assertEqual(0, result["duplicates"])
+            self.assertIn(second_id, notes2.docs)
+            target = (vault / "projects" / "jardal" / "demo"
+                      / "nota-0123456789ab.md")
+            self.assertIn("first note text",
+                          target.read_text(encoding="utf-8"))
+
+    def test_overlong_personal_note_refuses_and_keeps(self) -> None:
+        # Review 00015/mimo-2: Horizon capture truncates at its text
+        # limit; a longer note must refuse instead of losing its tail.
+        with tempfile.TemporaryDirectory() as tmp:
+            result, horizon, _t, notes = self._run(
+                [_note("n9", "x" * 2001)], Path(tmp))
+        self.assertEqual(
+            [{"note_id": "n9", "reason": "overlong",
+              "target": "personal"}],
+            result["refused"])
+        self.assertEqual(0, result["personal"])
+        self.assertEqual([], horizon.calls)
+        self.assertIn("n9", notes.docs)
+
+    def test_personal_note_at_sink_limit_migrates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, horizon, _t, notes = self._run(
+                [_note("n10", "x" * 2000)], Path(tmp))
+        self.assertEqual(1, result["personal"])
+        self.assertEqual(1, len(horizon.calls))
+        self.assertEqual({}, notes.docs)
+
     def test_company_note_with_ticket_tag_goes_to_the_ticket(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result, _h, tickets, notes = self._run(
@@ -717,6 +765,23 @@ class VaultWriterTest(unittest.TestCase):
             with self.assertRaises(NoteDuplicateError):
                 write_company_note(vault, "projects/jardal/demo",
                                    "nota-dup01abc", **kwargs)
+
+    def test_existing_file_of_another_note_is_a_collision(self) -> None:
+        from orchestration.notes_migration import NoteRefusedError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = Path(tmp)
+            write_company_note(vault, "projects/jardal/demo", "nota-same",
+                               project="demo", date="2026-10-13",
+                               tags=[], note_id="first-note",
+                               content="first")
+            with self.assertRaises(NoteRefusedError) as ctx:
+                write_company_note(vault, "projects/jardal/demo",
+                                   "nota-same", project="demo",
+                                   date="2026-10-13", tags=[],
+                                   note_id="second-note",
+                                   content="second")
+            self.assertEqual("slug_collision", ctx.exception.reason)
 
 
 if __name__ == "__main__":
