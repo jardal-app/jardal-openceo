@@ -192,6 +192,7 @@ class _ScriptedObjectiveExecutor:
         self._repo = repo
         self._planner_status = planner_status
         self.calls: list[str] = []
+        self.targets: list[str] = []
 
     async def run(self, role: str, prompt: str, workdir: Path,
                   timeout_s: int) -> ExecResult:
@@ -205,6 +206,7 @@ class _ScriptedObjectiveExecutor:
                         " with exactly")[0]
                     target = self._repo / rel.strip()
             assert target is not None, "planner prompt names no target"
+            self.targets.append(target.name)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(json.dumps({
                 "objective_status": self._planner_status,
@@ -329,9 +331,13 @@ class FunnelCloseWakesObjectiveTests(unittest.IsolatedAsyncioTestCase):
 
         assert result is not None
         self.assertEqual(result["status"], "completed")
-        # The planner ran once and declared complete_candidate; the
-        # final review ran clean over the integration ref.
-        self.assertEqual(scripted.calls.count("objective_planner"), 1)
+        # The planner declared complete_candidate, the final review ran
+        # clean over the integration ref, and the close proposed a
+        # playbook (TASK-2026-00217): plan first, proposal second.
+        self.assertEqual(scripted.calls.count("objective_planner"), 2)
+        self.assertEqual(scripted.targets,
+                         ["PLANNER_RESULT.json",
+                          "PLAYBOOK_PROPOSAL.json"])
         self.assertTrue(any(call.startswith("review:")
                             for call in scripted.calls))
         objective = await store.get_objective("OBJ-169A")
@@ -386,11 +392,13 @@ class FunnelCloseWakesObjectiveTests(unittest.IsolatedAsyncioTestCase):
             objective = await store.get_objective("OBJ-169C")
             assert objective is not None
             self.assertEqual(objective["status"], "closed")
+            # Plan plus the close-time playbook proposal (00217).
+            self.assertEqual(scripted.calls.count("objective_planner"), 2)
             # A force relaunch of the completed child notifies again,
-            # but a closed objective does not plan twice.
+            # but a closed objective neither replans nor re-proposes.
             await service.run_task("kid-1", force=True)
 
-        self.assertEqual(scripted.calls.count("objective_planner"), 1)
+        self.assertEqual(scripted.calls.count("objective_planner"), 2)
         objective = await store.get_objective("OBJ-169C")
         assert objective is not None
         self.assertEqual(objective["status"], "closed")

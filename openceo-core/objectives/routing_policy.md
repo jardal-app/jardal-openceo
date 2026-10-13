@@ -485,6 +485,8 @@ The optional `costs` field declares new spend: per ticket, or result-level for s
 
 There is no `planner_confidence`, `dev_mode`, `execution_runtime`, account, or model field.
 
+Playbooks (TASK-2026-00217) are approved multi-agent recipes the prompt lists with their trigger and stages. Follow one by default when it fits the objective: name it in `playbook`, mirror its order, agents and skills, and explain every deviation in `playbook_deviations` (a plan that ignores a fitting playbook without a reason is a bad plan). When the recipe itself should change, propose exactly one `proposed_playbook_update` per cycle; the Owner approves through the human channel and approval versions the playbook in git.
+
 ## 17. Deterministic validation before persistence
 
 OpenCEO must validate at least:
@@ -507,6 +509,7 @@ same-tier replan prohibition after material failure
 proposed_tools names unique (at most 2, Pydantic shape)
 costs declaration shape (label, decimal-string or int amount, null when unknown)
 suggested skill names a real skill of the target_agent (active or draft)
+playbook and proposed_playbook_update.playbook name approved playbooks
 ```
 
 Invalid output must not become durable tickets.

@@ -8,8 +8,9 @@ Owner's answer resumes the origin ticket from its checkpoint.
 Kinds (epic rumbo point 10): ``question`` (only the Owner can answer
 from their own data, including Tier S questions), ``lock`` (a boundary
 tool checkpoint, producers in TASK-2026-00208), ``new_tool`` (a missing
-boundary tool the planner proposes), ``playbook`` (reserved: proposed
-on objective close, TASK-2026-00217). Technical needs never become
+boundary tool the planner proposes), ``playbook`` (proposed on
+objective close or Owner request, TASK-2026-00217). Technical needs
+never become
 questions: they return to the planner as agent verdicts.
 """
 
@@ -67,6 +68,7 @@ def build_owner_question(
     checkpoint: Mapping[str, Any] | None = None,
     context: str | None = None,
     tool: Mapping[str, Any] | None = None,
+    playbook: Mapping[str, Any] | None = None,
     project: str | None = None,
     source_id: str | None = None,
     priority: str = "high",
@@ -128,6 +130,9 @@ def build_owner_question(
                 else None,
                 "tool": dict(tool)
                 if isinstance(tool, Mapping) and tool
+                else None,
+                "playbook": dict(playbook)
+                if isinstance(playbook, Mapping) and playbook
                 else None,
             }
         },

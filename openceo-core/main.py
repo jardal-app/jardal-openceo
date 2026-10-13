@@ -1096,6 +1096,23 @@ async def create_objective(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@app.post("/api/objectives/{objective_id}/playbook-request")
+async def request_objective_playbook(
+    objective_id: str,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Owner-asked playbook proposal for a closed objective (TASK-2026-00217).
+
+    Proposes through the planner once; a recurrent judgement opens one
+    owner question (kind ``playbook``) with the drafted recipe.
+    """
+    del current_user
+    try:
+        return await task_service.request_playbook(objective_id)
+    except ObjectiveRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/objectives/{objective_id}")
 async def get_objective(
     objective_id: str,

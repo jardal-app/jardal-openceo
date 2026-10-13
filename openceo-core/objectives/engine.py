@@ -49,6 +49,7 @@ from orchestration import review as review_mod
 from orchestration.live import TIMEOUT_RETURNCODE
 from objectives import planner_models as planner_mod
 from objectives import plan_spend as spend_mod
+from objectives import playbooks as playbooks_mod
 from objectives import ticket_cost as cost_mod
 from owner_channel import (
     build_owner_question,
@@ -168,6 +169,10 @@ class ObjectiveEnv:
     # catalog still park as capability_gap.
     delivery_verifiers: dict[str, DeliveryVerifier] = field(
         default_factory=dict)
+    # Playbook proposals on close (TASK-2026-00217): the planner judges
+    # recurrence once the close stands. Off in bare envs (tests opt in),
+    # on in service-built envs.
+    playbook_proposals: bool = False
     # Company mandate for the spend gate (TASK-2026-00207): declared
     # plan spend is checked against it before anything persists or
     # launches. None in bare unit envs and when the file is unreadable;
@@ -697,6 +702,24 @@ def _planner_skills() -> tuple[str, dict[str, list[str]]]:
     return block, suggestable_skills(catalog, by_agent)
 
 
+def _planner_playbooks(
+    repo: Path | str | None = None,
+) -> tuple[str, set[str] | None]:
+    """Playbook index block + approved names for one cycle.
+
+    Fail-open like skills: a load failure skips the playbook check
+    (None), while an empty shelf validates strictly (no approved
+    names to cite).
+    """
+    try:
+        books = playbooks_mod.load_playbooks(repo)
+    except Exception as exc:
+        logger.warning("playbook index unavailable, skipping playbook "
+                       "check this cycle: %s", exc)
+        return "", None
+    return playbooks_mod.playbooks_index_text(books), set(books)
+
+
 def _agents_section(agents: Mapping[str, Any],
                     skills_md: str = "") -> str:
     """Authoritative registry rendered for the planner prompt."""
@@ -735,6 +758,7 @@ def _planner_prompt(
     routing_guide: str = "",
     spend_guide: str = "",
     cost_guide: str = "",
+    playbooks_md: str = "",
 ) -> str:
     """Planner prompt: bounded state + JSON contract (self-contained).
 
@@ -831,11 +855,17 @@ def _planner_prompt(
                       sizing_hint[:3000]])
     if agents_md:
         lines.extend(["", agents_md])
+    if playbooks_md.strip():
+        lines.extend(["", playbooks_md.strip()])
     lines.extend([
         "",
         "ROUTING (summary; the normative policy below rules on conflicts):",
         "- Choose target_agent FIRST, only from enabled registered agents.",
         "- skill is an optional suggestion for any agent; the agent decides.",
+        "- Follow an approved PLAYBOOK by default when one fits; name it",
+        "  in `playbook`, explain deviations in `playbook_deviations`, and",
+        "  propose improvements in `proposed_playbook_update` (the Owner",
+        "  approves through the human channel).",
         "- DEV tiers apply only when target_agent == dev, in this order.",
         "  All four executors are top-tier models; letters order the work,",
         "  never the models. Never describe a tier as cheap or weaker.",
@@ -931,6 +961,10 @@ def _planner_prompt(
         '    "need": "<what the agent needs, in words>",',
         '    "spec?": "<how it should behave>",',
         '    "origin_task_id?": "<blocked ticket, when known>"}],',
+        '  "playbook?": "<approved playbook this plan follows>",',
+        '  "playbook_deviations?": ["<why each step differs>"],',
+        '  "proposed_playbook_update?": {"playbook": "<approved name>",',
+        '    "change": "<what to change>", "reason": "<why>"},',
         '  "roadmap_remaining": ["<one line per foreseen next step: what, '
         'and what it depends on>"]',
         "}",
@@ -1418,6 +1452,7 @@ async def _plan_objective_inner(
                 for entry in (objective.get("tickets_log") or [])[-3:]]
     handoffs = [item for item in reversed(handoffs) if item]
     skills_md, skill_map = _planner_skills()
+    playbooks_md, playbook_names = _planner_playbooks()
     scratch = objective_scratch(env.repo, objective_id)
     scratch.mkdir(parents=True, exist_ok=True)
     (scratch / "OBJECTIVE_CAPSULE.md").write_text(
@@ -1446,7 +1481,8 @@ async def _plan_objective_inner(
         spend_guide=spend_mod.spend_guide_section(env.mandate),
         cost_guide=cost_mod.objective_cost_section(
             cost_mod.aggregate_objective_cost(
-                [item.get("cost") for item in tickets])))
+                [item.get("cost") for item in tickets])),
+        playbooks_md=playbooks_md)
     timeout_s = int(planner_cfg.get("timeout_minutes", 15)) * 60
     errors: list[str] = []
     result: planner_mod.PlannerResult | None = None
@@ -1483,6 +1519,7 @@ async def _plan_objective_inner(
                                        or []),
                     horizon=planner_cfg.get("ticket_horizon"),
                     skills=skill_map,
+                    playbooks=playbook_names,
                 )
                 if not errors:
                     result = candidate
@@ -1774,6 +1811,7 @@ async def _plan_pedido_inner(
                     material_failures=[],
                     horizon=[1, 1],
                     skills=skill_map,
+                    playbooks=_planner_playbooks()[1],
                 )
                 errors.extend(_pedido_extra_errors(candidate))
                 if not errors:
@@ -1798,6 +1836,8 @@ async def _plan_pedido_inner(
                 "detail": f"invalid {PLANNER_RESULT_FILE} after retry: "
                           f"{'; '.join(errors)}"}
     await create_tool_proposal_questions(
+        env, f"loose:{task_id}", project, result)
+    await create_playbook_update_questions(
         env, f"loose:{task_id}", project, result)
     if result.objective_status != planner_mod.ObjectiveStatus.ACTIVE:
         return {"ok": True, "action": "convert",
@@ -1930,6 +1970,8 @@ async def _record_and_apply_plan(
     created = await _create_planned_tickets(
         env, objective, result, return_from, run_tag=run_tag)
     await create_tool_proposal_questions(
+        env, objective_id, str(objective.get("project") or ""), result)
+    await create_playbook_update_questions(
         env, objective_id, str(objective.get("project") or ""), result)
     tele = dict((await env.objectives.get_objective(objective_id) or {}
                  ).get("planner_telemetry") or {})
@@ -2169,6 +2211,7 @@ async def apply_approved_plan(
         material_failures=(objective.get("material_failures") or []),
         horizon=env.planner_cfg.get("ticket_horizon"),
         skills=skill_map,
+        playbooks=_planner_playbooks()[1],
     )
     if errors:
         await env.objectives.patch_objective(
@@ -2385,37 +2428,17 @@ async def _apply_contract_completions(
     return completed
 
 
-async def create_tool_proposal_questions(
-    env: ObjectiveEnv,
-    objective_id: str,
-    project: str,
-    result: planner_mod.PlannerResult,
+async def _park_owner_questions(
+    env: ObjectiveEnv, specs: list[dict[str, Any]],
 ) -> list[str]:
-    """Open one owner question per proposed boundary tool (TASK-2026-00206).
+    """Create owner-question tickets and park them waiting (shared).
 
-    Idempotent per proposal name: a re-proposed tool hits the same
-    ``source_id`` and is skipped when already answered, so a second
-    cycle never resurrects a decided question. Returns the parked
-    question task ids.
+    Idempotent per ``source_id``: a re-proposed item hits the same key
+    and is skipped when already answered, so a second cycle never
+    resurrects a decided question. Returns the parked question ids.
     """
     task_ids: list[str] = []
-    for proposal in result.proposed_tools or []:
-        source_id = tool_proposal_source_id(objective_id, proposal.name)
-        spec = build_owner_question(
-            kind="new_tool",
-            question=f"Crear la tool de frontera {proposal.name}?",
-            human_action="Aprobar la tool nueva o rechazarla",
-            origin_task_id=proposal.origin_task_id,
-            context=f"Necesidad: {proposal.need}"
-            + (f" Especificacion: {proposal.spec}" if proposal.spec else ""),
-            tool={
-                "name": proposal.name,
-                "need": proposal.need,
-                "spec": proposal.spec,
-            },
-            project=project,
-            source_id=source_id,
-        )
+    for spec in specs:
         created = await env.create_ticket({
             "title": spec["title"],
             "description": spec["description"],
@@ -2447,6 +2470,61 @@ async def create_tool_proposal_questions(
         })
         task_ids.append(question_id)
     return task_ids
+
+
+async def create_tool_proposal_questions(
+    env: ObjectiveEnv,
+    objective_id: str,
+    project: str,
+    result: planner_mod.PlannerResult,
+) -> list[str]:
+    """Open one owner question per proposed boundary tool (TASK-2026-00206)."""
+    specs = []
+    for proposal in result.proposed_tools or []:
+        source_id = tool_proposal_source_id(objective_id, proposal.name)
+        specs.append(build_owner_question(
+            kind="new_tool",
+            question=f"Crear la tool de frontera {proposal.name}?",
+            human_action="Aprobar la tool nueva o rechazarla",
+            origin_task_id=proposal.origin_task_id,
+            context=f"Necesidad: {proposal.need}"
+            + (f" Especificacion: {proposal.spec}" if proposal.spec else ""),
+            tool={
+                "name": proposal.name,
+                "need": proposal.need,
+                "spec": proposal.spec,
+            },
+            project=project,
+            source_id=source_id,
+        ))
+    return await _park_owner_questions(env, specs)
+
+
+async def create_playbook_update_questions(
+    env: ObjectiveEnv,
+    objective_id: str,
+    project: str,
+    result: planner_mod.PlannerResult,
+) -> list[str]:
+    """Open one owner question for a proposed playbook change (00217)."""
+    update = result.proposed_playbook_update
+    if update is None:
+        return []
+    spec = build_owner_question(
+        kind="playbook",
+        question=f"Actualizar el playbook {update.playbook}?",
+        human_action="Aprobar el cambio del playbook o rechazarlo",
+        context=f"Cambio: {update.change} Motivo: {update.reason}",
+        playbook={
+            "update": update.playbook,
+            "change": update.change,
+            "reason": update.reason,
+        },
+        project=project,
+        source_id=playbooks_mod.update_source_id(
+            update.playbook, objective_id),
+    )
+    return await _park_owner_questions(env, [spec])
 
 
 async def _create_planned_tickets(
@@ -3520,6 +3598,18 @@ async def _finish_objective(
             if env.notify is not None:
                 await env.notify(
                     ref, f"vault note failed (close stands): {exc}")
+    if getattr(env, "playbook_proposals", False):
+        # Playbook crystallization (TASK-2026-00217): the planner judges
+        # recurrence once the close stands. Never breaks the close.
+        try:
+            _, hook_skills = _planner_skills()
+            await playbooks_mod.propose_playbook(
+                env, objective_id, "close",
+                agents=env.planner_cfg.get("agents", {}) or {},
+                skills=hook_skills)
+        except Exception as exc:
+            logger.warning("playbook proposal failed for %s (close "
+                           "stands): %s", objective_id, exc)
     return {"ok": True, "action": "closed", "objective_id": objective_id}
 
 
