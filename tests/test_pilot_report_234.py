@@ -132,6 +132,45 @@ class FailuresTests(unittest.TestCase):
             self.assertIn(needle, joined)
 
 
+class DurationTests(unittest.TestCase):
+    def test_unknown_duration_never_renders_zero(self) -> None:
+        cost = dict(_UNKNOWN_COST)
+        cost["duration_s"] = 0.0
+        cost["duration_unknown_runs"] = cost["runs"]
+        ticket = _ticket(cost=cost)
+        data = trial_report_data(TrialRecords(
+            ticket_ref="ref", ticket=ticket))
+        row = data["ticket"]["row"]
+        self.assertIn("sin medir", row["duration_text"])
+        report = build_trial_report(TrialRecords(
+            ticket_ref="ref", ticket=ticket))
+        self.assertNotIn("duracion 0.0 s", report)
+        self.assertIn("duracion sin medir", report)
+
+    def test_measured_duration_keeps_seconds(self) -> None:
+        data = trial_report_data(TrialRecords(
+            ticket_ref="ref", ticket=_ticket()))
+        self.assertIn("12.5", data["ticket"]["row"]["duration_text"])
+
+
+class InProgressTests(unittest.TestCase):
+    def test_queued_ticket_is_not_a_failure(self) -> None:
+        ticket = _ticket(status="queued")
+        ticket["params"] = {"target_agent": "operations"}
+        del ticket["cost"]
+        data = trial_report_data(TrialRecords(
+            ticket_ref="ref", ticket=ticket))
+        joined = " ".join(data["ticket"]["failures"])
+        self.assertIn("sin fallos (en curso: queued)", joined)
+
+    def test_hard_failure_stays_a_failure(self) -> None:
+        ticket = _ticket(status="failed")
+        data = trial_report_data(TrialRecords(
+            ticket_ref="ref", ticket=ticket))
+        joined = " ".join(data["ticket"]["failures"])
+        self.assertNotIn("sin fallos", joined)
+
+
 class InterventionsTests(unittest.TestCase):
     def test_pending_and_answered_render(self) -> None:
         answered = _question(block={"decision": {"verdict": "approve",
@@ -239,6 +278,28 @@ class ReaderTests(unittest.TestCase):
         self.assertIn({"task_id": "task-pilot-1"}, db["tasks"].queries)
         self.assertIsNone(records.objective_id)
         self.assertEqual(records.objective_tickets, [])
+
+    def test_denials_cover_task_id_and_skip_surfaces(self) -> None:
+        ticket = _ticket()
+        del ticket["params"]["_mirrors"]
+        db = {
+            "tasks": FakeCollection([ticket]),
+            "mcp_calls": FakeCollection([
+                {"tool": "openceo_send_email", "ok": False,
+                 "reason": "not in the operations box"},
+                {"tool": "tools/list", "ok": False, "reason": "no badge"},
+                {"tool": "tools/call", "ok": False, "reason": "no badge"},
+                {"tool": "openceo_get_ticket", "ok": False,
+                 "reason": "tool error (boom)"},
+                {"tool": "prompts/list", "ok": False, "reason": "surface"},
+            ]),
+        }
+        records = asyncio.run(MongoTrialReader(db).read("task-pilot-1"))
+        self.assertEqual(
+            [call["tool"] for call in records.denied_calls],
+            ["openceo_send_email"])
+        denied = db["mcp_calls"].queries[0]
+        self.assertIn("task-pilot-1", denied["ticket"]["$in"])
 
     def test_queries_target_the_right_fields(self) -> None:
         db = self._db()

@@ -70,6 +70,10 @@ def _tokens_text(cost: Mapping[str, Any] | None) -> str:
     return text
 
 
+_FAILED_STATES = ("failed", "escalated", "interrupted", "cancelled")
+_RUNNING_STATES = ("queued", "in_progress", "waiting", "converted")
+
+
 def _failure_lines(ticket: Mapping[str, Any] | None) -> list[str]:
     if ticket is None:
         return ["ticket no encontrado en ejecucion"]
@@ -77,8 +81,9 @@ def _failure_lines(ticket: Mapping[str, Any] | None) -> list[str]:
     params = params if isinstance(params, dict) else {}
     verdict = params.get("agent_result")
     verdict = verdict if isinstance(verdict, dict) else {}
-    lines = [f"estado: {ticket.get('status')}"]
-    bad = ticket.get("status") not in ("completed", None)
+    status = ticket.get("status")
+    lines = [f"estado: {status}"]
+    bad = status in _FAILED_STATES
     if verdict:
         lines.append(f"veredicto: {verdict.get('resultado')}: "
                      f"{verdict.get('motivo')}")
@@ -88,17 +93,33 @@ def _failure_lines(ticket: Mapping[str, Any] | None) -> list[str]:
         bad = True
     if ticket.get("waiting_reason"):
         lines.append(f"en espera: {ticket.get('waiting_reason')}")
-        bad = True
     if ticket.get("error"):
         lines.append(f"error: {str(ticket.get('error'))[:200]}")
         bad = True
     attempts = params.get("planner_attempts")
     if attempts:
         lines.append(f"intentos del planner: {attempts}")
-        bad = True
     if not bad:
-        lines.append("sin fallos registrados")
+        if status in _RUNNING_STATES:
+            lines.append(f"sin fallos (en curso: {status})")
+        else:
+            lines.append("sin fallos registrados")
     return lines
+
+
+def _duration_text(cost: Mapping[str, Any] | None) -> str:
+    """Measured seconds, unknown as unknown, never a fake 0.0."""
+    if not isinstance(cost, Mapping) or not cost.get("runs"):
+        return "sin medir"
+    runs = int(cost.get("runs") or 0)
+    unknown = int(cost.get("duration_unknown_runs") or 0)
+    seconds = float(cost.get("duration_s") or 0.0)
+    if seconds == 0.0 and unknown >= runs and unknown > 0:
+        return "sin medir"
+    text = f"{seconds:.1f} s"
+    if unknown:
+        text += f" (+{unknown} sin medir)"
+    return text
 
 
 def _question_lines(question: Mapping[str, Any]) -> str:
@@ -130,6 +151,7 @@ def _ticket_row(doc: Mapping[str, Any]) -> dict[str, Any]:
         "runs": (cost or {}).get("runs", 0),
         "tokens": _tokens_text(cost),
         "duration_s": round(float((cost or {}).get("duration_s") or 0.0), 1),
+        "duration_text": _duration_text(cost),
     }
 
 
@@ -186,7 +208,7 @@ def build_trial_report(records: TrialRecords) -> str:
         f"({ticket['row']['ref']}), estado {ticket['status']}",
         f"- costo: runs={ticket['row']['runs']}, "
         f"tokens {ticket['tokens']}, "
-        f"duracion {ticket['row']['duration_s']} s",
+        f"duracion {ticket['row']['duration_text']}",
     ]
     if ticket["engines"]:
         lines.append(f"- motores: {', '.join(ticket['engines'])}")
@@ -276,16 +298,25 @@ class MongoTrialReader:
                 {"params.owner_question.origin_task_id": {"$in": origins}})
             questions = [clean async for row in cursor
                          if (clean := self._clean(row)) is not None]
-        tickets = [mirror, *(((((doc.get("params") or {}).get("_mirrors")
-                                 or {}).get("erpnext") or {}).get("name") or "")
-                              for doc in children)]
-        tickets = [name for name in tickets if name]
+        tickets = [mirror, task_id, *(((((doc.get("params") or {})
+                                          .get("_mirrors") or {})
+                                         .get("erpnext") or {}).get("name")
+                                        or "")
+                                       for doc in children)]
+        tickets = sorted({name for name in tickets if name})
         denied: list[dict[str, Any]] = []
         if tickets:
             cursor = self._db["mcp_calls"].find(
                 {"ticket": {"$in": tickets}, "ok": False})
-            denied = [clean async for row in cursor
-                      if (clean := self._clean(row)) is not None]
+            async for row in cursor:
+                clean = self._clean(row)
+                if clean is None:
+                    continue
+                tool = str(clean.get("tool") or "")
+                reason = str(clean.get("reason") or "")
+                if "/" in tool or reason.startswith("tool error"):
+                    continue
+                denied.append(clean)
         return TrialRecords(
             ticket_ref=ticket_ref, ticket=ticket,
             objective_id=objective_id, objective_tickets=children,
