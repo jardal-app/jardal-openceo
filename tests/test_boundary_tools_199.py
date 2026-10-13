@@ -313,20 +313,6 @@ class PMBatchOwnerOnlyTests(unittest.TestCase):
             "openceo_create_pm_tickets_batch",
             {"project": "other", "source_id": "s", "tickets": "[]"})
 
-    def test_service_may_call_until_00209_sunset(self) -> None:
-        """The SERVICE exception is the retiring PM subprocess path.
-
-        TASK-2026-00209 removes it; that ticket deletes this test and
-        narrows the rule to OWNER alone.
-        """
-        self._grant(TokenKind.SERVICE).check(
-            "openceo_create_pm_tickets_batch",
-            {"project": DEV_PROJECT, "source_id": "s", "tickets": "[]"})
-        with self.assertRaises(McpDenied):
-            self._grant(TokenKind.SERVICE).check(
-                "openceo_create_pm_tickets_batch",
-                {"project": "other", "source_id": "s", "tickets": "[]"})
-
     def test_agent_denied_even_in_box(self) -> None:
         with self.assertRaises(McpDenied):
             self._grant(TokenKind.AGENT).check(

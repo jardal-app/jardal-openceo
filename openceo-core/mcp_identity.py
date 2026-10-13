@@ -141,11 +141,10 @@ class TicketGrant:
     def check(self, tool: str, args: Mapping[str, Any] | None) -> None:
         if tool not in self.tools:
             raise McpDenied(f"Tool {tool} is outside this token's box")
-        # PM batches stay owner-only (TASK-2026-00199, scope 6): the SERVICE
-        # exception below is the retiring PM subprocess path, sunset in
-        # TASK-2026-00209, then this narrows to OWNER alone.
+        # PM batches are owner-only (TASK-2026-00209 narrowed the
+        # 00199 SERVICE exception away with the retiring PM subprocess).
         if (tool == "openceo_create_pm_tickets_batch"
-                and self.kind not in (TokenKind.OWNER, TokenKind.SERVICE)):
+                and self.kind is not TokenKind.OWNER):
             raise McpDenied("Only the Owner token creates PM batches")
         params = dict(args or {})
         if self.kind is TokenKind.OWNER:

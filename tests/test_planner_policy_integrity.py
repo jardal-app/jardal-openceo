@@ -205,7 +205,7 @@ class StartupWiringTests(unittest.TestCase):
         self.assertIn('logging.getLogger("uvicorn.error")',
                       lifespan[lifespan.index("log_policy_status("):][:600])
         self.assertLess(lifespan.index("log_policy_status("),
-                        lifespan.index("mark_interrupted_pm_states"))
+                        lifespan.index("mark_interrupted_tasks"))
         # A failing check must never stop the service from starting.
         before = lifespan[:lifespan.index("log_policy_status(")]
         self.assertTrue(before.rstrip().endswith("with suppress(Exception):")

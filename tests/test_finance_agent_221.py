@@ -563,8 +563,9 @@ class ExactSkillLiveTest(unittest.TestCase):
 
 
 class GraphRemovalTest(unittest.TestCase):
-    def test_wired_agents_are_the_two_nodes(self) -> None:
-        self.assertEqual({"dev", "pm"}, set(WIRED_AGENTS))
+    def test_wired_agents_is_dev_only(self) -> None:
+        # TASK-2026-00209 retired the pm node: only dev stays wired.
+        self.assertEqual({"dev"}, set(WIRED_AGENTS))
 
     def test_finance_routes_to_the_generic_node(self) -> None:
         graph = OpenCEOGraph(None, None, None)
@@ -581,14 +582,6 @@ class GraphRemovalTest(unittest.TestCase):
             _live_task(), agent_hint="finance"))
         self.assertEqual(TaskStatus.WAITING.value, out["status"])
         self.assertIn("config:", out["waiting_reason"])
-
-    def test_finance_failed_keeps_no_legacy_verdict(self) -> None:
-        out = OpenCEOGraph._attach_legacy_agent_result(
-            {"params": {}},
-            {"status": TaskStatus.FAILED.value,
-             "selected_agent": "finance",
-             "error": "boom", "params": {}})
-        self.assertNotIn("agent_result", out["params"])
 
     def test_retired_modules_stay_gone(self) -> None:
         with self.assertRaises(ModuleNotFoundError):

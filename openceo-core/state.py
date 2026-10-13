@@ -15,12 +15,8 @@ def utc_now() -> datetime:
 class AgentName(str, Enum):
     CEO = "ceo"
     DEV = "dev"
-    PM = "pm"
-    MARKETING = "marketing"
     FINANCE = "finance"
     SECRETARY = "secretary"
-    SALES = "sales"
-    MEDIA = "media"
     OPERATIONS = "operations"
     RESEARCH = "research"
 

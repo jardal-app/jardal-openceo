@@ -48,7 +48,6 @@ __all__ = [
     "CatalogStatus",
     "IndexEntry",
     "KNOWN_ENGINES",
-    "LEGACY_LIVE_DISABLED",
     "RoleCard",
     "RoleProfile",
     "RoleSkill",
@@ -1013,10 +1012,6 @@ def short_index(catalog: Catalog) -> str:
                      for entry in catalog.entries)
 
 
-#: Disabled names that stay live in the legacy enum until their removal
-#: ticket lands (TASK-2026-00209). The consistency check keeps them.
-LEGACY_LIVE_DISABLED = ("pm", "marketing", "sales", "media")
-
 #: Reason recorded when a staff member is outside their active period.
 STAFF_INACTIVE_REASON = "not in active period"
 
@@ -1074,7 +1069,7 @@ def find_consumer_mismatches(
     humans (owner and staff names), with the catalog enabled flags and
     reasons.
     R4: every wired graph agent is a catalog agent.
-    R5: the disabled-but-live legacy names stay in the enum until removal.
+    (R5 retired the legacy enum names with TASK-2026-00209.)
     R6: every enabled AI agent is in the enum and the router aliases
     (review 00006: the gate approves it from the catalog, and without
     its alias an explicit name would not resolve).
@@ -1119,11 +1114,6 @@ def find_consumer_mismatches(
             problems.append(
                 f"R4: wired graph agent {name!r} is not in the catalog")
     enum_names = set(agent_names)
-    for name in LEGACY_LIVE_DISABLED:
-        if name not in enum_names:
-            problems.append(
-                f"R5: disabled-but-live legacy agent {name!r} left the enum "
-                "before its removal (TASK-2026-00209)")
     alias_names = set(alias_values)
     for name in sorted(names):
         card = catalog.agents[name]

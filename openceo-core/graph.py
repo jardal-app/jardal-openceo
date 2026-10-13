@@ -8,10 +8,8 @@ from collections.abc import Collection, Mapping
 from langgraph.graph import END, START, StateGraph
 
 from agents.dev.session import DevSessionManager
-from agents.pm.session import PMSessionManager
 from catalog import AgentType, Catalog, load_catalog
 from config_loader import ConfigLoader
-from objectives.agent_result import legacy_blocked_result
 from objectives.ticket_cost import COST_RUNS_KEY
 from orchestration.generic_agent import (
     GenericAgentWiring,
@@ -20,9 +18,9 @@ from orchestration.generic_agent import (
 from router import CEORouter, resolve_explicit_name
 from state import AgentName, GraphState, TaskStatus
 
-#: Agents with a wired executor node below; a name stays wired while
-#: its agent is disabled (pm; secretary left in 00220, finance in 00221).
-WIRED_AGENTS = ("dev", "pm")
+#: Agents with a wired executor node below (pm left in 00209,
+#: secretary in 00220, finance in 00221; catalog agents run generic).
+WIRED_AGENTS = ("dev",)
 
 
 @dataclass(frozen=True)
@@ -117,21 +115,18 @@ class OpenCEOGraph:
         router: CEORouter,
         config_loader: ConfigLoader,
         dev_session: DevSessionManager,
-        pm_session: PMSessionManager | None = None,
         notion: Any | None = None,
         generic_wiring: GenericAgentWiring | None = None,
     ) -> None:
         self._router = router
         self._config_loader = config_loader
         self._dev_session = dev_session
-        self._pm_session = pm_session
         self._notion = notion
         self._generic_wiring = generic_wiring
 
         builder = StateGraph(GraphState)
         builder.add_node("ceo_router", self._ceo_router_node)
         builder.add_node("dev_agent", self._dev_node)
-        builder.add_node("pm_agent", self._pm_node)
         builder.add_node("generic_agent", self._generic_node)
         builder.add_node("unsupported_agent", self._unsupported_agent_node)
 
@@ -141,13 +136,11 @@ class OpenCEOGraph:
             self._after_ceo_route,
             {
                 "dev": "dev_agent",
-                "pm": "pm_agent",
                 "generic_agent": "generic_agent",
                 "unsupported": "unsupported_agent",
             },
         )
         builder.add_edge("dev_agent", END)
-        builder.add_edge("pm_agent", END)
         builder.add_edge("generic_agent", END)
         builder.add_edge("unsupported_agent", END)
 
@@ -192,40 +185,7 @@ class OpenCEOGraph:
             "coding_tool": task.get("coding_tool"),
             "objective_id": task.get("objective_id"),
         }
-        out = await self._graph.ainvoke(initial_state)
-        return self._attach_legacy_agent_result(task, out)
-
-    @staticmethod
-    def _attach_legacy_agent_result(
-        task: dict[str, Any], out: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Map a legacy non-dev FAILED to its agent verdict (00202).
-
-        The last deterministic session (pm) returns a bare status:
-        its FAILED means the agent could not do it, recorded as
-        ``bloqueado`` with the session detail. Dev runs parse their
-        own verdict from the CLI output; completed and waiting runs
-        carry none. Total: never raises, never drops params.
-        """
-        if not isinstance(out, dict):
-            return out
-        if str(out.get("status") or "") != TaskStatus.FAILED.value:
-            return out
-        if str(out.get("selected_agent") or "") not in {"pm"}:
-            return out
-        raw_params = out.get("params")
-        params = dict(raw_params) if isinstance(raw_params, dict) else {}
-        if not params and isinstance(task, dict):
-            task_params = task.get("params")
-            if isinstance(task_params, dict):
-                params = dict(task_params)
-        if isinstance(params.get("agent_result"), dict):
-            return out
-        motivo = str(out.get("error")
-                     or out.get("last_response_summary") or "").strip()
-        params["agent_result"] = legacy_blocked_result(motivo)
-        out["params"] = params
-        return out
+        return await self._graph.ainvoke(initial_state)
 
     async def _ceo_router_node(self, state: GraphState) -> GraphState:
         project_cfg = self._config_loader.load_project(state.get("project"))
@@ -308,8 +268,6 @@ class OpenCEOGraph:
     def _after_ceo_route(self, state: GraphState) -> str:
         if state.get("selected_agent") == AgentName.DEV.value:
             return "dev"
-        if state.get("selected_agent") == AgentName.PM.value:
-            return "pm"
         if state.get("selected_agent") in {AgentName.OPERATIONS.value,
                                            AgentName.SECRETARY.value,
                                            AgentName.FINANCE.value,
@@ -351,45 +309,6 @@ class OpenCEOGraph:
         if getattr(result, COST_RUNS_KEY, None):
             out[COST_RUNS_KEY] = getattr(result, COST_RUNS_KEY)
         return out  # type: ignore[return-value]
-
-    async def _pm_node(self, state: GraphState) -> GraphState:
-        if self._pm_session is None:
-            step = {
-                "step": "pm_dispatch",
-                "status": "failed",
-                "detail": "PM agent not configured",
-                "timestamp": datetime.now(timezone.utc),
-            }
-            return {
-                "selected_agent": AgentName.PM.value,
-                "status": TaskStatus.FAILED.value,
-                "steps": [*(state.get("steps") or []), step],
-                "error": "PM agent not configured",
-            }
-
-        task_params = state.get("params") or {}
-        autorun = bool(task_params.get("autorun", False))
-
-        result = await self._pm_session.extract_tickets(
-            interview_text=state["description"],
-            project=state.get("project"),
-            autorun=autorun,
-        )
-
-        step = {
-            "step": "pm_extraction",
-            "status": "ok" if result.status == TaskStatus.COMPLETED else "failed",
-            "detail": result.summary,
-            "timestamp": datetime.now(timezone.utc),
-        }
-
-        return {
-            "selected_agent": AgentName.PM.value,
-            "status": result.status.value,
-            "steps": [*(state.get("steps") or []), step],
-            "last_response_summary": result.summary,
-            "error": result.error,
-        }
 
     async def _generic_node(self, state: GraphState) -> GraphState:
         agent = str(state.get("selected_agent") or "")

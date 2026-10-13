@@ -640,9 +640,6 @@ class ConfigLoader:
                     "require_project_selection": True,
                 }
             },
-            "pm": {
-                "default_tool": "langraph",
-            },
             "notifications": [],
             "research": {
                 # Politica de research POR PROYECTO. Nace apagada de forma deliberada:

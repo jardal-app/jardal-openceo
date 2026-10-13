@@ -30,12 +30,10 @@ const SOURCES = [
 const AGENTS = [
   { value: '', label: '— Ninguno —' },
   { value: 'dev', label: 'Dev' },
-  { value: 'pm', label: 'PM' },
   { value: 'finance', label: 'Finance' },
   { value: 'secretary', label: 'Secretary' },
-  { value: 'sales', label: 'Sales' },
-  { value: 'marketing', label: 'Marketing' },
-  { value: 'media', label: 'Media' },
+  { value: 'operations', label: 'Operations' },
+  { value: 'research', label: 'Research' },
   { value: 'ceo', label: 'CEO' },
 ]
 

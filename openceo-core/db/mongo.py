@@ -1572,44 +1572,6 @@ class MongoRepository:
             },
         )
 
-    async def set_pm_state(self, user_id: str, state: dict[str, Any]) -> None:
-        await self.user_context.update_one(
-            {"user_id": user_id},
-            {"$set": {"pm_state": state, "updated_at": datetime.now(timezone.utc)}},
-            upsert=True,
-        )
-
-    async def get_pm_state(self, user_id: str) -> dict[str, Any] | None:
-        row = await self.user_context.find_one({"user_id": user_id})
-        if not row:
-            return None
-        return row.get("pm_state")
-
-    async def clear_pm_state(self, user_id: str) -> None:
-        await self.user_context.update_one(
-            {"user_id": user_id},
-            {"$unset": {"pm_state": ""}},
-        )
-
-    async def mark_interrupted_pm_states(self) -> int:
-        now = datetime.now(timezone.utc)
-        message = "Service restart interrupted PM background job"
-        result = await self.user_context.update_many(
-            {"pm_state.step": "background_running"},
-            {
-                "$set": {
-                    "pm_state.step": "background_failed",
-                    "pm_state.error": message,
-                    "pm_state.summary": message,
-                    "pm_state.job.status": "failed",
-                    "pm_state.job.error": message,
-                    "pm_state.job.completed_at": now,
-                    "updated_at": now,
-                }
-            },
-        )
-        return result.modified_count
-
     async def get_project_session(self, user_id: str, project: str) -> str | None:
         """Return the saved session_id for a specific project, if any."""
         row = await self.user_context.find_one({"user_id": user_id})

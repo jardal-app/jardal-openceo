@@ -124,14 +124,16 @@ class ConsumerConsistencyTest(unittest.TestCase):
             {"dev": {"enabled": True}}, ["dev", "ghost"], catalog)
         self.assertTrue(any("ghost" in line for line in mismatches))
 
-    def test_legacy_disabled_names_stay_in_enum(self):
+    def test_retired_names_need_no_enum_entry(self):
+        # R5 retired with TASK-2026-00209: a disabled name needs no
+        # enum entry anymore; the retired agents left the enum.
         catalog = tiny_catalog({"dev": {"enabled": True},
                                 "pm": {"enabled": False, "reason": "retired"}})
         mismatches = find_consumer_mismatches(
             ["dev"], ["dev"], {"dev": {"enabled": True},
                                "pm": {"enabled": False, "reason": "retired"}},
             ["dev"], catalog)
-        self.assertTrue(any("pm" in line for line in mismatches))
+        self.assertEqual([], mismatches)
 
     def test_enabled_ai_missing_from_enum_fails_r6(self):
         catalog = tiny_catalog({"dev": {"enabled": True}})
@@ -210,17 +212,22 @@ class AgentGateTest(unittest.TestCase):
         self.assertTrue(decision.proceed)
         self.assertEqual("dev", decision.hint)
 
-    def test_disabled_but_wired_stays_alive(self):
-        # TASK-2026-00220 enabled secretary and TASK-2026-00221 finance;
-        # pm stays alive on its legacy session until removal.
-        for name in ("pm",):
+    def test_retired_agents_wait_unknown(self):
+        # TASK-2026-00209 removed pm, marketing, sales and media from
+        # the catalog: no wired legacy, no disabled card, unknown.
+        for name in ("pm", "marketing", "sales", "media"):
             with self.subTest(agent=name):
                 decision = self.gate(hint=name)
-                self.assertTrue(decision.proceed)
-                self.assertEqual(name, decision.hint)
+                self.assertFalse(decision.proceed)
+                self.assertIn("routing_missing", decision.reason)
+                self.assertIn("unknown", decision.reason)
 
     def test_disabled_unwired_waits_with_reason(self):
-        decision = self.gate(hint="marketing")
+        # No disabled card ships anymore (TASK-2026-00209 retired the
+        # last ones), so the disabled branch runs on a tiny catalog.
+        catalog = tiny_catalog({"ops": {"enabled": False,
+                                        "reason": "no runner yet"}})
+        decision = resolve_agent_gate("ops", {}, None, catalog)
         self.assertFalse(decision.proceed)
         self.assertIn("routing_missing", decision.reason)
         self.assertIn("disabled", decision.reason)
@@ -246,11 +253,12 @@ class AgentGateTest(unittest.TestCase):
 
     def test_planner_wired_target_routes_by_name(self):
         # TASK-2026-00221 moved finance to the generic node (its gate
-        # assertions live in test_finance_agent_221.py); pm still
-        # exercises the wired path.
-        decision = self.gate(target="pm")
+        # assertions live in test_finance_agent_221.py) and
+        # TASK-2026-00209 removed the pm node: dev exercises the wired
+        # path, the only one left.
+        decision = self.gate(target="dev")
         self.assertTrue(decision.proceed)
-        self.assertEqual("pm", decision.hint)
+        self.assertEqual("dev", decision.hint)
 
     def test_planner_unknown_target_waits(self):
         decision = self.gate(target="frobnicate")
@@ -279,10 +287,11 @@ class AgentGateTest(unittest.TestCase):
 
 
 class GraphWiringTest(unittest.TestCase):
-    def test_wired_agents_are_the_two_nodes(self):
-        # TASK-2026-00220 retired the secretary node and TASK-2026-00221
-        # the finance node: enabled catalog agents run on the generic node.
-        self.assertEqual({"dev", "pm"},
+    def test_wired_agents_is_dev_only(self):
+        # TASK-2026-00220 retired the secretary node, TASK-2026-00221
+        # the finance node and TASK-2026-00209 the pm node: enabled
+        # catalog agents run on the generic node.
+        self.assertEqual({"dev"},
                          set(WIRED_AGENTS))
 
     def test_after_route_maps_wired_to_nodes(self):

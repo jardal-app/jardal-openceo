@@ -75,7 +75,7 @@ The integration must preserve `TaskDocument`, task/source idempotency, explicit 
 
 | Component | Technology | Purpose |
 |---|---|---|
-| Orchestration | LangGraph (Python) | Supervisor-workers graph for the wired runtime (`dev`, `pm`, `finance`) plus the generic catalog-agent node |
+| Orchestration | LangGraph (Python) | Supervisor-workers graph for the wired runtime (`dev`) plus the generic catalog-agent node |
 | API Server | FastAPI | OpenAI-compatible endpoint for OpenWebUI, REST API for dashboard/n8n, WebSocket for real-time |
 | Runtime database | MongoDB | Execution tasks, dev sessions, user context, queues, workflow state, and agent metadata |
 | Business system of record | ERPNext | Business projects, tickets, priorities, users, approvals, workflows, and financial records, connected through scoped adapters |
@@ -106,12 +106,12 @@ OpenCEO core does not require Redis, PostgreSQL, LiteLLM, or aider. ERPNext oper
 - Crystallized workflows execute as deterministic Python. Zero LLM tokens on step sequencing, flow control, or variable resolution. Discovery mode uses LLM to find unknown flows — but discovered flows crystallize into YAML and become deterministic thereafter.
 - LLMs support contextual conversation in `first_layer.py`, routing fallback (`router.py`), discovery, document extraction, secretary payload extraction fallback, and the coding CLIs. Crystallized workflow sequencing, conditions, and variable resolution stay deterministic; `llm_eval` is a design extension, not an enabled condition type in the deterministic executor.
 - Runtime wiring is explicit. A folder in `openceo-core/agents/` is a portable agent package (paquete de agente), but it becomes executable only when it is registered in `router.py`, `graph.py`, and the relevant service entrypoints.
-- The bundled worker graph wires `dev` and `pm`; enabled catalog agents (operations, secretary, finance, research) run on the generic node.
+- The bundled worker graph wires `dev`; enabled catalog agents (operations, secretary, finance, research) run on the generic node.
 - Versioned execution configuration lives in YAML (`projects/*/project.yaml`); business project identity lives in ERPNext. CEO routing triggers and patterns are read from `routing.agents`. Project is optional for runtime operations using company-level defaults; the Dev agent needs repository context. A missing project never implies personal scope or authorizes a project-sensitive business write.
 - Guided chat workflows are deterministic state machines. They accept required inputs in any order, persist whatever the user already provided, and ask only for the missing fields before executing.
-- Trigger phrases start a workflow but are not treated as the real payload unless they contain substantive content. Example: `tengo una entrevista` starts PM guidance, but it does not count as the interview text.
+- Trigger phrases start a workflow but are not treated as the real payload unless they contain substantive content. Example: a trigger phrase opens the guided flow, but the substantive payload must still arrive before execution.
 - Voice/chat UX must guide the user explicitly. The system should not assume the employee already knows the input order or that all required data will arrive in the first turn.
-- CEO routing should also recognize substantive workflow payloads when they arrive first. A pasted interview or requirements block must enter the guided PM flow even if the user never typed the trigger phrase.
+- CEO routing should also recognize substantive workflow payloads when they arrive first. A pasted payload must enter the guided flow for its workflow even if the user never typed the trigger phrase.
 - Browser automation uses Playwright-based flows.
 - Agents never talk to each other: the agent returns hecho / bloqueado / no_aplica and the single planner re-decides (the peer-to-peer Tier 2 rule was retired 2026-10-11, TASK-2026-00187/00189; see Inter-Agent Communication below). In crystallized workflows (YAML), the executor calls Python functions directly — no inter-agent communication, only sequential tool execution. The CEO initiates tasks (top-down) but does not relay data between active agents.
 - User project selection and active dev-session focus live in MongoDB.
@@ -155,7 +155,6 @@ Not every external integration goes through n8n. Each tool is evaluated case by 
 | Agent | Parallelism / Constraint |
 |---|---|
 | Dev | Persistent tmux sessions. Effective limit: one live runtime per project |
-| PM | Guided state in Mongo per chat. Extraction runs in background and status stays queryable by chat or dashboard |
 | Finance | Stateless per request. Can run multiple deterministic jobs in parallel |
 | Secretary | Stateless per request. Can run multiple email tasks in parallel |
 
@@ -202,7 +201,7 @@ The tiers describe the execution design. The runtime's proposal/approval contrac
 
 ### Two Levels of Discovery
 
-**Level 1: CEO** — `create_react_agent` with tools: `[call_pm, call_finance, call_secretary, call_dev]`. Question answered: **which agents do I need and in what order?**
+**Level 1: CEO** — `create_react_agent` with tools: `[call_dev, call_finance, call_secretary, call_operations]` (the `call_pm` tool in the original design retired with the PM agent in TASK-2026-00209). Question answered: **which agents do I need and in what order?**
 
 **Level 2: Internal Agent** — `create_react_agent` with domain-specific primitives (`binance_api`, `bank_transfer`, etc.). Activated only when the agent receives a subtask it has not crystallized. Question answered: **how do I combine my primitives to accomplish this?**
 
@@ -430,7 +429,7 @@ def check_registry(agent: str | None = None) -> dict:
     {
         "finance":   ["cierre_contable", "reporte_mensual", "pago_elfec"],
         "secretary": ["notificacion_clientes", "send_email"],
-        "pm":        ["create_tickets", "sprint_planning"],
+        "operations":  ["crear_proyecto"],
     }
     """
 ```
@@ -538,7 +537,7 @@ They do not mix: either parallel subtasks or sequential steps.
 
 | Who assigns | For whom | What type |
 |---|---|---|
-| PM | Dev agent | development tickets (features, bugs, sprints) |
+| Planner | Dev agent | development tickets (features, bugs, sprints) |
 | CEO | any agent | operational enterprise subtasks |
 
 #### Connection with Tiers
@@ -548,7 +547,7 @@ They do not mix: either parallel subtasks or sequential steps.
 
 ### `create_ticket` — Global Tool
 
-Capability sketch shared by PM and CEO, not a new registered MCP signature:
+Capability sketch shared by the planner and CEO, not a new registered MCP signature:
 
 ```python
 @tool
@@ -562,9 +561,9 @@ def create_ticket(
     """Requests business work through OpenCEO for an assigned agent."""
 ```
 
-PM always uses `assigned_to="dev"` (its scope does not change). CEO uses `assigned_to` with any agent.
+CEO uses `assigned_to` with any agent. (The retired PM agent always used `assigned_to="dev"`; TASK-2026-00209 removed it.)
 
-In the target integration, OpenCEO validates the request and creates the business ticket in ERPNext through an adapter, then associates execution work with its reference. Pure execution subtasks stay in the runtime. The existing `pm.create_tickets` workflow and task APIs remain the compatibility entrypoints; writing a Mongo task alone does not claim successful ERPNext registration.
+In the target integration, OpenCEO validates the request and creates the business ticket in ERPNext through an adapter, then associates execution work with its reference. Pure execution subtasks stay in the runtime. The ticket capability and task APIs are the compatibility entrypoints (the `pm.create_tickets` workflow named here retired with the PM agent in TASK-2026-00209); writing a Mongo task alone does not claim successful ERPNext registration.
 
 ### Parent Task Tracking
 
@@ -609,7 +608,7 @@ ERPNext holds the business hierarchy; OpenCEO holds execution dependencies and e
 
 - Chat/voice first enters `main.py`. For messages without an `@` prefix and with the gateway configured, `FirstLayerGateway` resolves contextual intents, ticket/session focus, presets, and Horizon before fallback routing. Horizon's deterministic classification precedes the gateway's LLM call.
 - CEO routing in `openceo-core/router.py`: direct hint, `@agent` prefix, project-config routing rules from `project.yaml`, then optional cheap LLM fallback. If no project is provided, company-level defaults apply and routing falls through to LLM fallback or `default_agent`.
-- Worker execution in `openceo-core/graph.py`: `dev` and `pm` keep explicit nodes; enabled catalog agents run on the generic node. Other routes escalate as unsupported.
+- Worker execution in `openceo-core/graph.py`: `dev` keeps the only explicit worker node; enabled catalog agents run on the generic node. Other routes escalate as unsupported.
 - Finance runs as a catalog agent (TASK-2026-00221): five exact skills over the registry tools, and voice/chat naming the skill through the first layer.
 - Research runs as a catalog agent (TASK-2026-00222): the `investigar` recipe over two bridge tools that admit and poll under a per-ticket consumer.
 - Secretary-specific action extraction in `openceo-core/agents/secretary/session.py`: JSON or structured-text parsing first, optional LLM fallback second.
@@ -631,7 +630,7 @@ These paths never mix inside the same request. A workflow exposed in MCP must be
 
 - ChatGPT must preprocess any user content it can already understand before calling `execute_workflow`.
 - OpenCEO should not repeat extraction, routing, or content processing that ChatGPT already completed.
-- PM is the reference example: in ChatGPT path, use `pm.create_tickets` with structured tickets. Only use the extraction variant if the user explicitly wants OpenCEO to do the extraction itself.
+- Ticket batches are the reference example: in ChatGPT path, use the batch capability with structured tickets (the `pm.create_tickets` workflow in the original direction retired with the PM agent in TASK-2026-00209). Only use the extraction variant if the user explicitly wants OpenCEO to do the extraction itself.
 - This same direct-vs-extraction rule generalizes to every future workflow where ChatGPT can produce a ready-to-run payload.
 
 ### Approval Loops
@@ -663,15 +662,15 @@ Core execution tools:
 - `get_user_context`: returns the current user's active project, active dev session, and running background jobs. ChatGPT should call this on demand only, when the request depends on current state such as active project, active dev session, pending work, or task status. `active_project` is advisory context, not a silent default for project-sensitive write workflows.
 - `execute_workflow`: runs one already-resolved workflow directly, without using the CEO router or graph fallback path. This is the single execution entrypoint for real OpenCEO actions once ChatGPT has already discovered and prepared the correct workflow. The intended behavior is MCP-first: when the cached catalog already shows a compatible connected workflow, ChatGPT should prefer executing it over local-only behavior and, for approval-required side effects, move into a compact approval step instead of stopping at a full drafted artifact. Once the workflow is known, `execute_workflow` is also the right place to let the connector resolve the last confirmable/selectable params through `needs_input` or MCP Apps.
 - `get_task_status`: reads one async task from MongoDB so ChatGPT can report progress later.
-- PM safety rule: `pm.create_tickets` and other project-sensitive writes must not fall back silently to `active_project`. If the project was not explicitly provided, the connector should force confirmation or UI selection.
-- `pm.create_tickets` retains its public name and structured batch contract. Its compatibility implementation registers one Mongo execution task per ticket with `autorun=false` and schedules the minimum Notion mirror from the creation operation. ERPNext-backed business creation belongs behind the same capability once integrated; neither the frontend nor the agent writes a second business backlog directly.
+- Batch safety rule: ticket-batch creation and other project-sensitive writes must not fall back silently to `active_project`. If the project was not explicitly provided, the connector should force confirmation or UI selection.
+- Batch creation goes through `openceo_create_pm_tickets_batch` (Owner badge only; keeps its public name) with its structured batch contract. Its compatibility implementation registers one Mongo execution task per ticket with `autorun=false`. ERPNext-backed business creation belongs behind the same capability once integrated; neither the frontend nor the agent writes a second business backlog directly.
 
 ### MCP Apps Presentation
 
 - The external MCP connector should use MCP Apps standard for presentation. Do not build new ChatGPT-only widgets for this path.
 - This UI layer remains optional and must not become a runtime dependency or architectural foundation. The durable contract stays MCP tools + deterministic workflows + `structuredContent`.
 - If the UI disappears, the workflow must still be operable through plain tool calls and text fallback.
-- The PM app hangs from `execute_workflow` for `pm.create_tickets`, reviewing the batch and confirming project selection before registration. The existing Mongo/Notion path is a compatibility implementation; business persistence can move to an ERPNext adapter without making the UI its owner.
+- The batch-review app hangs from `execute_workflow` for the ticket-batch workflow, reviewing the batch and confirming project selection before registration. (The original direction named the PM app over `pm.create_tickets`; the PM agent retired in TASK-2026-00209.) The existing Mongo/Notion path is a compatibility implementation; business persistence can move to an ERPNext adapter without making the UI its owner.
 - Client compatibility depends on MCP Apps support in the host. When a client does not support it, the connector falls back to text and structured data.
 - Host-specific APIs such as `widgetState`, `requestModal()`, `requestClose()`, OpenAI tool invocation strings, or ChatGPT file upload bridges are intentionally out of scope for this connector.
 - MCP Apps bind presentation to MCP tools, not to internal workflow identifiers. The architectural response is to attach presentation to an existing execution tool, not to invent new business tools.
@@ -697,7 +696,7 @@ Role: Receives authorized work and routes execution to the correct worker agent 
 Routing behavior:
 - Message contains `@agent_name` prefix → route directly when the alias exists.
 - No prefix → config-driven routing rules from `project.yaml routing.agents`, then optional cheap LLM fallback (`DEEPSEEK_API_KEY`) only if the config rules did not decide.
-- The router understands `dev`, `pm`, `finance`, `secretary`, `sales`, `marketing`, and `media`; the worker graph dispatches the wired runtime workers.
+- The router understands `dev`, `finance`, `secretary`, `operations`, `research`, and `ceo`; the worker graph dispatches the wired runtime workers.
 
 Administrative commands (owner only, deterministic, zero tokens):
 - `/status` and the OpenWebUI-compatible project/session commands handled in `main.py`
@@ -777,27 +776,9 @@ Without an active session, `openceo-dev` retains local Spanish conversation. Gen
 
 Project knowledge comes from the Obsidian vault and current repository evidence. The legacy `CONTEXT.md` runtime memory was retired in TASK-2026-00143; plans, review context, and completion signals keep their execution roles.
 
-### PM Agent
+### PM Agent (retired, TASK-2026-00209)
 
-Role: Extract actionable tickets from client interviews and requirements documents.
-
-The target persistence flow is: extract/structure requirements → confirm the project and proposed work → invoke OpenCEO's ticket capability → register business work in ERPNext → link any requested execution. Extraction does not imply execution authorization. The guided state machine and extraction engines below remain; Notion-specific paths are compatibility adapters, not the target business system of record.
-
-Flow:
-- Guided multi-turn chat flow via OpenWebUI: absorbs project, tool, and interview in any order; asks numbered menus or prompts only for missing info; confirmation starts extraction in background
-- Intent-only phrases such as `tengo una entrevista` or `quiero planificar requerimientos` start the PM workflow but do not become the stored interview content
-- CEO also routes substantive requirement/interview payloads directly into PM, so employees can paste the interview first and the chat will still guide the missing fields
-- If the interview arrives before project or tool, PM keeps it in `pm_state` and continues guiding until the missing fields are complete
-- When only the interview is missing, PM explicitly says which project and tool are already registered and asks for only the interview, so the user does not think they must repeat everything
-- After confirmation, PM answers immediately, keeps the job state in `pm_state`, and the employee can ask naturally `ya terminó` or `qué tickets creó` without blocking the chat
-- Three extraction engines: `langraph` (DeepSeek direct — cheap/fast), `codex` (Codex CLI headless + MCP), `claude` (Claude Code headless + MCP)
-- Tool selection cascade: `params.pm_tool` → `project.yaml pm.default_tool` → hardcoded `langraph`
-- DeepSeek extraction: single LLM call with structured JSON output → `create_tickets_batch()` direct Python call (no MCP overhead)
-- Claude/Codex extraction: headless CLI subprocess with the internal ticket-batch capability (`openceo_create_pm_tickets_batch`; the older name `notion_create_pm_tickets_batch` may appear in legacy prompts)
-- Direct API endpoint: `POST /api/pm/extract` accepts `{project, interview, tool}` — deterministic, no guided flow, ready for dashboard forms
-- Dashboard status endpoint: `GET /api/pm/status?user_id=...` returns the current PM background state for the chat user
-- PM state persisted in MongoDB (`user_context.pm_state`) so multi-turn flow survives between messages and dashboard polling can read the same job state
-- Model name in OpenWebUI: `openceo-pm` or `pm`
+Role, formerly: extract actionable tickets from client interviews and requirements documents. Retired together with marketing, sales, and media: the enum value, router aliases, catalog cards, graph node, session package, `pm_state`, and the `pm.default_tool` / `params.pm_tool` cascade are gone. Requirement payloads route to the pedido flow instead: `POST /api/pm/extract` accepts `{project, interview}` and registers one `undecided` ticket for the Owner to route; `GET /api/pm/status` no longer exists. The internal batch capability keeps its public name `openceo_create_pm_tickets_batch` (Owner-only now that the service exception retired) and the older name `notion_create_pm_tickets_batch` may appear in legacy prompts. The guided state machine, the three extraction engines, and the `openceo-pm` OpenWebUI model name live only in Git history.
 
 ### Secretary Agent
 
@@ -1034,13 +1015,13 @@ Profiles (TASK-2026-00197): `catalog/profiles/<role>.yaml` holds the engine-neut
 
 Translators (TASK-2026-00200): the same profile renders per run engine, chosen by the run provider (the profile file is never rewritten to switch engines). `orchestration/role_claude.py` renders a Claude run (the card via `--append-system-prompt`, explicit `mcp__<server>__<tool>` box names plus file/shell builtins via `--allowedTools`, the badged server via `--mcp-config` + `--strict-mcp-config` over a per-run overlay); `orchestration/role_opencode.py` renders an OpenCode `agent.<role>` entry (card + rules + skills prompt, skill allowlist, badged remote MCP map replacing the Owner's) selected with `--agent`. The live executor dispatches profile runs by provider (unknown providers refuse, never render the wrong motor); Tier A runs the dev profile through the Claude translator and Tier B carries the ticket MCP token via a per-run codex config override (rules travel in the workspace `AGENTS.md` everywhere). Equivalence tests: `tests/test_role_translators_200.py`; live verification lands in the epic Acceptance.
 
-Consumers (TASK-2026-00195): the planner registry derives from the catalog (AI agents only); the enum, the router aliases and the wired graph nodes validate against it at boot, fail-closed (`catalog.find_consumer_mismatches`, enforced in the `main.py` lifespan). R6 (review 00006) closes the loop the other way: every enabled AI agent must be back in the enum and the router aliases, or the gate would approve it and the router would reclassify it by text. The graph agent gate (`graph.resolve_agent_gate`) routes wired names by name and parks unknown, disabled, human or `ceo` targets in `routing_missing` with their reason — never reclassifies, never fails silently. The last disabled-but-wired agent (pm) keeps running on its legacy session until removal. Tests: `tests/test_agent_catalog_consumers_195.py`.
+Consumers (TASK-2026-00195): the planner registry derives from the catalog (AI agents only); the enum, the router aliases and the wired graph nodes validate against it at boot, fail-closed (`catalog.find_consumer_mismatches`, enforced in the `main.py` lifespan). R6 (review 00006) closes the loop the other way: every enabled AI agent must be back in the enum and the router aliases, or the gate would approve it and the router would reclassify it by text. The graph agent gate (`graph.resolve_agent_gate`) routes wired names by name and parks unknown, disabled, human or `ceo` targets in `routing_missing` with their reason — never reclassifies, never fails silently. The last disabled-but-wired agent (pm) was removed with its legacy session in TASK-2026-00209. Tests: `tests/test_agent_catalog_consumers_195.py`.
 
 Generic execution (TASK-2026-00205): an enabled AI agent with a muse-code profile runs on the generic graph node (`orchestration/generic_agent.py`): exact skills first (the skill dir carries `workflow.yaml` and the ticket names it in `params.skill` — the YAML engine runs it, the LLM is never invoked), else one fenced Muse run with the role spec, the ticket badge, the ticket folder and the verdict schema. The gate admits enabled unwired AI names and still parks disabled, human, untranslated-engine or unknown names; each migration flips its own agent (enum member + router alias + route mapping; operations is first, others follow in 00220/00221/00222). Verdicts map per 00202 (missing verdict stays legacy, never a failure — unless the output was truncated, which fails closed as bloqueado since a head-cut parse is untrustworthy; a crash rewrites a hecho claim to bloqueado so the planner loop still runs); unknown-tool waits (commented on ERPNext as blocked-tool, review 00006) and HITL waits propagate as the engine returns them. The orchestrator posts the run verdict on the business mirror (`run_task` publishes the node's `result_comment`); agents never change states. The ticket folder survives the run for deliverable evidence (lifecycle cleanup is future work). Tests: `tests/test_generic_agent_205.py`.
 
 ### Agent isolation
 
-No agent sees secrets or leaves its folder. Env is an allowlist (`child_env`: locale/terminal/identity only, secret-pattern backstop on the base; explicit overlay wins as operator intent — motor auth, ticket badges, per-slot env). Files are a bubblewrap fence (`orchestration/agent_sandbox.py` over the research `BubblewrapBackend`, extended with agent kwargs): system read-only, motor/toolchain paths read-only, the ticket workspace read-write, private /tmp, own pid namespace, shared network (motors and the local MCP need it; egress stays unrestricted and declared). Unlisted paths are simply not mounted: ssh keys, browser/cloud credential stores, pasted token files, sibling checkouts, the vault, foreign /tmp. Nested service env is masked by a pruned walk: every `.env*` file (except `*.example`-style docs, which stay readable) and every `.runtime` dir under the workspace or a mounted config root reads empty — including `openceo-core/.env` when the workspace is the checkout (review H1). Home mounts are narrow (`~/.config/muse`, `~/.config/opencode`, `~/.local/share/claude|uv|claude-skill-wrappers`, never whole `~/.config` or `~/.local/share`). No bwrap, no run (`IsolationUnavailable`, fail-closed). The motor keeps its real `$HOME`, so its own auth/config reads work unchanged; writable motor state it needs is tmpfs or a per-run snapshot (dsh headless profile, agy state JSONs). Repo-bound roles (planner, CEO, closer, builder) run fenced in the checkout they read; reviewers run fenced in worktrees (main `.git` bound read-only so git works); PM runs in an empty per-run ticket dir (`.runtime/agent-work/`, removed after); quota monitors run fenced in persistent per-provider dirs (pre-fence panes reaped on first touch). Config-root mounts skip the workspace and its ancestors (a config path inside the checkout must never shadow it read-only) and recreate symlinked motors. Declared extra roots (TASK-2026-00214) are the exception with a rule: skilled runs mount the repo read-only, creation agents mount their creation roots writable, shallow first with the workspace rebound read-write when covered, every extra root secret-masked like the workspace. Carve-outs, all documented in code: opencode QA binds the live opencode state read-write (the session must land there); the dsh harness binds read-only as motor code. Residuals for the pilots: codex/qwen/agyd/opencode/agy/kimi real-run writes (startup-tested only); live and monitor pane shells keep the dirty interactive env (the CLI child is fenced, shell escapes inherit it). (TASK-2026-00192 + review follow-ups. Tests: `tests/test_agent_isolation_192.py`; validated with fenced `muse`/`claudej`/`dsh` runs.)
+No agent sees secrets or leaves its folder. Env is an allowlist (`child_env`: locale/terminal/identity only, secret-pattern backstop on the base; explicit overlay wins as operator intent — motor auth, ticket badges, per-slot env). Files are a bubblewrap fence (`orchestration/agent_sandbox.py` over the research `BubblewrapBackend`, extended with agent kwargs): system read-only, motor/toolchain paths read-only, the ticket workspace read-write, private /tmp, own pid namespace, shared network (motors and the local MCP need it; egress stays unrestricted and declared). Unlisted paths are simply not mounted: ssh keys, browser/cloud credential stores, pasted token files, sibling checkouts, the vault, foreign /tmp. Nested service env is masked by a pruned walk: every `.env*` file (except `*.example`-style docs, which stay readable) and every `.runtime` dir under the workspace or a mounted config root reads empty — including `openceo-core/.env` when the workspace is the checkout (review H1). Home mounts are narrow (`~/.config/muse`, `~/.config/opencode`, `~/.local/share/claude|uv|claude-skill-wrappers`, never whole `~/.config` or `~/.local/share`). No bwrap, no run (`IsolationUnavailable`, fail-closed). The motor keeps its real `$HOME`, so its own auth/config reads work unchanged; writable motor state it needs is tmpfs or a per-run snapshot (dsh headless profile, agy state JSONs). Repo-bound roles (planner, CEO, closer, builder) run fenced in the checkout they read; reviewers run fenced in worktrees (main `.git` bound read-only so git works); generic catalog-agent runs use an empty per-run ticket dir (`.runtime/agent-work/`, removed after); quota monitors run fenced in persistent per-provider dirs (pre-fence panes reaped on first touch). Config-root mounts skip the workspace and its ancestors (a config path inside the checkout must never shadow it read-only) and recreate symlinked motors. Declared extra roots (TASK-2026-00214) are the exception with a rule: skilled runs mount the repo read-only, creation agents mount their creation roots writable, shallow first with the workspace rebound read-write when covered, every extra root secret-masked like the workspace. Carve-outs, all documented in code: opencode QA binds the live opencode state read-write (the session must land there); the dsh harness binds read-only as motor code. Residuals for the pilots: codex/qwen/agyd/opencode/agy/kimi real-run writes (startup-tested only); live and monitor pane shells keep the dirty interactive env (the CLI child is fenced, shell escapes inherit it). (TASK-2026-00192 + review follow-ups. Tests: `tests/test_agent_isolation_192.py`; validated with fenced `muse`/`claudej`/`dsh` runs.)
 
 ### Boundary tools
 
@@ -1048,7 +1029,7 @@ A tool exists only if it meets at least one condition: (a) it uses a secret the 
 
 Identity (TASK-2026-00196): `openceo-core/mcp_identity.py` issues opaque ticket tokens (SHA-256 stored, kinds owner/agent/readonly/service; planner and ceo are read-only principals, never catalog agents) and a FastMCP middleware filters `tools/list` to the grant's box and blocks out-of-box calls; calls with no badge get the default project-management box (`ANONYMOUS_BOX`: ticket tools, DNS, ERPNext project — the agent-specific tools need a badge), while a present but invalid badge answers 401 on every method of `/internal/mcp` (logged with client host, never the token), and every call lands in the `mcp_calls` audit log. The box resolves from the agent's catalog card (`boundary_tools`; dev reads its ticket and comments/attaches on it, owner sees all 26, badge-bearing calls enforce their catalog box and ticket scope); agent badges bind to the ERPNext mirror name (`TASK-2026-NNNNN`), never to the Mongo uuid, which the issuer refuses (TASK-2026-00214); badges die on terminal execution (funnel hook, best-effort) plus a TTL backstop. The shared `MCP_SERVER_API_KEY` is retired on the internal mount; the research broker keeps its own bearer and consumers. PM extraction keeps working through a per-run service badge (single tool, project-scoped, sunset in TASK-2026-00209); interactive dev sessions run under the dev role profile with a project-scoped service badge (TASK-2026-00197). Tests: `tests/test_mcp_identity_196.py`.
 
-Registry and surface (TASK-2026-00199): the YAML registry keeps 16 builtin tools plus the 3 conditional research ticks (removed so far: `pm.*`, `core.check_registry`, `cloudflare.*`, the secretary notes and `ops.*`). The internal mount exposes 26 boundary tools: the ticket/objective set, one DNS tool (`manage_dns_record`, create/delete), email with the sender list in its description, the ERPNext project ensure, the five finance tools (practice-only Elfec), and the two research bridge tools (submit/get under the ticket's consumer). Each description documents its criterion; `catalog.MCP_BOUNDARY_TOOLS` is the canonical set — unknown card boxes fail the load and unknown registrations fail the mount build. `openceo_create_pm_tickets_batch` answers only to owner and service badges (the service exception retires with TASK-2026-00209). The one-shot notes migration lives in `orchestration/notes_migration.py` (personal to Horizon capture, company to the vault or the named ticket; dry-run by default). Finance runs as a catalog agent (TASK-2026-00221): its box holds the ticket tools plus the five finance tools, and its five skills run exact over the registry; refused inputs fail the run as `invalid_input` with the refused output on the record, never a silent hecho. Tests: `tests/test_boundary_tools_199.py`, `tests/test_secretary_agent_220.py`, `tests/test_finance_agent_221.py`, `tests/test_research_agent_222.py`.
+Registry and surface (TASK-2026-00199): the YAML registry keeps 16 builtin tools plus the 3 conditional research ticks (removed so far: `pm.*`, `core.check_registry`, `cloudflare.*`, the secretary notes and `ops.*`). The internal mount exposes 26 boundary tools: the ticket/objective set, one DNS tool (`manage_dns_record`, create/delete), email with the sender list in its description, the ERPNext project ensure, the five finance tools (practice-only Elfec), and the two research bridge tools (submit/get under the ticket's consumer). Each description documents its criterion; `catalog.MCP_BOUNDARY_TOOLS` is the canonical set — unknown card boxes fail the load and unknown registrations fail the mount build. `openceo_create_pm_tickets_batch` answers only to the owner badge (the service exception retired with the PM agent in TASK-2026-00209). The one-shot notes migration lives in `orchestration/notes_migration.py` (personal to Horizon capture, company to the vault or the named ticket; dry-run by default). Finance runs as a catalog agent (TASK-2026-00221): its box holds the ticket tools plus the five finance tools, and its five skills run exact over the registry; refused inputs fail the run as `invalid_input` with the refused output on the record, never a silent hecho. Tests: `tests/test_boundary_tools_199.py`, `tests/test_secretary_agent_220.py`, `tests/test_finance_agent_221.py`, `tests/test_research_agent_222.py`.
 
 Locks (TASK-2026-00208): email to off-allowlist recipients, DNS deletion and Elfec runs pass `requires_owner` inside the tool (`tool_locks.py`, pure) and escalate as `lock` owner-questions; the tool answers pending and the agent ends bloqueado. The approval executes the stored action exactly once (guarded by the execution marker on the question), then resumes the origin; re-runs replay the stored outcome. A mid-run lock park wins over the run outcome in the funnel, and a YAML step held on a lock blocks its run as `blocked_tool` instead of completing. Resuming re-runs the origin from scratch (established engine semantic): locked steps replay their stored outcome, earlier unlocked steps re-execute. Agent badge calls bind their ticket/project params to the grant; service badges never call lockables; anonymous callers may only request a DNS deletion with a project (never an origin ticket) — email and Elfec need a badge. Per-project `secretary.allowed_recipients` (exact or `@domain`) is the email allowlist, fail-closed when absent. Email attachments snapshot their sha256 at request time and refuse to send on mismatch. Tests: `tests/test_tool_locks_208.py`.
 
@@ -1163,12 +1144,7 @@ Still-live settings from the retired section:
 
 Superseded by TASK-2026-00138: the numeric tiers (`tier1`→B, `tier2`→A, `tier3`/`tier4`→C), the LLM tier selector, the MCP `coding_tier` parameter, the `dev.coding_tier` default and every deprecated routing source were retired once the migration ran dry. `coding_tool` (tier_s/a/b/c) is the only routing; the previous sentence about `coding_tier: tier3` mapping to a one-shot OpenCode run no longer applies and lives only in Git history.
 
-```yaml
-pm:
-  default_tool: langraph | claude | codex
-```
-
-The `pm.default_tool` sets the default extraction engine for ticket extraction from interviews. `langraph` = DeepSeek direct (cheapest, covers 90% of cases). `claude`/`codex` = headless CLI subprocess with MCP. Can be overridden per-request via `params.pm_tool` or by mentioning the tool in the chat message.
+Retired by TASK-2026-00209: the `pm.default_tool` setting (extraction engine `langraph` | `claude` | `codex`, overridable per-request via `params.pm_tool`) is gone with the PM agent. It lives only in Git history.
 
 ---
 
@@ -1337,7 +1313,7 @@ The internal mount registers 26 boundary tools (`catalog.MCP_BOUNDARY_TOOLS`; re
 | `manage_dns_record(hostname, action)` | Cloudflare DNS: create (idempotent) or delete an A record. Required before Traefik deploy. |
 | `openceo_create_ticket(title, ...)` | Register a ticket through `TaskService`, with source identity and runtime policy. |
 | `openceo_create_tickets_batch(tickets)` | Register a structured JSON batch through the same service. |
-| `openceo_create_pm_tickets_batch(project, source_id, tickets, ...)` | Register a PM batch with explicit project and source context. Owner or scoped service badge. |
+| `openceo_create_pm_tickets_batch(project, source_id, tickets, ...)` | Register a PM batch with explicit project and source context. Owner badge only (the 00199 service exception retired with the PM agent in TASK-2026-00209). |
 | `openceo_search_tickets(query, project, status, limit)` | Read business tickets in ERPNext before creating new ones. |
 | `openceo_get_ticket(identifier, limit)` | Read one ticket in full: fields, execution status, comments and attachments. |
 | `openceo_create_objective(project, goal, ...)` | Create a company objective whose children the planner creates. |
@@ -1397,7 +1373,7 @@ The curated email and finance tools require an explicit badge and invoke their o
 | `agyd` / `agy` | `~/.gemini/config/mcp_config.json` | `serverUrl` |
 | Gemini CLI, when configured | `~/.gemini/settings.json` | `httpUrl` |
 
-Managed runs continue to receive explicit per-run service or agent badges through their role profile or provider configuration. `build_mcp_provider_env()` carries location only; `build_mcp_provider_config()` is anonymous unless an explicit badge is supplied. The retiring PM Codex path overrides `mcp_servers.openceo-internal.bearer_token_env_var` for its own service badge.
+Managed runs continue to receive explicit per-run service or agent badges through their role profile or provider configuration. `build_mcp_provider_env()` carries location only; `build_mcp_provider_config()` is anonymous unless an explicit badge is supplied. The retired PM Codex path used to override `mcp_servers.openceo-internal.bearer_token_env_var` for its own service badge; it is gone with the PM agent (TASK-2026-00209).
 
 ---
 
@@ -1515,15 +1491,15 @@ The ERPNext adapter and event mapping are integration contracts to implement, no
 
 - API/n8n-style tasks enter through `POST /api/tasks`.
 - OpenWebUI-compatible chat and LiveKit voice enter through `POST /v1/chat/completions`.
-- `router.py` selects an agent from config-driven rules plus optional LLM fallback; `graph.py` executes `dev`, `pm`, or a catalog agent on the generic node, and escalates unsupported workers.
-- Dev peer sessions can run long turns asynchronously in the background; PM guided chat also runs extraction in the background after confirmation, while finance and secretary run as catalog agents (finance voice names the exact skill through the first layer).
+- `router.py` selects an agent from config-driven rules plus optional LLM fallback; `graph.py` executes `dev` or a catalog agent on the generic node, and escalates unsupported workers.
+- Dev peer sessions can run long turns asynchronously in the background, while finance and secretary run as catalog agents (finance voice names the exact skill through the first layer).
 - On startup, Mongo-backed tasks are reconciled and tmux-backed dev sessions are reattached when possible.
 - Tasks with `source` + `source_id` are idempotent: a second POST with the same pair returns the existing task. Enforced by a partial unique index in MongoDB.
 - **Notion mirror on creation:** `TaskService.create_task()` schedules the minimum human-facing mirror from the originating CRUD operation; run/patch paths drive relevant updates. This is a compatibility projection of execution work. Private Horizon tasks are excluded.
 - **Notion sync-back:** when a Notion-sourced task changes status (`in_progress`, `completed`, `failed`, etc.), `task_service.py` writes back to the originating Notion page via `tools/notion.py`. Properties updated: `Runtime Status`, `OpenCEO Ref`, `Runtime Summary`, `Last Sync At`, `Agent`. Sync-back is fire-and-forget and never blocks task execution. Controlled by `NOTION_SYNC_BACK_ENABLED`.
 - Mirror reconciliation runs once at startup as a bounded safety net for orphaned tasks. No Notion change stream, periodic mirror scan, or second watcher reprocesses CRUD events.
 - MongoDB is the canonical **execution** queue; ERPNext is the target business system of record. Notion mirrors only the fields needed for compatibility and human visibility.
-- Legacy PM extraction paths that write directly to Notion are compatibility exceptions, not the pattern for new integrations. The external `pm.create_tickets` and internal `openceo_create_*` paths enter through OpenCEO task registration. Preserve consumers during adapter changes and verify each path rather than assuming that documentation migrated it.
+- Legacy PM extraction paths that write directly to Notion are compatibility exceptions, not the pattern for new integrations. The internal `openceo_create_*` paths enter through OpenCEO task registration (the external `pm.create_tickets` workflow retired with the PM agent in TASK-2026-00209). Preserve consumers during adapter changes and verify each path rather than assuming that documentation migrated it.
 
 ---
 
@@ -1791,8 +1767,6 @@ openceo/
 │   │   │   ├── tier_s/                   # Tier S v2 single-ticket cycle
 │   │   │   ├── tmux_runtime.py
 │   │   │   └── opencode_run.py
-│   │   ├── pm/
-│   │   │   └── session.py            # PMSessionManager — ticket extraction from interviews
 │   │   ├── finance/
 │   │   │   ├── prompt.md
 │   │   │   ├── tools.py

@@ -1,6 +1,6 @@
 """Agent sandbox: bwrap fence + ticket folders (TASK-2026-00192).
 
-Every model-driven CLI (planner, CEO, builder, closer, reviewers, PM,
+Every model-driven CLI (planner, CEO, builder, closer, reviewers,
 opencode QA, live tmux panes) runs inside this fence:
 
 * env: :func:`sandbox_env` (allowlist + forced headless vars, overlay wins);

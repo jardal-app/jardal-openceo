@@ -1,7 +1,7 @@
 """Cliente HTTP determinista hacia ERPNext. Cero logica LLM.
 
 Vive en `tools/` y no en `agents/finance/` (donde lo ubicaba el contrato de Finance,
-seccion 2) porque el ticket es transversal: lo crean PM, CEO, Horizon, las sesiones dev
+seccion 2) porque el ticket es transversal: lo crean el pedido, CEO, Horizon, las sesiones dev
 y la voz, no solo Finance. `docs/ARCHITECTURE_REFERENCE_2026.md` reserva `tools/` para
 las herramientas compartidas por varios agentes, que es este caso.
 
