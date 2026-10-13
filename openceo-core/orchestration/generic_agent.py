@@ -6,7 +6,8 @@ Two paths, no silent reclassification:
   part) and the ticket targets it via ``params.skill`` — the YAML engine
   runs it, the LLM is never invoked;
 * LLM: one fenced Muse run with the role profile (card, skills, tool
-  box badge), the ticket folder and the structured verdict schema.
+  box badge), the ticket folder, the crystallization draft instruction
+  and the structured verdict schema.
   Skilled runs stage their skill links into the ticket folder and mount
   the repo read-only; creation agents also mount the creation roots
   writable (TASK-2026-00214).
@@ -48,6 +49,7 @@ from objectives.agent_result import (
     parse_agent_result,
 )
 from orchestration.agent_sandbox import ensure_ticket_dir
+from orchestration.crystallization import CRYSTALLIZATION_PROMPT
 from orchestration.live import ProcessExecutor
 from orchestration.role_muse import (
     TicketBadgeProvider,
@@ -216,7 +218,7 @@ def build_agent_prompt(
     profile: RoleProfile, task: Mapping[str, Any],
     skill: str | None = None,
 ) -> str:
-    """Ticket + suggested skill + mandatory verdict block."""
+    """Ticket + suggested skill + crystallization + verdict block."""
     lines = [
         f"You are the {profile.name} agent: {profile.card.who}",
         f"Never: {'; '.join(profile.card.never)}.",
@@ -238,7 +240,7 @@ def build_agent_prompt(
             f"Suggested skill: {skill} — read its SKILL.md and follow it; "
             "you decide how.",
         ])
-    lines.extend(["", AGENT_RESULT_PROMPT])
+    lines.extend(["", CRYSTALLIZATION_PROMPT, "", AGENT_RESULT_PROMPT])
     return "\n".join(lines)
 
 

@@ -61,3 +61,23 @@ waits propagate exactly as the engine returns them.
 - `muse skills validate skills/<role>/<skill>` (also runs in the suite).
 - Planner: the per-agent index (name + description + status) travels in
   the prompt; a suggested skill must name a real one of its target.
+
+## Crystallization drafts (TASK-2026-00210)
+
+Agents never write here directly. On close, an agent that ran a
+recurrent process leaves `<ticket-dir>/skill_drafts/<skill>/` (SKILL.md
+with name + description, optional scripts/references/workflow.yaml);
+the save step (`openceo-core/orchestration/crystallization.py`) stamps
+the header (status/ticket/date), validates (normative loader, `muse
+skills validate`, fenced script tests when scripts changed) and commits
+skills + card + profile in a worktree over origin/main with the ticket
+number. New enters as `borrador`; reuse from another ticket promotes to
+`activa`; past 10 drafts per role the oldest is deleted. Failures
+discard the draft with a ticket comment and never touch the outcome.
+
+After pulling crystallization commits, recreate the exposure links in
+this checkout (the push lands on origin/main, never here):
+
+```bash
+cd openceo-core && ../.venv/bin/python -c "from catalog import discover_role_skills, sync_skill_links; print(sync_skill_links(discover_role_skills()))"
+```
