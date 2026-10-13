@@ -272,6 +272,13 @@ def aggregate_objective_cost(
     return total
 
 
+def aggregate_mission_cost(
+    costs: Sequence[Mapping[str, Any] | None] | None,
+) -> dict[str, Any] | None:
+    """Sum ticket costs into the mission view. Null when nothing ran."""
+    return aggregate_objective_cost(costs)
+
+
 def cost_summary_line(cost: Mapping[str, Any] | None) -> str:
     """Compact cost line for prompts (CEO, planner).
 

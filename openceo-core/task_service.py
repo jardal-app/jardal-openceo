@@ -39,6 +39,10 @@ from objectives import playbooks as playbooks_mod
 from objectives.pedido import is_pedido
 from objectives.playbooks import save_approved_playbook
 from objectives.ticket_cost import COST_RUNS_KEY, record_runs
+from objectives.missions import (
+    acceptance_question_marker as mission_acceptance_marker,
+    apply_acceptance_answer,
+)
 from objectives.plan_spend import (
     SPEND_WAITING_REASON,
     PlanSpendError,
@@ -4050,6 +4054,52 @@ class TaskService:
             return await self._repo.get_objective(objective_id)
         return await service.get_objective(objective_id)
 
+    async def create_mission(
+        self,
+        *,
+        project: str,
+        goal: str,
+        acceptance: list[str] | None = None,
+        entry: str = "top_down",
+        source: str = "api",
+        source_id: str | None = None,
+        requester: str | None = None,
+    ) -> dict[str, Any]:
+        """Top-down mission entry: the single surface for API/MCP/voice.
+
+        Raises :class:`MissionRejected` when refused deterministically.
+        """
+        from objectives.missions import MissionRejected
+
+        service = getattr(self, "_objective_service", None)
+        if service is None:
+            raise MissionRejected("objective service is not wired")
+        return await service.create_mission(
+            project=project,
+            goal=goal,
+            acceptance=acceptance,
+            entry=entry,
+            source=source,
+            source_id=source_id,
+            requester=requester,
+        )
+
+    async def get_mission(self, mission_id: str) -> dict[str, Any] | None:
+        """Read one mission document (API/MCP status surface)."""
+        service = getattr(self, "_objective_service", None)
+        if service is None:
+            return await self._repo.get_mission(mission_id)
+        return await service.get_mission(mission_id)
+
+    async def close_mission(
+        self, mission_id: str, reason: str = ""
+    ) -> dict[str, Any]:
+        """Close a mission the CEO declared complete (00218)."""
+        service = getattr(self, "_objective_service", None)
+        if service is None:
+            return {"ok": False, "reason": "no-objective-service"}
+        return await service.close_mission(mission_id, reason=reason)
+
     async def create_owner_escalation(
         self,
         *,
@@ -5080,6 +5130,11 @@ class TaskService:
             return await self._apply_lock_decision(
                 question or {}, lock, origin_id=origin_id,
                 approve=approve, record=record, summary=summary)
+        mission_marker = mission_acceptance_marker(question)
+        if mission_marker is not None:
+            return await self._apply_mission_acceptance_decision(
+                question or {}, mission_marker, approve=approve,
+                record=record)
         if kind == "new_tool" and approve:
             await self._deny_origin_from_question(origin_id, kind, summary)
             return "owner_question_tool"
@@ -5188,6 +5243,49 @@ class TaskService:
             "necesidad": "",
         })
         return "owner_question_spend_deny"
+
+    async def _apply_mission_acceptance_decision(
+        self,
+        question: dict[str, Any],
+        marker: dict[str, Any],
+        *,
+        approve: bool,
+        record: dict[str, Any],
+    ) -> str:
+        """Record the Owner's criteria answer on the mission (00218).
+
+        Non-blocking by design: the mission never waits for this
+        question, so no origin resumes — the answer only confirms,
+        adjusts, or disputes the working acceptance. A late answer
+        after a silent deadline still applies (the Owner's word wins).
+        """
+        mission_id = str(marker.get("mission_id") or "")
+        question_id = str(question.get("task_id") or "")
+        if self._repo is None:
+            logger.warning("mission answer on %s without repo",
+                           question_id)
+            return "owner_question_mission_unwired"
+        mission = await self._repo.get_mission(mission_id)
+        if mission is None:
+            logger.warning("mission answer on %s without mission %s",
+                           question_id, mission_id)
+            return "owner_question_mission_gone"
+        comment = str((record or {}).get("comment") or "")
+        patch = apply_acceptance_answer(
+            mission, approve=approve, comment=comment)
+        await self._repo.patch_mission(mission_id, patch)
+        shell_id = str(mission.get("conversion_source_task_id") or "")
+        if shell_id:
+            try:
+                await self.comment_on_ticket(
+                    shell_id,
+                    "Respuesta del Owner a los criterios: "
+                    f"{patch.get('acceptance_note')}",
+                )
+            except Exception:
+                logger.warning("mission-answer comment failed for %s",
+                               mission_id, exc_info=True)
+        return "owner_question_mission_recorded"
 
     async def _apply_lock_decision(
         self,

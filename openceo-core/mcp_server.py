@@ -382,6 +382,27 @@ def _register_openceo_tools(
         except Exception as exc:  # noqa: BLE001 - mismo contrato que create_ticket
             return {"ok": False, "status": "error", "message": str(exc)}
 
+    async def openceo_create_mission(
+        project: str,
+        goal: str,
+        acceptance: list[str] | None = None,
+        source_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Top-down company mission: ERP group + CEO-chained objectives."""
+        try:
+            mission = await task_service.create_mission(
+                project=project,
+                goal=goal,
+                acceptance=acceptance,
+                source="api",
+                source_id=source_id,
+            )
+            return {"ok": True,
+                    "mission_id": mission.get("mission_id"),
+                    "mission": mission}
+        except Exception as exc:  # noqa: BLE001 - mismo contrato que create_ticket
+            return {"ok": False, "status": "error", "message": str(exc)}
+
     async def openceo_transition_ticket(
         ticket: str,
         to_status: Literal["Open", "Working", "Pending Review", "Completed", "Cancelled"],
@@ -690,6 +711,11 @@ def _register_openceo_tools(
         openceo_create_objective,
         name="openceo_create_objective",
         description="Create a top-down company objective: one ERPNext group Task (business identity) whose children the planner creates. Required: project, goal. Optional: acceptance (delivery criteria), source_id. Refuses duplicates and admission limits deterministically. Boundary (c): writes the business record.",
+    )
+    server.tool(
+        openceo_create_mission,
+        name="openceo_create_mission",
+        description="Create a top-down company mission: one ERPNext group Task (business identity) whose children are objective groups the CEO strategy chains. Required: project, goal. Optional: acceptance (mission criteria; without them the CEO proposes and asks), source_id. Refuses duplicates deterministically. Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_transition_ticket,
@@ -1071,6 +1097,7 @@ def _register_openceo_tools(
         "openceo_search_tickets",
         "openceo_get_ticket",
         "openceo_create_objective",
+        "openceo_create_mission",
         "openceo_transition_ticket",
         "openceo_transition_tickets_batch",
         "openceo_update_ticket",

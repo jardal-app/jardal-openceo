@@ -258,6 +258,17 @@ class ObjectiveCreateRequest(BaseModel):
     source_id: str | None = None
 
 
+class MissionCreateRequest(BaseModel):
+    """Top-down mission creation (TASK-2026-00218)."""
+
+    project: str
+    goal: str
+    acceptance: list[str] | None = None
+    entry: str = "top_down"
+    source: str = "api"
+    source_id: str | None = None
+
+
 class TaskDocument(BaseModel):
     task_id: str = Field(default_factory=lambda: str(uuid4()))
     ticket_number: int | None = None

@@ -115,6 +115,7 @@ MCP_BOUNDARY_TOOLS = frozenset({
     "openceo_search_tickets",
     "openceo_get_ticket",
     "openceo_create_objective",
+    "openceo_create_mission",
     "openceo_transition_ticket",
     "openceo_transition_tickets_batch",
     "openceo_update_ticket",

@@ -120,6 +120,7 @@ class FakeTaskService:
         self.tasks_by_id: dict[str, dict[str, Any]] = {}
         self.escalations: list[dict[str, Any]] = []
         self.objectives: list[dict[str, Any]] = []
+        self.missions: list[dict[str, Any]] = []
         self.plan_calls: list[str] = []
         self._seq = 0
 
@@ -188,6 +189,28 @@ class FakeTaskService:
             "conversion_source_task_id": self._next_id("shell"),
         }
         self.objectives.append(doc)
+        if key:
+            self.by_source_id[key] = doc
+        return dict(doc)
+
+    async def create_mission(
+        self, *, project: str, goal: str, acceptance: Any = None,
+        entry: str = "top_down", source: str = "api",
+        source_id: str | None = None, requester: str | None = None,
+    ) -> dict[str, Any]:
+        key = str(source_id or "").strip()
+        if key and key in self.by_source_id:
+            return dict(self.by_source_id[key])
+        mission_id = self._next_id("mis")
+        doc = {
+            "mission_id": mission_id,
+            "project": project,
+            "entry": entry,
+            "goal": goal,
+            "acceptance": acceptance,
+            "conversion_source_task_id": self._next_id("shell"),
+        }
+        self.missions.append(doc)
         if key:
             self.by_source_id[key] = doc
         return dict(doc)
@@ -504,6 +527,26 @@ class PromoteServiceTests(_Base):
         self.assertEqual(result["reason"], "unknown_kind")
         self.assertEqual(self.task_service.created_tasks, [])
         self.assertEqual(self.task_service.escalations, [])
+
+    async def test_kind_mission_creates_a_mission(self) -> None:
+        stored = await self._store(
+            _action(company_project="acme", acceptance="Panel en verde")
+        )
+        result = await self.service.promote_action(
+            "usr_owner", action_id=stored["action_id"], kind="mission"
+        )
+        self.assertTrue(result["promoted"])
+        self.assertEqual(result["kind"], "mission")
+        self.assertEqual(self.task_service.created_tasks, [])
+        self.assertEqual(len(self.task_service.missions), 1)
+        created = self.task_service.missions[0]
+        self.assertEqual(created["entry"], "horizon_promotion")
+        self.assertEqual(created["project"], "acme")
+        self.assertIn("Revisar el panel", created["goal"])
+        self.assertEqual(created["acceptance"], ["Panel en verde"])
+        updated = await self.repo.get_horizon_action(stored["action_id"])
+        self.assertEqual(updated["promotion_kind"], "mission")
+        self.assertEqual(updated["promotion_ref"], created["mission_id"])
 
     async def test_cost_escalates_and_parks_the_work(self) -> None:
         stored = await self._store(_action(company_project="acme"))

@@ -76,6 +76,11 @@ def promotion_objective_source_id(action_id: str) -> str:
     return f"horizon-promotion-obj:{action_id}"
 
 
+def promotion_mission_source_id(action_id: str) -> str:
+    """Idempotencia de la API para la misión promovida."""
+    return f"horizon-promotion-mis:{action_id}"
+
+
 def promotion_escalation_source_id(action_id: str) -> str:
     """Idempotencia de la API para el escalado de una promocion."""
     return f"horizon-promotion-esc:{action_id}"

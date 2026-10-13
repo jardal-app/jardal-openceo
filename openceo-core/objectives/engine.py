@@ -179,6 +179,11 @@ class ObjectiveEnv:
     # launches. None in bare unit envs and when the file is unreadable;
     # then any declared spend escalates, while spend-free plans launch.
     mandate: Any | None = None
+    # Mission store (TASK-2026-00218): conversion links objectives to
+    # their mission and the close records the ledger. None in bare
+    # unit envs and mission-less flows: mission linkage then degrades
+    # to the ticket params the planner already sees.
+    missions: Any | None = None
 
 
 class InMemoryObjectiveStore:
@@ -533,6 +538,93 @@ async def create_objective(
     return final or objective
 
 
+async def _adopt_mission_proposal(
+    env: ObjectiveEnv,
+    mission_id: str,
+    objective_id: str,
+    acceptance: Any,
+) -> None:
+    """Link the converted objective; adopt + ask first proposal (00218).
+
+    Never breaks the conversion: every failure degrades to a log line
+    and the mission keeps whatever it already had.
+    """
+    store = getattr(env, "missions", None)
+    if store is None:
+        return
+    from objectives import missions as missions_mod
+
+    try:
+        mission = await store.get_mission(mission_id)
+    except Exception:
+        logger.warning("mission %s unreadable (convert stands)",
+                       mission_id)
+        return
+    if mission is None:
+        return
+    try:
+        await missions_mod.record_objective_linked(
+            store, mission_id, objective_id)
+    except Exception:
+        logger.warning("mission ledger failed for %s (convert stands)",
+                       mission_id)
+    patch = missions_mod.adopt_proposal(mission, acceptance or [])
+    if patch is None:
+        return
+    merged = dict(mission)
+    merged.update(patch)
+    try:
+        spec = missions_mod.acceptance_question_spec(merged)
+    except missions_mod.MissionRejected:
+        return
+    try:
+        question = await env.create_ticket({
+            "title": spec["title"],
+            "description": spec["description"],
+            "project": spec["project"],
+            "source": spec["source"],
+            "source_id": spec["source_id"],
+            "params": spec["params"],
+            "priority": spec["priority"],
+            "tags": spec["tags"],
+            "autorun": False,
+        })
+    except Exception:
+        logger.warning("mission question failed for %s (proposal "
+                       "unasked)", mission_id, exc_info=True)
+        return
+    question_id = str((question or {}).get("task_id") or "")
+    if not question_id:
+        logger.warning("mission question failed for %s (proposal "
+                       "unasked)", mission_id)
+        return
+    try:
+        await env.patch_task(question_id, {
+            "status": "waiting",
+            "phase": spec["phase"],
+            "waiting_reason": spec["waiting_reason"],
+            "workflow_key": None,
+            "workflow_phases": [],
+            "phase_index": 0,
+            "phase_assignments": {},
+        })
+    except Exception:
+        logger.warning("mission question failed for %s (proposal "
+                       "unasked)", mission_id, exc_info=True)
+        return
+    checkpoint = ((spec.get("params") or {}).get("owner_question") or {}
+                  ).get("checkpoint") or {}
+    try:
+        await store.patch_mission(mission_id, {
+            **patch,
+            "question_task_id": question_id,
+            "question_deadline": str(checkpoint.get("deadline") or ""),
+        })
+    except Exception:
+        logger.warning("mission adoption failed for %s (convert stands)",
+                       mission_id)
+
+
 async def convert_ticket(
     env: ObjectiveEnv,
     ticket: Mapping[str, Any],
@@ -586,6 +678,10 @@ async def convert_ticket(
         "out_of_scope": [],
         "source_doc": None,
     }
+    mission_id = ""
+    params = ticket.get("params")
+    if isinstance(params, Mapping):
+        mission_id = str(params.get("mission_id") or "").strip()
     objective = await env.objectives.create_objective(_new_objective_doc(
         objective_id=objective_id,
         project=project,
@@ -598,6 +694,15 @@ async def convert_ticket(
         base_sha=_git(env.repo, "rev-parse", "HEAD").strip(),
         branch="base" if env.auto_merge else f"objective/{objective_id}",
     ))
+    if mission_id:
+        try:
+            await env.objectives.patch_objective(
+                objective_id, {"mission_id": mission_id})
+        except Exception:
+            logger.warning("mission link failed for %s (convert "
+                           "stands): %s", objective_id, mission_id)
+        await _adopt_mission_proposal(env, mission_id, objective_id,
+                                      acceptance)
     await env.patch_task(task_id, {
         "status": "converted",
         "objective_id": objective_id,
@@ -1571,6 +1676,7 @@ def _pedido_prompt(
     routing_guide: str = "",
     spend_guide: str = "",
     principles_guide: str = "",
+    mission_guide: str = "",
     agent_return: Mapping[str, Any] | None = None,
 ) -> str:
     """Planner prompt for one pedido (self-contained decision contract)."""
@@ -1642,6 +1748,8 @@ def _pedido_prompt(
         lines.extend(["", spend_guide.strip()])
     if (principles_guide or "").strip():
         lines.extend(["", principles_guide.strip()])
+    if (mission_guide or "").strip():
+        lines.extend(["", mission_guide.strip()])
     lines.extend([
         "",
         f"OUTPUT: write {SCRATCH_DIRNAME}/loose/"
@@ -1751,6 +1859,45 @@ async def plan_pedido(
             del _PLAN_FLIGHTS[flight_key]
 
 
+async def _mission_guide_section(
+    env: ObjectiveEnv, ticket: Mapping[str, Any],
+) -> str:
+    """MISSION context for a mission-linked pedido ("" when none)."""
+    store = getattr(env, "missions", None)
+    if store is None:
+        return ""
+    params = ticket.get("params")
+    mission_id = ""
+    if isinstance(params, Mapping):
+        mission_id = str(params.get("mission_id") or "").strip()
+    if not mission_id:
+        return ""
+    try:
+        mission = await store.get_mission(mission_id)
+    except Exception:
+        return ""
+    if mission is None:
+        return ""
+    criteria = [str(item).strip()
+                for item in mission.get("acceptance") or []
+                if str(item).strip()]
+    ledger = [item for item in mission.get("objectives") or []
+              if isinstance(item, Mapping)]
+    states = ", ".join(
+        f"{item.get('objective_id')}={item.get('status')}"
+        for item in ledger) or "(first objective)"
+    lines = [
+        f"MISSION {mission_id}: {str(mission.get('goal') or '')[:300]}",
+        "Acceptance: "
+        + ("; ".join(criteria)[:600] if criteria else "(CEO proposes it)"),
+        f"Objectives so far: {states}",
+        "This pedido continues the mission as its next objective: it "
+        "outgrows one ticket by definition, so return capability_gap "
+        "and the system converts it (linked, under the mission group).",
+    ]
+    return "\n".join(lines)
+
+
 async def _plan_pedido_inner(
     env: ObjectiveEnv,
     ticket: Mapping[str, Any],
@@ -1791,6 +1938,7 @@ async def _plan_pedido_inner(
         routing_guide=routing_guide_section(project, env.project_routing),
         spend_guide=spend_mod.spend_guide_section(env.mandate),
         principles_guide=principles_prompt_section(env.mandate),
+        mission_guide=await _mission_guide_section(env, ticket),
         agent_return=return_from)
     timeout_s = int(planner_cfg.get("timeout_minutes", 15)) * 60
     errors: list[str] = []
@@ -3563,11 +3711,27 @@ async def _finish_objective(
             objective, children, verified_by="final_review",
             evidence=evidence),
     })
-    if env.ceo_wake is not None:
+    mission_id = str(objective.get("mission_id") or "").strip()
+    if mission_id and getattr(env, "missions", None) is not None:
+        from objectives import missions as missions_mod
+
         try:
-            env.ceo_wake(
-                f"Objective {objective_id} closed: final review clean."
+            await missions_mod.record_objective_closed(
+                getattr(env, "missions", None), mission_id,
+                objective_id)
+        except Exception:
+            logger.warning("mission ledger failed for %s (close stands)",
+                           mission_id)
+    if env.ceo_wake is not None:
+        reason = f"Objective {objective_id} closed: final review clean."
+        if mission_id:
+            reason += (
+                f" It served mission {mission_id}: judge the mission "
+                "acceptance and emit its next objective pedido, or "
+                "close the mission."
             )
+        try:
+            env.ceo_wake(reason)
         except Exception:
             pass
     parent_id = str(objective.get("conversion_source_task_id") or "")

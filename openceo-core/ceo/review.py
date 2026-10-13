@@ -11,9 +11,10 @@ Business-state effects flow only through sanctioned channels
 observer). If a future CEO ever needs to close or cancel business
 work directly, it MUST go through ``TaskService.transition_ticket``
 (TASK-2026-00132) — never through a direct adapter write. No such
-call site exists in this ticket: the four-action contract states a
-need (a pedido the single planner shapes), escalates or reports,
-and business acceptance stays an ERPNext decision.
+call site exists in this ticket: the five-action contract states a
+need (a pedido the single planner shapes), escalates, reports, or
+closes a mission with evidence, and business acceptance stays an
+ERPNext decision.
 """
 
 from __future__ import annotations
@@ -67,6 +68,8 @@ CEOReviewKind = ("scheduled", "reactive")
 # own: one unreadable source never empties the others.
 CEO_BUSINESS_ROWS = 50
 CEO_OBJECTIVES = 10
+CEO_MISSIONS = 10
+CEO_OBJECTIVES_PER_MISSION = 20
 CEO_CHILDREN_PER_OBJECTIVE = 100
 CEO_ROADMAP_PER_OBJECTIVE = 10
 CEO_DEFERRED_PER_OBJECTIVE = 10
@@ -136,6 +139,15 @@ class CEOEnv:
     publish: Callable[[dict[str, Any]], Awaitable[None]]
     ceo_cfg: dict[str, Any] = field(default_factory=dict)
     now: Callable[[], datetime] | None = None
+    # Missions (TASK-2026-00218). None in envs without mission wiring:
+    # no MISSIONS signals and mission decisions fail as unknown.
+    missions: Any | None = None
+    patch_task: (
+        Callable[[str, dict[str, Any]], Awaitable[None]] | None
+    ) = None
+    close_mission: (
+        Callable[..., Awaitable[dict[str, Any]]] | None
+    ) = None
 
     def moment(self) -> datetime:
         return self.now() if self.now is not None else _utcnow()
@@ -147,6 +159,8 @@ class CEOSignals:
 
     axes: list[dict[str, Any]] = field(default_factory=list)
     principios: list[str] = field(default_factory=list)
+    missions: list[dict[str, Any]] = field(default_factory=list)
+    missions_unknown: bool = False
     limits: dict[str, Any] = field(default_factory=dict)
     spend_threshold: str = ""
     spend_currency: str = ""
@@ -258,6 +272,83 @@ async def _objective_digest(
     return digest
 
 
+async def _mission_digest(
+    env: CEOEnv, mission: Mapping[str, Any]
+) -> dict[str, Any]:
+    mission_id = str(mission.get("mission_id") or "")
+    ledger = [item for item in mission.get("objectives") or []
+              if isinstance(item, Mapping)][:CEO_OBJECTIVES_PER_MISSION]
+    children: list[dict[str, Any]] = []
+    costs: list[Any] = []
+    for item in ledger:
+        objective_id = str(item.get("objective_id") or "")
+        try:
+            objective = await env.objectives.get_objective(objective_id)
+        except Exception:
+            logger.warning("CEO: mission objective %s unreadable",
+                           objective_id)
+            objective = None
+        if objective is None:
+            children.append({"objective_id": objective_id,
+                             "status": "unknown"})
+            continue
+        status = str(objective.get("status") or "")
+        children.append({"objective_id": objective_id, "status": status})
+        try:
+            tickets = await env.tasks.list_by_objective(objective_id)
+        except Exception:
+            logger.warning("CEO: children of %s unreadable", objective_id)
+            tickets = None
+        if tickets is not None:
+            costs.extend(item.get("cost")
+                         for item in list(tickets)[:CEO_CHILDREN_PER_OBJECTIVE])
+    shell_status = ""
+    shell_id = str(mission.get("conversion_source_task_id") or "")
+    if shell_id:
+        try:
+            shell = await env.tasks.get_task(shell_id)
+        except Exception:
+            logger.warning("CEO: mission shell %s unreadable", shell_id)
+            shell = None
+        if isinstance(shell, Mapping):
+            shell_status = str(shell.get("status") or "")
+    question_state = ""
+    question_id = str(mission.get("question_task_id") or "")
+    if question_id:
+        try:
+            question = await env.tasks.get_task(question_id)
+        except Exception:
+            logger.warning("CEO: mission question %s unreadable",
+                           question_id)
+            question = None
+        if isinstance(question, Mapping):
+            from owner_channel import question_answered
+            if question_answered(question):
+                question_state = "answered"
+            elif str(question.get("status") or "") in {
+                    "completed", "cancelled"}:
+                question_state = "closed without recorded answer"
+            else:
+                question_state = (
+                    "open (deadline "
+                    f"{mission.get('question_deadline')})"
+                )
+    return {
+        "mission_id": mission_id,
+        "project": mission.get("project"),
+        "goal": _short(mission.get("goal"), 300),
+        "status": mission.get("status"),
+        "shell_status": shell_status,
+        "acceptance": [str(item) for item in mission.get("acceptance") or []],
+        "acceptance_source": mission.get("acceptance_source"),
+        "acceptance_status": mission.get("acceptance_status"),
+        "acceptance_disputed": bool(mission.get("acceptance_disputed")),
+        "question_state": question_state,
+        "objectives": children,
+        "cost": cost_mod.aggregate_mission_cost(costs) if costs else None,
+    }
+
+
 async def compile_signals(env: CEOEnv) -> CEOSignals:
     """Compile the bounded signals. Unknown stays unknown, never zero."""
     signals = CEOSignals()
@@ -327,6 +418,22 @@ async def compile_signals(env: CEOEnv) -> CEOSignals:
             signals.objectives.append(
                 await _objective_digest(env, objective)
             )
+
+    if env.missions is None:
+        signals.missions = []
+    else:
+        try:
+            missions = await env.missions.list_active_missions()
+        except Exception:
+            logger.warning("CEO: missions unreadable", exc_info=True)
+            missions = None
+        if missions is None:
+            signals.missions_unknown = True
+        else:
+            for mission in list(missions)[:CEO_MISSIONS]:
+                signals.missions.append(
+                    await _mission_digest(env, mission)
+                )
 
     try:
         signals.closed_rows = list(
@@ -442,6 +549,37 @@ def _objectives_section(signals: CEOSignals) -> str:
     return "\n".join(lines)
 
 
+def _missions_section(signals: CEOSignals) -> str:
+    if signals.missions_unknown:
+        return "MISSIONS\nUNKNOWN (missions unreadable this review)"
+    if not signals.missions:
+        return "MISSIONS\n(none active)"
+    lines = ["MISSIONS"]
+    for item in signals.missions:
+        lines.append(
+            f"- {item['mission_id']} [{item['project']}] "
+            f"({item['status']}): {item['goal']}"
+        )
+        criteria = item["acceptance"] or ["(no criteria yet: propose them "
+                                          "in your next mission pedido)"]
+        lines.append(
+            f"  acceptance ({item['acceptance_source']}/"
+            f"{item['acceptance_status']}"
+            f"{', DISPUTED' if item['acceptance_disputed'] else ''}): "
+            f"{'; '.join(str(criterion) for criterion in criteria)[:400]}"
+        )
+        if item["question_state"]:
+            lines.append(f"  owner question: {item['question_state']}")
+        children = item["objectives"] or []
+        states = ", ".join(
+            f"{child['objective_id']}={child['status']}"
+            for child in children) or "(no objectives yet)"
+        lines.append(f"  objectives: {states}")
+        if isinstance(item.get("cost"), dict):
+            lines.append(f"  cost: {cost_mod.cost_summary_line(item['cost'])}")
+    return "\n".join(lines)
+
+
 def _rows_section(
     title: str, rows: Sequence[Mapping[str, Any]], unknown: bool
 ) -> str:
@@ -504,6 +642,7 @@ def _ceo_prompt(
         _rows_section(
             "BUSINESS OPEN", signals.business_rows,
             signals.business_unknown),
+        _missions_section(signals),
         _objectives_section(signals),
         _rows_section(
             "RECENTLY CLOSED", signals.closed_rows,
@@ -519,13 +658,25 @@ def _ceo_prompt(
         "\n".join([
             "RULES",
             "- One action only: keep_going | crear_pedido | escalate | "
-            "do_nothing.",
+            "do_nothing | close_mission.",
             "- keep_going: open work suffices, nothing new needed now. "
             "do_nothing: no action is warranted at all.",
             "- crear_pedido states a need, never its form: the single "
             "planner decides ticket or objective, agent, skill and "
             "(dev) tier. Never name the outcome ticket or objective; "
             "describe the work.",
+            "- A mission advances only through your mission pedidos: "
+            "when a mission needs its next objective, crear_pedido "
+            "with mission_id (filed under the mission group; the "
+            "planner gives it objective form). Name the mission need "
+            "in title/description. When a mission has no criteria "
+            "yet, propose them in the pedido acceptance: adoption "
+            "asks the Owner without blocking.",
+            "- close_mission declares one mission complete: use it "
+            "only when its acceptance is met on delivered evidence "
+            "(every mission objective terminal, at least one "
+            "closed). The deterministic validation rejects early or "
+            "criteria-less closes.",
             "- crear_pedido links the mandate: when a KPI is measured "
             "this review (a reading, not UNKNOWN), link it via eje_id "
             "and kpi_ids; otherwise write why the work matters in "
@@ -558,11 +709,12 @@ def _ceo_prompt(
         "\n".join([
             f"OUTPUT: write {CEO_DECISION_FILE} under {repo_root}/.tier-s/ "
             "with exactly this JSON (no other file, no other text):",
-            '{"action": "<one of the four>", "summary": "<one line>", '
+            '{"action": "<one of the five>", "summary": "<one line>", '
             '"pedido": {"project": "...", "title": "...", '
             '"description": "...", "acceptance": [...], '
             '"eje_id?": "...", "kpi_ids?": ["..."], '
             '"justificacion?": "<why, when no KPI is measured>", '
+            '"mission_id?": "<mission to chain as its next objective>", '
             '"costs": [{"label": "...", "amount": '
             '"..."|null}], "project_key": "...", "display_name": "..."} '
             '| "escalation": '
@@ -570,7 +722,8 @@ def _ceo_prompt(
             '"amount": null, "uses_paid_quota": false, '
             '"irreversible": false, "strategic_replan": false, '
             '"mandate_change": false, '
-            '"policy_requires_human_review": false}}',
+            '"policy_requires_human_review": false} '
+            '| "mission": {"mission_id": "<mission to close>"}}',
             "keep_going and do_nothing carry action+summary only; "
             "costs and project_key/display_name are optional (omit the "
             "keys when the pedido needs neither); eje_id/kpi_ids or "
@@ -582,7 +735,7 @@ def _ceo_prompt(
 def _ceo_retry_prompt(errors: Sequence[str], repo_root: Path) -> str:
     return (
         f"Your {CEO_DECISION_FILE} is invalid: {'; '.join(errors)}\n"
-        "Fix exactly that (same four actions, same rules) and rewrite "
+        "Fix exactly that (same five actions, same rules) and rewrite "
         f"the file under {repo_root}/.tier-s/. No other text."
     )
 
@@ -613,6 +766,23 @@ def _validation_context(env: CEOEnv, signals: CEOSignals) -> CEOValidationContex
         open_escalations=list(signals.open_escalations),
         escalations_unknown=signals.escalations_unknown,
         kpi_readings=dict(signals.kpi_readings),
+        missions={
+            str(item.get("mission_id") or ""): {
+                "status": item.get("status"),
+                "shell_status": item.get("shell_status"),
+                "acceptance": list(item.get("acceptance") or []),
+            }
+            for item in signals.missions
+        },
+        mission_objectives={
+            str(item.get("mission_id") or ""): [
+                {"objective_id": str(child.get("objective_id") or ""),
+                 "status": str(child.get("status") or "")}
+                for child in item.get("objectives") or []
+            ]
+            for item in signals.missions
+        },
+        missions_unknown=signals.missions_unknown,
     )
 
 
@@ -661,6 +831,8 @@ def _signals_digest(signals: CEOSignals) -> dict[str, Any]:
         "kpis_unknown": len(signals.kpi_readings) - measured,
         "business_rows": len(signals.business_rows),
         "business_unknown": signals.business_unknown,
+        "missions": len(signals.missions),
+        "missions_unknown": signals.missions_unknown,
         "objectives": len(signals.objectives),
         "objectives_unknown": signals.objectives_unknown,
         "closed": len(signals.closed_rows),
@@ -788,6 +960,33 @@ async def _act_on_decision(
     """Perform exactly one validated action. Never raises for refusals."""
     if decision.action in (CEOAction.KEEP_GOING, CEOAction.DO_NOTHING):
         return {"ok": True, "action": decision.action.value}
+    if decision.action == CEOAction.CLOSE_MISSION:
+        spec = decision.mission
+        assert spec is not None  # Shape-guarded.
+        if env.close_mission is None:
+            return {
+                "ok": False, "action": "error",
+                "reason": "mission service is not wired",
+            }
+        mission_id = str(spec.mission_id or "").strip()
+        try:
+            result = await env.close_mission(
+                mission_id, reason=str(decision.summary))
+        except Exception as exc:
+            return {
+                "ok": False, "action": "error",
+                "reason": f"mission close failed: {exc}",
+            }
+        if not isinstance(result, Mapping) or not result.get("ok"):
+            return {
+                "ok": False, "action": "error",
+                "reason": str((result or {}).get("reason")
+                              or "mission close failed"),
+            }
+        return {
+            "ok": True, "action": "mission_closed",
+            "mission_id": mission_id,
+        }
     if decision.action == CEOAction.CREAR_PEDIDO:
         spec = decision.pedido
         assert spec is not None  # Shape-guarded.
@@ -808,6 +1007,18 @@ async def _act_on_decision(
             params["kpi_ids"] = [str(item) for item in spec.kpi_ids]
         if str(spec.justificacion or "").strip():
             params["justificacion"] = str(spec.justificacion)
+        mission_id = str(spec.mission_id or "").strip()
+        parent_task: str | None = None
+        if mission_id:
+            params["mission_id"] = mission_id
+            if env.missions is not None:
+                try:
+                    mission = await env.missions.get_mission(mission_id)
+                except Exception:
+                    mission = None
+                group = (str((mission or {}).get("erp_group_ref") or "")
+                         .strip())
+                parent_task = group or None
         if spec.costs:
             params["costs"] = [
                 {"label": str(cost.label), "amount": cost.amount}
@@ -816,7 +1027,7 @@ async def _act_on_decision(
         if spec.project_key is not None:
             params["project_key"] = str(spec.project_key)
             params["display_name"] = str(spec.display_name or "")
-        created = await env.create_ticket({
+        payload: dict[str, Any] = {
             "title": str(spec.title),
             "description": f"{citation}\n\n{spec.description}",
             "project": str(spec.project),
@@ -825,7 +1036,10 @@ async def _act_on_decision(
             "acceptance": [str(item) for item in spec.acceptance],
             "params": params,
             "tags": ["ceo-review"],
-        })
+        }
+        if parent_task:
+            payload["parent_task"] = parent_task
+        created = await env.create_ticket(payload)
         if created is None:
             return {
                 "ok": False, "action": "error",
@@ -854,16 +1068,76 @@ async def _act_on_decision(
     }
 
 
+async def _expire_mission_questions(
+    env: CEOEnv, moment: datetime,
+) -> list[str]:
+    """Confirm proposals whose Owner deadline passed silently.
+
+    Deterministic bookkeeping, not an action: every mission with an
+    unanswered acceptance question past its deadline keeps its
+    proposal as confirmed, and the question closes with the note. A
+    late Owner answer still applies afterwards. Never raises.
+    """
+    from objectives import missions as missions_mod
+
+    expired: list[str] = []
+    if env.missions is None or env.patch_task is None:
+        return expired
+    try:
+        missions = await env.missions.list_active_missions()
+    except Exception:
+        logger.warning("CEO: missions unreadable for expiry", exc_info=True)
+        return expired
+    for mission in missions or []:
+        question_id = str(mission.get("question_task_id") or "")
+        if not question_id:
+            continue
+        try:
+            question = await env.tasks.get_task(question_id)
+        except Exception:
+            logger.warning("CEO: mission question %s unreadable",
+                           question_id)
+            continue
+        try:
+            overdue = missions_mod.mission_question_expired(
+                question, moment)
+        except Exception:
+            continue
+        if not overdue:
+            continue
+        mission_id = str(mission.get("mission_id") or "")
+        try:
+            await env.missions.patch_mission(
+                mission_id, missions_mod.deadline_confirmation_patch())
+            await env.patch_task(question_id, {
+                "status": "completed",
+                "waiting_reason": None,
+                "resume_at": None,
+                "completed_at": moment.isoformat().replace("+00:00", "Z"),
+                "last_response_summary": (
+                    "Plazo vencido sin respuesta: la propuesta del CEO "
+                    "queda confirmada para la misión "
+                    f"{mission_id}."),
+            })
+        except Exception:
+            logger.warning("CEO: mission expiry failed for %s",
+                           mission_id, exc_info=True)
+            continue
+        expired.append(mission_id)
+    return expired
+
+
 async def run_review(
     env: CEOEnv, *, kind: str, reasons: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Run one CEO review. Returns the outcome (never raises it).
 
     Without a valid mandate the review escalates deterministically and
-    never invokes the model. Otherwise: compile signals, one headless
-    run (plus one retry on invalid output), validate, act once,
-    publish the record. Unexpected failures become an ``error`` outcome
-    with a published record — the loop stays alive.
+    never invokes the model. Otherwise: expire silent mission
+    deadlines, compile signals, one headless run (plus one retry on
+    invalid output), validate, act once, publish the record.
+    Unexpected failures become an ``error`` outcome with a published
+    record — the loop stays alive.
     """
     if kind not in CEOReviewKind:
         raise ValueError(f"unknown CEO review kind {kind!r}")
@@ -878,6 +1152,7 @@ async def run_review(
             env, kind=kind, reasons=clean_reasons,
             review_id=review_id, moment=moment,
         )
+    expired_questions = await _expire_mission_questions(env, moment)
     signals = await compile_signals(env)
     ctx = _validation_context(env, signals)
     prompt = _ceo_prompt(
@@ -974,6 +1249,7 @@ async def run_review(
         "outcome": outcome,
         "status": _review_status(signals),
         "model_runs": model_runs,
+        "expired_questions": expired_questions,
     }
     await _publish_record(env, record)
     return {**outcome, "review_id": review_id}
