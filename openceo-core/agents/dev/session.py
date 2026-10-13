@@ -36,6 +36,15 @@ from objectives import ticket_cost as cost_mod
 from orchestration.inbox import InMemoryInboxStore, MongoInboxStore
 from orchestration.knowledge import detect_prompt_lang, with_preamble
 from orchestration.live import AllowAllQuota, ProcessExecutor, RateMonitorQuota
+from orchestration.role_claude import (
+    CLAUDE_MCP_OVERLAY_RELPATH,
+    claude_config_bytes,
+    ensure_mcp_placeholder,
+    profile_box_tools,
+)
+from orchestration.role_claude import (
+    render_argv_extras as claude_argv_extras,
+)
 from orchestration.role_muse import (
     SETTINGS_OVERLAY_RELPATH,
     ObjectiveBadgeProvider,
@@ -146,6 +155,12 @@ class DevExecutionOutput:
         if self.cost_runs:
             patch[COST_RUNS_KEY] = self.cost_runs
         return patch
+
+
+#: Env var carrying the run's MCP ticket token on Tier B (TASK-2026-00200).
+#: Codex reads it via a per-run bearer_token_env_var override (the PM
+#: extraction precedent); never persisted, never on argv.
+TIER_CODEX_TOKEN_ENV = "OPENCEO_TIER_MCP_TOKEN"
 
 
 @dataclass
@@ -1462,6 +1477,31 @@ class DevSessionManager:
             raise
         return {SETTINGS_OVERLAY_RELPATH: rendered}, badge
 
+    async def _claude_role_overlays(
+        self,
+        provider: TicketBadgeProvider,
+        role: str,
+        profile_name: str,
+    ) -> tuple[dict[str, bytes], str]:
+        """Badge + MCP config overlay for one claude tier run.
+
+        The overlay path is fixed under home (the resolve-time argv points
+        at it); the placeholder must exist for the fence to bind over it.
+        """
+        profile = load_role_profile(profile_name)
+        if profile.agent != "dev":
+            raise RoleProfileError(
+                f"tier runs need the dev profile, not {profile_name!r}")
+        badge = await provider.mint(role)
+        try:
+            home = Path(os.path.expanduser("~"))
+            ensure_mcp_placeholder(home)
+            rendered = claude_config_bytes(provider.mcp_servers(badge))
+        except Exception:
+            await provider.revoke(badge)
+            raise
+        return {CLAUDE_MCP_OVERLAY_RELPATH: rendered}, badge
+
     @staticmethod
     def _executor_link(executor: "TierExecutor") -> str | None:
         """Tier C chain link of ``executor`` (``muse``/``dsh``/``claudep``).
@@ -1501,7 +1541,10 @@ class DevSessionManager:
         overlays: dict[str, bytes] | None = None
         badge: str | None = None
         badge_provider: TicketBadgeProvider | None = None
-        if executor.label == "tier_c:muse":
+        extra_env: dict[str, str] = {}
+        if executor.label == "tier_c:muse" or (
+                executor.role_profile
+                and executor.label in ("tier_a", "tier_b")):
             project = str(task.get("project") or "")
             badge_provider = self._ticket_badge_provider(
                 badge_ticket_for_task(task) or "", project)
@@ -1515,10 +1558,19 @@ class DevSessionManager:
                     executor_link=self._executor_link(executor),
                 )
             try:
-                overlays, badge = await self._muse_role_overlays(
-                    badge_provider, str(executor.label),
-                    executor.cwd or os.getcwd(),
-                    executor.role_profile or "dev")
+                if executor.label == "tier_a":
+                    overlays, badge = await self._claude_role_overlays(
+                        badge_provider, str(executor.label),
+                        executor.role_profile or "dev")
+                elif executor.label == "tier_b":
+                    badge = await badge_provider.mint(
+                        str(executor.label))
+                    extra_env[TIER_CODEX_TOKEN_ENV] = badge
+                else:
+                    overlays, badge = await self._muse_role_overlays(
+                        badge_provider, str(executor.label),
+                        executor.cwd or os.getcwd(),
+                        executor.role_profile or "dev")
             except (RoleProfileError, CatalogError, McpAuthError,
                     ValueError, OSError) as exc:
                 detail = f"role profile refused: {exc}"
@@ -1530,10 +1582,11 @@ class DevSessionManager:
                     executor_link=self._executor_link(executor),
                 )
         started = time.monotonic()
+        run_env = {**(executor.env or {}), **extra_env} or None
         try:
             ok, output, err = await self._run_process(
                 command, stdin_payload=stdin_payload, timeout=1800,
-                cwd=executor.cwd, env=executor.env or None,
+                cwd=executor.cwd, env=run_env,
                 config_argv=list(executor.argv),
                 home_file_overlays=overlays,
             )
@@ -1595,25 +1648,48 @@ class DevSessionManager:
             account = str(tier_cfg.get("account") or "claudej")
             provider_cfg = providers.get("claude", {}) or {}
             argv = self._as_argv(provider_cfg.get("command")) or [account]
+            argv = self._ensure_print_flag(argv) + self._model_args(tier_cfg)
+            profile_name = (tier_cfg.get("role_profile")
+                            or provider_cfg.get("role_profile"))
+            if profile_name:
+                profile = load_role_profile(str(profile_name))
+                mcp_path = (Path(os.path.expanduser("~"))
+                            / CLAUDE_MCP_OVERLAY_RELPATH)
+                argv = [*argv, *claude_argv_extras(
+                    profile, profile_box_tools(profile), str(mcp_path))]
             return TierExecutor(
-                argv=self._ensure_print_flag(argv) + self._model_args(tier_cfg),
+                argv=argv,
                 prompt_via="argv",
                 cwd=self._provider_cwd(provider_cfg, repo_cwd),
                 env=self._provider_env(provider_cfg),
                 label="tier_a",
+                role_profile=(str(profile_name) if profile_name else None),
             )
         if tool == CodingTool.TIER_B:
             tier_cfg = tiers_cfg.get("tier_b") or {}
             account = str(tier_cfg.get("account") or "codexj")
             provider_cfg = providers.get("codex", {}) or {}
+            argv = self._ensure_codex_exec(self._with_model_args(
+                [account, "exec", "--ephemeral", "-"],
+                self._model_args(tier_cfg)))
+            profile_name = (tier_cfg.get("role_profile")
+                            or provider_cfg.get("role_profile"))
+            if profile_name:
+                load_role_profile(str(profile_name))
+                override = [
+                    "-c",
+                    "mcp_servers.openceo-internal.bearer_token_env_var="
+                    f'"{TIER_CODEX_TOKEN_ENV}"',
+                ]
+                argv = ([*argv[:-1], *override, argv[-1]]
+                        if argv and argv[-1] == "-" else [*argv, *override])
             return TierExecutor(
-                argv=self._ensure_codex_exec(self._with_model_args(
-                    [account, "exec", "--ephemeral", "-"],
-                    self._model_args(tier_cfg))),
+                argv=argv,
                 prompt_via="stdin",
                 cwd=self._provider_cwd(provider_cfg, repo_cwd),
                 env=self._provider_env(provider_cfg),
                 label="tier_b",
+                role_profile=(str(profile_name) if profile_name else None),
             )
         if tool == CodingTool.TIER_C:
             tier_c = tiers_cfg.get("tier_c", {}) or {}

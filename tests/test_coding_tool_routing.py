@@ -376,7 +376,8 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(DevSessionManager, "_resolve_tier_executor",
                               AsyncMock(return_value=MagicMock(
                                   argv=["codexj", "exec", "--ephemeral", "-"], prompt_via="stdin",
-                                  cwd="/tmp/repo", env={}, label="tier_b"))):
+                                  cwd="/tmp/repo", env={}, label="tier_b",
+                                  role_profile=None))):
                 await manager._step_code(_task(), config, CodingTool.TIER_B)
         self.assertEqual(calls[0]["command"], ["codexj", "exec", "--ephemeral", "-"])
         assert calls[0]["stdin"] is not None
