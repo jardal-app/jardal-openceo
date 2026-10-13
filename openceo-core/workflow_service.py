@@ -615,13 +615,21 @@ class WorkflowToolRegistry:
         date_from: str | None = None,
         date_to: str | None = None,
         cost_center: str | None = None,
+        text: str = "",
         **_: Any,
     ) -> dict[str, Any]:
         """Estado de la regla del 10% (TASK-2026-00054). SOLO lectura sobre
-        `GL Entry`: no crea ni modifica ningun documento."""
+        `GL Entry`: no crea ni modifica ningun documento.
+
+        Explicit bounds win; else the dictated text sets them
+        (mismo criterio que el resumen, TASK-2026-00221/00044).
+        """
         from agents.finance import contribution as _contribution
+        from agents.finance import scope_summary as _scope
         from tools.erpnext_client import ERPNextClient
 
+        if not (date_from or date_to) and str(text or "").strip():
+            date_from, date_to = _scope.period_bounds(text)
         client = ERPNextClient(self._settings)
         try:
             status = await _contribution.get_contribution_10_status(

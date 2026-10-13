@@ -49,6 +49,13 @@ async def run_finance_skill(
     except Exception:
         logger.warning("Finance skill resolve failed", exc_info=True)
         return None
+    if skill_name == "pago-elfec":
+        # The practice parks for Owner approval and resumes on the
+        # ticket; a sync voice turn has no real origin to resume, so
+        # it never runs here.
+        return ("La práctica de Elfec pide mi aprobación y se reanuda "
+                "desde el ticket. Lánzala con @finance paga la luz de "
+                "la casa.")
     if workflow_path is None:
         logger.warning("Finance skill %s carries no exact workflow",
                        skill_name)

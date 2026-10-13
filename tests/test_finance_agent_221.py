@@ -487,6 +487,39 @@ class ExactSkillLiveTest(unittest.TestCase):
         self.assertEqual("2026-01-01", seen["date_from"])
         self.assertEqual("2026-01-31", seen["date_to"])
 
+    def test_regla_10_derives_bounds_from_text(self) -> None:
+        from agents.finance import contribution as contribution_mod
+        service, _store = _service()
+        seen: dict[str, Any] = {}
+
+        async def _fake_status(client: Any, **kwargs: Any) -> Any:
+            seen.update(kwargs)
+            status = MagicMock()
+            status.to_dict.return_value = {"ok": True}
+            return status
+
+        class _Client:
+            def __init__(self, settings: Any) -> None:
+                del settings
+
+            async def aclose(self) -> None:
+                return None
+
+        text = "cómo vamos con el diezmo el mes pasado"
+        with patch.object(contribution_mod, "get_contribution_10_status",
+                          new=_fake_status), \
+                patch.object(contribution_mod, "build_spoken_summary",
+                             return_value="spoken"), \
+                patch("tools.erpnext_client.ERPNextClient", _Client):
+            out = asyncio.run(service._tools.call(
+                "finance.get_contribution_10_status", {"text": text}, {}))
+        self.assertTrue(out["ok"])
+        from agents.finance.scope_summary import period_bounds
+        want_from, want_to = period_bounds(text)
+        self.assertIsNotNone(want_from)
+        self.assertEqual(want_from, seen["date_from"])
+        self.assertEqual(want_to, seen["date_to"])
+
     def test_pago_elfec_parks_with_question_and_params(self) -> None:
         service, _store = _service()
         fake = MagicMock()
@@ -594,18 +627,14 @@ class VoiceSkillTest(unittest.TestCase):
         assert reply is not None
         self.assertIn("monto", reply)
 
-    def test_lock_park_speaks_pending(self) -> None:
+    def test_pago_elfec_never_runs_by_voice(self) -> None:
         service, store = _service()
-        fake = MagicMock()
-        fake.tool_elfec_pay = AsyncMock(return_value=pending_lock_result(
-            tool="elfec", question_task_id="q4",
-            waiting_reason="tool_lock:elfec", detail="hold"))
-        service.set_task_service(fake)
         reply = asyncio.run(run_finance_skill(
             "pago-elfec", "paga la luz de la casa",
             self._wiring(service, store)))
         assert reply is not None
-        self.assertIn("pendiente", reply.lower())
+        self.assertIn("@finance", reply)
+        self.assertEqual({}, store.runs)
 
     def test_unknown_skill_refuses(self) -> None:
         service, store = _service()
@@ -690,7 +719,7 @@ class FirstLayerFinanceTest(unittest.IsolatedAsyncioTestCase):
         handled, reply = await gateway.process_turn(
             "owner", "registra gasto carne 50 bs", SimpleNamespace())
         self.assertTrue(handled)
-        self.assertIn("No reconocí", reply)
+        self.assertIn("no está disponible", reply)
 
     async def test_handler_failure_is_friendly(self) -> None:
         handler = AsyncMock(side_effect=RuntimeError("boom"))

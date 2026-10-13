@@ -95,9 +95,7 @@ REPO_ROOT = Path(os.environ["OPENCEO_REPO_ROOT"]).resolve()
 sys.path.insert(0, str(REPO_ROOT / "openceo-core"))
 
 from agents.finance.elfec import run_elfec_house_payment_practice
-from agents.finance.session import FinanceSessionManager
 from agents.pm.session import PMSessionManager
-from agents.secretary.session import SecretarySessionManager
 from config_loader import ConfigLoader
 from db.mongo import MongoRepository
 from dev_session_service import DevSessionService
@@ -349,14 +347,10 @@ async def _services(connect_repo=True):
         rate_monitor=rate_monitor,
     )
     pm = PMSessionManager(settings, config_loader=config_loader)
-    finance = FinanceSessionManager(settings)
-    secretary = SecretarySessionManager(settings)
     graph = OpenCEOGraph(
         router=router,
         config_loader=config_loader,
         dev_session=dev,
-        finance_session=finance,
-        secretary_session=secretary,
         pm_session=pm,
         notion=notion,
     )
