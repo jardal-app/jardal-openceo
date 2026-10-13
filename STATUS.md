@@ -930,7 +930,7 @@ Trabajo de infraestructura hecho **fuera de OpenCEO** (en `/home/develop/deploym
 - `Phase 2 (CEO + Dev Agent)`: completada
 - `Voice backend bridge`: base implementada en `openceo-voice/`
 - `MCP dual`: Internal MCP (3 tools: DNS + Notion) para sesiones OpenCEO, Global MCP (1 tool: DNS) para toda la VM
-- `Apps SDK MCP test`: conector MCP en `apps-sdk-mcp-test/` expuesto por Traefik en `https://mcp.openceo.jardal.app/mcp`; registra `get_company_context`, `get_user_context`, `execute_workflow` y `get_task_status`, usa `@modelcontextprotocol/ext-apps` para la primera UI estandar MCP Apps colgada correctamente de `execute_workflow` en el caso `pm.create_tickets` (selector dark host-driven para proyecto + confirmacion de batch PM), ya no expone tools PM extras ni la demo ChatGPT-only de `secretary`, ya no inyecta `widget_html` inline en `execute_workflow`, declara `ui.domain=https://mcp.openceo.jardal.app` en el template MCP Apps para evitar el warning de widget domain en ChatGPT, y ahora deja tres reglas generales escalables: discovery al inicio del chat con `get_company_context` y refresco solo si el catalogo esta ausente, viejo o dudoso; `get_user_context` solo on-demand cuando la peticion depende de estado actual y `active_project` queda como contexto advisory; y `mcp-first` para acciones reales, priorizando el workflow conectado por encima del comportamiento local del modelo cuando exista una capacidad compatible. Cuando el workflow ya esta identificado y los faltantes restantes son seleccionables/confirmables, la guia viva del connector empuja a entrar en `execute_workflow` para que el propio contrato devuelva `needs_input` o MCP Apps, en lugar de cerrar ese loop manualmente en puro chat. En side effects con aprobacion, la expectativa correcta es resumen corto + paso de aprobacion, no pegar el artefacto final completo salvo que el usuario pida revisar el texto exacto. `pm.create_tickets` en este path ya no escribe directo a Notion: registra un task canonico en Mongo por ticket con `autorun=false`, lo deja en cola manual de dev y deja que el worker global de mirror sobre Mongo clone la vista minima a Notion aunque el task haya nacido fuera del runtime principal. Para PM y otras escrituras sensibles por proyecto, el connector ya no cae silenciosamente a `active_project`: si el proyecto no viene explicito, fuerza confirmacion o seleccion UI antes de registrar. Soporta jobs async persistidos en Mongo, persiste/recupera `client_id` OAuth dinámicos y la clave de firma del issuer OAuth embebido para no invalidar conectores/tokens tras restart o redeploy, expone TTL configurable de access token y el contenedor público ya monta repo/runtimes/redes internas para ejecutar workflows reales contra Mongo/SMTP/OpenCEO
+- `Apps SDK MCP test`: conector MCP en `apps-sdk-mcp-test/` expuesto por Traefik en `https://mcp.openceo.jardal.app/mcp`; registra `get_company_context`, `get_user_context`, `execute_workflow` y `get_task_status`, usa `@modelcontextprotocol/ext-apps` para la primera UI estandar MCP Apps colgada correctamente de `execute_workflow` en el caso `pm.create_tickets` (selector dark host-driven para proyecto + confirmacion de batch PM), ya no expone tools PM extras ni la demo ChatGPT-only de `secretary`, ya no inyecta `widget_html` inline en `execute_workflow`, declara `ui.domain=https://mcp.openceo.jardal.app` en el template MCP Apps para evitar el warning de widget domain en ChatGPT, y ahora deja tres reglas generales escalables: discovery al inicio del chat con `get_company_context` y refresco solo si el catalogo esta ausente, viejo o dudoso; `get_user_context` solo on-demand cuando la peticion depende de estado actual y `active_project` queda como contexto advisory; y `mcp-first` para acciones reales, priorizando el workflow conectado por encima del comportamiento local del modelo cuando exista una capacidad compatible. Cuando el workflow ya esta identificado y los faltantes restantes son seleccionables/confirmables, la guia viva del connector empuja a entrar en `execute_workflow` para que el propio contrato devuelva `needs_input` o MCP Apps, en lugar de cerrar ese loop manualmente en puro chat. En side effects con aprobacion, la expectativa correcta es resumen corto + paso de aprobacion, no pegar el artefacto final completo salvo que el usuario pida revisar el texto exacto. `pm.create_tickets` en este path ya no escribe directo a Notion: registra un task canonico en Mongo por ticket con `autorun=false`, lo deja en cola manual de dev y deja que el worker global de mirror sobre Mongo clone la vista minima a Notion aunque el task haya nacido fuera del runtime principal. Para PM y otras escrituras sensibles por proyecto, el connector ya no cae silenciosamente a `active_project`: si el proyecto no viene explicito, fuerza confirmacion o seleccion UI antes de registrar. Soporta jobs async persistidos en Mongo, persiste/recupera `client_id` OAuth dinámicos y la clave de firma del issuer OAuth embebido para no invalidar conectores/tokens tras restart o redeploy, expone TTL configurable de access token y el contenedor público ya monta repo/runtimes/redes internas para ejecutar workflows reales contra Mongo/SMTP/OpenCEO. **Estado tras TASK-2026-00209:** el puente Python quedó roto (importa `agents.pm.session`, borrado) y las 4 tools fallan al arrancar el bridge; seguimiento en TASK-2026-00242 (desacoplar PM y decidir su auth antes de reactivar escrituras)
 - `Rate Limit Management`: implementado en `openceo-core/rate_monitor.py`
 - Tool compartido de Notion: creación de tickets (individual + batch) + sync-back bidireccional implementados
 - Notion sync-back: idempotencia de tasks + escritura automática de Runtime Status, OpenCEO Ref, Runtime Summary, Last Sync At, Agent
@@ -938,9 +938,9 @@ Trabajo de infraestructura hecho **fuera de OpenCEO** (en `/home/develop/deploym
 - Workflow engine genérico inicial: carga YAMLs desde `workflows/`, ejecuta steps deterministas con `TOOL_REGISTRY`, persiste `workflow_runs`, soporta `ref`, `when`, loop `python_eval` y `discovery_runs` aprobables que cristalizan YAML. Las aprobaciones humanas ya no viven en YAML; deben resolverse con `status=waiting` + `phase` desde dashboard
 - Phase workflow dashboard: cada proyecto puede declarar `workflow_templates` reutilizables por tipo/agente, cada task copia `workflow_key`, `workflow_phases`, `phase`, `phase_index` y `phase_assignments`, y las fases humanas (`qa_review`, `client_signoff`, etc.) pausan con `status=waiting` para revisión desde React
 - Target real de Notion configurado en el core y workspace inicial de OpenCEO preparado
-- `PM Agent`: implementado con flujo guiado de entrevistas, 3 motores de extracción, API directa para dashboard
-- Modelos OpenWebUI expuestos: `ceo`, `dev`, `pm`, `secretary`, `finance`
-- Workers realmente operativos hoy: `dev`, `pm`, `secretary`, `finance`
+- `PM Agent`: retirado (TASK-2026-00209); ver su entrada en este mismo documento
+- Modelos OpenWebUI expuestos: `ceo`, `dev`, `secretary`, `finance`
+- Workers realmente operativos hoy: `dev` (nodo propio), `secretary`, `finance`, `operations` y `research` (nodo genérico)
 - `openceo-dev` funciona en dos modos: conversación local + sesión activa explícita
 - Los turnos dev se ejecutan en background; OpenWebUI no queda bloqueado esperando al provider
 - Runtime dev actual: sesiones tmux persistentes
@@ -948,7 +948,7 @@ Trabajo de infraestructura hecho **fuera de OpenCEO** (en `/home/develop/deploym
 - En host-mode, `scripts/openceo-core-host.sh` ahora exporta `PATH` con `~/.local/bin`, `~/.npm-global/bin` y `~/.opencode/bin`, y fija `KIMI_CLI_PATH=~/.local/bin/kimi` por defecto para que Tier4/Kimi no falle por `Command not found`
 - `openceo-core/.env` ahora fija `KIMI_CLI_PATH=/home/develop/.local/bin/kimi` y `projects/melanyryr/project.yaml` declara `providers.kimi.command` explícito; los tickets `tier4` de `melanyryr` ya no dependen del `PATH` del servicio
 - `openceo-core/graph.py` ahora pasa `ticket_number` y `params` completos al Dev Agent; el prompt vuelve a incluir `Ticket`, `Module`, `Type` y `Acceptance Criteria` desde `pm_ticket`
-- `openceo-core/graph.py` ahora respeta la fase agente actual del workflow (`dev_work -> agent=dev`) como source of truth para routing; un ticket DEV con `workflow_phases` ya no puede rebotar accidentalmente a `pm_extraction` por heurística CEO o por `params.workflow=pm.create_tickets_direct`
+- `openceo-core/graph.py` ahora respeta la fase agente actual del workflow (`dev_work -> agent=dev`) como source of truth para routing; un ticket DEV con `workflow_phases` ya no puede rebotar accidentalmente por heurística CEO ni por un workflow ajeno
 - `openceo-core/agents/dev/session.py` ya no agrega los steps fantasma `branch_setup` ni `push_pr`; la UI de ejecución muestra solo trabajo real del runtime actual
 - `openceo-core/task_service.py` limpia `steps`, `last_prompt_sent`, `last_response_summary`, `completed_at`, `waiting_reason` y `resume_at` al relanzar un ticket, evitando basura histórica de intentos viejos
 - Los tickets `tier3` y `tier4` ahora asignan título humano a la sesión CLI: OpenCode recibe `--title`, Kimi persiste `custom_title` en su `state.json`, y ambos guardan `coding_session_id` + `coding_session_title` en el ticket para verlos desde el dashboard
@@ -996,32 +996,11 @@ Trabajo de infraestructura hecho **fuera de OpenCEO** (en `/home/develop/deploym
 - Gestión natural soportada: `selecciona la 2`, `usa la sesion de <proyecto>`, `selecciona la sesion 2`, `elimina todas las sesiones`
 - `reanudar sesion` ya no reabre sesiones cerradas; para lenguaje natural se trata como entrar/enfocar una sesion abierta
 
-### `openceo-pm`
+### `openceo-pm` (retirado por TASK-2026-00209)
 
-- Flujo guiado por chat: absorbe proyecto + herramienta + entrevista en cualquier orden y pregunta solo lo que falta
-- Si el usuario entra por el perfil `ceo` y el intent cae en PM, se deriva al flujo guiado PM en vez de crear una task genérica
-- Si el flujo PM ya está activo en el chat, los siguientes turnos continúan en PM aunque el mensaje sea solo `1`, `2`, `si`, etc.
-- Frases de intención como `tengo una entrevista` disparan el flujo, pero no se guardan como entrevista real si no traen contenido sustantivo
-- Si el usuario pega una entrevista o requerimiento sustantivo como primer mensaje en `ceo`, el router lo deriva a PM aunque no diga la palabra `entrevista`
-- Si la entrevista llega antes que proyecto o herramienta, se guarda en `user_context.pm_state` y el chat sigue guiando hasta completar los faltantes
-- Cuando ya quedaron definidos proyecto y herramienta, el prompt final pide solo la entrevista y deja explícito que no hace falta repetir lo anterior
-- Confirmación obligatoria antes de procesar
-- Después de confirmar, PM responde al instante y ejecuta la extracción en segundo plano; el chat no queda bloqueado esperando a DeepSeek, Codex o Claude
-- Mientras el job PM corre o después de terminar, el empleado puede preguntar naturalmente `ya termino` o `que tickets creo` y el chat responde usando el estado persistido
-- Si el servicio reinicia mientras un PM estaba corriendo en background, ese estado pasa a `background_failed` al arrancar para no dejar falsos `running`
-- 3 motores: Básica (DeepSeek/langraph), Media (Codex), Máxima (Claude)
-- DeepSeek: 1 llamada LLM → JSON tickets → `create_tickets_batch()` directo
-- DeepSeek ya tolera JSON fenced (` ```json ... ``` `) y volvió a crear tickets reales en Notion en smoke mínimo
-- Todas las corridas PM ahora dejan `source_id` en Notion; DeepSeek lo escribe directo y Claude/Codex lo fuerzan desde el tool MCP
-- Claude headless ya recibe MCP explícito por `--mcp-config`; no depende del cwd ni del `~/.claude.json` interactivo
-- La herramienta MCP PM fuerza `project`, `source` y `source_id` en todo el lote; el modelo ya no puede “olvidar” esos campos
-- Si Codex/Claude crean tickets pero el CLI termina en timeout, OpenCEO puede recuperarlos desde Notion por `source_id` y reportar éxito real
-- Smoke real validado contra Notion: DeepSeek, Codex y Claude volvieron a crear tickets en `melanyryr`
-- Estado del flujo guiado persiste en MongoDB (`user_context.pm_state`)
-- Excepcion vigente: el path legacy de extraccion PM en OpenWebUI todavia escribe directo en Notion y aun no genera automaticamente un `tasks` canonico por ticket en Mongo; el path MCP `pm.create_tickets` ya quedo Mongo-first
-- API directa: `POST /api/pm/extract` con `{project, interview, tool}` — listo para dashboard
-- API de lectura para dashboard/chat ops: `GET /api/pm/status?user_id=...`
-- Modelo OpenWebUI: `openceo-pm` o `pm`
+- El agente PM ya no existe: flujo guiado por chat, `user_context.pm_state`, los 3 motores (DeepSeek/Codex/Claude), el modelo OpenWebUI `openceo-pm`/`pm` y `GET /api/pm/status` fueron retirados; el detalle vive en el historial git.
+- `POST /api/pm/extract` (firma `{project, interview, description?, autorun?}` intacta; `tool` se acepta e ignora) ahora crea UN pedido (ticket `undecided`) y el planner único decide el agente y la forma.
+- La creación estructurada de tickets vive en la tool MCP `openceo_create_pm_tickets_batch`, solo Owner.
 
 ### Notion Sync Bidireccional
 
@@ -1036,7 +1015,7 @@ Trabajo de infraestructura hecho **fuera de OpenCEO** (en `/home/develop/deploym
 - `post_actions_executed` en TaskDocument trackea qué syncs ya se dispararon
 - Kill switch: `NOTION_SYNC_BACK_ENABLED=false`
 - Propiedad `Source` eliminada de Notion (era redundante con metadata interna)
-- Agent options alineados: `ceo`, `dev`, `finance`, `secretary`, `marketing`, `sales`, `media`
+- Agent options vivos: `ceo`, `dev`, `finance`, `secretary`, `operations`, `research`; `marketing`, `sales` y `media` quedan solo como valores históricos en páginas previas al retiro (TASK-2026-00209)
 - Propiedades opcionales de workflow humano: `Sync Enabled`, `Needs Approval`, `Approval State`
 - El tool de Notion ya autoagrega opciones faltantes de `Project` y `Tags` al schema antes de crear páginas; proyectos nuevos como `melanyryr` ya no requieren edición manual en Notion
 
@@ -1062,7 +1041,7 @@ Trabajo de infraestructura hecho **fuera de OpenCEO** (en `/home/develop/deploym
 ### Workflow Engine
 
 - `TaskDocument` sigue siendo el contrato canónico; un task puede disparar un `workflow_run` si declara `params.workflow|workflow_id|workflow_ref` o si pide `params.use_workflow=true` y hay match único contra YAML con `auto_match=true`
-- Si no hay workflow compatible, el runtime existente (`graph.py` -> agentes concretos) sigue como fallback para no romper `dev`, `pm`, `finance` ni `secretary`
+- Si no hay workflow compatible, el runtime existente (`graph.py` -> agentes concretos) sigue como fallback para no romper `dev`, `finance` ni `secretary`
 - YAMLs activos iniciales:
   - `workflows/core/echo.yaml` para smoke sin side effects
   - `workflows/finance/pago_elfec_house.yaml` apuntando al flujo ELFEC existente
@@ -1131,11 +1110,10 @@ Trabajo de infraestructura hecho **fuera de OpenCEO** (en `/home/develop/deploym
 - `openceo-core/agents/dev/kimi_session_manager.py`: creación de sesiones Kimi CLI programáticas para QA review
 - `openceo-core/qa_review_service.py`: gate de revisión QA, construcción de contexto rico (AGENTS.md + git branch/PR + prompt original), sesiones Kimi y OpenCode
 - `openceo-core/agents/finance/elfec.py`: flujo Playwright de finanzas
-- `openceo-core/agents/pm/session.py`: extracción de tickets con DeepSeek + Notion batch
 - `openceo-core/tools/email_sender.py`: sender SMTP compartido
 - `openceo-core/tools/notion.py`: creación de tickets + sync-back bidireccional a Notion
 - `openceo-core/task_service.py`: orquestación de tasks con idempotencia, sync-back y rate limit gating
-- `openceo-core/db/mongo.py`: tasks, foco de sesión dev, `pm_state` y colección `task_reviews`
+- `openceo-core/db/mongo.py`: tasks, foco de sesión dev y colección `task_reviews`
 - `openceo-core/rate_monitor.py`: tracking de límites, gating pre-launch, detección mid-task, crash recovery
 - `openceo-core/mcp_server.py`: MCP interno owner-curated
 - `apps-sdk-mcp-test/`: conector MCP para ChatGPT Apps SDK con OAuth embebido opcional + tools de orquestación (`get_company_context`, `get_user_context`, `execute_workflow`, `get_task_status`)
@@ -1164,7 +1142,7 @@ Trabajo de infraestructura hecho **fuera de OpenCEO** (en `/home/develop/deploym
 - **Dashboard**: Mission Control con fila de 6 métricas operativas en tiempo real (Total, En Progreso, En Espera/Revisión, En Cola, Completadas, Fallidos) + tablero Kanban interactivo con 3 modos de agrupación (Por Estado, Por Agente, Por Flujo), filtros combinados y ejecución directa.
 - **Global project selector**: en header del dashboard, almacenado en `StoreContext` + `localStorage`; auto-preselecciona si el usuario solo tiene 1 proyecto
 - **TicketList**: vista dual con switch dinámico (Tabla / Kanban) persistido en `localStorage`, filtros por agente, estado, proyecto y búsqueda en tiempo real, tabla paginada con GSAP animations, bulk apply de workflow templates a tickets visibles
-- **KanbanBoard**: componente modular (`src/components/KanbanBoard/index.jsx`) con diseño Obsidian dark, columnas dinámicas, scroll horizontal optimizado, badges visuales por agente (`dev`, `finance`, `secretary`, `pm`, `ceo`) y workflow, modal/botón de ejecución de tareas y vista alternativa de tabla compacta
+- **KanbanBoard**: componente modular (`src/components/KanbanBoard/index.jsx`) con diseño Obsidian dark, columnas dinámicas, scroll horizontal optimizado, badges visuales por agente (`dev`, `finance`, `secretary`, `ceo`) y workflow, modal/botón de ejecución de tareas y vista alternativa de tabla compacta
 - **TicketDetail**: descripción, evidencia, URL prueba, historial reviews, fases de workflow (`phase`, `workflow_phases`), botones de aprobación/rechazo/cambios por fase
 - **ClientReview**: vista simplificada para clientes (`is_client=true`): solo ve tickets `client_visible=true` con status_display "En proceso"/"Entregado"; puede aprobar o solicitar cambios
 - **QADashboard**: filtra `phase=qa_review,status=waiting`; permite aprobar, pedir cambios, o abrir sesión Kimi para review

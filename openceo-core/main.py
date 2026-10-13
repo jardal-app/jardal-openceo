@@ -3079,7 +3079,7 @@ async def _direct_agent_session(
         return _maybe_stream(payload, "Secretaría ejecutó la solicitud, pero no devolvió detalle.")
 
     if agent != "dev":
-        # Future agents: marketing, sales, media, etc.
+        # Other named agents become ticket requests (TASK-2026-00209).
         task_payload = TaskCreateRequest(
             project=payload.project or settings.DEFAULT_PROJECT,
             source=TaskSource.API,
