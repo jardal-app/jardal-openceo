@@ -14,7 +14,7 @@ Sesiones del Owner: lee CLAUDE.md.
   one-shot executors, review pool/rounds, findings, inbox, knowledge
 - `openceo-core/objectives/` — company objective engine (execution state, planner models)
 - `openceo-core/company_mandate.py` — company mandate + owner escalation policy
-- `openceo-core/ops/` — deterministic Tier-0 ops tools (e.g. create_project)
+- `openceo-core/ops/` — deterministic project-creation library behind the operations skill
 - `openceo-react/` — dashboard (React 19 + Vite + Tailwind v4)
 - `openceo-voice/`, `openceo-voice-android/` — realtime voice + Android app
 - `workflows/` — deterministic Tier-0 YAML workflows
