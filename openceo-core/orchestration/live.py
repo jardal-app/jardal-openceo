@@ -207,6 +207,9 @@ class ProcessExecutor:
                     model=str(spec.get("model") or ""),
                     slot=str(spec.get("account") or spec.get("label")
                              or role))
+            except BaseException:
+                await self._badge_provider.revoke(badge)
+                raise
         stdin_payload: str | None = None
         full_argv = list(config_argv)
         if via == "stdin":
@@ -236,6 +239,10 @@ class ProcessExecutor:
                 returncode=1, elapsed_s=0.0,
                 output_tail=f"sandbox refused: {exc}",
                 model=model, slot=slot)
+        except BaseException:
+            if badge is not None and self._badge_provider is not None:
+                await self._badge_provider.revoke(badge)
+            raise
         started = time.monotonic()
         try:
             try:

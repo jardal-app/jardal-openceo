@@ -390,5 +390,127 @@ class TierExecutorTranslatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tiers["tier_b"]["role_profile"], "dev")
 
 
+class PlaceholderRaceTests(unittest.TestCase):
+    def test_cold_start_race_is_a_noop(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="home-") as tmp:
+            home = Path(tmp)
+            target = home / CLAUDE_MCP_OVERLAY_RELPATH
+            target.parent.mkdir(parents=True)
+            target.write_text("", encoding="utf-8")
+            with patch.object(Path, "exists", return_value=False):
+                path = ensure_mcp_placeholder(home)
+            self.assertEqual(path, target)
+            self.assertTrue(path.is_file())
+
+
+class LiveRevokeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unexpected_render_error_still_revokes(self) -> None:
+        provider = MagicMock()
+        provider.mint = AsyncMock(return_value="badge-1")
+        provider.mcp_servers = MagicMock(return_value=dict(SERVERS))
+        provider.revoke = AsyncMock()
+        spec = {"provider": "claude", "command": ["claudej"],
+                "headless_args": ["--print"], "prompt_via": "argv",
+                "role_profile": "dev"}
+        executor = ProcessExecutor(roles={"builder": spec},
+                                   badge_provider=provider)
+        with patch.object(live_mod, "profile_box_tools",
+                          side_effect=RuntimeError("boom")), \
+             tempfile.TemporaryDirectory(prefix="ws-") as tmp:
+            with self.assertRaises(RuntimeError):
+                await executor.run("builder", "hi", Path(tmp), 5)
+        provider.revoke.assert_awaited_once_with("badge-1")
+
+
+class FollowUpParityTests(unittest.IsolatedAsyncioTestCase):
+    def _manager(self):
+        from agents.dev.session import DevSessionManager
+        settings = MagicMock()
+        settings.DEV_EXECUTION_MODE = "live"
+        return DevSessionManager(settings, MagicMock())
+
+    def _provider(self):
+        provider = MagicMock()
+        provider.mint = AsyncMock(return_value="badge-x")
+        provider.mcp_servers = MagicMock(return_value=dict(SERVERS))
+        provider.revoke = AsyncMock()
+        return provider
+
+    async def _followup(self, executor, provider):
+        from agents.dev.session import CodingTool
+        manager = self._manager()
+        seen: dict[str, object] = {}
+        tool = CodingTool.TIER_A if executor.label == "tier_a" \
+            else CodingTool.TIER_B
+
+        async def fake_run(command, stdin_payload=None, timeout=120,
+                           cwd=None, env=None, sandbox=True,
+                           config_argv=None, home_file_overlays=None):
+            seen["command"] = list(command)
+            seen["env"] = env
+            seen["overlays"] = home_file_overlays
+            return True, "ok", ""
+
+        manager._run_process = fake_run  # type: ignore[method-assign]
+        manager._resolve_tier_executor = AsyncMock(  # type: ignore[method-assign]
+            return_value=executor)
+        manager._ticket_badge_provider = MagicMock(  # type: ignore[method-assign]
+            return_value=provider)
+        with tempfile.TemporaryDirectory(prefix="repo-") as tmp:
+            repo = Path(tmp)
+            (repo / "AGENTS.md").write_text("# rules\n", encoding="utf-8")
+            with patch("agents.dev.session.ensure_mcp_placeholder",
+                       return_value=repo / "mcp.json"):
+                result = await manager._simple_followup(
+                    tool, {}, repo, "Fix the code.",
+                    task_id="t", project="p",
+                    badge_ticket="TASK-2026-00001")
+        return result, seen
+
+    async def test_tier_a_followup_carries_overlay(self) -> None:
+        from agents.dev.session import TierExecutor
+        executor = TierExecutor(
+            argv=["claudej", "--print"], prompt_via="argv", cwd=None,
+            env={}, label="tier_a", role_profile="dev")
+        provider = self._provider()
+        result, seen = await self._followup(executor, provider)
+        self.assertIsNotNone(result)
+        overlays = seen["overlays"]
+        assert isinstance(overlays, dict)
+        self.assertEqual(set(overlays), {CLAUDE_MCP_OVERLAY_RELPATH})
+        payload = json.loads(next(iter(overlays.values())).decode("utf-8"))
+        self.assertEqual(payload["mcpServers"], SERVERS)
+        provider.revoke.assert_awaited_once_with("badge-x")
+
+    async def test_tier_b_followup_carries_token_env(self) -> None:
+        from agents.dev.session import TIER_CODEX_TOKEN_ENV, TierExecutor
+        executor = TierExecutor(
+            argv=["codexj", "exec", "--ephemeral", "-"],
+            prompt_via="stdin", cwd=None, env={}, label="tier_b",
+            role_profile="dev")
+        provider = self._provider()
+        result, seen = await self._followup(executor, provider)
+        self.assertIsNotNone(result)
+        self.assertIsNone(seen["overlays"])
+        self.assertEqual(seen["env"][TIER_CODEX_TOKEN_ENV], "badge-x")  # type: ignore[index]
+        provider.revoke.assert_awaited_once_with("badge-x")
+
+    async def test_tier_a_followup_without_repo_refused(self) -> None:
+        from agents.dev.session import TierExecutor
+        executor = TierExecutor(
+            argv=["claudej", "--print"], prompt_via="argv", cwd=None,
+            env={}, label="tier_a", role_profile="dev")
+        result, _seen = await self._followup(executor, None)
+        self.assertIsNone(result)
+
+    async def test_claude_overlays_refuse_non_dev_profile(self) -> None:
+        manager = self._manager()
+        provider = self._provider()
+        with self.assertRaises(RoleProfileError):
+            await manager._claude_role_overlays(  # noqa: SLF001
+                provider, "tier_a", "operations")
+        provider.mint.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()

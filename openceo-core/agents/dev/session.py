@@ -926,7 +926,10 @@ class DevSessionManager:
         overlays: dict[str, bytes] | None = None
         badge: str | None = None
         badge_provider: TicketBadgeProvider | None = None
-        if executor.label == "tier_c:muse":
+        extra_env: dict[str, str] = {}
+        if executor.label == "tier_c:muse" or (
+                executor.role_profile
+                and executor.label in ("tier_a", "tier_b")):
             badge_provider = self._ticket_badge_provider(
                 badge_ticket, project)
             if badge_provider is None:
@@ -934,19 +937,19 @@ class DevSessionManager:
                              task_id or "unknown task")
                 return None
             try:
-                overlays, badge = await self._muse_role_overlays(
-                    badge_provider, str(executor.label), str(repo),
-                    executor.role_profile or "dev")
+                overlays, badge, extra_env = await self._profile_run_extras(
+                    executor, badge_provider, str(repo))
             except (RoleProfileError, CatalogError, McpAuthError,
                     ValueError, OSError) as exc:
                 logger.error("follow-up refused without role profile: %s",
                              exc)
                 return None
         started = time.monotonic()
+        run_env = {**(executor.env or {}), **extra_env} or None
         try:
             await self._run_process(
                 command, stdin_payload=stdin_payload, timeout=1800,
-                cwd=str(repo), env=executor.env or None,
+                cwd=str(repo), env=run_env,
                 config_argv=list(executor.argv),
                 home_file_overlays=overlays)
         finally:
@@ -1502,6 +1505,32 @@ class DevSessionManager:
             raise
         return {CLAUDE_MCP_OVERLAY_RELPATH: rendered}, badge
 
+    async def _profile_run_extras(
+        self,
+        executor: "TierExecutor",
+        badge_provider: TicketBadgeProvider,
+        workspace: str,
+    ) -> tuple[dict[str, bytes] | None, str | None, dict[str, str]]:
+        """Badge, overlay and env for one profiled simple-tier run.
+
+        Shared by the code step and the follow-up turns, so a profiled
+        tier never runs with role argv but no credentials (review F1).
+        """
+        if executor.label == "tier_a":
+            overlays, badge = await self._claude_role_overlays(
+                badge_provider, str(executor.label),
+                executor.role_profile or "dev")
+            return overlays, badge, {}
+        if executor.label == "tier_b":
+            badge = await badge_provider.mint(str(executor.label))
+            return None, badge, {TIER_CODEX_TOKEN_ENV: badge}
+        if executor.label == "tier_c:muse":
+            overlays, badge = await self._muse_role_overlays(
+                badge_provider, str(executor.label), workspace,
+                executor.role_profile or "dev")
+            return overlays, badge, {}
+        return None, None, {}
+
     @staticmethod
     def _executor_link(executor: "TierExecutor") -> str | None:
         """Tier C chain link of ``executor`` (``muse``/``dsh``/``claudep``).
@@ -1558,19 +1587,9 @@ class DevSessionManager:
                     executor_link=self._executor_link(executor),
                 )
             try:
-                if executor.label == "tier_a":
-                    overlays, badge = await self._claude_role_overlays(
-                        badge_provider, str(executor.label),
-                        executor.role_profile or "dev")
-                elif executor.label == "tier_b":
-                    badge = await badge_provider.mint(
-                        str(executor.label))
-                    extra_env[TIER_CODEX_TOKEN_ENV] = badge
-                else:
-                    overlays, badge = await self._muse_role_overlays(
-                        badge_provider, str(executor.label),
-                        executor.cwd or os.getcwd(),
-                        executor.role_profile or "dev")
+                overlays, badge, extra_env = await self._profile_run_extras(
+                    executor, badge_provider,
+                    executor.cwd or os.getcwd())
             except (RoleProfileError, CatalogError, McpAuthError,
                     ValueError, OSError) as exc:
                 detail = f"role profile refused: {exc}"
