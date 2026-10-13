@@ -21,9 +21,8 @@ from orchestration.generic_agent import (
 from router import CEORouter, resolve_explicit_name
 from state import AgentName, GraphState, TaskStatus
 
-#: Agents with a wired executor node below. Disabled-but-wired names stay
-#: alive on their legacy session until their removal ticket lands
-#: (secretary left in TASK-2026-00220).
+#: Agents with a wired executor node below; a name stays wired while
+#: its agent is disabled (pm, finance; secretary left in 00220).
 WIRED_AGENTS = ("dev", "pm", "finance")
 
 
