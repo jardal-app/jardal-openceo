@@ -360,6 +360,19 @@ class TicketBridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(out["ok"])
         self.assertEqual(out["error"]["reason"], "not_found")
 
+    async def test_get_job_from_other_project_is_not_found(self) -> None:
+        # Second branch of get: same owner, job in a project the grant
+        # does not cover (review 00017/H6).
+        bridge, _consumers, live, _woken = _bridge()
+        live.jobs["r9"] = {
+            "research_id": "r9", "project_key": "other-project",
+            "owner_id": f"ticket:{TICKET}", "status": "queued",
+        }
+        out = await bridge.get(ticket=TICKET, project=PROJECT,
+                               research_id="r9")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"]["reason"], "not_found")
+
     async def test_second_project_on_same_ticket_is_forbidden(self) -> None:
         bridge, _consumers, _live, _woken = _bridge()
         first = await bridge.submit(ticket=TICKET, project=PROJECT,
@@ -422,7 +435,8 @@ class TicketBridgeTest(unittest.IsolatedAsyncioTestCase):
         second = await bridge.submit(ticket=TICKET, project=PROJECT,
                                      purpose="b", question="qb")
         self.assertTrue(second["ok"], second)
-        self.assertEqual(consumers.count(), 2)
+        # The re-mint purges expired credentials first (review 00017/H2).
+        self.assertEqual(consumers.count(), 1)
 
     async def test_agent_never_sees_the_consumer_token(self) -> None:
         bridge, _consumers, _live, _woken = _bridge()

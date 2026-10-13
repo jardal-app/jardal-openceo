@@ -251,8 +251,7 @@ ceo_loop = CEOLoop(
 task_service.set_ceo_wake(ceo_loop.wake)
 objective_service.set_ceo_wake(ceo_loop.wake)
 # Ticket research bridge (TASK-2026-00222): per-ticket consumers over the
-# in-process service. Lazy lookups: the service and the dispatcher wake
-# live below this line; the registry is ours, separate from the facade's.
+# in-process service, with lazy lookups for the service and dispatcher wake.
 _ticket_research_consumers = ConsumerRegistry()
 _ticket_research_bridge = TicketResearchBridge(
     consumers=_ticket_research_consumers,
