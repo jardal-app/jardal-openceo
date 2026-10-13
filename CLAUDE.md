@@ -112,10 +112,9 @@ Contrato vigente: épico TASK-2026-00187, sección «Agentes por rol» de `docs/
 - Ejecución directa secuencial sin gasto de LLM.
 - Se invocan registrando tickets con `params: {"workflow": "<id_workflow>"}` o con `params: {"use_workflow": true}` si el YAML define `auto_match: true` y triggers.
 
-### Autodiscovery de Workflows (`deepseek-flash`)
-- Activación explícita con `params: {"discover_workflow": true}`.
-- DeepSeek Flash recibe el catálogo exacto de las herramientas disponibles (`WorkflowToolRegistry.describe()`) y sintetiza una propuesta en YAML libre de alucinaciones.
-- Crea un registro en `discovery_runs` (`status: proposed`) y el ticket queda en `waiting`. Al aprobarse, se guarda el YAML en disco como nuevo workflow cristalizado.
+### Autodiscovery de Workflows (retirado en TASK-2026-00215)
+- El flujo `discover_workflow` + DeepSeek Flash + `discovery_runs` + aprobación ya no existe en el código; los flags legados no deciden nada (`objectives/pedido.py`).
+- El aprendizaje ahora cristaliza en skills (sección «Agentes por rol» de `docs/ARCHITECTURE_REFERENCE_2026.md`).
 
 ### Human-in-the-Loop (HITL) en YAMLs
 - Los pasos con `type: human_in_the_loop` y `permission: <fase>` pausan la ejecución (`WorkflowRunStatus.BLOCKED_HUMAN`).

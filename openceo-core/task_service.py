@@ -4707,7 +4707,7 @@ class TaskService:
         planner (deny) its origin; a standalone owner-escalation ticket
         records the decision and completes, so the status observer pushes
         Completed to ERPNext. Anything else (personal scope, no human wait,
-        QA without phases, discovery) is rejected fail-closed with a reason.
+        QA without phases) is rejected fail-closed with a reason.
         """
         task = await self._repo.get_task(task_id)
         if task is None:

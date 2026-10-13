@@ -263,7 +263,7 @@ def waiting_needs_human_review(task: dict[str, Any] | None) -> bool:
     """Senal de "una espera nombra una accion humana" (TASK-2026-00118).
 
     Solo estas esperas llegan a `Pending Review`: aprobaciones pendientes
-    (pasos YAML `human_in_the_loop`, fases humanas, discovery), escalados al
+    (pasos YAML `human_in_the_loop`, fases humanas), escalados al
     dueño (fase o motivo `owner_escalation`), preguntas al dueño
     (TASK-2026-00206) y esperas de fase (`phase:*`).
     Las operativas (quota, transient, config, Tier S, `blocked_by`) no empujan:

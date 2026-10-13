@@ -567,7 +567,7 @@ In the target integration, OpenCEO validates the request and creates the busines
 
 ### Parent Task Tracking
 
-Execution fragmentation uses a **parent execution task** in MongoDB. Subtasks, `workflow_runs`, or `discovery_runs` reference that parent and retain the business reference. This technical hierarchy does not replace ERPNext's business task hierarchy.
+Execution fragmentation uses a **parent execution task** in MongoDB. Subtasks or `workflow_runs` reference that parent and retain the business reference. This technical hierarchy does not replace ERPNext's business task hierarchy. (`discovery_runs` retired with TASK-2026-00215; orphan rows were left unmigrated and no code reads them.)
 
 ```
 Parent execution: "close the month"  (MongoDB, linked to ERPNext work)
@@ -1522,7 +1522,7 @@ Persistent tmux runtime with explicit provider sessions. Deterministic Python or
 - **agent_status** — provider quota and health data
 - **browser_tasks** — reserved for browser/worker style queues
 - **workflow_runs** — Runtime execution state for crystallized workflows, including `blocked_human` for a paused approval step. Persisted status values follow `WorkflowRunStatus` in `state.py`
-- **discovery_runs** — Proposals, approval/rejection, and discovery execution state under `DiscoveryRunStatus`; conceptual Tier 2 states must be mapped before use
+- **discovery_runs** — Retired with TASK-2026-00215 (orphan rows unmigrated; no code reads them). Was: proposals, approval/rejection, and discovery execution state under `DiscoveryRunStatus`
 - **task_reviews** — Append-only technical review history linked by `task_id`; does not replace ERPNext business approval history
 - **projects**, **project_presets** — Local execution configuration/overrides and presets; business project identity is mapped from ERPNext
 - **users**, **groups** — Local authentication and OpenCEO permissions; business user ownership remains ERPNext's, with explicit identity mapping

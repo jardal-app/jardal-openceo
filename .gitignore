@@ -52,6 +52,9 @@ tmp/
 docs/work/
 docs/reviews/
 
+# Informes de rondas de revisión (locales, no versionar)
+reviewers_temp/
+
 # Salidas de revisiones del CLI Qwen (locales, no versionar)
 .qwen/reviews/
 
