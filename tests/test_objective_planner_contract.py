@@ -33,7 +33,7 @@ from objectives.planner_models import (
 
 AGENTS = {
     "dev": {"enabled": True},
-    "research": {"enabled": False, "reason": "no ticket execution bridge yet"},
+    "research": {"enabled": False, "reason": "disabled by the test fixture"},
 }
 
 
@@ -338,7 +338,7 @@ class DeterministicTests(unittest.IsolatedAsyncioTestCase):
                                      why_not_c=None)]))
         self.assertEqual(len(errors), 1)
         self.assertIn("disabled", errors[0])
-        self.assertIn("no ticket execution bridge", errors[0])
+        self.assertIn("disabled by the test fixture", errors[0])
 
     async def test_local_blocked_by_accepted(self) -> None:
         first = _ticket(local_ref="a", title="First")

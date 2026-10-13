@@ -64,8 +64,9 @@ class TicketResearchBridge:
         if token is not None:
             try:
                 return self._consumers.authenticate(token)
-            except ConsumerAuthError:
-                pass  # expired or revoked: mint below, once
+            except ConsumerAuthError as exc:
+                logger.debug("Re-mint del consumidor de %s: %s", ticket, exc.detail)
+        self._consumers.purge_expired()
         token = self._consumers.register(
             consumer_id=ticket_owner(ticket),
             owner_id=ticket_owner(ticket),

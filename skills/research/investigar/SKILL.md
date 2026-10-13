@@ -26,9 +26,10 @@ the planner with `hecho`.
 
 ## Steps
 
-1. Read the ticket (title, description, params) and its attachments.
-   A vague question with no decidable purpose: end `bloqueado`
-   naming what is missing — never guess the question.
+1. Read the ticket (title, description, params) and the attachment
+   links it carries; the ticket text carries the question. A vague
+   question with no decidable purpose: end `bloqueado` naming what
+   is missing — never guess the question.
 2. Admit with `openceo_research_submit` (`purpose`, `question`,
    plus `mode`, `seed_urls`, `idempotency_key` when the ticket
    names them). Keep the returned `research_id`.

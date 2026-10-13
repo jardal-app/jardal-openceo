@@ -196,10 +196,8 @@ class TicketGrant:
             # bound under LOCKABLE_MCP_TOOLS.
             return
         if tool in ("openceo_research_submit", "openceo_research_get"):
-            # Ticket research bridge (TASK-2026-00222): the server maps
-            # the badge to the ticket's consumer, so the params must
-            # name exactly this grant. No Owner lock: reads run through
-            # the server-held provider credentials.
+            # Ticket research bridge (TASK-2026-00222): params must name
+            # this grant; provider credentials stay server-held (no lock).
             if params.get("ticket") != self.ticket:
                 raise McpDenied("Research tools need your own ticket")
             if params.get("project") != self.project:
