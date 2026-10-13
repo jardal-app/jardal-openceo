@@ -554,7 +554,10 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("arrives as a CEO `crear_pedido` pedido", text)
         self.assertNotIn("`create_project` action", text)
         # (blockquote: each wrapped line starts with "> ")
-        self.assertIn("is registered but disabled in the agent", text)
+        # TASK-2026-00222 enabled the research agent through the ticket bridge.
+        self.assertIn("The `research` agent is enabled: route research tickets",
+                      text)
+        self.assertNotIn("is registered but disabled in the agent", text)
         self.assertIn("It declares; it does not write", text)
         # §12 / §15: the horizon is a hard maximum; triggers are split.
         self.assertIn("enforces 3 as a hard maximum", text)

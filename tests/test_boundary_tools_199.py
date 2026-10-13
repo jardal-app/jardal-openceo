@@ -115,6 +115,8 @@ EXPECTED_MCP = frozenset({
     "openceo_scope_summary",
     "openceo_contribution_10_status",
     "openceo_elfec_house_payment",
+    "openceo_research_submit",
+    "openceo_research_get",
 })
 
 DEV_BOX = frozenset({
@@ -590,7 +592,7 @@ class BoundaryDelegationTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(FAST_MCP_AVAILABLE, "FastMCP is required")
 class NewToolBudgetTests(unittest.TestCase):
-    """The 8 non-thread tools keep the same description budget as the rest.
+    """The 10 non-thread tools keep the same description budget as the rest.
 
     Every description word travels in each session request, so growth is a
     visible decision, not drift. The email sender list is representative (2
@@ -606,6 +608,8 @@ class NewToolBudgetTests(unittest.TestCase):
         "openceo_scope_summary",
         "openceo_contribution_10_status",
         "openceo_elfec_house_payment",
+        "openceo_research_submit",
+        "openceo_research_get",
     )
 
     def test_new_tools_fit_budget(self) -> None:

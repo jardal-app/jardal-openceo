@@ -55,6 +55,7 @@ class CEORouter:
         "sales": AgentName.SALES,
         "media": AgentName.MEDIA,
         "operations": AgentName.OPERATIONS,
+        "research": AgentName.RESEARCH,
     }
 
     def __init__(self, settings: Any = None) -> None:

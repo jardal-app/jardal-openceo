@@ -22,6 +22,7 @@ class AgentName(str, Enum):
     SALES = "sales"
     MEDIA = "media"
     OPERATIONS = "operations"
+    RESEARCH = "research"
 
 
 class TaskSource(str, Enum):

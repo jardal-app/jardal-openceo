@@ -237,11 +237,12 @@ class AgentGateTest(unittest.TestCase):
         self.assertFalse(decision.proceed)
         self.assertIn("routing_missing", decision.reason)
 
-    def test_planner_research_target_waits(self):
+    def test_planner_research_target_proceeds(self):
+        # TASK-2026-00222 enabled research on the generic node (its gate
+        # assertions live in test_research_agent_222.py).
         decision = self.gate(target="research")
-        self.assertFalse(decision.proceed)
-        self.assertIn("routing_missing", decision.reason)
-        self.assertIn("no ticket execution bridge yet", decision.reason)
+        self.assertTrue(decision.proceed)
+        self.assertEqual("research", decision.hint)
 
     def test_planner_wired_target_routes_by_name(self):
         # TASK-2026-00221 moved finance to the generic node (its gate

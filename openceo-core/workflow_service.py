@@ -68,6 +68,7 @@ class WorkflowToolRegistry:
         self._task_service = task_service
         self._horizon: Any | None = None
         self._research: Any | None = None
+        self._research_bridge: Any | None = None
         self._research_watch: Any | None = None
         self._register_builtin_tools()
 
@@ -147,6 +148,46 @@ class WorkflowToolRegistry:
     def set_research_service(self, research_service: Any) -> None:
         self._research = research_service
         self.register("research.investigate", self._research_investigate)
+
+    def set_research_bridge(self, bridge: Any) -> None:
+        """Mount the ticket bridge. Without it these tools do not exist."""
+        self._research_bridge = bridge
+        self.register("research.submit_job", self._research_submit_job)
+        self.register("research.get_job", self._research_get_job)
+
+    async def _research_submit_job(
+        self,
+        project: str = "",
+        ticket: str = "",
+        purpose: str = "",
+        question: str = "",
+        mode: str = "quick",
+        seed_urls: list[str] | None = None,
+        idempotency_key: str | None = None,
+        context: dict[str, Any] | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Admits one investigation under the ticket's consumer (TASK-2026-00222)."""
+        if self._research_bridge is None:
+            raise RuntimeError("Puente de research no montado")
+        return await self._research_bridge.submit(
+            ticket=ticket, project=project, purpose=purpose,
+            question=question, mode=mode, seed_urls=seed_urls,
+            idempotency_key=idempotency_key)
+
+    async def _research_get_job(
+        self,
+        project: str = "",
+        ticket: str = "",
+        research_id: str = "",
+        context: dict[str, Any] | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """Status of one of the ticket's own investigations (TASK-2026-00222)."""
+        if self._research_bridge is None:
+            raise RuntimeError("Puente de research no montado")
+        return await self._research_bridge.get(
+            ticket=ticket, project=project, research_id=research_id)
 
     async def _research_investigate(
         self, request: dict[str, Any], context: dict[str, Any],

@@ -609,7 +609,8 @@ class CatalogBoxConsistencyTests(unittest.TestCase):
         names = _register_all_tools(
             server, settings, _FakeTaskService(), _FakeErpnext())
         registered = set(names)
-        self.assertEqual(len(registered), 24)
+        # TASK-2026-00222 added the two research bridge tools.
+        self.assertEqual(len(registered), 26)
         owner_box = set(catalog.agents["owner"].boundary_tools)
         self.assertEqual(owner_box, registered)
         dev_box = set(catalog.agents["dev"].boundary_tools)
