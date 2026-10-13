@@ -25,6 +25,7 @@ from company_mandate import (
 )
 from db.mongo import MongoRepository
 from events import RealtimeHub
+from catalog import load_role_skills
 from graph import OpenCEOGraph
 from horizon.privacy import is_personal_scope
 from horizon.promotion import is_horizon_promoted
@@ -52,6 +53,10 @@ from orchestration.crystallization import (
     has_drafts,
     mirror_ticket,
     run_save_step,
+)
+from orchestration.ticket_handoff import (
+    TICKET_OUTPUTS_KEY,
+    publish_ticket_outputs,
 )
 from owner_channel import (
     OWNER_QUESTION_PHASE,
@@ -3748,6 +3753,16 @@ class TaskService:
                 if phase_updates:
                     updates.update(phase_updates)
                     final_status = str(phase_updates.get("status") or final_status)
+            if final_status == TaskStatus.COMPLETED.value:
+                # Handoff publish (TASK-2026-00211): files to the mirror,
+                # data to the execution record, before the patch so the
+                # successors the dispatcher wakes already see them.
+                handoff_record = await self._publish_ticket_outputs(
+                    task_id, task, current, graph_out)
+                if handoff_record is not None:
+                    merged_params = dict(updates.get("params") or {})
+                    merged_params[TICKET_OUTPUTS_KEY] = handoff_record
+                    updates["params"] = merged_params
 
             if final_status in {
                 TaskStatus.COMPLETED.value,
@@ -3896,6 +3911,58 @@ class TaskService:
         except Exception:
             logger.warning("Crystallization failed for %s", task_id,
                            exc_info=True)
+
+    async def _publish_ticket_outputs(
+            self, task_id: str, task: dict[str, Any] | None,
+            current: dict[str, Any] | None,
+            graph_out: dict[str, Any]) -> dict[str, Any] | None:
+        """Handoff publish on close (TASK-2026-00211).
+
+        A COMPLETED run with a hecho verdict leaves its files as
+        private mirror attachments and its data in the execution
+        record, for the ``blocked_by`` successors. Anything else (no
+        verdict, any other outcome) publishes nothing. Never raises.
+        """
+        try:
+            session_params = graph_out.get("params")
+            verdict = (session_params or {}).get("agent_result") \
+                if isinstance(session_params, dict) else None
+            if not isinstance(verdict, dict) \
+                    or verdict.get("resultado") != "hecho":
+                return None
+            agent = str(graph_out.get("selected_agent") or "")
+            skill = (session_params or {}).get("skill") \
+                if isinstance(session_params, dict) else None
+            skill_name = str(skill or "").strip() or None
+            try:
+                folder: Path | None = ticket_dir(
+                    task_id, base_dir=self._crystallization_drafts_base())
+            except (ValueError, OSError):
+                folder = None
+            row = current if isinstance(current, dict) else task
+            mirror = mirror_ticket(row) \
+                if isinstance(row, dict) else None
+            adapter = getattr(self, "_erpnext", None)
+            attach = adapter.attach_file \
+                if adapter is not None \
+                and getattr(adapter, "is_enabled", False) else None
+            declared: list[str] = []
+            if agent and skill_name:
+                try:
+                    found = load_role_skills(agent, f"skills/{agent}")
+                    declared = next(
+                        (item.outputs for item in found
+                         if item.name == skill_name), [])
+                except Exception:
+                    declared = []
+            return await publish_ticket_outputs(
+                agent=agent, skill=skill_name, verdict=verdict,
+                ticket_folder=folder, mirror=mirror, attach=attach,
+                declared_outputs=declared)
+        except Exception:
+            logger.warning("Handoff publish failed for %s", task_id,
+                           exc_info=True)
+            return None
 
     async def comment_on_ticket(self, task_id: str, text: str) -> bool:
         """Post an ERP comment on a ticket's business mirror (Tier S, F3–F6).

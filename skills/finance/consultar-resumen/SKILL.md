@@ -4,6 +4,12 @@ description: "Reads balance and spending by scope from GL Entry without writing 
 status: activa
 ticket: TASK-2026-00221
 date: 2026-10-13
+inputs:
+  - date_from
+  - date_to
+  - dictated_period
+outputs:
+  - scope_summary
 ---
 
 # Consultar resumen

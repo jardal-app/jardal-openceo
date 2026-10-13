@@ -4,6 +4,20 @@ description: "Drafts and sends email through the locked boundary tool (off-allow
 status: activa
 ticket: TASK-2026-00220
 date: 2026-10-13
+inputs:
+  - to
+  - subject
+  - body_text
+  - draft_brief
+  - from_email
+  - cc
+  - bcc
+  - reply_to
+  - attachments
+  - language
+outputs:
+  - send_confirmation
+  - approval_question
 ---
 
 # Enviar correo

@@ -4,6 +4,21 @@ description: "Creates a company project end to end (ERPNext identity, git repo, 
 status: activa
 ticket: TASK-2026-00214
 date: 2026-10-12
+inputs:
+  - project_key
+  - display_name
+  - description
+  - repo
+  - org
+  - remote_url
+  - is_web
+  - hostname
+outputs:
+  - erpnext_project
+  - git_repo
+  - project_config
+  - vault_hub
+  - dns_hostname
 ---
 
 # Crear proyecto
