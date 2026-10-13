@@ -726,7 +726,7 @@ class DevSessionManager:
             tail = "\n\n".join(
                 f"[{item.name}] {item.status}: {item.detail}\n{item.output_tail}"
                 for item in failed)
-            await self._simple_followup(
+            followup = await self._simple_followup(
                 tool, project_config, repo,
                 f"Gates failed:\n{tail[:6000]}\nFix the code (no commits), "
                 "keep HANDOFF.md truthful. Never edit the frozen oracle "
@@ -734,6 +734,8 @@ class DevSessionManager:
                 task_id=str(task.get("task_id") or ""),
                 project=str(task.get("project") or ""),
                 badge_ticket=badge_ticket_for_task(task) or "")
+            if followup is not None:
+                output.cost_runs.append(followup)
             # The retry saw the failing oracle's output: re-verify its hashes
             # before running the gates again (a "fix" by editing the test is
             # the oracle being redefined).
@@ -762,13 +764,15 @@ class DevSessionManager:
         except OSError:
             handoff = ""
         if not handoff or len(handoff.split()) > 600:
-            await self._simple_followup(
+            followup = await self._simple_followup(
                 tool, project_config, repo,
                 "Write .tier-s/HANDOFF.md (executor sections ≤300 words). "
                 "Do not touch code.",
                 task_id=str(task.get("task_id") or ""),
                 project=str(task.get("project") or ""),
                 badge_ticket=badge_ticket_for_task(task) or "")
+            if followup is not None:
+                output.cost_runs.append(followup)
             try:
                 handoff = handoff_path.read_text(
                     encoding="utf-8", errors="replace")
@@ -887,13 +891,17 @@ class DevSessionManager:
         task_id: str = "",
         project: str = "",
         badge_ticket: str = "",
-    ) -> None:
-        """One follow-up turn on the work branch (gate/handoff fixes)."""
+    ) -> dict[str, Any] | None:
+        """One follow-up turn on the work branch (gate/handoff fixes).
+
+        Returns the turn's cost run (review 00013/H1), or None when no
+        executor turn happened (refusals before spawn).
+        """
         prompt = with_preamble(prompt, repo, detect_prompt_lang(prompt))
         try:
             executor = await self._resolve_tier_executor(tool, project_config)
         except ValueError:
-            return
+            return None
         if executor.prompt_via == "argv":
             command = [*executor.argv, prompt]
             stdin_payload: str | None = None
@@ -909,7 +917,7 @@ class DevSessionManager:
             if badge_provider is None:
                 logger.error("follow-up refused without repository: %s",
                              task_id or "unknown task")
-                return
+                return None
             try:
                 overlays, badge = await self._muse_role_overlays(
                     badge_provider, str(executor.label), str(repo),
@@ -918,7 +926,8 @@ class DevSessionManager:
                     ValueError, OSError) as exc:
                 logger.error("follow-up refused without role profile: %s",
                              exc)
-                return
+                return None
+        started = time.monotonic()
         try:
             await self._run_process(
                 command, stdin_payload=stdin_payload, timeout=1800,
@@ -928,6 +937,10 @@ class DevSessionManager:
         finally:
             if badge is not None and badge_provider is not None:
                 await badge_provider.revoke(badge)
+        return cost_mod.normalize_run({
+            "engine": str(executor.label),
+            "duration_s": time.monotonic() - started,
+        })
 
     async def _task_cancelled(self, task_id: str) -> bool:
         """Fresh cancel check against the stored ticket (fail-open).
