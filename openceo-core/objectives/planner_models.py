@@ -334,6 +334,25 @@ class PlannedTicket(BaseModel):
         return self
 
 
+class PlaybookUpdateProposal(BaseModel):
+    """A planner-proposed change to an approved playbook (TASK-2026-00217).
+
+    The Owner approves through the single human channel; approval
+    versions the playbook in git.
+    """
+
+    playbook: str = Field(min_length=1, max_length=64)
+    change: str = Field(min_length=1, max_length=2000)
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("playbook", "change", "reason")
+    @classmethod
+    def _fields_nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value.strip()
+
+
 class PlannerResult(BaseModel):
     objective_status: ObjectiveStatus
     state_summary: str = Field(min_length=1)
@@ -349,6 +368,12 @@ class PlannerResult(BaseModel):
     # (TASK-2026-00207): shared costs no single ticket owns.
     costs: list[PlannedCost] = Field(default_factory=list)
 
+    # Approved playbook this plan follows, with explained deviations
+    # (TASK-2026-00217): validated against the approved names.
+    playbook: str | None = None
+    playbook_deviations: list[str] = Field(default_factory=list)
+    proposed_playbook_update: PlaybookUpdateProposal | None = None
+
     @field_validator("state_summary")
     @classmethod
     def _summary_nonblank(cls, value: str) -> str:
@@ -360,6 +385,18 @@ class PlannerResult(BaseModel):
     @classmethod
     def _roadmap_bounded(cls, value: list[str]) -> list[str]:
         return _roadmap_within_bounds(_string_list_nonblank(value))
+
+    @field_validator("playbook")
+    @classmethod
+    def _playbook_nonblank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("must not be blank")
+        return value.strip() if value is not None else None
+
+    @field_validator("playbook_deviations")
+    @classmethod
+    def _deviations_nonblank(cls, value: list[str]) -> list[str]:
+        return _string_list_nonblank(value)
 
     @model_validator(mode="after")
     def validate_objective_state(self) -> "PlannerResult":
@@ -476,6 +513,7 @@ async def validate_planner_result(
     material_failures: Sequence[Any] | None = None,
     horizon: Any = None,
     skills: Mapping[str, Collection[str]] | None = None,
+    playbooks: Collection[str] | None = None,
 ) -> list[str]:
     """Deterministic validation (routing policy §17). Returns errors.
 
@@ -503,6 +541,17 @@ async def validate_planner_result(
                 f"proposed_tools names must be unique, got "
                 f"{proposal.name!r} twice (policy §17)")
         seen_tools.add(lowered)
+    if playbooks is not None:
+        approved = set(playbooks)
+        if result.playbook and result.playbook not in approved:
+            errors.append(
+                f"playbook {result.playbook!r} is not an approved "
+                "playbook (policy §17)")
+        update = result.proposed_playbook_update
+        if update is not None and update.playbook not in approved:
+            errors.append(
+                f"proposed_playbook_update names {update.playbook!r}, "
+                "which is not an approved playbook (policy §17)")
     if result.objective_status != ObjectiveStatus.ACTIVE:
         return errors  # Pydantic already enforced no tickets.
     creations = [ticket for ticket in result.tickets

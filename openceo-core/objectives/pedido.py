@@ -2,9 +2,11 @@
 
 A pedido is a loose ticket (no ``objective_id``) carrying no explicit
 decision. Explicit means decided by someone the rumbo trusts — the
-Owner, an approved playbook, or a validated plan — expressed in the
-ticket fields, and it only passes deterministic validation against
-the catalog: the planner never runs for it.
+Owner or a validated plan — expressed in the ticket fields, and it
+only passes deterministic validation against the catalog: the planner
+never runs for it. Approved playbooks (TASK-2026-00217) guide the
+planner instead of bypassing it: the planner follows them by default
+from its prompt index.
 
 Explicit channels (any one suffices):
 

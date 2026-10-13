@@ -35,7 +35,9 @@ from objectives.engine import (
     TicketCloseContext,
     on_ticket_closed,
 )
+from objectives import playbooks as playbooks_mod
 from objectives.pedido import is_pedido
+from objectives.playbooks import save_approved_playbook
 from objectives.ticket_cost import COST_RUNS_KEY, record_runs
 from objectives.plan_spend import (
     SPEND_WAITING_REASON,
@@ -4034,6 +4036,13 @@ class TaskService:
             requester=requester,
         )
 
+    async def request_playbook(self, objective_id: str) -> dict[str, Any]:
+        """Owner-asked playbook proposal for a closed objective (00217)."""
+        service = getattr(self, "_objective_service", None)
+        if service is None:
+            raise ObjectiveRejected("objective service is not wired")
+        return await service.request_playbook(objective_id)
+
     async def get_objective(self, objective_id: str) -> dict[str, Any] | None:
         """Read one objective document (API/MCP status surface)."""
         service = getattr(self, "_objective_service", None)
@@ -4866,6 +4875,39 @@ class TaskService:
         kind = str(block.get("kind") or "")
         origin_id = str(block.get("origin_task_id") or "")
         dev_task_id: str | None = None
+        playbook_saved: dict[str, Any] | None = None
+        decided_at = datetime.now(timezone.utc).isoformat()
+        if kind == "playbook" and approve:
+            # The playbook lands in git first (TASK-2026-00217): saving
+            # may raise, and then the question must stay open for a retry.
+            draft = block.get("playbook")
+            draft = draft if isinstance(draft, Mapping) and draft else None
+            if draft is None:
+                raise OwnerQuestionSkipped(
+                    "cannot approve: the question carries no playbook")
+            mirror = mirror_ticket(task) or task_id
+            seal = {"question": mirror, "actor": actor_id,
+                    "at": decided_at}
+            if draft.get("update"):
+                stored = playbooks_mod.load_playbooks().get(
+                    str(draft["update"]))
+                if stored is None:
+                    raise OwnerQuestionSkipped(
+                        "cannot approve: the playbook to update "
+                        "is not approved")
+                payload = stored.model_dump(mode="json")
+                notes = list(payload.get("update_notes") or [])
+                notes.append(str(draft.get("change") or ""))
+                payload["update_notes"] = notes
+                playbook_saved = await asyncio.to_thread(
+                    save_approved_playbook,
+                    Path(__file__).resolve().parent.parent,
+                    payload, approval=seal, update=True)
+            else:
+                playbook_saved = await asyncio.to_thread(
+                    save_approved_playbook,
+                    Path(__file__).resolve().parent.parent,
+                    dict(draft), approval=seal)
         if kind == "new_tool" and approve:
             # The dev ticket first: creation may raise (ERPNext hard fail),
             # and then the question must stay open for a retry.
@@ -4876,9 +4918,15 @@ class TaskService:
             approve=approve,
             actor_id=actor_id,
             comment=comment,
-            decided_at=datetime.now(timezone.utc).isoformat(),
+            decided_at=decided_at,
         )
         summary = self._owner_answer_summary(approve, comment)
+        if kind == "playbook" and approve and playbook_saved:
+            summary = (
+                f"Playbook {playbook_saved['name']} aprobado "
+                f"(version {playbook_saved['version']})."
+                + (f" {comment}" if comment else "")
+            )
         if kind == "new_tool" and approve and dev_task_id:
             tool = block.get("tool") if isinstance(block.get("tool"), dict) else {}
             summary = (

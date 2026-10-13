@@ -14,6 +14,12 @@ import logging
 from pathlib import Path
 from typing import Any, Mapping
 
+from catalog import (
+    load_all_role_skills,
+    load_catalog,
+    suggestable_skills,
+)
+from objectives import playbooks as playbooks_mod
 from objectives.delivery_verification import generic_agent_verifiers
 from objectives.money_guide import project_money_routing
 from orchestration.inbox import InMemoryInboxStore, MongoInboxStore
@@ -287,6 +293,7 @@ class ObjectiveService:
             # Domains outside the catalog still park as
             # capability_gap (TASK-2026-00175).
             delivery_verifiers=_generic_verifiers_or_empty(),
+            playbook_proposals=True,
             dispatcher_wake=(getattr(task_service, "wake_dispatcher", None)
                              if task_service is not None else None),
             mandate=mandate,
@@ -338,6 +345,25 @@ class ObjectiveService:
         if self._repo is None:
             return None
         return await self._repo.get_objective(objective_id)
+
+    async def request_playbook(self, objective_id: str) -> dict[str, Any]:
+        """Owner-asked playbook proposal for a closed objective (00217)."""
+        if self._repo is None:
+            return {"ok": False, "action": "no-objective"}
+        objective = await self._repo.get_objective(objective_id)
+        if objective is None:
+            return {"ok": False, "action": "no-objective"}
+        env = self.env_for(str(objective.get("project") or ""))
+        try:
+            catalog = load_catalog()
+            skills = suggestable_skills(
+                catalog, load_all_role_skills(catalog))
+        except Exception:
+            skills = {}
+        return await playbooks_mod.propose_playbook(
+            env, objective_id, "owner_request",
+            agents=env.planner_cfg.get("agents", {}) or {},
+            skills=skills)
 
     async def propagate_group_decision(
         self,
