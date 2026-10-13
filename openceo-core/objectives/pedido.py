@@ -16,9 +16,11 @@ Explicit channels (any one suffices):
   ``agent="ceo"`` default is undecided, not a decision;
 - ``params.target_agent`` (planner target backup, approved tools);
 - ``objective_id`` (objective children arrive planner-decided);
-- an explicit YAML/workflow target (``params.workflow`` family,
-  ``discover_workflow``, or ``workflow_phases``): a validated plan or
-  an approval flow in flight, which planning must not override.
+- an explicit YAML/workflow target (``params.workflow`` family or
+  ``workflow_phases``): a validated plan or an approval flow in
+  flight, which planning must not override. The retired discovery
+  flags (``discover_workflow``, ``workflow_discovery``) decide
+  nothing since TASK-2026-00215.
 
 Excluded even when undecided: owner questions (``params`` carries an
 ``owner_question`` block): human-channel tickets the planner must
@@ -42,8 +44,6 @@ _EXPLICIT_WORKFLOW_PARAMS = (
     "workflow_id",
     "workflow_ref",
     "use_workflow",
-    "discover_workflow",
-    "workflow_discovery",
 )
 
 

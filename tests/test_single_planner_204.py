@@ -185,13 +185,17 @@ class PedidoPredicateTests(unittest.TestCase):
 
     def test_workflow_targets_are_explicit(self) -> None:
         for params in ({"workflow": "finance.register_expense"},
-                       {"use_workflow": True},
-                       {"discover_workflow": True},
-                       {"workflow_discovery": True}):
+                       {"use_workflow": True}):
             with self.subTest(params=params):
                 self.assertFalse(is_pedido(_pedido(params=params)))
         self.assertFalse(is_pedido(_pedido(
             workflow_phases=[{"key": "qa_review", "type": "human"}])))
+
+    def test_retired_discovery_flags_decide_nothing(self) -> None:
+        for params in ({"discover_workflow": True},
+                       {"workflow_discovery": True}):
+            with self.subTest(params=params):
+                self.assertTrue(is_pedido(_pedido(params=params)))
 
     def test_skill_alone_is_not_explicit(self) -> None:
         self.assertTrue(is_pedido(

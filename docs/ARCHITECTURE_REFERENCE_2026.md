@@ -103,8 +103,8 @@ OpenCEO core does not require Redis, PostgreSQL, LiteLLM, or aider. ERPNext oper
 
 ## Architecture Rules
 
-- Crystallized workflows execute as deterministic Python. Zero LLM tokens on step sequencing, flow control, or variable resolution. Discovery mode uses LLM to find unknown flows — but discovered flows crystallize into YAML and become deterministic thereafter.
-- LLMs support contextual conversation in `first_layer.py`, routing fallback (`router.py`), discovery, document extraction, secretary payload extraction fallback, and the coding CLIs. Crystallized workflow sequencing, conditions, and variable resolution stay deterministic; `llm_eval` is a design extension, not an enabled condition type in the deterministic executor.
+- Crystallized workflows execute as deterministic Python. Zero LLM tokens on step sequencing, flow control, or variable resolution. Workflow discovery was removed (TASK-2026-00215); learning crystallizes into skills.
+- LLMs support contextual conversation in `first_layer.py`, routing fallback (`router.py`), document extraction, secretary payload extraction fallback, and the coding CLIs. Crystallized workflow sequencing, conditions, and variable resolution stay deterministic; `llm_eval` is a design extension, not an enabled condition type in the deterministic executor.
 - Runtime wiring is explicit. A folder in `openceo-core/agents/` is a portable agent package (paquete de agente), but it becomes executable only when it is registered in `router.py`, `graph.py`, and the relevant service entrypoints.
 - The bundled worker graph wires `dev`; enabled catalog agents (operations, secretary, finance, research) run on the generic node.
 - Versioned execution configuration lives in YAML (`projects/*/project.yaml`); business project identity lives in ERPNext. CEO routing triggers and patterns are read from `routing.agents`. Project is optional for runtime operations using company-level defaults; the Dev agent needs repository context. A missing project never implies personal scope or authorizes a project-sensitive business write.
@@ -190,14 +190,14 @@ Code topology is read on demand and is not copied into the vault or MongoDB. Gra
 
 ## Discovery & Crystallization
 
-> **Partially retired (2026-10-11, TASK-2026-00187 / TASK-2026-00189).** Discovery that writes YAML — the Tier 1.5/2 flows below, the DeepSeek autodiscovery proposal/approval loop, and the blocked-discovery resume — is retired; removal is TASK-2026-00215. The deterministic executor for already-crystallized YAML workflows stays until its owning tickets migrate it. Learning now crystallizes into skills; see Agentes por rol.
+> **Removed (2026-10-13, TASK-2026-00215).** Discovery that writes YAML — the Tier 1.5/2 flows below, the DeepSeek autodiscovery proposal/approval loop, the blocked-discovery resume, the `discover_workflow` flags, and the `discovery-runs` API — is gone from the code; what follows is history. The deterministic executor for already-crystallized YAML workflows stays until its owning tickets migrate it. Learning now crystallizes into skills; see Agentes por rol.
 
-OpenCEO has two execution modes for any task:
+OpenCEO had two execution modes for any task:
 
 1. **Deterministic** — a crystallized YAML workflow already exists → Python executor runs it with zero LLM tokens
-2. **Discovery** — the flow is unknown → `create_react_agent` discovers it → human approves → it crystallizes into YAML
+2. **Discovery** — the flow was unknown → the service proposed it → a human approved → it crystallized into YAML (removed)
 
-The tiers describe the execution design. The runtime's proposal/approval contract lives in `workflow_service.py`; the full ReAct/claim design below is not a claim that every tier is wired. Discovery may compose only registered capabilities and must respect ERPNext business authority. Approval to crystallize a recipe does not grant approval for every later business operation it could perform.
+The tiers describe the execution design. The full ReAct/claim design below is not a claim that every tier was wired. Discovery could compose only registered capabilities and had to respect ERPNext business authority. Approval to crystallize a recipe never granted approval for later business operations.
 
 ### Two Levels of Discovery
 

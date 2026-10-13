@@ -12,14 +12,12 @@ from typing import Any, Callable
 from uuid import uuid4
 
 import yaml
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
 from db.mongo import MongoRepository
 from events import RealtimeHub
 from horizon import privacy as privacy_module
 from settings import Settings, get_settings
-from state import DiscoveryRunStatus, TaskStatus, WorkflowRunStatus
+from state import TaskStatus, WorkflowRunStatus
 from tool_locks import (
     LOCK_WAITING_PREFIX,
     ToolLockError,
@@ -708,7 +706,7 @@ class MissingWorkflowToolError(RuntimeError):
 
 
 class WorkflowService:
-    """YAML workflow catalog, deterministic executor, and discovery state."""
+    """YAML workflow catalog and deterministic executor."""
 
     def __init__(
         self,
@@ -722,14 +720,6 @@ class WorkflowService:
         self._repo = repo
         self._hub = realtime_hub
         self._tools = tool_registry or WorkflowToolRegistry(settings=settings, repo=repo)
-        self._llm: ChatOpenAI | None = None
-        if settings.DEEPSEEK_API_KEY:
-            self._llm = ChatOpenAI(
-                model=settings.CEO_LLM_MODEL,
-                api_key=settings.DEEPSEEK_API_KEY,
-                base_url=settings.CEO_LLM_BASE_URL,
-                temperature=0,
-            )
 
     def set_task_service(self, task_service: Any) -> None:
         self._tools.set_task_service(task_service)
@@ -830,11 +820,6 @@ class WorkflowService:
     async def run_for_task(self, task: dict[str, Any]) -> WorkflowExecutionOutcome | None:
         resolution = self.resolve_task_workflow(task)
         if resolution is None:
-            if self._should_start_discovery(task):
-                return await self.start_discovery_for_task(
-                    task,
-                    reason="No crystallized workflow matched this task.",
-                )
             return None
         return await self.execute_task_workflow(task, resolution.workflow, resolution=resolution)
 
@@ -932,102 +917,6 @@ class WorkflowService:
         run = await self._repo.create_workflow_run(run_doc)
         await self._hub.broadcast("workflow_run_created", run)
         return await self._continue_workflow_run(run, workflow)
-
-    async def start_discovery_for_task(
-        self,
-        task: dict[str, Any],
-        *,
-        reason: str,
-    ) -> WorkflowExecutionOutcome:
-        proposal = await self._build_discovery_proposal(task)
-        status = DiscoveryRunStatus.PROPOSED if proposal else DiscoveryRunStatus.PENDING_APPROVAL
-        discovery_doc = {
-            "discovery_id": str(uuid4()),
-            "task_id": task["task_id"],
-            "project": task.get("project"),
-            "status": status.value,
-            "reason": reason,
-            "available_tools": self._tools.names(),
-            "proposed_workflow": proposal,
-            "review": None,
-            "created_at": _utc_now(),
-            "updated_at": _utc_now(),
-            "completed_at": None,
-        }
-        discovery = await self._repo.create_discovery_run(discovery_doc)
-        await self._hub.broadcast("discovery_run_created", discovery)
-
-        params = _task_params(task)
-        params["_discovery"] = {
-            "discovery_id": discovery["discovery_id"],
-            "status": discovery["status"],
-        }
-        return WorkflowExecutionOutcome(
-            selected_agent=str(task.get("agent") or task.get("agent_hint") or "ceo"),
-            status=TaskStatus.WAITING.value,
-            steps=[
-                _task_step(
-                    "workflow_discovery",
-                    "pending_approval",
-                    "No hay workflow cristalizado. Revise y apruebe la propuesta de discovery.",
-                )
-            ],
-            waiting_reason="workflow_discovery_pending_approval",
-            last_response_summary="Discovery creado y pendiente de aprobacion humana.",
-            params=params,
-            approval_required=True,
-            approval_state="pending",
-        )
-
-    async def approve_discovery_run(
-        self,
-        discovery_id: str,
-        *,
-        actor_id: str,
-        approve: bool,
-        comment: str = "",
-        execute: bool = False,
-        workflow_yaml: str | None = None,
-    ) -> dict[str, Any]:
-        discovery = await self._repo.get_discovery_run(discovery_id)
-        if discovery is None:
-            raise ValueError("Discovery run not found")
-
-        if not approve:
-            updated = await self._repo.patch_discovery_run(
-                discovery_id,
-                {
-                    "status": DiscoveryRunStatus.REJECTED.value,
-                    "review": {"actor_id": actor_id, "comment": comment, "approved": False},
-                    "completed_at": _utc_now(),
-                },
-            )
-            return {"discovery": updated, "workflow": None, "task": None}
-
-        raw_yaml = workflow_yaml or str(discovery.get("proposed_workflow") or "").strip()
-        workflow = self._parse_workflow_yaml(raw_yaml, source="<discovery>")
-        saved_path = self._save_workflow_yaml(raw_yaml, workflow)
-        updated = await self._repo.patch_discovery_run(
-            discovery_id,
-            {
-                "status": DiscoveryRunStatus.APPROVED.value,
-                "review": {
-                    "actor_id": actor_id,
-                    "comment": comment,
-                    "approved": True,
-                    "workflow_path": str(saved_path),
-                },
-                "completed_at": _utc_now(),
-            },
-        )
-
-        task_result = None
-        if execute:
-            task = await self._repo.get_task(str(discovery.get("task_id") or ""))
-            if task is not None:
-                outcome = await self.execute_task_workflow(task, workflow)
-                task_result = await self._apply_outcome_to_task(task, outcome)
-        return {"discovery": updated, "workflow": workflow, "task": task_result}
 
     async def _continue_workflow_run(
         self,
@@ -1459,68 +1348,6 @@ class WorkflowService:
             return f"Workflow {workflow_name} fallo: {run['error']}"
         return f"Workflow {workflow_name}: {status}"
 
-    async def _build_discovery_proposal(self, task: dict[str, Any]) -> str:
-        if self._llm is None:
-            return self._fallback_workflow_yaml(task)
-
-        instruction = (
-            "You are the OpenCEO Enterprise Workflow Architect. "
-            "Generate one crystallized YAML workflow for this task using the available tools.\n\n"
-            "Rules:\n"
-            "1. Top-level keys: workflow, name, agent, description, auto_match, triggers, steps.\n"
-            "2. workflow must be in format {agent}.{action_name} (e.g. dev.implement, secretary.monthly_digest, etc.).\n"
-            "3. Each step must use either:\n"
-            "   - tool: <tool_name> with params matching the tool's signature.\n"
-            "   - ref: <workflow_id> to call another crystallized workflow.\n"
-            "   - type: loop with max_iterations, condition (type: python_eval, expr: ...), and steps.\n"
-            "   - type: human_in_the_loop with permission: qa_review | client_review | admin_approval and prompt: 'message' for sensitive operations or approvals.\n"
-            "4. Variables: use {{task.params.field}}, {{task.title}}, or {{steps.<step_id>.<field>}}.\n"
-            "5. auto_match: true only if triggers contains 2-5 explicit natural language trigger phrases.\n"
-            "6. Use ONLY tools from the catalog. Do not invent non-existent tools.\n"
-            "7. Return clean YAML only, without markdown formatting or commentary."
-        )
-        payload = {
-            "task": _task_context(task),
-            "available_tools": self._tools.describe(),
-        }
-        try:
-            response = await self._llm.ainvoke(
-                [
-                    SystemMessage(content=instruction),
-                    HumanMessage(content=yaml.safe_dump(payload, sort_keys=False, allow_unicode=False)),
-                ]
-            )
-            text = _strip_fenced_yaml(str(getattr(response, "content", "") or ""))
-            self._parse_workflow_yaml(text, source="<llm_discovery>")
-            return text
-        except Exception:
-            logger.warning("Workflow discovery proposal failed; falling back to skeleton", exc_info=True)
-            return self._fallback_workflow_yaml(task)
-
-    def _fallback_workflow_yaml(self, task: dict[str, Any]) -> str:
-        params = _task_params(task)
-        raw_name = _safe_name(str(params.get("workflow") or task.get("title") or "discovered_workflow"))
-        workflow_id = raw_name if "." in raw_name else f"ceo.{raw_name}"
-        doc = {
-            "workflow": workflow_id,
-            "name": str(task.get("title") or workflow_id),
-            "agent": _agent_from_workflow_id(workflow_id),
-            "description": str(task.get("description") or ""),
-            "auto_match": False,
-            "triggers": [],
-            "steps": [
-                {
-                    "id": "complete",
-                    "tool": "core.complete",
-                    "params": {
-                        "task_id": "{{task.task_id}}",
-                        "message": "Replace this step with real tools before using this workflow.",
-                    },
-                },
-            ],
-        }
-        return yaml.safe_dump(doc, sort_keys=False, allow_unicode=False)
-
     def _load_workflows(self) -> dict[str, dict[str, Any]]:
         base = self.workflows_dir
         if not base.exists():
@@ -1574,18 +1401,6 @@ class WorkflowService:
                     raise ValueError(f"Workflow {source} loop step {index + 1} must define steps")
                 self._validate_yaml_steps(nested, source=source)
 
-    def _save_workflow_yaml(self, raw_yaml: str, workflow: dict[str, Any]) -> Path:
-        workflow_id = str(workflow["workflow"])
-        agent = _safe_name(str(workflow.get("agent") or _agent_from_workflow_id(workflow_id)))
-        name = _safe_name(workflow_id.split(".", 1)[-1])
-        base = self.workflows_dir / agent
-        base.mkdir(parents=True, exist_ok=True)
-        path = (base / f"{name}.yaml").resolve()
-        if self.workflows_dir not in path.parents:
-            raise ValueError("Invalid workflow path")
-        path.write_text(raw_yaml.strip() + "\n", encoding="utf-8")
-        return path
-
     @staticmethod
     def _find_workflow(workflows: dict[str, dict[str, Any]], lookup: str) -> dict[str, Any] | None:
         normalized = lookup.strip().lower()
@@ -1618,18 +1433,6 @@ class WorkflowService:
         if name and name in text:
             return 30, f"matched name {name}"
         return 0, ""
-
-    @staticmethod
-    def _should_start_discovery(task: dict[str, Any]) -> bool:
-        params = _task_params(task)
-        if _truthy(params.get("discover_workflow")) or _truthy(params.get("workflow_discovery")):
-            return True
-        if _truthy(params.get("use_workflow")) and not _truthy(params.get("no_discovery")):
-            return True
-        if _first_text(params.get("workflow"), params.get("workflow_id"), params.get("workflow_ref")):
-            return not _truthy(params.get("no_discovery"))
-        return False
-
 
 def _task_params(task: dict[str, Any]) -> dict[str, Any]:
     params = task.get("params")

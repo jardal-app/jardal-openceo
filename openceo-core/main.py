@@ -76,7 +76,6 @@ from state import (
     DevSessionCreateRequest,
     DevSessionMessageRequest,
     DevSessionStatus,
-    DiscoveryApprovalRequest,
     GroupDocument,
     MissionCreateRequest,
     ObjectiveCreateRequest,
@@ -688,44 +687,6 @@ async def get_workflow_run(run_id: str) -> dict:
     if run is None:
         raise HTTPException(status_code=404, detail="Workflow run not found")
     return run
-
-
-@app.get("/api/discovery-runs")
-async def list_discovery_runs(
-    task_id: str | None = Query(default=None),
-    status: str | None = Query(default=None),
-    limit: int = Query(default=100, ge=1, le=500),
-) -> list[dict]:
-    return await repo.list_discovery_runs(task_id=task_id, status=status, limit=limit)
-
-
-@app.get("/api/discovery-runs/{discovery_id}")
-async def get_discovery_run(discovery_id: str) -> dict:
-    discovery = await repo.get_discovery_run(discovery_id)
-    if discovery is None:
-        raise HTTPException(status_code=404, detail="Discovery run not found")
-    return discovery
-
-
-@app.post("/api/discovery-runs/{discovery_id}/approve")
-async def approve_discovery_run(
-    discovery_id: str,
-    payload: DiscoveryApprovalRequest,
-    current_user: UserDocument = Depends(get_current_user),
-) -> dict:
-    try:
-        return await workflow_service.approve_discovery_run(
-            discovery_id,
-            actor_id=payload.actor_id,
-            approve=payload.approve,
-            comment=payload.comment,
-            execute=payload.execute,
-            workflow_yaml=payload.workflow_yaml,
-        )
-    except ValueError as exc:
-        detail = str(exc)
-        status_code = 404 if "not found" in detail.lower() else 400
-        raise HTTPException(status_code=status_code, detail=detail) from exc
 
 
 # ------------------------- horizon (espacio personal) -------------------------
@@ -1851,32 +1812,6 @@ async def task_phase_kimi(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/tasks/{task_id}/discover-workflow")
-async def discover_task_workflow(
-    task_id: str,
-    body: dict[str, Any] | None = None,
-    current_user: UserDocument = Depends(get_current_user),
-) -> dict:
-    task = await task_service.get_task(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="Task not found")
-    reason = str((body or {}).get("reason") or "Manual workflow discovery requested.").strip()
-    outcome = await workflow_service.start_discovery_for_task(task, reason=reason)
-    updated = await task_service.patch_task(
-        task_id,
-        {
-            "status": outcome.status,
-            "steps": outcome.steps,
-            "waiting_reason": outcome.waiting_reason,
-            "last_response_summary": outcome.last_response_summary,
-            "params": outcome.params,
-        },
-    )
-    if updated is None:
-        raise HTTPException(status_code=404, detail="Task not found")
-    return updated
 
 
 # ------------------------- QA review -------------------------
