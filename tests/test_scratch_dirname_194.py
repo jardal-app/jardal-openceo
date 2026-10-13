@@ -1,9 +1,11 @@
 """Contract: the orchestrator scratch is `.openceo/` (TASK-2026-00194).
 
-`.tier-s/` was the scratch of the whole orchestrator (TASK-2026-00136),
-not Tier S tickets, so the name confused. Since 00194 the engine,
-executors, prompts, tests, .gitignore and docs use `.openceo/`.
-STATUS.md keeps its past entries: it is the operational log, history.
+The pre-00194 dirname belonged to the whole orchestrator
+(TASK-2026-00136), not to Tier S tickets, so the name confused. Since
+00194 the engine, executors, prompts, tests, .gitignore and docs use
+`.openceo/`. STATUS.md keeps its past entries: it is the operational
+log, history. (This file never spells the old dirname: it scans the
+tracked tree for it, itself included.)
 """
 
 from __future__ import annotations
