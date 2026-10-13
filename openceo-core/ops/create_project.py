@@ -12,7 +12,7 @@ TASK-2026-00223; spend approval lives in the plan (TASK-2026-00207).
 
 All filesystem writes stay under caller-provided roots (resolved + confined);
 identifiers are restricted to ``[a-z0-9-]`` so no traversal is expressible.
-No tokens, no LLM, no network except through the injected ERPNext adapter.
+No tokens, no LLM, no network: filesystem and local git only.
 """
 from __future__ import annotations
 
@@ -471,7 +471,7 @@ def ensure_project_config(
 ) -> dict[str, Any]:
     """Write ``projects/<key>/project.yaml`` once; never overwrite.
 
-    Validation runs in the workflow tool (``ConfigLoader.validate_project``)
+    Validation runs in the skill CLI (``ConfigLoader.validate_project``)
     so a template bug fails the run instead of persisting a bad config.
     """
     import yaml
