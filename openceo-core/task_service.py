@@ -3780,7 +3780,9 @@ class TaskService:
                         task_id, str(result_comment).strip())
                 if final_status in {TaskStatus.COMPLETED.value,
                                     TaskStatus.FAILED.value} \
-                        and has_drafts(task_id):
+                        and has_drafts(
+                            task_id,
+                            base_dir=self._crystallization_drafts_base()):
                     # Crystallization save step (TASK-2026-00210):
                     # drafts left in the ticket folder become versioned
                     # role skills. Escalated closes stay out: their close
@@ -3840,6 +3842,19 @@ class TaskService:
         except Exception:
             logger.warning("Could not comment wait on ERP for %s", task.get("task_id"), exc_info=True)
 
+    def _crystallization_drafts_base(self) -> Path | None:
+        """Ticket-folder base the generic runs wrote drafts under.
+
+        Generic runs stage their folders under the wiring's
+        ``work_base_dir`` (late-bound on the graph); reading the same
+        source keeps writer and gate aligned (review 00012 H1). Any
+        gap falls back to the sandbox default.
+        """
+        wiring = getattr(getattr(self, "_graph", None),
+                         "_generic_wiring", None)
+        base = getattr(wiring, "work_base_dir", None)
+        return Path(base) if base else None
+
     async def _crystallize_after_close(
             self, task_id: str, agent: str,
             ticket: dict[str, Any]) -> None:
@@ -3852,8 +3867,15 @@ class TaskService:
         """
         try:
             mirror = mirror_ticket(ticket)
-            folder = ticket_dir(task_id) / DRAFTS_DIRNAME
+            folder = ticket_dir(
+                task_id,
+                base_dir=self._crystallization_drafts_base()) \
+                / DRAFTS_DIRNAME
             if not agent or mirror is None:
+                logger.warning(
+                    "crystallization skipped for %s (agent=%r, mirror=%s): "
+                    "drafts kept in the ticket folder",
+                    task_id, agent, mirror)
                 return
             outcome = await asyncio.to_thread(
                 run_save_step,

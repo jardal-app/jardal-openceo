@@ -186,6 +186,8 @@ def has_drafts(task_id: str, *,
     """True when the ticket folder holds unprocessed drafts.
 
     Read-only: never creates the folder (most closes have no drafts).
+    Only entries the collector would consider count — a stray file,
+    symlink or dotdir never re-triggers the gate on every close.
     """
     try:
         target = ticket_dir(task_id, base_dir=_base(base_dir)) \
@@ -193,7 +195,13 @@ def has_drafts(task_id: str, *,
     except ValueError:
         return False
     try:
-        return target.is_dir() and any(target.iterdir())
+        if not target.is_dir():
+            return False
+        return any(
+            not entry.name.startswith(".")
+            and not entry.is_symlink()
+            and entry.is_dir()
+            for entry in target.iterdir())
     except OSError:
         return False
 
