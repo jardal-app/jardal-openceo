@@ -1436,7 +1436,7 @@ class PackageLocationTests(unittest.TestCase):
 
 
 class SharedScratchRootTests(unittest.TestCase):
-    """`.tier-s/` is the orchestrator-wide scratch (TASK-2026-00136).
+    """`.openceo/` is the orchestrator-wide scratch (TASK-2026-00136).
 
     The objectives engine keeps ``objectives/<id>/``,
     ``PLANNER_RESULT.json`` and ``OBJECTIVE_CLOSURE.md`` under the same
@@ -1447,13 +1447,13 @@ class SharedScratchRootTests(unittest.TestCase):
     """
 
     def test_dirname_is_pinned(self) -> None:
-        self.assertEqual(engine_mod.SCRATCH_DIRNAME, ".tier-s")
+        self.assertEqual(engine_mod.SCRATCH_DIRNAME, ".openceo")
 
     def test_helpers_resolve_under_repo(self) -> None:
         repo = _scratch_repo(self)
-        self.assertEqual(engine_mod.scratch_root(repo), repo / ".tier-s")
+        self.assertEqual(engine_mod.scratch_root(repo), repo / ".openceo")
         self.assertEqual(engine_mod.objective_scratch(repo, "OBJ-X"),
-                         repo / ".tier-s" / "objectives" / "OBJ-X")
+                         repo / ".openceo" / "objectives" / "OBJ-X")
 
     def test_root_is_shared_with_tier_s(self) -> None:
         from agents.dev.tier_s import cycle as cycle_mod
@@ -1465,7 +1465,7 @@ class SharedScratchRootTests(unittest.TestCase):
         repo = _scratch_repo(self)
         prompt = engine_mod._closure_judge_prompt(
             1, "goal", "capsule", repo,
-            result_path=".tier-s/objectives/OBJ-1/OBJECTIVE_CLOSURE.md")
+            result_path=".openceo/objectives/OBJ-1/OBJECTIVE_CLOSURE.md")
         self.assertIn(f"{engine_mod.SCRATCH_DIRNAME}/status", prompt)
 
 

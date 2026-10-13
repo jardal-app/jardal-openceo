@@ -1,6 +1,6 @@
 """Small, deterministic contracts for a Tier S attempt.
 
-The files in .tier-s are an agent interface. MongoDB owns the process state.
+The files in .openceo are an agent interface. MongoDB owns the process state.
 """
 
 from __future__ import annotations
@@ -86,7 +86,7 @@ def git_snapshot(repo: Path) -> GitSnapshot:
         names.update(os.fsdecode(part) for part in result.stdout.split(b"\0") if part)
     files: dict[str, str | None] = {}
     for name in sorted(names):
-        if name == ".tier-s" or name.startswith(".tier-s/"):
+        if name == ".openceo" or name.startswith(".openceo/"):
             continue
         path = repo / name
         if path.is_symlink():
@@ -260,10 +260,10 @@ def verify_plan_anchor(
 
     F0.1 covers existence + range; quote matching joins the shared
     verification module in F3 (§7.11). The plan file may be cited bare
-    (``CURRENT_PLAN.md``) or with the ``.tier-s/`` prefix.
+    (``CURRENT_PLAN.md``) or with the ``.openceo/`` prefix.
     """
     name = observation.path.strip().lstrip("./")
-    if name in {"CURRENT_PLAN.md", ".tier-s/CURRENT_PLAN.md", plan_path.name}:
+    if name in {"CURRENT_PLAN.md", ".openceo/CURRENT_PLAN.md", plan_path.name}:
         target = plan_path
     else:
         target = repo_path / name

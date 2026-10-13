@@ -175,7 +175,7 @@ def _git_identity(repo: Path) -> list[str]:
 
 
 def _tier_dir(repo: Path) -> Path:
-    return repo / ".tier-s"
+    return repo / ".openceo"
 
 
 def _read_status(repo: Path) -> str:
@@ -204,7 +204,7 @@ def _diff_sizes(repo: Path, base_sha: str, exclude: Sequence[str]) -> tuple[int,
         added_s, deleted_s, path = fields[0], fields[1], fields[2]
         if not path:
             continue
-        if path == ".tier-s" or path.startswith(".tier-s/"):
+        if path == ".openceo" or path.startswith(".openceo/"):
             continue
         try:
             added = int(added_s) if added_s != "-" else 0
@@ -220,7 +220,7 @@ def _diff_sizes(repo: Path, base_sha: str, exclude: Sequence[str]) -> tuple[int,
         lines += added + deleted
     untracked = _git(repo, "ls-files", "--others", "--exclude-standard", "-z")
     for path in untracked.stdout.split("\0"):
-        if not path or path == ".tier-s" or path.startswith(".tier-s/"):
+        if not path or path == ".openceo" or path.startswith(".openceo/"):
             continue
         lowered = path.lower()
         if lowered.startswith(("tests/", "test/")) or "/tests/" in lowered:
@@ -286,7 +286,7 @@ def _plan_response_retry_prompt(
 
 def _handoff_fix_prompt(signal: str, repo: Path) -> str:
     return knowledge_mod.with_preamble(
-        "Write .tier-s/HANDOFF.md (executor sections ≤300 words) and emit "
+        "Write .openceo/HANDOFF.md (executor sections ≤300 words) and emit "
         f"{signal} again. Do not touch code.", repo, "en")
 
 
@@ -891,11 +891,11 @@ class TierSCycle:
             ctx.repo, "ls-files", "--others", "--exclude-standard", "-z")
         names.extend(part for part in untracked.stdout.split("\0") if part)
         return sorted({name for name in names
-                       if name != ".tier-s" and not name.startswith(".tier-s/")})
+                       if name != ".openceo" and not name.startswith(".openceo/")})
 
     def _commit(self, ctx: _Ctx, message: str) -> str:
         identity = _git_identity(ctx.repo)
-        _git(ctx.repo, "add", "-A", "--", ".", ":!.tier-s")
+        _git(ctx.repo, "add", "-A", "--", ".", ":!.openceo")
         proc = _git(ctx.repo, *identity, "commit", "-qm", message)
         if proc.returncode != 0:
             raise RuntimeError(f"commit failed: {proc.stderr.strip()[:300]}")
@@ -1251,7 +1251,7 @@ class TierSCycle:
             out_of_plan=self._out_of_plan_files(ctx),
             gates_section=gate_mod.handoff_gates_section(
                 [self._gate_result(entry) for entry in ctx.gate_runs]),
-            handoff_path=".tier-s/HANDOFF.md",
+            handoff_path=".openceo/HANDOFF.md",
             extra_context=extra_context)
         request_name = f"REVIEW_REQUEST_{round_no}.md"
         (_tier_dir(ctx.repo) / request_name).write_text(
@@ -2195,12 +2195,12 @@ class TierSCycle:
             "First decide SIZE: if this cannot fit one session "
             f"(≤{ctx.budgets.get('files_per_ticket', 8)} files, "
             f"≤{ctx.budgets.get('lines_per_ticket', 400)} lines, tests excluded), "
-            "write .tier-s/SIZING.md (why + rough split) and emit "
-            f"{SIGNALS['objective_needed']} in .tier-s/status, then stop.\n"
-            "Otherwise write .tier-s/PLAN.md (§16.1: TICKET/OBJECTIVE/GOAL/"
+            "write .openceo/SIZING.md (why + rough split) and emit "
+            f"{SIGNALS['objective_needed']} in .openceo/status, then stop.\n"
+            "Otherwise write .openceo/PLAN.md (§16.1: TICKET/OBJECTIVE/GOAL/"
             "ACCEPTANCE/FILES with create|modify|delete + why/CONTRACTS/DECISIONS/"
             "STEPS/ESTIMATE files=<n> lines=<n>/OUT_OF_SCOPE) and emit "
-            f"{SIGNALS['plan_ready']} in .tier-s/status.\n"
+            f"{SIGNALS['plan_ready']} in .openceo/status.\n"
             "Decide open questions yourself and record them in DECISIONS; only "
             "use [OWNER] when the ticket explicitly marks a decision so."
         )
@@ -2209,9 +2209,9 @@ class TierSCycle:
     def _plan_review_prompt(self, ctx: _Ctx, plan: Plan) -> str:
         files = ", ".join(item.path for item in plan.files[:20])
         body = (
-            "Read-only review of .tier-s/PLAN.md (pointers, no pasted diffs).\n"
+            "Read-only review of .openceo/PLAN.md (pointers, no pasted diffs).\n"
             f"Ticket goal: {plan.goal}\nPlanned files: {files}\n"
-            "Write .tier-s/PLAN_REVIEW.md with numbered observations "
+            "Write .openceo/PLAN_REVIEW.md with numbered observations "
             "(O<n> [CRITICAL|WARN] <PLAN.md|repo-path>:<line> — <problem> → "
             "<suggestion>, each with a literal `>` quote), or `No findings.`.\n"
             "End the report with REVIEW_DONE_plan_0."
@@ -2223,14 +2223,14 @@ class TierSCycle:
         if not observations:
             return knowledge_mod.with_preamble(
                 "No plan observations. Emit "
-                f"{SIGNALS['plan_responded']} in .tier-s/status.",
+                f"{SIGNALS['plan_responded']} in .openceo/status.",
                 ctx.repo, "en")
         ids = ", ".join(f"O{obs.id}" for obs in observations)
         body = (
-            f"Answer each plan observation ({ids}) in .tier-s/PLAN_RESPONSE.md: "
+            f"Answer each plan observation ({ids}) in .openceo/PLAN_RESPONSE.md: "
             "`O<n>: ACEPTADA — <what changed>` (and apply it to PLAN.md), "
             "`RECHAZADA — <reason>` or `DIFERIDA — <reason>`. "
-            f"Then emit {SIGNALS['plan_responded']} in .tier-s/status."
+            f"Then emit {SIGNALS['plan_responded']} in .openceo/status."
         )
         return knowledge_mod.with_preamble(body, ctx.repo, "en")
 
@@ -2240,12 +2240,12 @@ class TierSCycle:
         steps = "\n".join(f"{num}. {step}"
                           for num, step in enumerate(plan.steps, 1))
         body = (
-            f"Implement ticket {ctx.ref} from .tier-s/PLAN.md + "
-            ".tier-s/PLAN_RESPONSE.md.\n"
+            f"Implement ticket {ctx.ref} from .openceo/PLAN.md + "
+            ".openceo/PLAN_RESPONSE.md.\n"
             f"Goal: {plan.goal}\nFiles:\n{files}\nSteps:\n{steps}\n"
             "Do NOT commit, push, rebase, stash, or change branches: leave your "
             "work uncommitted; the orchestrator integrates it.\n"
-            "Write .tier-s/HANDOFF.md (§16.6, executor sections ≤300 words) "
-            f"and emit {SIGNALS['build_done']} in .tier-s/status."
+            "Write .openceo/HANDOFF.md (§16.6, executor sections ≤300 words) "
+            f"and emit {SIGNALS['build_done']} in .openceo/status."
         )
         return knowledge_mod.with_preamble(body, ctx.repo, "en")

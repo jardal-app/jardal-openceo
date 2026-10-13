@@ -9,7 +9,7 @@ zero Mongo) and real orchestrator gates, and asserts the F1+F2 acceptance:
   any reviewer could see the work); the handoff ``Gates`` section is the
   orchestrator's, never the agent's claim.
 - F2: one ticket runs one cycle with one builder session; close integrates,
-  mirrors ERP, archives ``.tier-s/``, kills every session and frees the lock.
+  mirrors ERP, archives ``.openceo/``, kills every session and frees the lock.
 """
 
 from __future__ import annotations
@@ -86,7 +86,7 @@ class ScriptedExecutor:
     async def run(self, role, prompt, workdir, timeout_s):
         del timeout_s
         self.calls.append(role)
-        tier_dir = Path(workdir) / ".tier-s"
+        tier_dir = Path(workdir) / ".openceo"
         tier_dir.mkdir(exist_ok=True)
         if role == "planner" and "PLAN_RESPONSE.md is incomplete" not in prompt and "Answer each plan observation" not in prompt and "Your PLAN.md is invalid" not in prompt:
             (tier_dir / "PLAN.md").write_text(PLAN_MD, encoding="utf-8")
@@ -234,7 +234,7 @@ class TierSFinalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(branches, "")
 
         # -- handoff completed by the orchestrator, then archived -----------
-        handoff = (repo / ".tier-s" / "runs" / outcome.run_id / "HANDOFF.md")
+        handoff = (repo / ".openceo" / "runs" / outcome.run_id / "HANDOFF.md")
         text = handoff.read_text(encoding="utf-8")
         self.assertIn(outcome.commit_sha, text)
         self.assertIn("tracked.txt", text)

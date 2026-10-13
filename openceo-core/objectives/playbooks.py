@@ -63,7 +63,7 @@ PLAYBOOK_PROPOSAL_FILE = "PLAYBOOK_PROPOSAL.json"
 #: Objective scratch prefix (mirror of engine.SCRATCH_DIRNAME: the root
 #: is shared, the engines are not — TASK-2026-00141; renamed together
 #: by TASK-2026-00194).
-PLAYBOOK_SCRATCH_PREFIX = ".tier-s/objectives"
+PLAYBOOK_SCRATCH_PREFIX = ".openceo/objectives"
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 

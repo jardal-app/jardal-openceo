@@ -47,7 +47,7 @@ __all__ = [
 ]
 
 #: Result file the headless run writes into the orchestrator scratch root
-#: (``.tier-s/``, TASK-2026-00136). Dropped before every run, like the
+#: (``.openceo/``, TASK-2026-00136). Dropped before every run, like the
 #: planner result: a run that writes nothing reads as missing.
 CEO_DECISION_FILE = "CEO_DECISION.json"
 

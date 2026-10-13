@@ -211,9 +211,9 @@ class DiscoveryTests(unittest.TestCase):
 class PromptCompositionTests(unittest.TestCase):
     def test_index_names_every_staged_file(self) -> None:
         index = planner_mod.policy_detail_index(
-            [("dev", "/repo/.tier-s/objectives/OBJ-1/policy/dev.md")])
+            [("dev", "/repo/.openceo/objectives/OBJ-1/policy/dev.md")])
         self.assertIn("AGENT POLICY DETAIL", index)
-        self.assertIn("dev: /repo/.tier-s/objectives/OBJ-1/policy/dev.md",
+        self.assertIn("dev: /repo/.openceo/objectives/OBJ-1/policy/dev.md",
                       index)
 
     def test_prompt_pastes_core_and_index(self) -> None:
@@ -390,7 +390,7 @@ class CycleStagingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(first.get("ok"), first)
         (repo / "policy.d" / "dev.md").write_text("DEV v2\n",
                                                  encoding="utf-8")
-        (repo / ".tier-s" / "objectives" / "OBJ-1"
+        (repo / ".openceo" / "objectives" / "OBJ-1"
          / "PLANNER_RESULT.json").unlink(missing_ok=True)
         second = await plan_objective(env, "OBJ-1")
         self.assertTrue(second.get("ok"), second)

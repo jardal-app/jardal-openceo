@@ -575,7 +575,7 @@ class FenceMountsTest(unittest.TestCase):
             (extra / ".env").write_text("K=v\n", encoding="utf-8")
             plan = self._plan(root, extra_write_roots=[extra])
         argv = plan.argv
-        scratch = str(root / "ws" / ".tier-s" / "sandbox" / "empty")
+        scratch = str(root / "ws" / ".openceo" / "sandbox" / "empty")
         self.assertIn(
             ["--ro-bind", scratch, str(extra / ".env")],
             [argv[index:index + 3] for index in range(len(argv) - 2)])

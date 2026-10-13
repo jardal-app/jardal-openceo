@@ -123,7 +123,7 @@ def _open_work_branch(repo: Path) -> str:
 
 
 def _write_handoff(repo: Path) -> None:
-    folder = repo / ".tier-s"
+    folder = repo / ".openceo"
     folder.mkdir(exist_ok=True)
     (folder / "HANDOFF.md").write_text(
         "# Handoff\nSHA:\nFiles changed:\nGates:\nDone.\n", encoding="utf-8")

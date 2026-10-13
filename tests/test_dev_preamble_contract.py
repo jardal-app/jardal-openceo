@@ -163,7 +163,7 @@ class HelperTests(_RepoCases):
         self.assertEqual(detect_prompt_lang("Revisa la rama y dime qué falla"), "es")
         self.assertEqual(detect_prompt_lang("sigue"), "es")
         self.assertEqual(detect_prompt_lang("Gates failed:\n[x] failed: boom"), "en")
-        self.assertEqual(detect_prompt_lang("Write .tier-s/HANDOFF.md now."), "en")
+        self.assertEqual(detect_prompt_lang("Write .openceo/HANDOFF.md now."), "en")
         self.assertEqual(detect_prompt_lang("Fix the code (no commits)."), "en")
 
 
@@ -302,7 +302,7 @@ class TierSPromptsTests(_RepoCases):
             with self.subTest(repo=repo.name):
                 prompt = objectives_mod._closure_judge_prompt(
                     2, "goal", "contracts", repo,
-                    result_path=".tier-s/objectives/OBJ-1/"
+                    result_path=".openceo/objectives/OBJ-1/"
                                 "OBJECTIVE_CLOSURE.md")
                 self.assertPreamble(prompt, repo, "en")
 
@@ -312,7 +312,7 @@ class TierSPromptsTests(_RepoCases):
             with self.subTest(repo=repo.name):
                 prompt = objectives_mod._closure_retry_prompt(
                     [1], repo,
-                    result_path=".tier-s/objectives/OBJ-1/"
+                    result_path=".openceo/objectives/OBJ-1/"
                                 "OBJECTIVE_CLOSURE.md")
                 self.assertPreamble(prompt, repo, "en")
 

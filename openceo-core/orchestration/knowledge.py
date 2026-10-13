@@ -172,7 +172,7 @@ def _note_prompt(
         "ticket refs as evidence. Frontmatter: type research, org/project "
         "from the project path, today's date.\n"
         f"Evidence:\n{evidence[:6000]}\n"
-        "Then emit VAULT_DONE in .tier-s/status."
+        "Then emit VAULT_DONE in .openceo/status."
     )
     return with_preamble(body, repo, "en")
 

@@ -600,7 +600,7 @@ class SessionCloseContractTests(unittest.IsolatedAsyncioTestCase):
         _git(repo, "checkout", "-qb", "work")
         (repo / "tracked.txt").write_text(
             "before\nchanged line\n", encoding="utf-8")
-        handoff_dir = repo / ".tier-s"
+        handoff_dir = repo / ".openceo"
         handoff_dir.mkdir(exist_ok=True)
         (handoff_dir / "HANDOFF.md").write_text(
             "# Handoff\nSHA:\nFiles changed:\nDone.\n", encoding="utf-8")
