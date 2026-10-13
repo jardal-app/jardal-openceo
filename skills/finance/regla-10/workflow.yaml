@@ -1,0 +1,10 @@
+workflow: finance.regla_10
+name: Regla 10 (exact skill)
+agent: finance
+description: "Exact part of the regla-10 skill: one registry tool, no LLM."
+steps:
+  - id: get_contribution_10_status
+    tool: finance.get_contribution_10_status
+    params:
+      date_from: "{{task.params.date_from}}"
+      date_to: "{{task.params.date_to}}"

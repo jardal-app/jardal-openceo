@@ -486,7 +486,12 @@ class WorkflowToolRegistry:
         rate = _rate_or_none(exchange_rate)
         parsed = _voice_expense.parse_expense(text, exchange_rate=rate)
         if parsed is None:
-            return {"ok": False, "error": "no_amount"}
+            return {"ok": False, "status": "invalid_input",
+                    "error": "no_amount",
+                    "summary": (
+                        "No encontré un monto válido para registrar. "
+                        "Dime por ejemplo: 'registra gasto personal "
+                        "carne 50 bolivianos'.")}
         ref = self._operation_ref("voice-expense", openceo_ref, context)
         client = ERPNextClient(self._settings)
         try:
@@ -497,6 +502,7 @@ class WorkflowToolRegistry:
             except MissingExchangeRateError as exc:
                 return {
                     "ok": False,
+                    "status": "invalid_input",
                     "error": "missing_exchange_rate",
                     "summary": str(exc),
                 }
@@ -519,13 +525,20 @@ class WorkflowToolRegistry:
         cost_center: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
+        text: str = "",
         **_: Any,
     ) -> dict[str, Any]:
         """Resumen de saldos/gasto por Scope (TASK-2026-00044). SOLO lectura
-        sobre `GL Entry`: no crea ni modifica ningun documento."""
+        sobre `GL Entry`: no crea ni modifica ningun documento.
+
+        Explicit bounds win; else the dictated text sets them
+        (TASK-2026-00221: the exact skill carries no LLM to compute them).
+        """
         from agents.finance import scope_summary as _scope
         from tools.erpnext_client import ERPNextClient
 
+        if not (date_from or date_to) and str(text or "").strip():
+            date_from, date_to = _scope.period_bounds(text)
         client = ERPNextClient(self._settings)
         try:
             summary = await _scope.get_scope_summary(
@@ -563,7 +576,12 @@ class WorkflowToolRegistry:
         rate = _rate_or_none(exchange_rate)
         parsed = _voice_income.parse_income(text, exchange_rate=rate)
         if parsed is None:
-            return {"ok": False, "error": "no_amount"}
+            return {"ok": False, "status": "invalid_input",
+                    "error": "no_amount",
+                    "summary": (
+                        "No encontré un monto válido para el ingreso. "
+                        "Dime por ejemplo: 'registra ingreso sueldo "
+                        "6200 bolivianos'.")}
         ref = self._operation_ref("voice-income", openceo_ref, context)
         client = ERPNextClient(self._settings)
         try:
@@ -574,6 +592,7 @@ class WorkflowToolRegistry:
             except MissingExchangeRateError as exc:
                 return {
                     "ok": False,
+                    "status": "invalid_input",
                     "error": "missing_exchange_rate",
                     "summary": str(exc),
                 }
@@ -1405,14 +1424,21 @@ class WorkflowService:
             _sync_context_outputs(context, outputs)
             if isinstance(result, dict) and result.get("status") in {
                     "denied", "invalid_input", "unavailable"}:
-                # A lock terminal state fails the run like the sessions
-                # do: later steps must never act as if the send, delete
-                # or payment had happened.
+                # A terminal tool state fails the run like the sessions
+                # do: later steps must never act as if the refused send,
+                # delete, payment or booking had happened. The refused
+                # output stays on the record: voice reads its summary back.
+                reason = str(result.get("reason")
+                             or result.get("message")
+                             or result.get("error") or "").strip()
+                events.append(_run_event(
+                    step_id, "failed",
+                    f"{tool_name} ended: {result.get('status')}",
+                    result))
                 raise ToolLockError(
-                    f"{tool_name} lock ended: "
-                    f"{result.get('status')}: "
-                    f"{result.get('reason') or result.get('message') or ''}"
-                    .strip())
+                    f"{tool_name} ended: "
+                    f"{result.get('status')}"
+                    f"{(': ' + reason) if reason else ''}")
             if is_lock_pending(result):
                 detail = (f"Candado ({result.get('tool') or tool_name}): "
                           f"pendiente de aprobacion del dueno.")

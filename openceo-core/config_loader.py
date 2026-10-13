@@ -641,9 +641,6 @@ class ConfigLoader:
             "pm": {
                 "default_tool": "langraph",
             },
-            "finance": {
-                "workflows": [],
-            },
             "notifications": [],
             "research": {
                 # Politica de research POR PROYECTO. Nace apagada de forma deliberada:

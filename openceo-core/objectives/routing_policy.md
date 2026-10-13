@@ -236,6 +236,15 @@ draft brief travel in the ticket. The send runs through the locked
 boundary tool (off-allowlist recipients park for Owner approval),
 never through SMTP from the agent.
 
+A ticket that asks about dated company money routes to `finance`
+with its skill: `registrar-gasto` and `registrar-ingreso` record
+(and run exact when the ticket brings the data),
+`consultar-resumen` reads balances, `regla-10` measures the 10%
+rule, and `pago-elfec` practices the Elfec payment under the Owner
+lock. Voice and chat dictation is an explicit Owner source: the
+chat layer names the exact skill, code validates it against the
+catalog, and no planner runs (criterio 1).
+
 ## 7. Domain ownership is separate from execution mechanism
 
 `target_agent` answers:

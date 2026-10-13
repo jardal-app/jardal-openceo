@@ -67,23 +67,6 @@ voice:
     enabled: true
     require_project_selection: false
 
-finance:
-  workflows:
-    - id: pago_elfec_house
-      name: Pago Elfec House
-      aliases:
-        - Pago Luz Casa
-      triggers:
-        - pago elfec house
-        - pago luz casa
-        - pagar luz casa
-        - elfec house
-        - elfec casa
-        - pago luz house
-      handler: elfec_house_payment
-      expected_row_label: House
-      stop_before_card: true
-
 secretary:
   # Recipients the secretary may mail without the Owner (TASK-2026-00208):
   # exact addresses or @domain suffixes. Anything else locks.

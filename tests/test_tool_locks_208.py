@@ -1744,101 +1744,10 @@ class SecretarySessionLockTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output.error, "no")
 
 
-class FinanceSessionLockTests(unittest.IsolatedAsyncioTestCase):
-    def _config(self) -> dict[str, Any]:
-        return {"finance": {"workflows": [{
-            "id": "pago_elfec_house",
-            "name": "Pago Elfec House",
-            "handler": "elfec_house_payment",
-            "triggers": ["pago elfec house"],
-        }]}}
-
-    def _manager(self):
-        from unittest.mock import Mock
-
-        from agents.finance.session import FinanceSessionManager
-
-        return FinanceSessionManager(Mock())
-
-    async def test_elfec_waits_with_question(self) -> None:
-        manager = self._manager()
-        service = MagicMock()
-        service.tool_elfec_pay = AsyncMock(return_value=pending_lock_result(
-            tool="elfec", question_task_id="q4",
-            waiting_reason="tool_lock:elfec", detail="hold"))
-        manager.set_task_service(service)
-        output = await manager.run(
-            {"task_id": "t1", "title": "pago elfec house",
-             "project": "jardal-openceo"},
-            self._config(),
-        )
-        self.assertEqual(output.status.value, "waiting")
-        self.assertEqual(output.waiting_reason, "tool_lock:elfec")
-        self.assertEqual(output.owner_question_id, "q4")
-
-    async def test_elfec_without_service_fails_closed(self) -> None:
-        manager = self._manager()
-        output = await manager.run(
-            {"task_id": "t1", "title": "pago elfec house",
-             "project": "jardal-openceo"},
-            self._config(),
-        )
-        self.assertEqual(output.status.value, "failed")
-        self.assertIn("TaskService", output.error or "")
-
-    async def test_elfec_denied_fails(self) -> None:
-        manager = self._manager()
-        service = MagicMock()
-        service.tool_elfec_pay = AsyncMock(return_value={
-            "ok": False, "status": "denied", "reason": "no"})
-        manager.set_task_service(service)
-        output = await manager.run(
-            {"task_id": "t1", "title": "pago elfec house",
-             "project": "jardal-openceo"},
-            self._config(),
-        )
-        self.assertEqual(output.status.value, "failed")
-
-
-class GraphLockNodeTests(unittest.IsolatedAsyncioTestCase):
-    # TASK-2026-00220 retired the secretary node; the secretary lock now
-    # travels the generic agent path (see test_secretary_agent_220.py).
-    def _graph(self, session: Any):
-        from graph import OpenCEOGraph
-
-        graph = OpenCEOGraph.__new__(OpenCEOGraph)
-        graph._finance_session = session
-        return graph
-
-    def _state(self) -> dict[str, Any]:
-        return {
-            "task_id": "t1",
-            "project": "jardal-openceo",
-            "title": "T",
-            "description": "D",
-            "attachments": [],
-            "priority": "medium",
-            "project_config": {},
-            "steps": [],
-        }
-
-    async def test_finance_waiting_passes_reason_and_params(self) -> None:
-        from unittest.mock import Mock
-
-        from agents.finance.session import FinanceExecutionOutput
-        from state import TaskStatus
-
-        session = Mock()
-        session.run = AsyncMock(return_value=FinanceExecutionOutput(
-            status=TaskStatus.WAITING,
-            last_response_summary="hold",
-            waiting_reason="tool_lock:elfec",
-            owner_question_id="q4",
-        ))
-        out = await self._graph(session)._finance_node(self._state())  # type: ignore[arg-type]
-        self.assertEqual(out["status"], "waiting")
-        self.assertEqual(out["waiting_reason"], "tool_lock:elfec")
-        self.assertEqual(out["params"], {"owner_question_id": "q4"})
+# TASK-2026-00221 retired the finance session and node with it; the
+# Elfec lock now travels the generic exact-skill path (pago-elfec
+# parks blocked_tool with the owner question; see
+# test_finance_agent_221.py).
 
 
 class ValidateSecretaryAllowlistTests(unittest.TestCase):
