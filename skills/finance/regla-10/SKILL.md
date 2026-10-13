@@ -4,6 +4,13 @@ description: "Measures the 10% contribution rule from income accounts without wr
 status: activa
 ticket: TASK-2026-00221
 date: 2026-10-13
+inputs:
+  - question
+  - date_from
+  - date_to
+  - cost_center
+outputs:
+  - contribution_status
 ---
 
 # Regla 10

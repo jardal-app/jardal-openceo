@@ -4,6 +4,11 @@ description: "Records already-collected income as an idempotent ERPNext Journal 
 status: activa
 ticket: TASK-2026-00221
 date: 2026-10-13
+inputs:
+  - dictated_text
+  - exchange_rate
+outputs:
+  - journal_entry
 ---
 
 # Registrar ingreso

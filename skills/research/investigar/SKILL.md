@@ -4,6 +4,17 @@ description: "Runs a grounded investigation through the ticket research bridge (
 status: activa
 ticket: TASK-2026-00222
 date: 2026-10-13
+inputs:
+  - question
+  - purpose
+  - mode
+  - seed_urls
+  - idempotency_key
+  - ticket
+  - project
+outputs:
+  - research_brief
+  - research_id
 ---
 
 # Investigar

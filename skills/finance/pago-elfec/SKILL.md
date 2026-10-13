@@ -4,6 +4,12 @@ description: "Runs the Elfec House payment practice flow to the card screen with
 status: activa
 ticket: TASK-2026-00221
 date: 2026-10-13
+inputs:
+  - expected_row_label
+  - stop_before_card
+outputs:
+  - practice_result
+  - approval_question
 ---
 
 # Pago Elfec

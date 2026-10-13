@@ -15,6 +15,10 @@ description: Sorts inbox findings into claimed work.
 status: borrador        # borrador | activa
 ticket: TASK-2026-00203 # creation ticket
 date: 2026-10-12
+inputs:                 # optional handoff contract (TASK-2026-00211)
+  - inbox_slice
+outputs:
+  - triage_report
 ---
 ```
 
@@ -61,6 +65,18 @@ waits propagate exactly as the engine returns them.
 - `muse skills validate skills/<role>/<skill>` (also runs in the suite).
 - Planner: the per-agent index (name + description + status) travels in
   the prompt; a suggested skill must name a real one of its target.
+
+## Handoff between tickets (TASK-2026-00211)
+
+`inputs`/`outputs` declare what the skill receives and delivers (names
+from the ticket text and params on the way in; verdict and file names
+on the way out). On close, a `hecho` run publishes its files as
+private ticket attachments and its data in the execution record
+(`params.ticket_outputs`); on launch, the generic executor resolves
+the `blocked_by` predecessors and delivers their recorded outputs —
+staged files under `upstream/<task_id>/` plus a prompt section (LLM
+path) or the `upstream_outputs` params (exact path). See
+`openceo-core/orchestration/ticket_handoff.py`.
 
 ## Crystallization drafts (TASK-2026-00210)
 

@@ -12,6 +12,11 @@ Two paths, no silent reclassification:
   the repo read-only; creation agents also mount the creation roots
   writable (TASK-2026-00214).
 
+Upstream outputs (TASK-2026-00211) resolve from the ``blocked_by``
+predecessors before either path: the LLM prompt carries them as a
+section and the exact workflow receives them in its params, with
+verified files staged under ``upstream/<task_id>/`` in both.
+
 Verdict semantics belong to TASK-2026-00202: hecho completes, bloqueado
 and no_aplica fail with the verdict stored (objective children return
 once to the planner through the existing funnel), and a missing verdict
@@ -53,6 +58,12 @@ from objectives import ticket_cost as cost_mod
 from orchestration.agent_sandbox import ensure_ticket_dir
 from orchestration.crystallization import CRYSTALLIZATION_PROMPT
 from orchestration.live import ProcessExecutor
+from orchestration.ticket_handoff import (
+    UPSTREAM_OUTPUTS_KEY,
+    render_upstream_section,
+    resolve_upstream_outputs,
+    stage_upstream_files,
+)
 from orchestration.role_muse import (
     TicketBadgeProvider,
     badge_ticket_for_task,
@@ -219,8 +230,9 @@ def muse_role_spec(profile: RoleProfile, label: str) -> dict[str, Any]:
 def build_agent_prompt(
     profile: RoleProfile, task: Mapping[str, Any],
     skill: str | None = None,
+    upstream_section: str = "",
 ) -> str:
-    """Ticket + suggested skill + crystallization + verdict block."""
+    """Ticket + upstream outputs + suggested skill + verdict block."""
     lines = [
         f"You are the {profile.name} agent: {profile.card.who}",
         f"Never: {'; '.join(profile.card.never)}.",
@@ -236,6 +248,8 @@ def build_agent_prompt(
                  if not str(key).startswith("_") and key != "skill"}
         if shown:
             lines.extend(["", f"Ticket data: {shown!r}"])
+    if upstream_section.strip():
+        lines.extend(["", upstream_section.strip()])
     if skill:
         lines.extend([
             "",
@@ -264,6 +278,31 @@ def _waiting(agent: str, reason: str,
         "resume_at": None,
         "result_comment": None,
     }
+
+
+async def _resolve_upstream(
+    task: Mapping[str, Any], wiring: GenericAgentWiring,
+) -> list[dict[str, Any]]:
+    """Predecessor outputs for this run, [] without repo or blockers."""
+    blocked = task.get("blocked_by") or []
+    repo = wiring.repo
+    task_id = str(task.get("task_id") or "")
+    if not blocked and repo is not None and task_id:
+        try:
+            row = await repo.get_task(task_id)
+        except Exception:  # noqa: BLE001 - no upstream, the run proceeds
+            row = None
+        if isinstance(row, dict):
+            blocked = row.get("blocked_by") or []
+    if not blocked or repo is None:
+        return []
+    try:
+        return await resolve_upstream_outputs(
+            repo, [str(dep) for dep in blocked], wiring.work_base_dir)
+    except Exception:  # noqa: BLE001 - no upstream, the run proceeds
+        logger.warning("upstream outputs unresolved for %s", task_id,
+                       exc_info=True)
+        return []
 
 
 async def run_generic_agent(
@@ -305,18 +344,20 @@ async def run_generic_agent(
                         f"{agent_name} skill", params)
     exact = resolve_exact_skill_path(skill.source, repo_root=skills_root) \
         if skill is not None else None
+    upstream = await _resolve_upstream(task, wiring)
     if exact is not None:
         return await _run_exact_skill(
             agent_name, task, params, profile, skill_name or "", exact,
-            wiring)
+            wiring, upstream=upstream)
     return await _run_llm(agent_name, task, params, profile, skill_name,
-                          wiring, skills)
+                          wiring, skills, upstream=upstream)
 
 
 async def _run_exact_skill(
     agent_name: str, task: dict[str, Any], params: dict[str, Any],
     profile: RoleProfile, skill_name: str, workflow_path: Path,
     wiring: GenericAgentWiring,
+    upstream: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Deterministic path: the skill's YAML runs, the LLM stays out."""
     del profile
@@ -325,6 +366,21 @@ async def _run_exact_skill(
         return _waiting(agent_name,
                         "config: exact skills need a workflow service",
                         params)
+    flow_task = task
+    flow_params = params
+    if upstream:
+        try:
+            workdir = ensure_ticket_dir(
+                str(task.get("task_id") or ""),
+                base_dir=(Path(wiring.work_base_dir)
+                          if wiring.work_base_dir is not None else None))
+            staged = stage_upstream_files(upstream, workdir)
+        except ValueError:
+            staged = []
+        payload = {"tickets": upstream, "dir": "upstream",
+                   "staged": [[pair[0], pair[1]] for pair in staged]}
+        flow_params = {**params, UPSTREAM_OUTPUTS_KEY: payload}
+        flow_task = {**task, "params": flow_params}
     try:
         raw = workflow_path.read_text(encoding="utf-8")
         workflow = service.parse_workflow_text(raw, source=str(workflow_path))
@@ -337,11 +393,11 @@ async def _run_exact_skill(
     workflow_id = str(workflow["workflow"])
     started = time.monotonic()
     try:
-        outcome = await service.execute_task_workflow(task, workflow)
+        outcome = await service.execute_task_workflow(flow_task, workflow)
     except Exception as exc:
         logger.warning("exact skill %s engine run failed: %s",
                        skill_name, exc, exc_info=True)
-        return _failed(agent_name, params, f"skill {skill_name}",
+        return _failed(agent_name, flow_params, f"skill {skill_name}",
                        error=f"workflow {workflow_id} raised "
                              f"{type(exc).__name__}: {exc}",
                        verdict=AgentResult(
@@ -356,7 +412,8 @@ async def _run_exact_skill(
         summary = str(outcome.last_response_summary or "").strip() \
             or f"workflow {workflow_id} completed"
         verdict = AgentResult(resultado=AgentOutcome.HECHO, motivo=summary)
-        out_params = {**params, "agent_result": verdict.model_dump(mode="json")}
+        out_params = {**flow_params,
+                      "agent_result": verdict.model_dump(mode="json")}
         if isinstance(outcome.params, dict):
             out_params.update({key: value
                                for key, value in outcome.params.items()
@@ -378,7 +435,7 @@ async def _run_exact_skill(
     if status == TaskStatus.FAILED.value:
         detail = str(outcome.error or outcome.last_response_summary or ""
                      ).strip() or f"workflow {workflow_id} failed"
-        failed = _failed(agent_name, params, f"skill {skill_name}",
+        failed = _failed(agent_name, flow_params, f"skill {skill_name}",
                          steps=list(outcome.steps or []),
                          error=detail,
                          verdict=AgentResult(
@@ -394,8 +451,8 @@ async def _run_exact_skill(
                         f"exact skill {skill_name} via workflow "
                         f"{workflow_id}: {outcome.waiting_reason or status}"),
                   *list(outcome.steps or [])],
-        "params": dict(params) if outcome.params is None
-        else {**params, **outcome.params},
+        "params": dict(flow_params) if outcome.params is None
+        else {**flow_params, **outcome.params},
         "last_response_summary": outcome.last_response_summary,
         "error": outcome.error,
         "waiting_reason": str(outcome.waiting_reason or status),
@@ -421,6 +478,7 @@ async def _run_llm(
     profile: RoleProfile, skill_name: str | None,
     wiring: GenericAgentWiring,
     skills: Mapping[str, Any] | None = None,
+    upstream: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """One fenced Muse run with profile, badge, folder and verdict schema."""
     if wiring.settings is None:
@@ -452,6 +510,8 @@ async def _run_llm(
     except ValueError as exc:
         return _waiting(agent_name, f"config: {exc}", params)
     stage_skill_links(workdir, skills or {})
+    staged = stage_upstream_files(upstream or [], workdir)
+    section = render_upstream_section(upstream or [], staged)
     read_roots, write_roots = role_extra_mounts(
         agent_name, has_skills=bool(skills), settings=wiring.settings)
     if read_roots:
@@ -469,7 +529,8 @@ async def _run_llm(
     provider = badge_factory(agent_name, badge_ticket or task_id,
                              str(task.get("project") or ""))
     executor = factory(agent_name, spec, provider)
-    prompt = build_agent_prompt(profile, task, skill=skill_name)
+    prompt = build_agent_prompt(profile, task, skill=skill_name,
+                                upstream_section=section)
     try:
         result = await executor.run(agent_name, prompt, workdir,
                                     wiring.timeout_s)

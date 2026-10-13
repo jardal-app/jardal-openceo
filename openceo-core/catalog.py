@@ -339,9 +339,10 @@ class RoleSkill(BaseModel):
     """One versioned role skill (TASK-2026-00203).
 
     Source: ``skills/<role>/<skill>/SKILL.md`` (Agent Skills standard
-    plus the OpenCEO header: ``status``, creation ``ticket``, ``date``).
-    ``source`` is the skill directory as loaded; the catalog resolves it
-    against the ``.codex/skills/`` exposure symlink.
+    plus the OpenCEO header: ``status``, creation ``ticket``, ``date``,
+    and the declared ``inputs``/``outputs`` handoff contract,
+    TASK-2026-00211). ``source`` is the skill directory as loaded; the
+    catalog resolves it against the ``.codex/skills/`` exposure symlink.
     """
 
     role: str = Field(pattern=_NAME_PATTERN)
@@ -351,6 +352,8 @@ class RoleSkill(BaseModel):
     ticket: str = Field(pattern=_TICKET_PATTERN)
     date: date
     source: str = Field(min_length=1)
+    inputs: list[str] = Field(default_factory=list)
+    outputs: list[str] = Field(default_factory=list)
 
     @field_validator("name")
     @classmethod
@@ -368,6 +371,11 @@ class RoleSkill(BaseModel):
         if not cleaned:
             raise ValueError("description: must not be blank")
         return cleaned
+
+    @field_validator("inputs", "outputs")
+    @classmethod
+    def _io_clean(cls, value: list[str], info: Any) -> list[str]:
+        return _nonempty_unique(value, str(info.field_name))
 
 
 class StaffEntry(BaseModel):
