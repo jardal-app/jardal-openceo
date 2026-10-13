@@ -135,7 +135,6 @@ graph = OpenCEOGraph(
     config_loader=config_loader,
     dev_session=dev_step_manager,
     finance_session=finance_step_manager,
-    secretary_session=secretary_step_manager,
     pm_session=pm_step_manager,
     notion=None,  # set after notion_manager is created
 )

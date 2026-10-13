@@ -136,7 +136,9 @@ class RealCatalogTest(unittest.TestCase):
         catalog = load_catalog()
         enabled = {name for name, card in catalog.agents.items()
                    if card.enabled}
-        self.assertEqual({"dev", "owner", "operations"}, enabled)
+        # TASK-2026-00220 enabled secretary on the generic node.
+        self.assertEqual({"dev", "owner", "operations", "secretary"},
+                         enabled)
 
     def test_owner_card(self):
         owner = load_catalog().agents["owner"]

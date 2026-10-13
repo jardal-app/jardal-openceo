@@ -683,7 +683,9 @@ class RealRepoTest(unittest.TestCase):
     def test_real_skills_index_has_first_skill(self) -> None:
         catalog = load_catalog()
         by_agent = load_all_role_skills(catalog)
-        self.assertEqual({"operations": ["crear-proyecto"]},
+        # TASK-2026-00220 added the second shipped skill.
+        self.assertEqual({"operations": ["crear-proyecto"],
+                          "secretary": ["enviar-correo"]},
                          {key: [skill.name for skill in value]
                           for key, value in by_agent.items() if value})
         self.assertIn("crear-proyecto",

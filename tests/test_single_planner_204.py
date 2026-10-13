@@ -946,7 +946,7 @@ class GraphFailClosedTests(unittest.IsolatedAsyncioTestCase):
         from graph import OpenCEOGraph  # noqa: E402
         loader = MagicMock()
         loader.load_project.return_value = {}
-        return OpenCEOGraph(MagicMock(), loader, None, None, None)
+        return OpenCEOGraph(MagicMock(), loader, None, None)
 
     async def test_execute_undecided_loose_waits(self) -> None:
         graph = self._graph()
@@ -971,7 +971,7 @@ class GraphFailClosedTests(unittest.IsolatedAsyncioTestCase):
         session.run = AsyncMock(return_value=waiting)
         loader = MagicMock()
         loader.load_project.return_value = {}
-        graph = OpenCEOGraph(MagicMock(), loader, None, session, None)
+        graph = OpenCEOGraph(MagicMock(), loader, None, session)
         out = await graph._finance_node({
             "task_id": "task-pedido-1", "title": "t", "description": "d",
             "params": {"target_agent": "finance",

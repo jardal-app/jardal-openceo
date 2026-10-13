@@ -12,7 +12,7 @@ agents:
     summary: Creates company projects end to end.
     card: agents/operations.yaml
   - name: secretary
-    summary: Sends email and coordinates lightly. Disabled until migrated.
+    summary: Sends email and coordinates lightly.
     card: agents/secretary.yaml
   - name: finance
     summary: Answers and records dated finance against ERPNext. Disabled until migrated, never executes a transfer by itself.

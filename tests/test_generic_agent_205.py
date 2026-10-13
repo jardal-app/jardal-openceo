@@ -257,8 +257,10 @@ class GenericGateTest(unittest.TestCase):
         self.assertIn("opencode", decision.reason)
 
     def test_wired_names_keep_legacy_routing(self) -> None:
+        # TASK-2026-00220 moved secretary to the generic node (its gate
+        # assertions live in test_secretary_agent_220.py).
         catalog = load_catalog()
-        for name in ("dev", "pm", "finance", "secretary"):
+        for name in ("dev", "pm", "finance"):
             with self.subTest(agent=name):
                 decision = resolve_agent_gate(name, {}, None, catalog)
                 self.assertTrue(decision.proceed)
@@ -276,13 +278,13 @@ class GenericRoutingTest(unittest.TestCase):
         self.assertEqual(AgentName.OPERATIONS, selected)
 
     def test_after_route_maps_operations_to_generic(self) -> None:
-        graph = OpenCEOGraph(None, None, None, None, None)
+        graph = OpenCEOGraph(None, None, None, None)
         self.assertEqual(
             "generic_agent",
             graph._after_ceo_route({"selected_agent": "operations"}))
 
     def test_after_route_sends_rest_to_unsupported(self) -> None:
-        graph = OpenCEOGraph(None, None, None, None, None)
+        graph = OpenCEOGraph(None, None, None, None)
         for name in ("marketing", "sales", "media", "ceo", "unknown"):
             with self.subTest(agent=name):
                 self.assertEqual(
@@ -660,7 +662,7 @@ class LegacyNodesUnchangedTest(unittest.TestCase):
         return OpenCEOGraph(
             router=CEORouter(settings), config_loader=loader,
             dev_session=dev_session, finance_session=MagicMock(),
-            secretary_session=MagicMock()), dev_session
+            ), dev_session
 
     def test_dev_hint_still_runs_legacy_dev_node(self) -> None:
         graph, dev_session = self._legacy_graph()
@@ -680,7 +682,7 @@ class LegacyNodesUnchangedTest(unittest.TestCase):
         self.assertIn("config:", out["waiting_reason"])
 
     def test_generic_node_without_wiring_waits(self) -> None:
-        graph = OpenCEOGraph(None, None, None, None, None)
+        graph = OpenCEOGraph(None, None, None, None)
         out = asyncio.run(graph._generic_node(
             {"task_id": "t", "title": "T", "description": "D",
              "selected_agent": "operations", "params": {},
@@ -696,7 +698,7 @@ class LegacyNodesUnchangedTest(unittest.TestCase):
             ExecResult(returncode=0, elapsed_s=1.0,
                        output_tail=hecho_stdout("node ran")))
         wiring = wiring_with(Path(tmp.name), catalog, factory)
-        graph = OpenCEOGraph(None, None, None, None, None,
+        graph = OpenCEOGraph(None, None, None, None,
                              generic_wiring=wiring)
         out = asyncio.run(graph._generic_node(
             {"task_id": "task-205", "ticket_number": 244,
