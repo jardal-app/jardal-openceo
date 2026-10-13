@@ -31,6 +31,7 @@ from company_mandate import (
     requires_owner,
 )
 from objectives import engine as engine_mod
+from objectives import ticket_cost as cost_mod
 from ceo import models as models_mod
 from ceo.models import (
     CEOAction,
@@ -245,6 +246,13 @@ async def _objective_digest(
         )
     except Exception:
         digest["tier_c_late_failure_rate"] = None
+    rows = list(children)[:CEO_CHILDREN_PER_OBJECTIVE] \
+        if children is not None else None
+    digest["cost"] = (
+        cost_mod.aggregate_objective_cost(
+            [item.get("cost") for item in rows])
+        if rows is not None else None
+    )
     return digest
 
 
@@ -416,6 +424,8 @@ def _objectives_section(signals: CEOSignals) -> str:
             lines.append(f"  waiting: {item['waiting_reason']}")
         if item["capability_gap"]:
             lines.append(f"  capability_gap: {item['capability_gap']}")
+        if isinstance(item.get("cost"), dict):
+            lines.append(f"  cost: {cost_mod.cost_summary_line(item['cost'])}")
         for deferred in item["deferred"]:
             lines.append(f"  deferred: {deferred}")
         for roadmap in item["roadmap_remaining"]:

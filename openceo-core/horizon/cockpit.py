@@ -202,6 +202,32 @@ def normalize_decision(
     }
 
 
+def _measured_cost_sentence(objectives: Any) -> str:
+    """Voice sentence with measured agent runs. Empty when nothing ran."""
+    total_runs = 0
+    total_s = 0.0
+    for item in objectives or []:
+        cost = item.get("cost") if isinstance(item, Mapping) else None
+        if not isinstance(cost, Mapping):
+            continue
+        try:
+            total_runs += int(cost.get("runs") or 0)
+            total_s += float(cost.get("duration_s") or 0.0)
+        except (TypeError, ValueError):
+            continue
+    if total_runs <= 0:
+        return ""
+    if total_runs == 1:
+        runs_text = "una corrida de agentes"
+    else:
+        runs_text = f"{total_runs} corridas de agentes"
+    minutes = int(total_s // 60)
+    if minutes > 0:
+        return (f"Llevamos {runs_text} ({minutes} minutos de ejecución) "
+                "en los objetivos activos.")
+    return f"Llevamos {runs_text} en los objetivos activos."
+
+
 def describe_company(company: Mapping[str, Any]) -> str:
     """Parrafo de voz con el status de empresa."""
     parts: list[str] = []
@@ -215,6 +241,9 @@ def describe_company(company: Mapping[str, Any]) -> str:
             parts.append(f"Tenemos {len(objectives)} objetivos de empresa activos: {names}.")
         else:
             parts.append(f"Tenemos un objetivo de empresa activo: {names}.")
+        sentence = _measured_cost_sentence(objectives)
+        if sentence:
+            parts.append(sentence)
     else:
         parts.append("No tenemos objetivos de empresa activos.")
     closed = company.get("recently_closed") or []

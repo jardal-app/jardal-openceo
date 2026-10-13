@@ -14,6 +14,7 @@ from agents.secretary.session import SecretarySessionManager
 from catalog import AgentType, Catalog, load_catalog
 from config_loader import ConfigLoader
 from objectives.agent_result import legacy_blocked_result
+from objectives.ticket_cost import COST_RUNS_KEY
 from orchestration.generic_agent import (
     GenericAgentWiring,
     run_generic_agent,
@@ -346,7 +347,7 @@ class OpenCEOGraph:
 
         result = await self._dev_session.run(task, state.get("project_config", {}))
 
-        return {
+        out: dict[str, Any] = {
             "selected_agent": AgentName.DEV.value,
             "status": result.status.value,
             "steps": [*(state.get("steps") or []), *result.steps],
@@ -361,6 +362,9 @@ class OpenCEOGraph:
             "modified_files": result.modified_files,
             "params": result.params,
         }
+        if getattr(result, COST_RUNS_KEY, None):
+            out[COST_RUNS_KEY] = getattr(result, COST_RUNS_KEY)
+        return out  # type: ignore[return-value]
 
     async def _pm_node(self, state: GraphState) -> GraphState:
         if self._pm_session is None:
@@ -502,6 +506,8 @@ class OpenCEOGraph:
             "last_response_summary": out.get("last_response_summary"),
             "error": out.get("error"),
         }
+        if out.get(COST_RUNS_KEY):
+            merged[COST_RUNS_KEY] = out[COST_RUNS_KEY]
         if out.get("waiting_reason") is not None:
             merged["waiting_reason"] = out["waiting_reason"]
             merged["resume_at"] = out.get("resume_at")

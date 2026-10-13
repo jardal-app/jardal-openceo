@@ -35,6 +35,7 @@ from objectives.engine import (
     on_ticket_closed,
 )
 from objectives.pedido import is_pedido
+from objectives.ticket_cost import COST_RUNS_KEY, record_runs
 from objectives.plan_spend import (
     SPEND_WAITING_REASON,
     PlanSpendError,
@@ -3650,6 +3651,14 @@ class TaskService:
                 updates["approval_state"] = graph_out["approval_state"]
             if graph_out.get("params") is not None:
                 updates["params"] = graph_out["params"]
+            cost_runs = graph_out.get(COST_RUNS_KEY)
+            if cost_runs:
+                # Measured cost (TASK-2026-00212): this execution's runs
+                # fold onto the stored ticket cost. The mid-run re-read
+                # is the freshest base; the run-start snapshot covers a
+                # ticket deleted mid-flight.
+                base = (current or task or {}).get("cost")
+                updates["cost"] = record_runs(base, list(cost_runs))
             if graph_out.get("waiting_reason") and str(graph_out["waiting_reason"]).startswith("phase:"):
                 phase_name = str(graph_out["waiting_reason"]).split("phase:", 1)[1].strip()
                 updates["phase"] = phase_name

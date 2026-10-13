@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,7 @@ from objectives.agent_result import (
     AgentResult,
     parse_agent_result,
 )
+from objectives import ticket_cost as cost_mod
 from orchestration.agent_sandbox import ensure_ticket_dir
 from orchestration.crystallization import CRYSTALLIZATION_PROMPT
 from orchestration.live import ProcessExecutor
@@ -333,6 +335,7 @@ async def _run_exact_skill(
                         f"config: skill {skill_name!r} carries an invalid "
                         f"workflow ({type(exc).__name__})", params)
     workflow_id = str(workflow["workflow"])
+    started = time.monotonic()
     try:
         outcome = await service.execute_task_workflow(task, workflow)
     except Exception as exc:
@@ -344,8 +347,11 @@ async def _run_exact_skill(
                        verdict=AgentResult(
                            resultado=AgentOutcome.BLOQUEADO,
                            motivo=f"workflow {workflow_id} raised "
-                                  f"{type(exc).__name__}"))
+                                  f"{type(exc).__name__}"),
+                       cost_runs=[_exact_skill_run(
+                           time.monotonic() - started)])
     status = str(outcome.status or "")
+    runs = [_exact_skill_run(time.monotonic() - started)]
     if status == TaskStatus.COMPLETED.value:
         summary = str(outcome.last_response_summary or "").strip() \
             or f"workflow {workflow_id} completed"
@@ -367,6 +373,7 @@ async def _run_exact_skill(
             "error": None,
             "result_comment": (f"{agent_name}: hecho ({workflow_id}): "
                                f"{summary}"),
+            cost_mod.COST_RUNS_KEY: runs,
         }
     if status == TaskStatus.FAILED.value:
         detail = str(outcome.error or outcome.last_response_summary or ""
@@ -375,7 +382,8 @@ async def _run_exact_skill(
                          steps=list(outcome.steps or []),
                          error=detail,
                          verdict=AgentResult(
-                             resultado=AgentOutcome.BLOQUEADO, motivo=detail))
+                             resultado=AgentOutcome.BLOQUEADO, motivo=detail),
+                         cost_runs=runs)
         failed["result_comment"] = (
             f"{agent_name}: bloqueado ({workflow_id}): {detail}")
         return failed
@@ -393,7 +401,19 @@ async def _run_exact_skill(
         "waiting_reason": str(outcome.waiting_reason or status),
         "resume_at": None,
         "result_comment": None,
+        cost_mod.COST_RUNS_KEY: runs,
     }
+
+
+def _exact_skill_run(duration_s: float) -> dict[str, Any]:
+    """Exact-skill cost: the LLM never runs, so 0 tokens is measured."""
+    return cost_mod.normalize_run({
+        "engine": "exact-skill",
+        "duration_s": duration_s,
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "tokens_cached": 0,
+    })
 
 
 async def _run_llm(
@@ -462,6 +482,9 @@ async def _run_llm(
     verdict = parse_agent_result(result.output_tail)
     usage = result.usage if isinstance(result.usage, dict) else {}
     truncated = bool(usage.get("truncated"))
+    runs = [cost_mod.run_from_exec_result(
+        usage=usage, elapsed_s=result.elapsed_s,
+        engine=str(profile.engine), model=result.model)]
     if result.returncode != 0:
         detail = (f"agent run failed (returncode {result.returncode})"
                   + (f": {result.output_tail.strip()[:500]}"
@@ -474,7 +497,7 @@ async def _run_llm(
                 motivo=(f"run crashed (returncode {result.returncode}); "
                         f"the agent claimed hecho: {verdict.motivo}"))
         return _failed(agent_name, params, "LLM run", error=detail,
-                       verdict=verdict)
+                       verdict=verdict, cost_runs=runs)
     if truncated:
         motivo = (f"agent output truncated "
                   f"({usage.get('stdout_chars', '?')} chars), verdict "
@@ -484,7 +507,8 @@ async def _run_llm(
         return _failed(agent_name, params, "LLM run",
                        error=motivo,
                        verdict=AgentResult(
-                           resultado=AgentOutcome.BLOQUEADO, motivo=motivo))
+                           resultado=AgentOutcome.BLOQUEADO, motivo=motivo),
+                       cost_runs=runs)
     if verdict is None:
         summary = (result.output_tail or "").strip() or "ok"
         return {
@@ -496,6 +520,7 @@ async def _run_llm(
             "last_response_summary": summary[:500],
             "error": None,
             "result_comment": f"{agent_name}: {summary[:500]}",
+            cost_mod.COST_RUNS_KEY: runs,
         }
     if verdict.resultado is AgentOutcome.HECHO:
         out_params = {**params,
@@ -509,20 +534,23 @@ async def _run_llm(
             "last_response_summary": verdict.motivo,
             "error": None,
             "result_comment": f"{agent_name}: hecho: {verdict.motivo}",
+            cost_mod.COST_RUNS_KEY: runs,
         }
     return _failed(agent_name, params, "LLM run",
-                   error=verdict.motivo, verdict=verdict)
+                   error=verdict.motivo, verdict=verdict, cost_runs=runs)
 
 
 def _failed(agent_name: str, params: dict[str, Any], where: str, *,
             error: str, verdict: AgentResult | None,
-            steps: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+            steps: list[dict[str, Any]] | None = None,
+            cost_runs: list[dict[str, Any]] | None = None,
+            ) -> dict[str, Any]:
     out_params = dict(params)
     if verdict is not None:
         out_params["agent_result"] = verdict.model_dump(mode="json")
     comment = (f"{agent_name}: {verdict.resultado.value}: {verdict.motivo}"
                if verdict is not None else f"{agent_name}: failed: {error}")
-    return {
+    out: dict[str, Any] = {
         "selected_agent": agent_name,
         "status": TaskStatus.FAILED.value,
         "steps": [_step("generic_agent", "failed", f"{where}: {error}"),
@@ -532,3 +560,6 @@ def _failed(agent_name: str, params: dict[str, Any], where: str, *,
         "error": error,
         "result_comment": comment,
     }
+    if cost_runs:
+        out[cost_mod.COST_RUNS_KEY] = cost_runs
+    return out

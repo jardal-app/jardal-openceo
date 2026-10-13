@@ -307,6 +307,10 @@ class TaskDocument(BaseModel):
     last_prompt_sent: str | None = None
     last_response_summary: str | None = None
     error: str | None = None
+    # Measured cost, folded by run_task from each execution's runs
+    # (TASK-2026-00212). Absent until the first recorded run; unknown
+    # stays null, never 0.
+    cost: dict[str, Any] | None = None
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     updated_by: str | None = None
@@ -612,6 +616,7 @@ class GraphState(TypedDict, total=False):
     coding_session_title: str | None
     modified_files: list[str]
     status: str
+    cost_runs: list[dict[str, Any]] | None
 
 
 def make_task_document(payload: TaskCreateRequest) -> TaskDocument:
