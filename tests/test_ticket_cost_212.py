@@ -246,6 +246,21 @@ class RenderTests(unittest.TestCase):
         self.assertTrue(line.startswith("PRIOR RUNS: "))
         self.assertIn("runs=1", line)
 
+    def test_render_tolerates_mangled_stored_cost(self) -> None:
+        # Review 00013/H5: a legacy or hand-edited cost renders as
+        # unmeasured instead of raising inside a planner prompt.
+        mangled: dict[str, Any] = {"runs": "many", "duration_s": "soon",
+                                   "engines": "muse", "tokens_in": "x"}
+        self.assertEqual(cost_mod.cost_summary_line(mangled),
+                         "(no measured runs)")
+        self.assertEqual(cost_mod.objective_cost_section(mangled), "")
+        self.assertEqual(cost_mod.pedido_cost_line(mangled), "")
+        readable = cost_mod.cost_summary_line(
+            {"runs": 2, "tokens_in": 5, "duration_s": 3.0,
+             "engines": ["a"]})
+        self.assertIn("runs=2", readable)
+        self.assertIn("tokens_in=5", readable)
+
 
 class GenericAgentCostTests(unittest.TestCase):
     def _world(self, stdout: str, returncode: int = 0,
@@ -384,6 +399,35 @@ class SimpleTierCostTests(unittest.IsolatedAsyncioTestCase):
             CodingTool.TIER_A)
         assert result.cost_run is not None
         self.assertEqual(result.cost_run["engine"], "tier_a")
+
+    async def test_followup_turn_returns_its_run(self) -> None:
+        # Review 00013/H1: gate/handoff fix turns are executor turns on
+        # the ticket and report their cost like the code step.
+        from agents.dev.session import CodingTool
+
+        manager = self._manager()
+        manager._resolve_tier_executor = AsyncMock(  # type: ignore[method-assign]
+            return_value=MagicMock(argv=["musej", "exec"], prompt_via="argv",
+                                   cwd=None, env={}, label="tier_c:muse"))
+
+        async def _ok(command, stdin_payload=None, timeout=120, cwd=None,
+                      env=None, sandbox=True, config_argv=None,
+                      home_file_overlays=None):
+            return True, "fixed", ""
+
+        manager._run_process = _ok  # type: ignore[method-assign]
+        provider_stub = MagicMock()
+        provider_stub.revoke = AsyncMock()
+        manager._ticket_badge_provider = MagicMock(  # type: ignore[method-assign]
+            return_value=provider_stub)
+        manager._muse_role_overlays = AsyncMock(  # type: ignore[method-assign]
+            return_value=({}, "badge-stub"))
+        with tempfile.TemporaryDirectory() as tmp:
+            run = await manager._simple_followup(
+                CodingTool.TIER_C, {}, Path(tmp), "Fix the code.")
+        assert run is not None
+        self.assertEqual(run["engine"], "tier_c:muse")
+        self.assertIsNotNone(run["duration_s"])
 
 
 class TierSCostDeltaTests(unittest.TestCase):

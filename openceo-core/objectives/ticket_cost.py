@@ -273,41 +273,45 @@ def aggregate_objective_cost(
 
 
 def cost_summary_line(cost: Mapping[str, Any] | None) -> str:
-    """Compact cost line for prompts (CEO, planner)."""
-    if not isinstance(cost, Mapping) or int(cost.get("runs") or 0) <= 0:
+    """Compact cost line for prompts (CEO, planner).
+
+    The stored mapping is normalized first: a legacy or hand-edited
+    cost renders as unmeasured, never raises (review 00013/H5).
+    """
+    if not isinstance(cost, Mapping):
         return "(no measured runs)"
-    parts = [f"runs={cost['runs']}"]
+    view = _as_cost(cost)
+    if view["runs"] <= 0:
+        return "(no measured runs)"
+    parts = [f"runs={view['runs']}"]
     tokens = []
     for key in ("tokens_in", "tokens_out", "tokens_cached"):
-        value = cost.get(key)
+        value = view[key]
         tokens.append(f"{key}={value if value is not None else '?'}")
-    unknown = int(cost.get("tokens_unknown_runs") or 0)
+    unknown = int(view["tokens_unknown_runs"])
     if unknown:
         tokens.append(f"{unknown} run(s) unmeasured")
     parts.append(f"tokens[{', '.join(tokens)}]")
-    duration = cost.get("duration_s")
-    if duration is None:
-        parts.append("duration_s=?")
-    else:
-        parts.append(f"duration_s={float(duration):.1f}")
-        if int(cost.get("duration_unknown_runs") or 0):
-            parts[-1] += (f" (+{int(cost['duration_unknown_runs'])} "
-                          "unmeasured)")
-    engines = list(cost.get("engines") or [])
+    duration = view["duration_s"]
+    parts.append(f"duration_s={float(duration):.1f}")
+    if int(view["duration_unknown_runs"]):
+        parts[-1] += (f" (+{int(view['duration_unknown_runs'])} "
+                      "unmeasured)")
+    engines = list(view["engines"])
     if engines:
         parts.append(f"engines=[{', '.join(engines)}]")
-    money = cost.get("money")
+    money = view["money"]
     if money is None:
         parts.append("money=unknown")
     else:
-        parts.append(f"money={money} {cost.get('money_currency') or ''}"
+        parts.append(f"money={money} {view['money_currency'] or ''}"
                      .strip())
     return " ".join(parts)
 
 
 def objective_cost_section(cost: Mapping[str, Any] | None) -> str:
     """Planner/CEO cost section. Empty when nothing ran (callers skip it)."""
-    if not isinstance(cost, Mapping) or int(cost.get("runs") or 0) <= 0:
+    if not isinstance(cost, Mapping) or _as_cost(cost)["runs"] <= 0:
         return ""
     return (
         "MEASURED COST (tickets so far; information only, never a "
@@ -318,6 +322,6 @@ def objective_cost_section(cost: Mapping[str, Any] | None) -> str:
 
 def pedido_cost_line(cost: Mapping[str, Any] | None) -> str:
     """The pedido's own prior runs, for replans. Empty when nothing ran."""
-    if not isinstance(cost, Mapping) or int(cost.get("runs") or 0) <= 0:
+    if not isinstance(cost, Mapping) or _as_cost(cost)["runs"] <= 0:
         return ""
     return f"PRIOR RUNS: {cost_summary_line(cost)}"
