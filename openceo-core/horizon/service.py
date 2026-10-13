@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from company_mandate import SECRET_BLOCK_PARAM
+from objectives import ticket_cost as cost_mod
 from horizon import capacity as capacity_module
 from horizon import classify as classify_module
 from horizon import cockpit as cockpit_module
@@ -854,6 +855,9 @@ class HorizonService:
                         "open_children": open_count,
                         "blocked_children": blocked_count,
                         "closed_children": closed_count,
+                        "cost": cost_mod.aggregate_objective_cost(
+                            [c.get("cost") for c in children]
+                        ),
                     }
                 )
 

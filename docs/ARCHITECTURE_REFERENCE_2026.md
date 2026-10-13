@@ -1073,6 +1073,10 @@ The Owner only ever receives: the 5 mandate categories (new spend, irreversible 
 
 The Owner or Horizon gives a mission; the CEO strategy chains objectives until it holds. Spend declared in a plan asks approval before launch (TASK-2026-00207). (TASK-2026-00218.)
 
+### Measured cost
+
+Every execution reports one run record (tokens in/out/cached, duration, engine) and `run_task` folds it onto the ticket's stored `cost`; the objective aggregates its tickets for the CEO strategy, the planner and the cockpit. Unknown is null, never 0: token totals stay null until a run measures them and the aggregation stays null until a run exists. Money stays null until a dated finance reader links ERPNext money to a ticket or project. Cost is information only: no threshold, tier or dispatch decision derives from it. (TASK-2026-00212: `objectives/ticket_cost.py` normalizes the heterogeneous engine shapes; generic LLM and exact-skill runs (0 measured tokens, the LLM never runs), simple-tier sessions and Tier S session deltas report `cost_runs`; legacy nodes report nothing until migrated. Tests: `tests/test_ticket_cost_212.py`.)
+
 ### What stays deterministic code
 
 Dispatch, quotas, dependencies, states, schema and deliverable validation, locks, mandate limits, privacy, exact scripts and dev gates. AI decides and does the work; code guards it.

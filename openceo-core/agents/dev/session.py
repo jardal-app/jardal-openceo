@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,8 @@ from catalog import CatalogError, load_role_profile
 from mcp_identity import McpAuthError
 from objectives.money_guide import project_money_routing
 from objectives.pedido import is_explicit_dev
+from objectives.ticket_cost import COST_RUNS_KEY
+from objectives import ticket_cost as cost_mod
 from orchestration.inbox import InMemoryInboxStore, MongoInboxStore
 from orchestration.knowledge import detect_prompt_lang, with_preamble
 from orchestration.live import AllowAllQuota, ProcessExecutor, RateMonitorQuota
@@ -123,9 +126,10 @@ class DevExecutionOutput:
     error: str | None = None
     modified_files: list[str] = field(default_factory=list)
     params: dict[str, Any] | None = None
+    cost_runs: list[dict[str, Any]] = field(default_factory=list)
 
     def as_state_patch(self) -> dict[str, Any]:
-        return {
+        patch: dict[str, Any] = {
             "status": self.status.value,
             "steps": self.steps,
             "coding_tool": self.coding_tool.value if self.coding_tool else None,
@@ -139,6 +143,9 @@ class DevExecutionOutput:
             "modified_files": self.modified_files,
             "params": self.params,
         }
+        if self.cost_runs:
+            patch[COST_RUNS_KEY] = self.cost_runs
+        return patch
 
 
 @dataclass
@@ -357,6 +364,8 @@ class DevSessionManager:
         if tool == CodingTool.TIER_C:
             await self._record_tier_c_event(task, "started")
         code_result = await self._step_code(task, project_config, tool)
+        if code_result.cost_run is not None:
+            output.cost_runs.append(code_result.cost_run)
         output.steps.append(code_result.step)
         output.coding_session_id = code_result.session_id
         output.coding_session_title = code_result.session_title
@@ -606,7 +615,8 @@ class DevSessionManager:
             return await self._material_simple_failure(
                 task, project_config, tool, branch,
                 f"oracle modified: {names} ({origin})",
-                prior_steps=output.steps, params_base=output.params)
+                prior_steps=output.steps, params_base=output.params,
+                cost_runs=output.cost_runs)
         if not recheck:
             protected = sum(1 for item in
                             branch.oracle_frozen.get("refs", [])
@@ -711,7 +721,8 @@ class DevSessionManager:
                 return await self._material_simple_failure(
                     task, project_config, tool, branch,
                     f"gates failed after {retries} retries: {names}",
-                    prior_steps=output.steps, params_base=output.params)
+                    prior_steps=output.steps, params_base=output.params,
+                    cost_runs=output.cost_runs)
             tail = "\n\n".join(
                 f"[{item.name}] {item.status}: {item.detail}\n{item.output_tail}"
                 for item in failed)
@@ -741,7 +752,8 @@ class DevSessionManager:
                 task, project_config, tool, branch,
                 f"size {files_n} files/{lines_n} lines over budget "
                 f"({files_budget}/{brake})",
-                prior_steps=output.steps, params_base=output.params)
+                prior_steps=output.steps, params_base=output.params,
+                cost_runs=output.cost_runs)
 
         handoff_path = repo / ".tier-s" / "HANDOFF.md"
         handoff = ""
@@ -984,6 +996,8 @@ class DevSessionManager:
             steps=[code_result.step,
                    self._step("agent_return", "failed", evidence)],
             params=params,
+            cost_runs=([code_result.cost_run]
+                       if code_result.cost_run is not None else []),
         )
 
     async def _material_simple_failure(
@@ -995,6 +1009,7 @@ class DevSessionManager:
         cause: str,
         prior_steps: list[dict[str, Any]] | None = None,
         params_base: dict[str, Any] | None = None,
+        cost_runs: list[dict[str, Any]] | None = None,
     ) -> DevExecutionOutput:
         """Material simple-tier failure (policy §29, replaces F5 escalation).
 
@@ -1062,6 +1077,7 @@ class DevSessionManager:
             steps=[*(prior_steps or []),
                    self._step("material_failure", "failed", evidence)],
             params=params,
+            cost_runs=list(cost_runs or []),
         )
 
     async def _material_failure_replan(
@@ -1276,6 +1292,7 @@ class DevSessionManager:
                 steps=[self._step("cycle", "ok", f"Tier S {detail}"),
                        *(self._step("notice", "ok", note) for note in notices[-5:])],
                 params=s_params,
+                cost_runs=list(getattr(outcome, "cost_runs", None) or []),
             )
         # Any non-completed cycle outcome mirrors as WAITING: the cycle
         # already patched the task itself (waiting/transient/needs_owner),
@@ -1291,6 +1308,7 @@ class DevSessionManager:
             steps=[self._step("cycle", "waiting",
                               f"{outcome.reason}: {outcome.detail}")],
             params=params,
+            cost_runs=list(getattr(outcome, "cost_runs", None) or []),
         )
 
     @staticmethod
@@ -1498,6 +1516,7 @@ class DevSessionManager:
                     error=detail,
                     executor_link=self._executor_link(executor),
                 )
+        started = time.monotonic()
         try:
             ok, output, err = await self._run_process(
                 command, stdin_payload=stdin_payload, timeout=1800,
@@ -1508,6 +1527,10 @@ class DevSessionManager:
         finally:
             if badge is not None and badge_provider is not None:
                 await badge_provider.revoke(badge)
+        run = cost_mod.normalize_run({
+            "engine": str(executor.label),
+            "duration_s": time.monotonic() - started,
+        })
 
         if not ok:
             detail = self._summarize_failure_output(
@@ -1518,6 +1541,7 @@ class DevSessionManager:
                 summary="",
                 error=detail,
                 executor_link=self._executor_link(executor),
+                cost_run=run,
             )
 
         text = output or "ok"
@@ -1532,6 +1556,7 @@ class DevSessionManager:
             review_links=review_links,
             agent_result=(verdict.model_dump(mode="json")
                           if verdict is not None else None),
+            cost_run=run,
         )
 
     async def _resolve_tier_executor(
@@ -2020,6 +2045,8 @@ class CodingStepResult:
     executor_link: str | None = None
     #: Parsed agent verdict (hecho/bloqueado/no_aplica), None when absent.
     agent_result: dict[str, Any] | None = None
+    #: Measured cost of the coding CLI invocation, None when never spawned.
+    cost_run: dict[str, Any] | None = None
 
 
 @dataclass

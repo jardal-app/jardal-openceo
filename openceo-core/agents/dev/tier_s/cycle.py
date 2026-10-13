@@ -22,7 +22,7 @@ import shutil
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Sequence
@@ -36,6 +36,7 @@ from agents.dev.tier_s_contract import (
 )
 from agents.dev.tier_s import gates as gate_mod
 from objectives import engine as objectives_mod
+from objectives import ticket_cost as cost_mod
 from orchestration import findings as findings_mod
 from orchestration import inbox as inbox_mod
 from orchestration import knowledge as knowledge_mod
@@ -101,6 +102,7 @@ class CycleOutcome:
     branch: str | None = None
     commit_sha: str | None = None
     resume_at: str | None = None  # ISO-8601 UTC when the wait self-heals
+    cost_runs: tuple[dict[str, Any], ...] = ()  # sessions of THIS execution
 
 
 @dataclass
@@ -145,6 +147,10 @@ class _Ctx:
     # Set once the cycle observes a business cancellation mid-flight
     # (TASK-2026-00177): parks and closes fence instead of acting.
     fenced_cancelled: bool = False
+    # Sessions already folded into the ticket cost by a previous execution
+    # (TASK-2026-00212): only sessions past this index travel as cost_runs,
+    # so resumes never double-count.
+    cost_sessions_base: int = 0
 
 
 def _utcnow_iso() -> str:
@@ -444,8 +450,10 @@ class TierSCycle:
         )
         if resume is not None:
             self._restore_checkpoint(ctx, resume)
+        ctx.cost_sessions_base = len(ctx.metrics.get("sessions") or [])
         try:
-            return await self._run_guarded(ctx)
+            outcome = await self._run_guarded(ctx)
+            return replace(outcome, cost_runs=self._cost_delta(ctx))
         except Exception as exc:  # fail explicit, resumable, lock always freed
             detail = f"{type(exc).__name__}: {exc}"[:500]
             parked = await self._park(
@@ -455,9 +463,17 @@ class TierSCycle:
             return CycleOutcome(
                 status="failed", run_id=ctx.run_id,
                 reason="transient", detail=detail,
-                resume_at=parked.resume_at)
+                resume_at=parked.resume_at,
+                cost_runs=self._cost_delta(ctx))
         finally:
             await self._cleanup(ctx)
+
+    def _cost_delta(self, ctx: _Ctx) -> tuple[dict[str, Any], ...]:
+        """Sessions recorded by this execution as ticket cost runs."""
+        sessions = ctx.metrics.get("sessions") or []
+        fresh = list(sessions)[max(0, ctx.cost_sessions_base):]
+        return tuple(cost_mod.run_from_session(dict(item))
+                     for item in fresh if isinstance(item, Mapping))
 
     # -- guarded flow ----------------------------------------------------
 

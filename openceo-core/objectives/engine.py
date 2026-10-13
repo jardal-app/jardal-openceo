@@ -49,6 +49,7 @@ from orchestration import review as review_mod
 from orchestration.live import TIMEOUT_RETURNCODE
 from objectives import planner_models as planner_mod
 from objectives import plan_spend as spend_mod
+from objectives import ticket_cost as cost_mod
 from owner_channel import (
     build_owner_question,
     owner_question_block,
@@ -733,6 +734,7 @@ def _planner_prompt(
     repo: Path | str | None = None,
     routing_guide: str = "",
     spend_guide: str = "",
+    cost_guide: str = "",
 ) -> str:
     """Planner prompt: bounded state + JSON contract (self-contained).
 
@@ -812,6 +814,8 @@ def _planner_prompt(
         "claim via includes_findings):",
         inbox_md,
     ]
+    if cost_guide.strip():
+        lines.extend(["", cost_guide.strip()])
     if deferred:
         lines.extend(["", "DEFERRED (reviewer suggestions out of scope):",
                       *[f"- {item}" for item in deferred]])
@@ -1439,7 +1443,10 @@ async def _plan_objective_inner(
         routing_guide=routing_guide_section(
             str(objective.get("project") or ""),
             env.project_routing),
-        spend_guide=spend_mod.spend_guide_section(env.mandate))
+        spend_guide=spend_mod.spend_guide_section(env.mandate),
+        cost_guide=cost_mod.objective_cost_section(
+            cost_mod.aggregate_objective_cost(
+                [item.get("cost") for item in tickets])))
     timeout_s = int(planner_cfg.get("timeout_minutes", 15)) * 60
     errors: list[str] = []
     result: planner_mod.PlannerResult | None = None
@@ -1551,6 +1558,9 @@ def _pedido_prompt(
             f"{agent_return.get('motivo')}",
             f"  necesidad: {agent_return.get('necesidad')}",
         ])
+    prior_runs = cost_mod.pedido_cost_line(ticket.get("cost"))
+    if prior_runs:
+        lines.extend(["", prior_runs])
     lines.extend([
         "",
         agents_md.strip(),
