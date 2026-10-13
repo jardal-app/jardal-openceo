@@ -44,6 +44,7 @@ __all__ = [
     "sandbox_available",
     "sandbox_env",
     "sandboxed_shell_command",
+    "ticket_dir",
 ]
 
 #: Vars forced on every agent spawn, over base and overlay alike.
@@ -119,11 +120,16 @@ def _check_ticket_id(ticket_id: str) -> str:
     return cleaned
 
 
-def ensure_ticket_dir(ticket_id: str, base_dir: Path | None = None) -> Path:
-    """Empty per-ticket folder, created 0700. Removed via remove_ticket_dir."""
+def ticket_dir(ticket_id: str, base_dir: Path | None = None) -> Path:
+    """Per-ticket folder path without creating it (close hooks)."""
     target = Path(base_dir) if base_dir is not None else (
         runtime_base_dir() / _TICKET_WORK_BASE)
-    path = target / _check_ticket_id(ticket_id)
+    return target / _check_ticket_id(ticket_id)
+
+
+def ensure_ticket_dir(ticket_id: str, base_dir: Path | None = None) -> Path:
+    """Empty per-ticket folder, created 0700. Removed via remove_ticket_dir."""
+    path = ticket_dir(ticket_id, base_dir=base_dir)
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o700)
     return path

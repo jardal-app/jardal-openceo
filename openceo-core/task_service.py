@@ -5,6 +5,7 @@ import hashlib
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from pymongo.errors import DuplicateKeyError
@@ -42,6 +43,14 @@ from objectives.plan_spend import (
     parse_costs,
     spend_hold_objective,
     spend_total_text,
+)
+from orchestration.agent_sandbox import ticket_dir
+from orchestration.crystallization import (
+    DRAFTS_DIRNAME,
+    SaveStepConfig,
+    has_drafts,
+    mirror_ticket,
+    run_save_step,
 )
 from owner_channel import (
     OWNER_QUESTION_PHASE,
@@ -3769,6 +3778,17 @@ class TaskService:
                     # (TASK-2026-00205). Never raises, never blocks long.
                     await self.comment_on_ticket(
                         task_id, str(result_comment).strip())
+                if final_status in {TaskStatus.COMPLETED.value,
+                                    TaskStatus.FAILED.value} \
+                        and has_drafts(task_id):
+                    # Crystallization save step (TASK-2026-00210):
+                    # drafts left in the ticket folder become versioned
+                    # role skills. Escalated closes stay out: their close
+                    # belongs to whoever resolves the escalation.
+                    asyncio.create_task(self._crystallize_after_close(
+                        task_id,
+                        str(graph_out.get("selected_agent") or ""),
+                        updated))
                 if (final_status == TaskStatus.COMPLETED.value
                         and updated.get("objective_id")):
                     # Single post-persist objective close (TASK-2026-00169):
@@ -3819,6 +3839,32 @@ class TaskService:
             await self._repo.patch_task(task["task_id"], {"wait_commented_for": key})
         except Exception:
             logger.warning("Could not comment wait on ERP for %s", task.get("task_id"), exc_info=True)
+
+    async def _crystallize_after_close(
+            self, task_id: str, agent: str,
+            ticket: dict[str, Any]) -> None:
+        """Fire-and-forget crystallization save (TASK-2026-00210).
+
+        Drafts the agent left in its ticket folder become versioned
+        role skills through the deterministic save gate. Never raises,
+        never touches the ticket outcome: failures land in the outcome
+        comment at most.
+        """
+        try:
+            mirror = mirror_ticket(ticket)
+            folder = ticket_dir(task_id) / DRAFTS_DIRNAME
+            if not agent or mirror is None:
+                return
+            outcome = await asyncio.to_thread(
+                run_save_step,
+                SaveStepConfig(
+                    repo=Path(__file__).resolve().parent.parent,
+                    agent=agent, ticket=mirror, drafts_dir=folder))
+            if outcome.comment:
+                await self.comment_on_ticket(task_id, outcome.comment)
+        except Exception:
+            logger.warning("Crystallization failed for %s", task_id,
+                           exc_info=True)
 
     async def comment_on_ticket(self, task_id: str, text: str) -> bool:
         """Post an ERP comment on a ticket's business mirror (Tier S, F3–F6).

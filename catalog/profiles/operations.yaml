@@ -7,6 +7,7 @@ card:
   who: "Company operations agent: creates company projects end to end."
   delivers:
     - "created project: ERPNext, repo, config, vault, DNS"
+    - skill drafts for recurrent work
   never:
     - decide business work
     - change ticket states
