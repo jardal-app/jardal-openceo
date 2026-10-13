@@ -756,6 +756,38 @@ class HookTests(unittest.TestCase):
             _write(target / "SKILL.md", "x")
             self.assertTrue(crys.has_drafts("tid-1", base_dir=base))
 
+    def test_has_drafts_ignores_non_draft_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "work"
+            drafts = base / "tid-1" / crys.DRAFTS_DIRNAME
+            drafts.mkdir(parents=True)
+            _write(drafts / "stray.txt", "x")
+            self.assertFalse(crys.has_drafts("tid-1", base_dir=base))
+            (drafts / ".hidden" / "x").mkdir(parents=True)
+            self.assertFalse(crys.has_drafts("tid-1", base_dir=base))
+            (drafts / "linked").symlink_to(drafts / ".hidden")
+            self.assertFalse(crys.has_drafts("tid-1", base_dir=base))
+
+    def test_drafts_base_follows_generic_wiring(self) -> None:
+        from types import SimpleNamespace
+
+        from task_service import TaskService
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "wire"
+            service = TaskService.__new__(TaskService)
+            service._graph = SimpleNamespace(
+                _generic_wiring=SimpleNamespace(work_base_dir=str(base)))
+            self.assertEqual(base, service._crystallization_drafts_base())
+            target = base / "tid-1" / crys.DRAFTS_DIRNAME / "s"
+            target.mkdir(parents=True)
+            _write(target / "SKILL.md", "x")
+            self.assertTrue(crys.has_drafts(
+                "tid-1", base_dir=service._crystallization_drafts_base()))
+            service._graph = SimpleNamespace(_generic_wiring=None)
+            self.assertIsNone(service._crystallization_drafts_base())
+            del service._graph
+            self.assertIsNone(service._crystallization_drafts_base())
+
     def test_has_drafts_rejects_bad_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             self.assertFalse(crys.has_drafts("../x", base_dir=Path(tmp)))
