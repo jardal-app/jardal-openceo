@@ -1,1 +1,1 @@
-"""Deterministic operations (0 tokens) for Tier-0 YAML workflows."""
+"""Deterministic project-creation library (0 tokens) behind the operations skill."""

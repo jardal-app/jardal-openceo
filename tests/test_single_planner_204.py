@@ -184,7 +184,7 @@ class PedidoPredicateTests(unittest.TestCase):
         self.assertFalse(is_pedido(_pedido(objective_id="OBJ-1")))
 
     def test_workflow_targets_are_explicit(self) -> None:
-        for params in ({"workflow": "ops.create_project"},
+        for params in ({"workflow": "finance.register_expense"},
                        {"use_workflow": True},
                        {"discover_workflow": True},
                        {"workflow_discovery": True}):

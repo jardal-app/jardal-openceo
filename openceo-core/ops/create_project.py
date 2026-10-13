@@ -1,11 +1,14 @@
 """End-to-end project creation (autonomy F6, TASK-2026-00115).
 
-Deterministic, idempotent operations behind the ``ops.*`` workflow tools and
-the ``operations.create_project`` Tier-0 workflow. Every ``ensure_*`` returns
-what already existed untouched and reports ``created``/``existed`` per
-artifact, so re-running a creation never duplicates anything. Every
-``remove_*`` only deletes what this module could have created (guarded by
-identity checks), for clean teardown of test projects.
+Deterministic, idempotent library behind the operations ``crear-proyecto``
+skill (TASK-2026-00214): the exact CLI calls ``ensure_*`` while the
+ERPNext-project and DNS steps run through their boundary tools. Every
+``ensure_*`` returns what already existed untouched and reports
+``created``/``existed`` per artifact, so re-running a creation never
+duplicates anything. Every ``remove_*`` only deletes what this module could
+have created (guarded by identity checks), for clean teardown of test
+projects. The legacy Tier-0 workflow and its ``ops.*`` tools retired in
+TASK-2026-00223; spend approval lives in the plan (TASK-2026-00207).
 
 All filesystem writes stay under caller-provided roots (resolved + confined);
 identifiers are restricted to ``[a-z0-9-]`` so no traversal is expressible.
@@ -17,9 +20,8 @@ import re
 import shutil
 import subprocess
 from datetime import date
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 KEY_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,60}$")
 ORG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
@@ -67,76 +69,6 @@ def confined(root: Path, *parts: str) -> Path:
 
 def default_remote_url(repo_name: str) -> str:
     return REMOTE_URL_TEMPLATE.format(repo=repo_name)
-
-
-def escalation_source_id(project_key: str) -> str:
-    return f"f6-create-project:{project_key}"
-
-
-# ---------------------------------------------------------------------------
-# Spend gate (mandate F4, TASK-2026-00114)
-# ---------------------------------------------------------------------------
-
-def check_spend(
-    *,
-    project_key: str,
-    summary: str,
-    costs: Sequence[Mapping[str, Any]] | None,
-    mandate: Any | None,
-) -> dict[str, Any]:
-    """Decide whether creating the project needs the owner. Pure.
-
-    ``costs`` is ``[{"label": ..., "amount": <decimal-string|int>}]`` (domain
-    purchase, hosting, paid service...). Total over the mandate threshold (or
-    no valid mandate at all) escalates fail-closed; anything else is automatic.
-    """
-    from company_mandate import OwnerAction, requires_owner
-
-    total = Decimal("0")
-    details: dict[str, str] = {}
-    for index, cost in enumerate(costs or []):
-        if not isinstance(cost, Mapping):
-            raise ProjectCreationError(f"costs[{index}] must be an object")
-        label = str(cost.get("label") or f"cost-{index}").strip() or f"cost-{index}"
-        raw = cost.get("amount", "0")
-        if isinstance(raw, bool) or isinstance(raw, float):
-            raise ProjectCreationError(
-                f"costs[{index}].amount must be a decimal string or int, "
-                f"got {type(raw).__name__}"
-            )
-        try:
-            amount = Decimal(str(raw).strip())
-        except (InvalidOperation, ValueError, AttributeError) as exc:
-            raise ProjectCreationError(
-                f"costs[{index}].amount is not a number: {raw!r}"
-            ) from exc
-        if amount < 0:
-            raise ProjectCreationError(f"costs[{index}].amount must not be negative")
-        total += amount
-        details[label] = str(amount)
-
-    action = OwnerAction(
-        kind="crear-proyecto",
-        summary=(summary or f"Crear el proyecto {project_key}").strip(),
-        project=None,
-        amount=total,
-        details={"project_key": project_key, **details},
-    )
-    decision = requires_owner(action, mandate)
-    currency = "?"
-    if mandate is not None:
-        try:
-            currency = str(mandate.presupuesto.moneda)
-        except AttributeError:
-            currency = "?"
-    return {
-        "escalate": bool(decision.escalate),
-        "category": decision.category.value if decision.category else None,
-        "reason": decision.reason,
-        "human_action": decision.human_action,
-        "amount": str(total),
-        "currency": currency,
-    }
 
 
 # ---------------------------------------------------------------------------

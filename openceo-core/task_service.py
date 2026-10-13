@@ -1096,9 +1096,9 @@ class TaskService:
         """Declared costs when the creation spend gate applies, else None.
 
         Objective children are plan-gated, never creation-gated; tickets
-        targeting a YAML workflow keep their in-workflow gate until the
-        legacy flow migrates (TASK-2026-00214/00223). Shape errors stay
-        for ``parse_costs`` at the call sites.
+        targeting a YAML workflow skip the creation gate and keep their
+        in-workflow handling. Shape errors stay for ``parse_costs`` at
+        the call sites.
         """
         if objective_id or str(origin or "") == "objective_planner":
             return None
