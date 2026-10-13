@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 
 __all__ = [
     "MANDATE_VERSION",
+    "MANDATE_PRINCIPLES",
     "SECRET_BLOCK_BUSINESS_STATUS",
     "SECRET_BLOCK_PARAM",
     "EscalationCategory",
@@ -41,11 +42,24 @@ __all__ = [
     "build_secret_block",
     "load_mandate_file",
     "parse_mandate",
+    "principles_prompt_section",
     "project_requires_human_review",
     "requires_owner",
 ]
 
 MANDATE_VERSION = 1
+
+#: The five Owner-decided company principles (TASK-2026-00193): how the
+#: CEO and the planner optimize — gain up, spend down, no fruitless work,
+#: reuse, and never tier/model by price (routing policy §28). Guidance
+#: only, never a gate: an unreadable mandate still fails autonomy closed.
+MANDATE_PRINCIPLES: tuple[str, ...] = (
+    "maximizar la ganancia",
+    "reducir el gasto",
+    "no hacer trabajo que no rinda",
+    "reutilizar lo que ya existe",
+    "nunca elegir el tier ni el modelo por precio",
+)
 
 #: Owner channels allowed to change the mandate. Voice, Horizon or a ticket
 #: carrying the owner's instruction; an agent applies the change.
@@ -174,6 +188,9 @@ class RevisionCEOMandato(BaseModel):
 class MandatoEmpresa(BaseModel):
     version: int = MANDATE_VERSION
     ejes: list[EjeMandato] = Field(default_factory=list)
+    principios: list[str] = Field(
+        default_factory=lambda: list(MANDATE_PRINCIPLES)
+    )
     presupuesto: PresupuestoMandato
     limites: LimitesMandato
     revision_ceo: RevisionCEOMandato
@@ -184,6 +201,21 @@ class MandatoEmpresa(BaseModel):
     def _version_supported(cls, value: int) -> int:
         if value != MANDATE_VERSION:
             raise ValueError(f"unsupported mandate version: {value!r}")
+        return value
+
+    @field_validator("principios")
+    @classmethod
+    def _principios_nonblank_unique(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("principios must declare at least one")
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError("principios must not contain blank items")
+            folded = item.strip().lower()
+            if folded in seen:
+                raise ValueError("principios must be unique")
+            seen.add(folded)
         return value
 
     @model_validator(mode="after")
@@ -235,6 +267,26 @@ def load_mandate_file(path: str | Path) -> MandatoEmpresa:
         return parse_mandate(data)
     except MandateError as exc:
         raise MandateError(f"mandate file {candidate}: {exc}") from exc
+
+
+def principles_prompt_section(mandate: MandatoEmpresa | None) -> str:
+    """Company principles for the CEO/planner prompts (one definition).
+
+    The mandate file carries them; without a readable mandate the
+    canonical five still apply (Owner decision, guidance only — the
+    escalation gates stay fail-closed independently).
+    """
+    if mandate is None:
+        items: list[str] = list(MANDATE_PRINCIPLES)
+        return "\n".join(
+            ["PRINCIPLES (default company principles):",
+             *(f"- {item}" for item in items)]
+        )
+    items = [str(item) for item in mandate.principios]
+    return "\n".join(
+        ["PRINCIPLES (company mandate):",
+         *(f"- {item}" for item in items)]
+    )
 
 
 @dataclass(frozen=True)

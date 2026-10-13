@@ -474,12 +474,12 @@ class AntiBloatTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("unknown eje", errors[0])
 
-    def test_eje_without_kpis_never_starts_work(self) -> None:
+    def test_empty_axis_rejects_undeclared_link(self) -> None:
         errors = validate_ceo_decision(
             _pedido_decision(spec={"eje_id": "vacio", "kpi_ids": ["x"]}),
             _ctx())
         self.assertEqual(len(errors), 1)
-        self.assertIn("declares no KPI", errors[0])
+        self.assertIn("not declared", errors[0])
 
     def test_undeclared_kpi_link_rejected(self) -> None:
         errors = validate_ceo_decision(
@@ -487,7 +487,7 @@ class AntiBloatTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("not declared", errors[0])
 
-    def test_unmeasured_axis_yields_report_never_work(self) -> None:
+    def test_unmeasured_axis_without_justification_rejected(self) -> None:
         ctx = _ctx(kpi_readings={
             "crecimiento:tickets_abiertos": CEOKpiReading(
                 value=None, unknown=True),
@@ -495,11 +495,13 @@ class AntiBloatTests(unittest.TestCase):
         errors = validate_ceo_decision(_pedido_decision(), ctx)
         self.assertEqual(len(errors), 1)
         self.assertIn("no measured KPI", errors[0])
+        self.assertIn("justificacion", errors[0])
 
-    def test_missing_reading_counts_as_unmeasured(self) -> None:
+    def test_missing_reading_needs_justification(self) -> None:
         errors = validate_ceo_decision(_pedido_decision(), _ctx(kpi_readings={}))
         self.assertEqual(len(errors), 1)
         self.assertIn("no measured KPI", errors[0])
+        self.assertIn("justificacion", errors[0])
 
     def test_measured_zero_is_measured_not_unknown(self) -> None:
         ctx = _ctx(kpi_readings={

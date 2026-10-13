@@ -86,20 +86,22 @@ class NewPedidoSpec(BaseModel):
     project where the pedido is filed; ``costs`` reuses the planner
     shape so the spend gate reads it unchanged; ``project_key`` (with
     ``display_name``) marks a new-project pedido for the operations
-    ``crear-proyecto`` skill.
+    ``crear-proyecto`` skill. The mandate link (TASK-2026-00193) is a
+    measured KPI or, when none is measured, a written ``justificacion``.
     """
 
     project: str = Field(min_length=1)
     title: str = Field(min_length=1)
     description: str = Field(min_length=1)
     acceptance: list[str] = Field(default_factory=list)
-    eje_id: str = Field(min_length=1)
-    kpi_ids: list[str] = Field(min_length=1)
+    eje_id: str | None = None
+    kpi_ids: list[str] = Field(default_factory=list)
+    justificacion: str | None = None
     costs: list[PlannedCost] = Field(default_factory=list)
     project_key: str | None = None
     display_name: str | None = None
 
-    @field_validator("project", "title", "description", "eje_id")
+    @field_validator("project", "title", "description")
     @classmethod
     def _fields_nonblank(cls, value: str) -> str:
         if not value.strip():
@@ -111,7 +113,7 @@ class NewPedidoSpec(BaseModel):
     def _lists_nonblank(cls, value: list[str]) -> list[str]:
         return _string_list_nonblank(value)
 
-    @field_validator("project_key", "display_name")
+    @field_validator("eje_id", "justificacion", "project_key", "display_name")
     @classmethod
     def _optional_nonblank(cls, value: str | None) -> str | None:
         if value is not None and not value.strip():
@@ -275,46 +277,59 @@ class CEOValidationContext:
 
 def _check_axis_kpis(
     decision_label: str,
-    eje_id: str,
-    kpi_ids: Sequence[str],
+    spec: NewPedidoSpec,
     ctx: CEOValidationContext,
     errors: list[str],
 ) -> None:
-    """Axis/KPI link + measurability (scope §2/§4)."""
+    """Mandate link: a measured KPI or a written justificacion (§2/§4).
+
+    The KPI is optional since TASK-2026-00193: a pedido without a
+    measured KPI carries the reason in words instead. Unknown axes and
+    undeclared links still fail; KPIs need their axis to mean anything.
+    """
     mandate = ctx.mandate
     if mandate is None:
         errors.append(f"{decision_label}: no valid company mandate")
         return
+    eje_id = str(spec.eje_id or "").strip()
+    kpi_ids = [str(item) for item in spec.kpi_ids]
+    justified = bool(str(spec.justificacion or "").strip())
+    if not eje_id:
+        if kpi_ids:
+            errors.append(
+                f"{decision_label}: kpi_ids {kpi_ids} without eje_id: "
+                "a KPI link needs its axis"
+            )
+        elif not justified:
+            errors.append(
+                f"{decision_label}: without a mandate eje, a written "
+                "justificacion is required"
+            )
+        return
     axes = {eje.id: eje for eje in mandate.ejes}
-    eje = axes.get(str(eje_id or "").strip())
+    eje = axes.get(eje_id)
     if eje is None:
         errors.append(
-            f"{decision_label}: unknown eje {str(eje_id)!r} "
+            f"{decision_label}: unknown eje {eje_id!r} "
             f"(mandate axes: {sorted(axes) or 'none'})"
         )
         return
     declared = [kpi.id for kpi in eje.kpis]
-    if not declared:
-        errors.append(
-            f"{decision_label}: eje {eje.id!r} declares no KPI: "
-            "an axis without a KPI yields a report, never new work"
-        )
-        return
     unknown = [kpi for kpi in kpi_ids if kpi not in declared]
     if unknown:
         errors.append(
             f"{decision_label}: kpi_ids {unknown} are not declared "
-            f"on eje {eje.id!r} (declared: {declared})"
+            f"on eje {eje.id!r} (declared: {declared or 'none'})"
         )
         return
     measured = [
         kpi for kpi in kpi_ids if ctx.reading_known(eje.id, kpi)
     ]
-    if not measured:
+    if not measured and not justified:
         errors.append(
             f"{decision_label}: eje {eje.id!r} has no measured KPI "
-            f"this review (linked: {list(kpi_ids)}): an axis without "
-            "a measurable KPI yields a report, never new work"
+            f"this review (linked: {kpi_ids or 'none'}): link a "
+            "measured KPI or write the justificacion"
         )
 
 
@@ -338,7 +353,7 @@ def _validate_new_pedido(
             f"{label}: unknown project {spec.project!r}: a pedido "
             "is filed in exactly one known project"
         )
-    _check_axis_kpis(label, spec.eje_id, spec.kpi_ids, ctx, errors)
+    _check_axis_kpis(label, spec, ctx, errors)
     normalized = normalize_title(spec.title)
     if normalized in {normalize_title(t) for t in ctx.open_titles}:
         errors.append(f"{label}: duplicates an open ticket")
@@ -429,12 +444,12 @@ def validate_ceo_decision(
     """Deterministic anti-bloat validation. Returns errors (pure, sync).
 
     ``keep_going``/``do_nothing`` always validate (they persist nothing
-    but the review record). A pedido validates project, axis/KPI link
-    with a measured KPI, and duplicates against open tickets and active
-    objectives; form limits apply where the form materializes (objective
-    admission, ticket dispatch). Escalation validates the policy cause
-    through the single mandate policy and dedupes against already-open
-    escalations.
+    but the review record). A pedido validates project, the mandate
+    link (a measured KPI or a written justificacion), and duplicates
+    against open tickets and active objectives; form limits apply where
+    the form materializes (objective admission, ticket dispatch).
+    Escalation validates the policy cause through the single mandate
+    policy and dedupes against already-open escalations.
     """
     if decision.action == CEOAction.CREAR_PEDIDO:
         assert decision.pedido is not None  # Shape-guarded.

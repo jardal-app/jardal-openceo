@@ -41,6 +41,7 @@ from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
 from catalog import (load_all_role_skills, load_catalog,
                      skills_index_for_planner, suggestable_skills)
+from company_mandate import principles_prompt_section
 from objectives.money_guide import routing_guide_section
 from orchestration import findings as findings_mod
 from orchestration import inbox as inbox_mod
@@ -757,6 +758,7 @@ def _planner_prompt(
     repo: Path | str | None = None,
     routing_guide: str = "",
     spend_guide: str = "",
+    principles_guide: str = "",
     cost_guide: str = "",
     playbooks_md: str = "",
 ) -> str:
@@ -918,6 +920,8 @@ def _planner_prompt(
         lines.extend(["", routing_guide.strip()])
     if (spend_guide or "").strip():
         lines.extend(["", spend_guide.strip()])
+    if (principles_guide or "").strip():
+        lines.extend(["", principles_guide.strip()])
     lines.extend([
         "",
         f"OUTPUT: write {SCRATCH_DIRNAME}/objectives/"
@@ -1479,6 +1483,7 @@ async def _plan_objective_inner(
             str(objective.get("project") or ""),
             env.project_routing),
         spend_guide=spend_mod.spend_guide_section(env.mandate),
+        principles_guide=principles_prompt_section(env.mandate),
         cost_guide=cost_mod.objective_cost_section(
             cost_mod.aggregate_objective_cost(
                 [item.get("cost") for item in tickets])),
@@ -1565,6 +1570,7 @@ def _pedido_prompt(
     policy_index: str = "",
     routing_guide: str = "",
     spend_guide: str = "",
+    principles_guide: str = "",
     agent_return: Mapping[str, Any] | None = None,
 ) -> str:
     """Planner prompt for one pedido (self-contained decision contract)."""
@@ -1634,6 +1640,8 @@ def _pedido_prompt(
         lines.extend(["", routing_guide.strip()])
     if (spend_guide or "").strip():
         lines.extend(["", spend_guide.strip()])
+    if (principles_guide or "").strip():
+        lines.extend(["", principles_guide.strip()])
     lines.extend([
         "",
         f"OUTPUT: write {SCRATCH_DIRNAME}/loose/"
@@ -1782,6 +1790,7 @@ async def _plan_pedido_inner(
         policy_index=planner_mod.policy_detail_index(staged),
         routing_guide=routing_guide_section(project, env.project_routing),
         spend_guide=spend_mod.spend_guide_section(env.mandate),
+        principles_guide=principles_prompt_section(env.mandate),
         agent_return=return_from)
     timeout_s = int(planner_cfg.get("timeout_minutes", 15)) * 60
     errors: list[str] = []

@@ -782,4 +782,16 @@ You run as one fresh Muse Code / Muse Spark 1.3 Contributor headless planning cy
 18. Declare every new cost in `costs` (per ticket, or result-level
     for shared costs). Unknown cost is never zero: it waits for
     the Owner, like any spend over the mandate threshold.
+
+19. Optimize for the company PRINCIPLES in the prompt (§43).
 ```
+
+## 43. Company principles guide optimization
+
+Every planning prompt carries a PRINCIPLES section from the company
+mandate (`projects/company_mandate.yaml`, `principios`; TASK-2026-00193):
+gain up, spend down, no fruitless work, reuse what exists, and never
+tier or model by price. They are optimization guidance, not gates:
+they never override an explicit request, a justification rule, or an
+escalation. When two plans both satisfy the contract, prefer the one
+the principles favor; say so in one line of `state_summary`.
