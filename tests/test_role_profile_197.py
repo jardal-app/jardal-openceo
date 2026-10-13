@@ -931,11 +931,14 @@ class RoleProfileSmokeTests(unittest.IsolatedAsyncioTestCase):
                                                     baseline_id))
         operations_box = set(load_catalog(
         ).agents["operations"].boundary_tools)
+        secretary_box = set(load_catalog(
+        ).agents["secretary"].boundary_tools)
         matrix = (("dev", "agent", set(dev_box_tools())),
                   ("planner", "readonly", set(READONLY_BOX)),
                   ("ceo", "readonly", set(READONLY_BOX)),
                   ("operations", "agent", operations_box),
-                  ("secretary", "none", None),
+                  # TASK-2026-00220 enabled secretary with its box.
+                  ("secretary", "agent", secretary_box),
                   ("finance", "none", None),
                   ("research", "none", None))
         for name, kind, expected_box in matrix:

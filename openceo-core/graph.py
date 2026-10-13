@@ -10,7 +10,6 @@ from langgraph.graph import END, START, StateGraph
 from agents.dev.session import DevSessionManager
 from agents.finance.session import FinanceSessionManager
 from agents.pm.session import PMSessionManager
-from agents.secretary.session import SecretarySessionManager
 from catalog import AgentType, Catalog, load_catalog
 from config_loader import ConfigLoader
 from objectives.agent_result import legacy_blocked_result
@@ -23,8 +22,9 @@ from router import CEORouter, resolve_explicit_name
 from state import AgentName, GraphState, TaskStatus
 
 #: Agents with a wired executor node below. Disabled-but-wired names stay
-#: alive on their legacy session until their removal ticket lands.
-WIRED_AGENTS = ("dev", "pm", "finance", "secretary")
+#: alive on their legacy session until their removal ticket lands
+#: (secretary left in TASK-2026-00220).
+WIRED_AGENTS = ("dev", "pm", "finance")
 
 
 @dataclass(frozen=True)
@@ -120,7 +120,6 @@ class OpenCEOGraph:
         config_loader: ConfigLoader,
         dev_session: DevSessionManager,
         finance_session: FinanceSessionManager,
-        secretary_session: SecretarySessionManager,
         pm_session: PMSessionManager | None = None,
         notion: Any | None = None,
         generic_wiring: GenericAgentWiring | None = None,
@@ -129,7 +128,6 @@ class OpenCEOGraph:
         self._config_loader = config_loader
         self._dev_session = dev_session
         self._finance_session = finance_session
-        self._secretary_session = secretary_session
         self._pm_session = pm_session
         self._notion = notion
         self._generic_wiring = generic_wiring
@@ -139,7 +137,6 @@ class OpenCEOGraph:
         builder.add_node("dev_agent", self._dev_node)
         builder.add_node("pm_agent", self._pm_node)
         builder.add_node("finance_agent", self._finance_node)
-        builder.add_node("secretary_agent", self._secretary_node)
         builder.add_node("generic_agent", self._generic_node)
         builder.add_node("unsupported_agent", self._unsupported_agent_node)
 
@@ -151,7 +148,6 @@ class OpenCEOGraph:
                 "dev": "dev_agent",
                 "pm": "pm_agent",
                 "finance": "finance_agent",
-                "secretary": "secretary_agent",
                 "generic_agent": "generic_agent",
                 "unsupported": "unsupported_agent",
             },
@@ -159,7 +155,6 @@ class OpenCEOGraph:
         builder.add_edge("dev_agent", END)
         builder.add_edge("pm_agent", END)
         builder.add_edge("finance_agent", END)
-        builder.add_edge("secretary_agent", END)
         builder.add_edge("generic_agent", END)
         builder.add_edge("unsupported_agent", END)
 
@@ -213,9 +208,9 @@ class OpenCEOGraph:
     ) -> dict[str, Any]:
         """Map a legacy non-dev FAILED to its agent verdict (00202).
 
-        Deterministic sessions (pm/finance/secretary) return a bare
-        status: their FAILED means the agent could not do it, recorded
-        as ``bloqueado`` with the session detail. Dev runs parse their
+        Deterministic sessions (pm/finance) return a bare status:
+        their FAILED means the agent could not do it, recorded as
+        ``bloqueado`` with the session detail. Dev runs parse their
         own verdict from the CLI output; completed and waiting runs
         carry none. Total: never raises, never drops params.
         """
@@ -223,8 +218,7 @@ class OpenCEOGraph:
             return out
         if str(out.get("status") or "") != TaskStatus.FAILED.value:
             return out
-        if str(out.get("selected_agent") or "") \
-                not in {"pm", "finance", "secretary"}:
+        if str(out.get("selected_agent") or "") not in {"pm", "finance"}:
             return out
         raw_params = out.get("params")
         params = dict(raw_params) if isinstance(raw_params, dict) else {}
@@ -325,9 +319,8 @@ class OpenCEOGraph:
             return "pm"
         if state.get("selected_agent") == AgentName.FINANCE.value:
             return "finance"
-        if state.get("selected_agent") == AgentName.SECRETARY.value:
-            return "secretary"
-        if state.get("selected_agent") == AgentName.OPERATIONS.value:
+        if state.get("selected_agent") in {AgentName.OPERATIONS.value,
+                                           AgentName.SECRETARY.value}:
             return "generic_agent"
         return "unsupported"
 
@@ -419,37 +412,6 @@ class OpenCEOGraph:
 
         out: dict[str, Any] = {
             "selected_agent": AgentName.FINANCE.value,
-            "status": result.status.value,
-            "steps": [*(state.get("steps") or []), *result.steps],
-            "last_response_summary": result.last_response_summary,
-            "error": result.error,
-        }
-        if result.status == TaskStatus.WAITING:
-            out["waiting_reason"] = result.waiting_reason
-            out["resume_at"] = None
-            if result.owner_question_id:
-                # Merge over the ticket params: replacing them wholesale
-                # would drop the planner decision and mirrors.
-                out["params"] = {**(state.get("params") or {}),
-                                 "owner_question_id":
-                                 result.owner_question_id}
-        return out
-
-    async def _secretary_node(self, state: GraphState) -> GraphState:
-        task = {
-            "task_id": state["task_id"],
-            "project": state.get("project"),
-            "title": state["title"],
-            "description": state["description"],
-            "attachments": state.get("attachments", []),
-            "priority": state.get("priority", "medium"),
-        }
-
-        result = await self._secretary_session.run(
-            task, state.get("project_config", {}))
-
-        out: dict[str, Any] = {
-            "selected_agent": AgentName.SECRETARY.value,
             "status": result.status.value,
             "steps": [*(state.get("steps") or []), *result.steps],
             "last_response_summary": result.last_response_summary,

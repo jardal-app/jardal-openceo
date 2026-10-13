@@ -364,10 +364,12 @@ class LegacyGraphMappingTests(unittest.TestCase):
         self.assertEqual(out["params"]["target_agent"], "finance")
 
     def test_failed_without_detail_falls_back(self) -> None:
+        # TASK-2026-00220 moved secretary off the legacy mapping; finance
+        # still exercises the empty-detail fallback.
         out = OpenCEOGraph._attach_legacy_agent_result(
             {"task_id": "t", "params": {}},
             {"status": TaskStatus.FAILED.value,
-             "selected_agent": "secretary", "params": {}})
+             "selected_agent": "finance", "params": {}})
         assert isinstance(out["params"], dict)
         AgentResult.model_validate(out["params"]["agent_result"])
 

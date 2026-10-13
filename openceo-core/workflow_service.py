@@ -115,8 +115,6 @@ class WorkflowToolRegistry:
         # Secretary
         self.register("secretary.send_email", self._secretary_send_email)
         self.register("secretary.list_sender_accounts", self._secretary_list_sender_accounts)
-        self.register("secretary.save_note", self._secretary_save_note)
-        self.register("secretary.query_notes", self._secretary_query_notes)
 
         # Finance
         self.register("finance.pago_elfec_house", self._finance_pago_elfec_house)
@@ -422,55 +420,6 @@ class WorkflowToolRegistry:
         """Lists the configured sender addresses (no secrets)."""
         from agents.secretary.tools import list_sender_accounts
         return list_sender_accounts()
-
-    async def _secretary_save_note(
-        self,
-        content: str,
-        project: str | None = None,
-        tags: list[str] | None = None,
-        user: str = "admin",
-        **_: Any,
-    ) -> dict[str, Any]:
-        """Saves a note, idea, or reminder into MongoDB collection 'notes'."""
-        if not self._repo:
-            return {"ok": False, "error": "Repo not available"}
-        note_id = str(uuid4())
-        doc = {
-            "note_id": note_id,
-            "content": content,
-            "project": project,
-            "tags": tags or [],
-            "user": user,
-            "created_at": _utc_now(),
-        }
-        await self._repo.db["notes"].insert_one(doc)
-        doc.pop("_id", None)
-        return {"ok": True, "note_id": note_id, "note": doc}
-
-    async def _secretary_query_notes(
-        self,
-        project: str | None = None,
-        tag: str | None = None,
-        search: str | None = None,
-        limit: int = 20,
-        **_: Any,
-    ) -> list[dict[str, Any]]:
-        """Queries notes from MongoDB collection 'notes' with optional filters."""
-        if not self._repo:
-            return []
-        query: dict[str, Any] = {}
-        if project:
-            query["project"] = project
-        if tag:
-            query["tags"] = tag
-        if search:
-            query["content"] = {"$regex": re.escape(search), "$options": "i"}
-        cursor = self._repo.db["notes"].find(query).sort("created_at", -1).limit(max(1, min(limit, 50)))
-        notes: list[dict[str, Any]] = []
-        async for doc in cursor:
-            doc.pop("_id", None)
-            notes.append(doc)
-        return notes
 
     async def _finance_pago_elfec_house(
         self,

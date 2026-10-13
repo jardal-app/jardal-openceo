@@ -52,8 +52,6 @@ EXPECTED_REGISTRY = frozenset({
     "core.query_workflow_runs",
     "secretary.send_email",
     "secretary.list_sender_accounts",
-    "secretary.save_note",
-    "secretary.query_notes",
     "finance.pago_elfec_house",
     "finance.register_expense",
     "finance.register_income",
@@ -81,6 +79,9 @@ REMOVED_TOOLS = (
     "core.check_registry",
     "cloudflare.upsert_dns_record",
     "cloudflare.delete_dns_record",
+    # TASK-2026-00220: notes left the registry with the third memory.
+    "secretary.save_note",
+    "secretary.query_notes",
 )
 
 RESEARCH_TOOLS = (

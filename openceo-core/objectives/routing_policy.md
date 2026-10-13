@@ -230,6 +230,12 @@ TASK-2026-00223 retires it after the tokenless rehearsal
 `crear_pedido` pedido routed here, and the planner never launches
 workflows directly (`PlannedTicket` carries no `params.workflow`).
 
+A ticket that asks to send or draft email routes to `secretary`
+with the `enviar-correo` skill; recipients, subject, and body or
+draft brief travel in the ticket. The send runs through the locked
+boundary tool (off-allowlist recipients park for Owner approval),
+never through SMTP from the agent.
+
 ## 7. Domain ownership is separate from execution mechanism
 
 `target_agent` answers:

@@ -1801,11 +1801,12 @@ class FinanceSessionLockTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GraphLockNodeTests(unittest.IsolatedAsyncioTestCase):
+    # TASK-2026-00220 retired the secretary node; the secretary lock now
+    # travels the generic agent path (see test_secretary_agent_220.py).
     def _graph(self, session: Any):
         from graph import OpenCEOGraph
 
         graph = OpenCEOGraph.__new__(OpenCEOGraph)
-        graph._secretary_session = session
         graph._finance_session = session
         return graph
 
@@ -1820,24 +1821,6 @@ class GraphLockNodeTests(unittest.IsolatedAsyncioTestCase):
             "project_config": {},
             "steps": [],
         }
-
-    async def test_secretary_waiting_passes_reason_and_params(self) -> None:
-        from unittest.mock import Mock
-
-        from agents.secretary.session import SecretaryExecutionOutput
-        from state import TaskStatus
-
-        session = Mock()
-        session.run = AsyncMock(return_value=SecretaryExecutionOutput(
-            status=TaskStatus.WAITING,
-            last_response_summary="hold",
-            waiting_reason="tool_lock:email",
-            owner_question_id="q3",
-        ))
-        out = await self._graph(session)._secretary_node(self._state())  # type: ignore[arg-type]
-        self.assertEqual(out["status"], "waiting")
-        self.assertEqual(out["waiting_reason"], "tool_lock:email")
-        self.assertEqual(out["params"], {"owner_question_id": "q3"})
 
     async def test_finance_waiting_passes_reason_and_params(self) -> None:
         from unittest.mock import Mock
