@@ -830,6 +830,36 @@ class AcceptanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any("duplicates" in error for error in record["errors"]))
 
+    async def test_duplicate_check_uses_the_full_objective_goal(
+        self,
+    ) -> None:
+        repo = _scratch_repo(self)
+        goal = "Expand " + "x" * 400 + " checkout"
+        store = InMemoryObjectiveStore()
+        await store.create_objective({
+            "objective_id": "OBJ-LONG", "status": "active",
+            "project": "shop", "goal": goal,
+        })
+        ceo = _RecordedCEO(repo, [
+            {"action": "crear_pedido", "summary": "Shop needs checkout",
+             "pedido": {
+                 "project": "shop", "title": goal,
+                 "description": "The button double-charges",
+                 "eje_id": "crecimiento",
+                 "kpi_ids": ["tickets_abiertos"],
+             }},
+        ])
+        env, calls = _make_env(
+            self, repo, executor=ceo, read_kpi=_measured_kpis(),
+            objectives=store)
+
+        outcome = await run_review(env, kind="scheduled", reasons=[])
+
+        self.assertFalse(outcome["ok"])
+        self.assertEqual(outcome["action"], "rejected")
+        self.assertIn("duplicates active objective", outcome["reason"])
+        self.assertEqual(calls["created_tickets"], [])
+
     async def test_cost_case_is_escalated(self) -> None:
         repo = _scratch_repo(self)
         ceo = _RecordedCEO(repo, [

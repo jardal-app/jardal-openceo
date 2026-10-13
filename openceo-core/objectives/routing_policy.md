@@ -226,9 +226,9 @@ project spec in the ticket (`project_key`, display name, org,
 description, and `is_web`/`hostname` for web projects). The
 deterministic `operations.create_project` workflow stays until
 TASK-2026-00223 retires it after the tokenless rehearsal
-(TASK-2026-00234); meanwhile it is still launched by the CEO review's
-`create_project` action, and the planner never launches workflows
-directly (`PlannedTicket` carries no `params.workflow`).
+(TASK-2026-00234); project creation now arrives as a CEO
+`crear_pedido` pedido routed here, and the planner never launches
+workflows directly (`PlannedTicket` carries no `params.workflow`).
 
 ## 7. Domain ownership is separate from execution mechanism
 

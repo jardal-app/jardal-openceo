@@ -212,6 +212,7 @@ async def _objective_digest(
         "project": objective.get("project"),
         "entry": objective.get("entry"),
         "goal": _short(_objective_goal(objective), 300),
+        "goal_full": str(_objective_goal(objective)),
         "status": objective.get("status"),
         "waiting_reason": _short(objective.get("waiting_reason"), 160),
         "open_children": open_count,
@@ -578,7 +579,7 @@ def _validation_context(env: CEOEnv, signals: CEOSignals) -> CEOValidationContex
             {
                 "objective_id": item.get("objective_id"),
                 "project": item.get("project"),
-                "goal": item.get("goal"),
+                "goal": item.get("goal_full") or item.get("goal"),
             }
             for item in signals.objectives
         ],
