@@ -953,6 +953,37 @@ class MongoRepository:
         )
         return result.modified_count + tier_result.modified_count
 
+    async def apply_restart_recovery(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        waiting_reason: str | None,
+        recovery_meta: dict[str, Any],
+    ) -> bool:
+        """Rewrite one interrupted ticket. True when it still was interrupted.
+
+        Silent by design, like :meth:`mark_interrupted_tasks`: a restart is
+        not a business transition, so the observer never sees the requeue
+        (queued would push Open over a Working ticket) and the next claim
+        matches ``status_pushed``. Only ``params._recovery`` is touched, so
+        artifacts, approvals and confirmed effects survive. The conditional
+        filter makes a second boot pass a no-op.
+        """
+        if not task_id or not status:
+            return False
+        result = await self.tasks.update_one(
+            {"task_id": task_id, "status": TaskStatus.INTERRUPTED.value},
+            {"$set": {
+                "status": str(status),
+                "waiting_reason": waiting_reason,
+                "resume_at": None,
+                "params._recovery": dict(recovery_meta or {}),
+                "updated_at": datetime.now(timezone.utc),
+            }},
+        )
+        return result.matched_count == 1
+
     async def close_orphan_tier_s_runs(self, limit: int = 500) -> int:
         """Boot reconcile: waiting Tier S runs whose task already ended.
 
