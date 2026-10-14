@@ -67,15 +67,15 @@ scripts/openceo-core-host.sh restart|status
   any work on a company project/repo goes to ERPNext first.
 - No secrets, credentials, or personal data in notes or temp docs.
 - Conventions over configuration: mirror sibling code, reuse its helpers.
-- Owner rule (2026-10-06; revised 2026-10-11 for epic TASK-2026-00187):
-  during the epic, component tests MAY spend tokens — prefer `musej`
-  (run as many as needed); `claudej` (Claude Code) and `dsh` (DeepSeek)
-  are allowed too, but only for minimal checks, never large flows. What
-  stays forbidden until the whole epic is done is a full token-spending
-  end-to-end run (a complete objective/mission, or a full Tier S cycle).
-  The only full real runs are the two pilots, moved on 2026-10-12 to the
-  validation epic TASK-2026-00233: TASK-2026-00219 (Pilot 1) and
-  TASK-2026-00224 (Acceptance), each only once all its dependencies are
-  Completed, and only in a dedicated Owner validation session (never in
-  the coding loop). Unit/contract and communication tests,
-  simulated executors and `muse --provider echo` stay the default (CLAUDE.md §11).
+- Owner rule (2026-10-14; current epic TASK-2026-00245): validation uses
+  only simple, targeted logic/contract/communication tests with mocks,
+  simulated executors/CLIs, or non-generative echo/help/version checks.
+  No validation calls to live models, extensive integrated rehearsals
+  (including simulated ones), or full objective/mission/Tier S test runs.
+  Run the mandatory focused checks above; do not require the full suite
+  to close this epic. These limits concern tests, not CLI invocations
+  needed to implement authorized work. They supersede the component-test
+  token allowance from completed epic TASK-2026-00187. Its pilots remain
+  separate in TASK-2026-00233 (TASK-2026-00219 and TASK-2026-00224), only
+  with `valida` in a dedicated Owner session and completed dependencies,
+  never through the current coding loop (CLAUDE.md §11).
