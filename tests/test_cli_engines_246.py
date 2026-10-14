@@ -175,6 +175,14 @@ class ResolveEngineTest(unittest.TestCase):
         self.assertEqual(
             EngineSelection("codex-cli", "codexj", "params"), selection)
 
+    def test_account_only_override_keeps_card_via(self) -> None:
+        # Review 00002/mimo-H3: via names the engine origin, so an
+        # account-only override still records via="card".
+        selection = resolve_engine(
+            "agy", "agyd", {"engine_account": "agy2"})
+        self.assertEqual(
+            EngineSelection("agy", "agy2", "card"), selection)
+
     def test_engine_override_resets_foreign_card_account(self) -> None:
         selection = resolve_engine("agy", "agy2", {"engine": "codex-cli"})
         self.assertEqual(
@@ -213,12 +221,19 @@ class AvailabilityTest(unittest.TestCase):
         self.assertIn("unknown engine", reason)
 
     def test_probe_version_ok(self) -> None:
-        proc = mock.Mock(returncode=0, stdout="agy 1.3.5\n", stderr="")
-        report = probe_engine_version(
-            "agy", "agyd", run=mock.Mock(return_value=proc))
-        self.assertTrue(report["ok"])
-        self.assertEqual("agy 1.3.5", report["version"])
-        self.assertEqual(["agyd", "--version"], report["command"])
+        binaries = {"muse-code": "musej", "claude-code": "claudej",
+                    "opencode": "opencode", "codex-cli": "codexj"}
+        for engine, account in SELECTIONS:
+            with self.subTest(engine=engine, account=account):
+                proc = mock.Mock(returncode=0, stdout="v1\n", stderr="")
+                run = mock.Mock(return_value=proc)
+                report = probe_engine_version(engine, account, run=run)
+                self.assertTrue(report["ok"])
+                self.assertEqual("v1", report["version"])
+                binary = binaries.get(engine, account)
+                self.assertEqual([binary, "--version"],
+                                 report["command"])
+                run.assert_called_once()
 
     def test_probe_version_failure(self) -> None:
         proc = mock.Mock(returncode=1, stdout="", stderr="boom\n")

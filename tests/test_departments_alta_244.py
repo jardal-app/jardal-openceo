@@ -335,6 +335,36 @@ class RouteByCatalogTest(unittest.TestCase):
             "unsupported",
             graph._after_ceo_route({"selected_agent": "accountant"}))
 
+    def test_non_dict_params_wait_with_reason(self) -> None:
+        # Review 00002/mimo-H1: malformed params wait explicitly
+        # instead of crashing the gate on .get().
+        graph = OpenCEOGraph(None, None, None)
+        for bad in ("oops", ["x"], 42):
+            with self.subTest(params=bad):
+                out = asyncio.run(graph.execute({"params": bad}))
+                self.assertEqual("waiting", out["status"])
+                self.assertIn("must be an object",
+                              out["waiting_reason"])
+
+    def test_execute_gate_honors_injected_catalog(self) -> None:
+        # Review 00002/mimo-H2: the gate reads the injected catalog,
+        # not the disk tree (operations is enabled on disk).
+        catalog = tiny_catalog(
+            {"operations": {"enabled": False, "reason": "off"}})
+        graph = OpenCEOGraph(None, None, None, catalog=catalog)
+        out = asyncio.run(graph.execute({}, "operations"))
+        self.assertEqual("waiting", out["status"])
+        self.assertIn("is disabled", out["waiting_reason"])
+
+    def test_unsupported_node_honors_injected_catalog(self) -> None:
+        catalog = tiny_catalog(
+            {"old": {"enabled": False, "reason": "retired"}})
+        graph = OpenCEOGraph(None, None, None, catalog=catalog)
+        out = asyncio.run(graph._unsupported_agent_node(
+            {"selected_agent": "old", "steps": []}))
+        self.assertIn("is disabled", out["waiting_reason"])
+        self.assertIn("retired", out["waiting_reason"])
+
 
 class AgentsSectionTest(unittest.TestCase):
     def test_catalog_lines_carry_department_summary_and_detail(self) -> None:
