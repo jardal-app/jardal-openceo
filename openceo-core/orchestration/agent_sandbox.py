@@ -56,7 +56,7 @@ SANDBOX_FORCED_ENV = {
 
 _HOME_DIRS_RO = (
     ".codex", ".claude", ".claude-j", ".qwen", ".dsh", ".opencode",
-    ".gemini",
+    ".gemini", ".gemini-j", ".gemini-2",
     ".config/muse", ".config/opencode",
     ".local/share/claude", ".local/share/uv",
     ".local/share/claude-skill-wrappers",
@@ -67,7 +67,8 @@ _HOME_FILES_RO = (
     ".local/bin/muse", ".local/bin/musej",
     ".local/bin/codexj", ".local/bin/claudej", ".local/bin/clauded",
     ".local/bin/claudep", ".local/bin/qwen",
-    ".local/bin/agyd", ".local/bin/agy",
+    ".local/bin/agyd", ".local/bin/agyj", ".local/bin/agy2",
+    ".local/bin/agy",
     ".local/bin/uv", ".local/bin/uvx",
     ".local/bin/.muse-version", ".local/bin/.muse-release-info.json",
 )
@@ -79,10 +80,14 @@ _HOME_TMPFS = (
     ".local/share/muse", ".cache", ".npm", ".ssh",
 )
 
-_GEMINI_STATE_TMPFS = (".gemini/history", ".gemini/tmp", ".gemini/projects")
+_GEMINI_STATE_SUBDIRS = (".gemini/history", ".gemini/tmp", ".gemini/projects")
 _GEMINI_STATE_FILES = ("settings.json", "state.json", "projects.json",
                        "trustedFolders.json", "google_accounts.json")
-_GEMINI_BINARIES = frozenset({"agy", "agyd"})
+_GEMINI_BINARIES = frozenset({"agy", "agyd", "agyj", "agy2"})
+
+#: agy binary → home subdir holding its state (account dirs come from
+#: the agy translator; bare ``agy`` shares the default dir).
+_GEMINI_BINARY_SUBDIRS = {"agyj": ".gemini-j", "agy2": ".gemini-2"}
 
 _WALK_PRUNE_DIRS = frozenset({
     ".git", ".venv", "node_modules", "__pycache__", ".pytest_cache",
@@ -331,20 +336,23 @@ def _snapshot_dsh_profile(overlay: Mapping[str, str] | None,
 
 def _gemini_state_ops(home: Path, scratch: Path,
                       argv: Sequence[str]) -> list[list[str]]:
-    """Writable agy state over the read-only ``~/.gemini`` (review H4).
+    """Writable agy state over the read-only account dir (review H4).
 
     agy writes history, tmp, projects and root-level state JSONs; a
-    pure ro bind would EROFS it. Only agy-family runs pay for it.
+    pure ro bind would EROFS it. Only agy-family runs pay for it, each
+    over its own account dir (TASK-2026-00246).
     """
     if not argv or Path(str(argv[0])).name not in _GEMINI_BINARIES:
         return []
-    ops = [["--tmpfs", str(home / entry)]
-           for entry in _GEMINI_STATE_TMPFS]
+    subdir = _GEMINI_BINARY_SUBDIRS.get(Path(str(argv[0])).name,
+                                        ".gemini")
+    ops = [["--tmpfs", str(home / subdir / entry.split("/", 1)[1])]
+           for entry in _GEMINI_STATE_SUBDIRS]
     for name in _GEMINI_STATE_FILES:
-        src = home / ".gemini" / name
+        src = home / subdir / name
         if not src.is_file() or src.is_symlink():
             continue
-        dst = scratch / f"gemini-{name}"
+        dst = scratch / f"gemini-{subdir[1:]}-{name}"
         try:
             shutil.copy2(src, dst)
         except OSError:

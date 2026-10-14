@@ -249,12 +249,20 @@ class GenericGateTest(unittest.TestCase):
         self.assertFalse(decision.proceed)
         self.assertIn("no runner", decision.reason)
 
-    def test_non_muse_engine_waits_for_translator(self) -> None:
+    def test_known_engine_proceeds_unknown_waits(self) -> None:
+        # TASK-2026-00246 redefines this: configured engines dispatch,
+        # only unknown ones wait for a translator that does not exist.
         catalog = tiny_catalog(
             {"operations": {"enabled": True, "engine": "opencode"}})
         decision = resolve_agent_gate("operations", {}, None, catalog)
+        self.assertTrue(decision.proceed)
+        self.assertEqual("operations", decision.hint)
+        catalog = tiny_catalog(
+            {"operations": {"enabled": True, "engine": "not-a-cli"}})
+        decision = resolve_agent_gate("operations", {}, None, catalog)
         self.assertFalse(decision.proceed)
-        self.assertIn("opencode", decision.reason)
+        self.assertIn("no runner", decision.reason)
+        self.assertIn("not-a-cli", decision.reason)
 
     def test_wired_names_keep_legacy_routing(self) -> None:
         # TASK-2026-00220 moved secretary and TASK-2026-00221 finance to
