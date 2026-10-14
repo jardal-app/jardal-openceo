@@ -46,6 +46,7 @@ __all__ = [
     "Catalog",
     "CatalogError",
     "CatalogStatus",
+    "Department",
     "IndexEntry",
     "KNOWN_ENGINES",
     "RoleCard",
@@ -54,6 +55,7 @@ __all__ = [
     "StaffEntry",
     "StaffRoster",
     "TICKET_PATTERN",
+    "agent_detail_text",
     "catalog_fingerprint",
     "catalog_root",
     "check_catalog",
@@ -193,6 +195,25 @@ class IndexEntry(BaseModel):
         return value
 
 
+class Department(BaseModel):
+    """One company department (TASK-2026-00244).
+
+    Departments group responsibilities for the planner; they grant no
+    permissions and add no directors or routers. Declared once in
+    ``index.yaml``; cards reference them by name.
+    """
+
+    name: str = Field(pattern=_NAME_PATTERN)
+    summary: str = Field(min_length=1, max_length=INDEX_SUMMARY_MAX_CHARS)
+
+    @field_validator("summary")
+    @classmethod
+    def _summary_single_line(cls, value: str) -> str:
+        if "\n" in value or "\r" in value:
+            raise ValueError("summary: must be a single line")
+        return value.strip()
+
+
 class AgentCard(BaseModel):
     """One agent: type, engine and profile, tool box, skills, enablement."""
 
@@ -200,6 +221,7 @@ class AgentCard(BaseModel):
     type: AgentType
     engine: str | None = None
     profile: str | None = None
+    department: str | None = None
     boundary_tools: list[str] = Field(default_factory=list)
     skills_dir: str
     skills: list[str] = Field(default_factory=list)
@@ -216,7 +238,7 @@ class AgentCard(BaseModel):
             raise ValueError(f"name: {value!r} is reserved, never an executor")
         return value
 
-    @field_validator("engine", "profile")
+    @field_validator("engine", "profile", "department")
     @classmethod
     def _optional_nonempty(cls, value: str | None) -> str | None:
         if value is None:
@@ -412,6 +434,7 @@ class Catalog(BaseModel):
     entries: list[IndexEntry] = Field(min_length=1)
     agents: dict[str, AgentCard]
     staff: StaffRoster
+    departments: list[Department] = Field(default_factory=list)
 
     @field_validator("version")
     @classmethod
@@ -796,6 +819,31 @@ def load_catalog(root: str | Path | None = None) -> Catalog:
                 seen.add(entry.name)
                 entries.append(entry)
 
+    departments: set[str] = set()
+    department_list: list[Department] = []
+    if index_data is not None:
+        raw_departments = index_data.get("departments", [])
+        if not isinstance(raw_departments, list):
+            errors.append(
+                f"{rel(index_path)}: departments: must be a list")
+        else:
+            for position, raw in enumerate(raw_departments):
+                where = f"{rel(index_path)} departments[{position}]"
+                if not isinstance(raw, dict):
+                    errors.append(f"{where}: must be a mapping")
+                    continue
+                try:
+                    department = Department.model_validate(raw)
+                except ValidationError as exc:
+                    errors.append(f"{where}: {_format_pydantic(exc)}")
+                    continue
+                if department.name in departments:
+                    errors.append(f"{where}: duplicate department "
+                                  f"{department.name!r}")
+                    continue
+                departments.add(department.name)
+                department_list.append(department)
+
     agents: dict[str, AgentCard] = {}
     referenced: set[str] = set()
     base_resolved = base.resolve()
@@ -830,6 +878,11 @@ def load_catalog(root: str | Path | None = None) -> Catalog:
                 errors.append(
                     f"{rel(card_path)}: boundary_tools: {tool!r} is not "
                     "an MCP boundary tool")
+        if card.department is not None \
+                and card.department not in departments:
+            errors.append(
+                f"{rel(card_path)}: department: {card.department!r} is "
+                "not declared in index.yaml")
         agents[entry.name] = card
 
     agents_dir = base / "agents"
@@ -969,7 +1022,7 @@ def load_catalog(root: str | Path | None = None) -> Catalog:
 
     version_value = index_data.get("version")
     return Catalog(version=version_value, entries=entries, agents=agents,
-                   staff=staff)
+                   staff=staff, departments=department_list)
 
 
 @dataclass(frozen=True)
@@ -1011,6 +1064,56 @@ def short_index(catalog: Catalog) -> str:
     """Render the always-loaded short index: ``name: summary`` per line."""
     return "\n".join(f"{entry.name}: {entry.summary}"
                      for entry in catalog.entries)
+
+
+def agent_detail_text(
+    catalog: Catalog,
+    name: str,
+    profile: RoleProfile | None = None,
+) -> str:
+    """Compact agent detail for planner staging (TASK-2026-00244).
+
+    Department, index summary, role card lines, handoff vocabulary,
+    skill names and tool names: enough to judge a fit without loading
+    skill recipes. The caller stages the text where the fenced planner
+    can read it; unknown names render their absence (the registry line
+    already waits fail-closed).
+    """
+    card = catalog.agents.get(name)
+    if card is None:
+        return f"{name}: unknown agent (not in the catalog)"
+    summary = next((entry.summary for entry in catalog.entries
+                    if entry.name == name), "")
+    head = f"# {name}"
+    if card.department:
+        head += f" [{card.department}]"
+    lines = [head, summary or "(no index summary)", ""]
+    if profile is not None:
+        lines.extend([
+            f"Role: {profile.card.who}",
+            "Delivers:",
+            *[f"- {item}" for item in profile.card.delivers],
+            "Never:",
+            *[f"- {item}" for item in profile.card.never],
+            "",
+        ])
+    elif (card.profile or "").strip():
+        lines.extend(["(role profile unreadable: card detail only)", ""])
+    if card.inputs:
+        lines.append(f"Inputs: {'; '.join(card.inputs)}")
+    if card.outputs:
+        lines.append(f"Outputs: {'; '.join(card.outputs)}")
+    if card.skills:
+        lines.append(f"Skills: {', '.join(card.skills)} "
+                     "(names only; recipes stay unloaded)")
+    if card.boundary_tools:
+        lines.append(f"Tools: {', '.join(card.boundary_tools)}")
+    if card.enabled:
+        lines.append("Enabled: yes")
+    else:
+        lines.append(
+            f"Enabled: no ({card.disabled_reason or 'disabled'})")
+    return "\n".join(lines)
 
 
 #: Reason recorded when a staff member is outside their active period.
@@ -1071,9 +1174,10 @@ def find_consumer_mismatches(
     reasons.
     R4: every wired graph agent is a catalog agent.
     (R5 retired the legacy enum names with TASK-2026-00209.)
-    R6: every enabled AI agent is in the enum and the router aliases
-    (review 00006: the gate approves it from the catalog, and without
-    its alias an explicit name would not resolve).
+    (R6 retired with TASK-2026-00244: catalog names resolve through the
+    explicit vocabulary by construction — ``router.resolve_selected_agent``
+    maps manual aliases first, then any catalog name to itself — so an
+    enabled AI agent needs no enum member and no manual alias to dispatch.)
     """
     problems: list[str] = []
     names = set(catalog.agents)
@@ -1114,20 +1218,4 @@ def find_consumer_mismatches(
         if name not in names:
             problems.append(
                 f"R4: wired graph agent {name!r} is not in the catalog")
-    enum_names = set(agent_names)
-    alias_names = set(alias_values)
-    for name in sorted(names):
-        card = catalog.agents[name]
-        if not card.enabled or card.type is not AgentType.AI:
-            continue
-        if name not in enum_names:
-            problems.append(
-                f"R6: enabled AI agent {name!r} is missing from the enum "
-                "(the gate would approve it, but the explicit name would "
-                "not resolve)")
-        if name not in alias_names:
-            problems.append(
-                f"R6: enabled AI agent {name!r} is missing from the router "
-                "aliases (the gate would approve it, but the explicit "
-                "name would not resolve)")
     return problems

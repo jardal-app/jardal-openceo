@@ -1,6 +1,17 @@
 # Single agent catalog: short index (always loaded; card detail on demand).
 # Epic TASK-2026-00187. Content language: en (the planner reads it).
+# Departments (TASK-2026-00244): responsibility groups for the planner.
+# They grant no permissions and add no directors or routers.
 version: 1
+departments:
+  - name: engineering
+    summary: Builds, deploys and maintains company repos and systems.
+  - name: finance
+    summary: Answers and records dated company money against ERPNext.
+  - name: research
+    summary: Runs grounded research on demand for company work.
+  - name: operations
+    summary: Runs company operations, coordination and messaging.
 agents:
   - name: dev
     summary: Writes, deploys and maintains repos. Never decides business work or moves real money.

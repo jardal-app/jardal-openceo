@@ -11,9 +11,46 @@ that fed it.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from state import AgentName
+
+if TYPE_CHECKING:
+    from catalog import Catalog
+
+
+def resolve_selected_agent(
+    agent_hint: Any,
+    coding_tool: Any,
+    catalog: Catalog | None = None,
+) -> str | None:
+    """Resolve an explicit routing decision to an agent name.
+
+    Pure, reads no ticket text. A set ``coding_tool`` is a persisted
+    tier decision: every tier value is a dev executor, so it forces
+    ``"dev"`` before any name lookup (without this, Tier S tickets
+    misroute and "complete" without ever reaching dev — F0 pilot
+    00097). Otherwise the hint resolves through
+    :data:`CEORouter.AGENT_ALIASES` first, then through the catalog
+    itself: any catalog name resolves to itself (TASK-2026-00244), so
+    a new employee needs no enum member and no manual alias to
+    dispatch. Unknown or absent names resolve to None: the caller
+    waits fail-closed, never guesses.
+    """
+    if coding_tool is not None and str(coding_tool).strip():
+        return AgentName.DEV.value
+    if agent_hint is None:
+        return None
+    cleaned = str(agent_hint).strip().lower()
+    if not cleaned:
+        return None
+    member = CEORouter.AGENT_ALIASES.get(cleaned)
+    if member is not None:
+        return member.value
+    agents = getattr(catalog, "agents", None) or {}
+    if cleaned in agents:
+        return cleaned
+    return None
 
 
 def resolve_explicit_name(
@@ -29,17 +66,17 @@ def resolve_explicit_name(
     through :data:`CEORouter.AGENT_ALIASES`. Unknown or absent names
     resolve to None: the caller waits fail-closed, never guesses.
     """
-    if coding_tool is not None and str(coding_tool).strip():
-        return AgentName.DEV
-    if agent_hint is None:
+    resolved = resolve_selected_agent(agent_hint, coding_tool)
+    if resolved is None:
         return None
-    return CEORouter.AGENT_ALIASES.get(str(agent_hint).strip().lower())
+    return AgentName(resolved) \
+        if resolved in AgentName._value2member_map_ else None
 
 
 class CEORouter:
     """Explicit agent vocabulary holder.
 
-    Kept as a class because the catalog back-check (R6, TASK-2026-00195)
+    Kept as a class because the catalog back-check (R2, TASK-2026-00195)
     reads ``AGENT_ALIASES`` from it and call sites hold an instance;
     it decides nothing and holds no LLM client.
     """

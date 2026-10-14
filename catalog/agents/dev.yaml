@@ -3,6 +3,7 @@ name: dev
 type: ai
 engine: muse-code
 profile: profiles/dev.yaml
+department: engineering
 boundary_tools:
   - openceo_search_tickets
   - openceo_get_ticket

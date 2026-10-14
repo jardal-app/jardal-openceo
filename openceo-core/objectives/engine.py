@@ -39,7 +39,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
-from catalog import (load_all_role_skills, load_catalog,
+from catalog import (Catalog, agent_detail_text, load_all_role_skills,
+                     load_catalog, load_role_profile,
                      skills_index_for_planner, suggestable_skills)
 from company_mandate import principles_prompt_section
 from objectives.money_guide import routing_guide_section
@@ -826,23 +827,107 @@ def _planner_playbooks(
     return playbooks_mod.playbooks_index_text(books), set(books)
 
 
-def _agents_section(agents: Mapping[str, Any],
-                    skills_md: str = "") -> str:
-    """Authoritative registry rendered for the planner prompt."""
+def _planner_catalog() -> Catalog | None:
+    """Fresh catalog for planner context, None when unloadable.
+
+    Fail-open like skills: the boot gate already refuses an invalid
+    catalog, so a mid-run load failure degrades the registry lines to
+    bare names instead of breaking the planning cycle.
+    """
+    try:
+        return load_catalog()
+    except Exception as exc:
+        logger.warning("planner catalog unavailable, registry lines stay "
+                       "bare this cycle: %s", exc)
+        return None
+
+
+def _stage_agent_details(
+    scratch: Path,
+    catalog: Catalog,
+    root: str | Path | None = None,
+) -> list[tuple[str, str]]:
+    """Stage one compact agent detail file per catalog agent.
+
+    Mirror of :func:`_stage_policy_details` for TASK-2026-00244: the
+    planner runs fenced in the project repo while the catalog lives in
+    the install dir, so each detail text lands verbatim under
+    ``agents/<name>.md`` and the paths ride the prompt index. A profile
+    that fails to load degrades that agent to card-only detail (the
+    registry line still carries its department and summary).
+    """
+    staged: list[tuple[str, str]] = []
+    folder = scratch / "agents"
+    shutil.rmtree(folder, ignore_errors=True)
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in sorted(catalog.agents):
+        card = catalog.agents[name]
+        profile = None
+        if (card.profile or "").strip():
+            try:
+                profile = load_role_profile(
+                    Path(str(card.profile)).stem, root)
+            except Exception as exc:
+                logger.warning("agent detail for %s without profile: %s",
+                               name, exc)
+        target = folder / f"{name}.md"
+        target.write_text(agent_detail_text(catalog, name, profile),
+                          encoding="utf-8")
+        staged.append((name, str(target)))
+    return staged
+
+
+def _agents_section(
+    agents: Mapping[str, Any],
+    skills_md: str = "",
+    catalog: Catalog | None = None,
+    detail_paths: Mapping[str, str] | None = None,
+) -> str:
+    """Authoritative registry rendered for the planner prompt.
+
+    With a catalog each line also carries the department and the index
+    summary, and staged detail paths ride a closing block
+    (TASK-2026-00244); without one the bare name + enablement shape
+    stays. Non-catalog registry names (staff) always render bare.
+    """
     lines = ["REGISTERED AGENTS (select target_agent ONLY from enabled):"]
+    summaries = {entry.name: entry.summary for entry in catalog.entries} \
+        if catalog is not None else {}
     for name in sorted(agents):
         spec = agents.get(name)
         if not isinstance(spec, Mapping):
             continue
+        label = name
+        card = catalog.agents.get(name) if catalog is not None else None
+        if card is not None and card.department:
+            label += f" [{card.department}]"
+        summary = summaries.get(name, "")
+        if summary:
+            label += f": {summary}"
+        head = f"- {label}"
         if spec.get("enabled", False):
-            lines.append(f"- {name}: enabled")
+            lines.append(head + (" (enabled)" if summary else ": enabled"))
         else:
             reason = str(spec.get("reason") or "disabled").strip()
-            lines.append(f"- {name}: DISABLED ({reason}) — never route here")
+            if summary:
+                lines.append(
+                    f"{head} — DISABLED ({reason}) — never route here")
+            else:
+                lines.append(
+                    f"{head}: DISABLED ({reason}) — never route here")
     lines.append("Never invent an agent. If no enabled agent can do required "
                  "work, return capability_gap with no tickets.")
     if skills_md.strip():
         lines.extend(["", skills_md.strip()])
+    staged = {name: str(path) for name, path in (detail_paths or {}).items()
+              if str(path).strip()}
+    if staged:
+        lines.extend([
+            "",
+            "AGENT DETAIL (read the agent's file only when the assignment "
+            "materially depends on it; skill recipes stay unloaded):",
+            *[f"- {name}: {staged[name]}" for name in sorted(staged)],
+        ])
     return "\n".join(lines)
 
 
@@ -1570,6 +1655,9 @@ async def _plan_objective_inner(
     (scratch / "INBOX.md").write_text(inbox_md or "INBOX\n(none)\n",
                                       encoding="utf-8")
     staged = _stage_policy_details(scratch, policy_details)
+    agent_catalog = _planner_catalog()
+    agent_staged = _stage_agent_details(scratch, agent_catalog) \
+        if agent_catalog is not None else []
     prompt = _planner_prompt(
         objective, (objective.get("capsule") or {}).get("text", ""),
         ready, inbox_md or "INBOX\n(none)\n", deferred,
@@ -1577,7 +1665,8 @@ async def _plan_objective_inner(
         blocked_tickets=blocked,
         tierless=[item for item in open_tickets
                   if not item.get("coding_tool")],
-        agents_md=_agents_section(agents, skills_md),
+        agents_md=_agents_section(agents, skills_md, agent_catalog,
+                                  dict(agent_staged)),
         policy_text=policy_core,
         policy_index=planner_mod.policy_detail_index(staged),
         handoffs=handoffs,
@@ -1929,10 +2018,14 @@ async def _plan_pedido_inner(
         f"{str(ticket.get('description') or '')[:6000] or '(empty)'}\n",
         encoding="utf-8")
     staged = _stage_policy_details(scratch, policy_details)
+    agent_catalog = _planner_catalog()
+    agent_staged = _stage_agent_details(scratch, agent_catalog) \
+        if agent_catalog is not None else []
     project = str(ticket.get("project") or "")
     prompt = _pedido_prompt(
         ticket,
-        agents_md=_agents_section(agents, skills_md),
+        agents_md=_agents_section(agents, skills_md, agent_catalog,
+                                  dict(agent_staged)),
         policy_text=policy_core,
         policy_index=planner_mod.policy_detail_index(staged),
         routing_guide=routing_guide_section(project, env.project_routing),

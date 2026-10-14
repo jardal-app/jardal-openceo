@@ -135,29 +135,39 @@ class ConsumerConsistencyTest(unittest.TestCase):
             ["dev"], catalog)
         self.assertEqual([], mismatches)
 
-    def test_enabled_ai_missing_from_enum_fails_r6(self):
-        catalog = tiny_catalog({"dev": {"enabled": True}})
+    def test_enabled_ai_needs_no_enum_entry_r6_retired(self):
+        # R6 retired with TASK-2026-00244: catalog names resolve through
+        # the explicit vocabulary by construction
+        # (router.resolve_selected_agent), so an enabled AI agent needs
+        # no enum member to dispatch. R1 still guards the other way
+        # (enum names must exist in the catalog).
+        catalog = tiny_catalog({"dev": {"enabled": True},
+                                "accountant": {"enabled": True}})
         mismatches = find_consumer_mismatches(
-            ["ceo"], ["dev"], {"dev": {"enabled": True}}, ["dev"],
-            catalog)
-        self.assertTrue(any(line.startswith("R6:") and "dev" in line
-                            and "enum" in line for line in mismatches))
+            ["ceo", "dev"], ["dev"],
+            {"dev": {"enabled": True},
+             "accountant": {"enabled": True}},
+            ["dev"], catalog)
+        self.assertEqual([], mismatches)
 
-    def test_enabled_ai_missing_from_aliases_fails_r6(self):
-        catalog = tiny_catalog({"dev": {"enabled": True}})
+    def test_enabled_ai_needs_no_manual_alias_r6_retired(self):
+        # Same retirement on the aliases leg: the catalog name resolves
+        # to itself, no manual alias entry required.
+        catalog = tiny_catalog({"dev": {"enabled": True},
+                                "accountant": {"enabled": True}})
         mismatches = find_consumer_mismatches(
-            ["ceo", "dev"], [], {"dev": {"enabled": True}}, ["dev"],
-            catalog)
-        self.assertTrue(any(line.startswith("R6:") and "dev" in line
-                            and "aliases" in line
-                            for line in mismatches))
+            ["ceo", "dev"], ["dev"],
+            {"dev": {"enabled": True},
+             "accountant": {"enabled": True}},
+            ["dev"], catalog)
+        self.assertFalse(any("accountant" in line for line in mismatches))
 
-    def test_disabled_ai_is_exempt_from_r6(self):
+    def test_r6_prefix_is_gone(self):
         catalog = tiny_catalog({"dev": {"enabled": True},
                                 "ops": {"enabled": False,
                                         "reason": "no runner yet"}})
         mismatches = find_consumer_mismatches(
-            ["ceo", "dev"], ["dev"],
+            ["ceo"], [],
             {"dev": {"enabled": True},
              "ops": {"enabled": False, "reason": "no runner yet"}},
             ["dev"], catalog)
