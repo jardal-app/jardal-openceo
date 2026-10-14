@@ -3794,7 +3794,8 @@ class TaskService:
                 if final_status == TaskStatus.WAITING.value:
                     reason = str(updated.get("waiting_reason") or "")
                     if reason.startswith(("routing_missing", "config",
-                                          "workflow_blocked_tool")):
+                                          "workflow_blocked_tool",
+                                          "review_conflict", "review_invalid")):
                         asyncio.create_task(self._comment_wait_on_erp(updated, reason))
                 result_comment = graph_out.get("result_comment")
                 if result_comment and str(result_comment).strip():
@@ -3836,10 +3837,11 @@ class TaskService:
     async def _comment_wait_on_erp(self, task: dict[str, Any], reason: str) -> None:
         """Post a one-shot ERP comment for waits that need the owner.
 
-        Only routing, config and blocked-tool waits qualify: all mean a
-        human (or the tier authority) must fix something before the ticket
-        can run. Transient waits (quota, repo_busy, rate limits) heal
-        alone and stay silent. Never breaks execution.
+        Only routing, config, blocked-tool and review-switch waits
+        qualify: all mean a human (or the tier authority) must fix
+        something before the ticket can run. Transient waits (quota,
+        repo_busy, rate limits) heal alone and stay silent. Never
+        breaks execution.
         """
         try:
             adapter = getattr(self, "_erpnext", None)
@@ -3855,6 +3857,13 @@ class TaskService:
                 return
             if key == "routing_missing":
                 text = wait_comment_text(task, reason)
+            elif key == "review_conflict":
+                text = ("OpenCEO no puede ejecutar este ticket: Tier S "
+                        "siempre revisa y rechaza review=off. Quita el "
+                        "override o usa tier_a/b/c para el modo rápido.")
+            elif key == "review_invalid":
+                text = ("OpenCEO no puede ejecutar este ticket: valor de "
+                        f"revisión inválido ({reason}). Usa review=on u off.")
             elif key == "workflow_blocked_tool":
                 detail = str(task.get("error") or reason).strip()
                 text = ("OpenCEO no puede ejecutar este ticket: su "

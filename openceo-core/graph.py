@@ -201,6 +201,7 @@ class OpenCEOGraph:
             "steps": [],
             "status": task.get("status", TaskStatus.QUEUED.value),
             "coding_tool": task.get("coding_tool"),
+            "review": task.get("review"),
             "objective_id": task.get("objective_id"),
         }
         return await self._graph.ainvoke(initial_state)
@@ -318,6 +319,7 @@ class OpenCEOGraph:
             "params": state.get("params") or {},
             "priority": state.get("priority", "medium"),
             "coding_tool": state.get("coding_tool"),
+            "review": state.get("review"),
             "objective_id": state.get("objective_id"),
         }
 

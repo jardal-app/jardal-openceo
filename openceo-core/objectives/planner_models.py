@@ -224,6 +224,10 @@ class PlannedTicket(BaseModel):
     tier_reason: str | None = None
     oracle: Oracle | None = None
 
+    # Per-ticket review switch (00249): on/off, omit = on. Preserves an
+    # explicit user instruction ("sin reviewers" -> off) on dev tickets.
+    review: Literal["on", "off"] | None = None
+
     # Suggested skill for any agent (TASK-2026-00198): a hint, the agent
     # decides. Checked against the real role skills by TASK-2026-00203.
     skill: str | None = None
@@ -266,7 +270,7 @@ class PlannedTicket(BaseModel):
 
     @field_validator("tier_reason", "why_consensus_is_needed",
                      "why_single_session_is_insufficient", "why_not_c",
-                     "completes_task_id", "skill")
+                     "completes_task_id", "skill", "review")
     @classmethod
     def _optional_fields_nonblank(cls, value: str | None) -> str | None:
         if value is not None and not value.strip():
@@ -301,6 +305,8 @@ class PlannedTicket(BaseModel):
                     "Tier-S justification is only valid for DEV tickets")
             if self.why_not_c is not None:
                 raise ValueError("why_not_c is only valid for DEV tickets")
+            if self.review is not None:
+                raise ValueError("review is only valid for DEV tickets")
             return self
 
         if self.coding_tool is None:
@@ -314,6 +320,10 @@ class PlannedTicket(BaseModel):
             if not self.why_single_session_is_insufficient:
                 raise ValueError(
                     "Tier S requires why_single_session_is_insufficient")
+            if self.review == "off":
+                raise ValueError(
+                    "tier_s always reviews and rejects review=off: drop "
+                    "the override or keep the A/B/C tier for the fast path")
 
         if self.coding_tool in (DevTier.TIER_A, DevTier.TIER_B):
             if not self.why_not_c:

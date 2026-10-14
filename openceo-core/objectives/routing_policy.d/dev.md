@@ -253,6 +253,13 @@ The C/B boundary is about **provable complexity**, not perceived
 difficulty and not oracle availability: B needs its `why_not_c`, C
 needs nothing beyond specified work.
 
+The review switch is orthogonal to the tier: A/B/C review on by
+default and an explicit user instruction (`review: off`, e.g. "Tier C
+sin reviewers") keeps the tier, builder and gates and only skips
+reviewer invocations — a generic ask for speed never implies it.
+Tier S always reviews and rejects off. Preserve an explicit
+instruction on the decided ticket or child; omit the field otherwise.
+
 ## 28. Quota is separate from technical routing
 
 After technical classification, deterministic admission control protects scarce Tier-S capacity.
