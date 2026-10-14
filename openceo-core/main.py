@@ -381,6 +381,18 @@ async def lifespan(_: FastAPI):
             await repo.close_orphan_tier_s_runs()
         except Exception:
             logger.warning("Tier S orphan-run reconcile failed", exc_info=True)
+        # One bounded pass: requeue interrupted work for this boot only; the
+        # dispatcher admits it on its startup cycle (TASK-2026-00247).
+        try:
+            from orchestration.restart_recovery import recover_interrupted
+            _recovery = await recover_interrupted(repo)
+            if _recovery["requeued"] or _recovery["to_waiting"]:
+                logger.info(
+                    "Restart recovery: requeued %d, parked %d, skipped %s",
+                    len(_recovery["requeued"]), len(_recovery["to_waiting"]),
+                    _recovery["skipped"])
+        except Exception:
+            logger.warning("Restart recovery failed", exc_info=True)
         await repo.mark_interrupted_dev_sessions()
         await dev_session_service.startup_reconcile()
         # Mirror workers + startup repairs (ex-WaitingTaskScheduler.start).
