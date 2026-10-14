@@ -966,9 +966,12 @@ class MongoRepository:
         Silent by design, like :meth:`mark_interrupted_tasks`: a restart is
         not a business transition, so the observer never sees the requeue
         (queued would push Open over a Working ticket) and the next claim
-        matches ``status_pushed``. Only ``params._recovery`` is touched, so
-        artifacts, approvals and confirmed effects survive. The conditional
-        filter makes a second boot pass a no-op.
+        matches ``status_pushed``. Besides the status fields only
+        ``params._recovery`` is touched, so artifacts, approvals and
+        confirmed effects survive; the interruption ``error`` is cleared
+        (voice/cockpit fall back to it, and the event now lives in
+        ``params._recovery``). The conditional filter makes a second boot
+        pass a no-op.
         """
         if not task_id or not status:
             return False
@@ -978,6 +981,7 @@ class MongoRepository:
                 "status": str(status),
                 "waiting_reason": waiting_reason,
                 "resume_at": None,
+                "error": None,
                 "params._recovery": dict(recovery_meta or {}),
                 "updated_at": datetime.now(timezone.utc),
             }},
