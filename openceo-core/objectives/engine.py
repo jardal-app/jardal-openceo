@@ -1135,6 +1135,8 @@ def _planner_prompt(
         '    "expected_artifacts": ["<at least one>"],',
         '    "blocked_by": ["<local_ref or existing task_id, acyclic>"],',
         '    "coding_tool": "<dev only: tier_s|tier_a|tier_b|tier_c>",',
+        '    "review?": "<dev only: on|off, omit = on; preserve an '
+        'explicit user instruction, reject off for tier_s>",',
         '    "tier_reason": "<dev only: why this tier>",',
         '    "oracle": {"type": "<oracle type>", "refs": [{"ref": "...",',
         '      "description?": "..."}]},',
@@ -1861,6 +1863,8 @@ def _pedido_prompt(
         '    "blocked_by": [],',
         '    "coding_tool": "<REQUIRED for dev: tier_s|tier_a|tier_b|'
         'tier_c; FORBIDDEN otherwise>",',
+        '    "review?": "<dev only: on|off, omit = on; preserve an '
+        'explicit user instruction, reject off for tier_s>",',
         '    "tier_reason": "<REQUIRED for dev: why this tier>",',
         '    "oracle?": {"type": "<oracle type>", "refs": [{"ref": '
         '"..."}]},',
@@ -2114,6 +2118,13 @@ async def _plan_pedido_inner(
         # A re-decision away from dev clears the stale tier: the gate
         # forces DEV on any coding_tool. Fresh pedidos stay tier-free.
         updates["coding_tool"] = None
+    if planned.review is not None:
+        updates["review"] = planned.review
+    elif planned.coding_tool is None and ticket.get("review"):
+        # Same rule as the tier above: a re-decision away from dev
+        # clears the stale switch; a dev decision that omits it
+        # preserves the ticket's explicit instruction.
+        updates["review"] = None
     if planned.coding_tool is None:
         for key in ("tier_reason", "tier_assigned_by", "tier_signals",
                     "oracle", "why_consensus_is_needed",
@@ -2662,6 +2673,8 @@ async def _apply_contract_completions(
         }
         if planned.coding_tool is not None:
             updates["coding_tool"] = planned.coding_tool.value
+        if planned.review is not None:
+            updates["review"] = planned.review
         if str(current.get("waiting_reason") or "").startswith(
                 "routing_missing"):
             updates["status"] = "queued"
@@ -2830,6 +2843,7 @@ async def _create_planned_tickets(
             "acceptance": list(item.acceptance_criteria),
             "coding_tool": (item.coding_tool.value
                             if item.coding_tool is not None else None),
+            "review": item.review,
             "agent_hint": item.target_agent,
             "params": params,
             "blocked_by": blocked,

@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from .review_links import ReviewLinksExtraction, apply_review_links_to_params, extract_review_links
+from .review_policy import (resolve_review, review_wait_reason,
+                            stamp_effective_review)
 from .routing import (ROUTING_MISSING_REASON, TIER_C_CHAIN, RoutingDecision,
                       resolve_coding_tool, select_tier_c_link)
 from .tier_oracle import (
@@ -298,6 +300,20 @@ class DevSessionManager:
                 params=task.get("params") if isinstance(task.get("params"), dict) else None,
             )
 
+        # Per-ticket review switch (00249): resolve before any lock or
+        # execution. Invalid input and S+off wait with a typed reason;
+        # the admitted mode freezes into params on the way out.
+        review_decision = resolve_review(task)
+        review_hold = review_wait_reason(
+            review_decision,
+            decision.tool.value if decision.tool is not None else None)
+        if review_hold is not None:
+            return DevExecutionOutput(
+                status=TaskStatus.WAITING,
+                waiting_reason=review_hold,
+                params=task.get("params") if isinstance(task.get("params"), dict) else None,
+            )
+
         # Common execution lock (§11.1): one repo, one execution, every tier.
         # Tier S owns its own locking inside the cycle (run-scoped holder);
         # taking the outer lock here too would deadlock the cycle against
@@ -313,7 +329,8 @@ class DevSessionManager:
                     status=TaskStatus.WAITING,
                     waiting_reason=f"{REPO_BUSY_REASON}: {repo}",
                     resume_at=datetime.now(timezone.utc) + timedelta(minutes=2),
-                    params=task.get("params") if isinstance(task.get("params"), dict) else None,
+                    params=stamp_effective_review(
+                        task.get("params"), review_decision),
                 )
         try:
             if decision.tool == CodingTool.TIER_S:
@@ -325,6 +342,10 @@ class DevSessionManager:
                 assert repo is not None
                 await self._repo.release_repo_lock(repo, holder)
             raise
+        output.params = stamp_effective_review(
+            output.params if isinstance(output.params, dict)
+            else task.get("params"),
+            review_decision)
         if outer_lock:
             assert repo is not None
             if output.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.ESCALATED):

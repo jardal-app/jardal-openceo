@@ -140,6 +140,18 @@ class CodingTool(str, Enum):
     TIER_C = "tier_c"
 
 
+class ReviewMode(str, Enum):
+    """Per-ticket review switch (epic TASK-2026-00248, child 00249).
+
+    A/B/C review on by default; an explicit off keeps the tier,
+    builder and gates and only skips reviewer invocations. S always
+    reviews and rejects off. Absent input means on.
+    """
+
+    ON = "on"
+    OFF = "off"
+
+
 class DevProvider(str, Enum):
     AUTO = "auto"
     CODEX = "codex"
@@ -217,6 +229,9 @@ class TaskCreateRequest(BaseModel):
     created_by: str | None = None
     autorun: bool = True
     coding_tool: CodingTool | None = None
+    # Per-ticket review switch (00249): on/off, absent means on. Single
+    # source, stored verbatim; the run resolves it (review_policy).
+    review: ReviewMode | None = None
     # Tier S design v2 §15.1 (F4/F6): internal creation (inbox promotion,
     # objective planner, closure fixes) sets these at creation, like any
     # other origin. They flow into TaskDocument via make_task_document.
@@ -287,6 +302,8 @@ class TaskDocument(BaseModel):
     # campo no existia y el False del registro se perdia -> Working fantasma.
     autorun: bool | None = None
     coding_tool: CodingTool | None = None
+    # Per-ticket review switch (00249): on/off, absent means on.
+    review: ReviewMode | None = None
     # Tier S design v2 §15.1 (F2/F6): objective membership, OpenCEO-side
     # dependencies (the enqueuer never dispatches with open blockers),
     # ticket origin and findings-inbox fingerprint for promoted tickets.
@@ -415,6 +432,9 @@ class TaskPatchRequest(BaseModel):
     updated_by: str | None = None
     params: dict[str, Any] | None = None
     coding_tool: CodingTool | None = None
+    # Per-ticket review switch (00249): patchable so a review_conflict
+    # or review_invalid wait is fixable through the API.
+    review: ReviewMode | None = None
 
 
 class TaskWorkflowApplyRequest(BaseModel):
@@ -600,6 +620,7 @@ class GraphState(TypedDict, total=False):
     resume_at: datetime | None
     result_comment: str | None
     coding_tool: str | None
+    review: str | None
     objective_id: str | None
     coding_session_id: str | None
     coding_session_title: str | None

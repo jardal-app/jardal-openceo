@@ -33,6 +33,7 @@ from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
+from agents.dev.review_policy import resolve_review, review_wait_reason
 from agents.dev.routing import ROUTING_MISSING_REASON, resolve_coding_tool
 from state import (
     WAIT_BLOCKED_BY,
@@ -354,6 +355,14 @@ class Dispatcher:
                 None, now,
             )
             return "parked"
+        if effective_tier is not None:
+            # Per-ticket review switch (00249): invalid input and S+off
+            # park before the claim; the run re-checks (same resolver).
+            review_hold = review_wait_reason(
+                resolve_review(ticket), effective_tier.value)
+            if review_hold is not None:
+                await self._park(ticket, review_hold, None, now)
+                return "parked"
         # A loose ticket without a tier is either a pedido (the run
         # pre-stage plans it before executing, TASK-2026-00204) or
         # explicit non-dev work: admission proceeds tier-unaware and

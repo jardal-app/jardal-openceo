@@ -25,7 +25,7 @@ from tools.erpnext_client import (
     ERPNextValidationError,
 )
 from tools.erpnext_tickets import AttachmentRejected
-from state import CodingTool, TaskCreateRequest, TaskPriority, TaskSource
+from state import CodingTool, ReviewMode, TaskCreateRequest, TaskPriority, TaskSource
 
 logger = logging.getLogger(__name__)
 
@@ -537,6 +537,7 @@ def _register_openceo_tools(
         due_date: str | None = None,
         external_url: str | None = None,
         coding_tool: Literal["tier_s", "tier_a", "tier_b", "tier_c"] | None = None,
+        review: Literal["on", "off"] | None = None,
         autorun: bool = False,
         parent_task: str | None = None,
         depends_on: list[str] | None = None,
@@ -551,6 +552,7 @@ def _register_openceo_tools(
             tags=tags,
             params=_build_params(ticket_type, due_date, external_url, status),
             coding_tool=CodingTool(coding_tool) if coding_tool else None,
+            review=ReviewMode(review) if review else None,
             autorun=autorun,
             parent_task=parent_task,
             depends_on=depends_on,
@@ -592,6 +594,7 @@ def _register_openceo_tools(
                         item.get("external_url"),
                         item.get("status"),
                     ),
+                    review=item.get("review"),
                     autorun=autorun,
                     parent_task=item.get("parent_task"),
                     depends_on=item.get("depends_on"),
@@ -670,6 +673,7 @@ def _register_openceo_tools(
                         item.get("external_url"),
                         item.get("status"),
                     ),
+                    review=item.get("review"),
                     autorun=autorun,
                     parent_task=item.get("parent_task"),
                     depends_on=item.get("depends_on"),
@@ -685,17 +689,17 @@ def _register_openceo_tools(
     server.tool(
         openceo_create_ticket,
         name="openceo_create_ticket",
-        description="Create a ticket in OpenCEO. It is registered in ERPNext (the business record) and in MongoDB (the execution record). Required: title. Optional: description, project, priority (low/medium/high/critical), status (queued/in_progress/completed/failed/escalated/interrupted/waiting), ticket_type, source, source_id, tags, due_date, external_url, coding_tool, autorun (default false), parent_task (TASK-... group), depends_on (list of TASK-...). Set autorun=true ONLY when the ticket must start executing now; by default it is only registered. Before creating, consider openceo_search_tickets to avoid duplicating existing work. Boundary (c): writes the business record.",
+        description="Create a ticket in OpenCEO. It is registered in ERPNext (the business record) and in MongoDB (the execution record). Required: title. Optional: description, project, priority (low/medium/high/critical), status (queued/in_progress/completed/failed/escalated/interrupted/waiting), ticket_type, source, source_id, tags, due_date, external_url, coding_tool, review (dev only: on/off, omit = on; tier_s rejects off), autorun (default false), parent_task (TASK-... group), depends_on (list of TASK-...). Set autorun=true ONLY when the ticket must start executing now; by default it is only registered. Before creating, consider openceo_search_tickets to avoid duplicating existing work. Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_create_tickets_batch,
         name="openceo_create_tickets_batch",
-        description='Batch-create tickets. Input: JSON array of objects with at least "title" (each may also carry parent_task and depends_on with TASK-... names). Max 50. Registered but NOT executed unless autorun=true. Boundary (c): writes the business record.',
+        description='Batch-create tickets. Input: JSON array of objects with at least "title" (each may also carry parent_task and depends_on with TASK-... names, and review on/off for dev tickets, omit = on). Max 50. Registered but NOT executed unless autorun=true. Boundary (c): writes the business record.',
     )
     server.tool(
         openceo_create_pm_tickets_batch,
         name="openceo_create_pm_tickets_batch",
-        description='Create child tickets (spillover/interview) from a parent ticket. Forces project/source/source_id across the batch. Required: project, source_id, tickets (JSON array with title and optional description, priority, tags, ticket_type, due_date, external_url, parent_task, depends_on). Optional: source (default "spillover"), autorun (default false). Owner token only. Boundary (c): writes the business record.',
+        description='Create child tickets (spillover/interview) from a parent ticket. Forces project/source/source_id across the batch. Required: project, source_id, tickets (JSON array with title and optional description, priority, tags, ticket_type, due_date, external_url, review on/off for dev tickets, parent_task, depends_on). Optional: source (default "spillover"), autorun (default false). Owner token only. Boundary (c): writes the business record.',
     )
     server.tool(
         openceo_search_tickets,

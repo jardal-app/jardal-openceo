@@ -121,6 +121,7 @@ async def create_internal_ticket(
         origin=data.get("origin"),
         finding_fingerprint=data.get("finding_fingerprint"),
         coding_tool=data.get("coding_tool"),  # type: ignore[arg-type]
+        review=data.get("review"),  # type: ignore[arg-type]
         autorun=bool(data.get("autorun", True)),
         agent_hint=agent_hint,
         parent_task=data.get("parent_task"),
