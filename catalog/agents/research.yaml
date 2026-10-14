@@ -3,6 +3,7 @@ name: research
 type: ai
 engine: muse-code
 profile: profiles/research.yaml
+department: research
 boundary_tools:
   - openceo_search_tickets
   - openceo_get_ticket

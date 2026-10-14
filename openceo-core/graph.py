@@ -15,7 +15,7 @@ from orchestration.generic_agent import (
     GenericAgentWiring,
     run_generic_agent,
 )
-from router import CEORouter, resolve_explicit_name
+from router import CEORouter, resolve_selected_agent
 from state import AgentName, GraphState, TaskStatus
 
 #: Agents with a wired executor node below (pm left in 00209,
@@ -117,12 +117,14 @@ class OpenCEOGraph:
         dev_session: DevSessionManager,
         notion: Any | None = None,
         generic_wiring: GenericAgentWiring | None = None,
+        catalog: Catalog | None = None,
     ) -> None:
         self._router = router
         self._config_loader = config_loader
         self._dev_session = dev_session
         self._notion = notion
         self._generic_wiring = generic_wiring
+        self._catalog = catalog
 
         builder = StateGraph(GraphState)
         builder.add_node("ceo_router", self._ceo_router_node)
@@ -190,13 +192,19 @@ class OpenCEOGraph:
     async def _ceo_router_node(self, state: GraphState) -> GraphState:
         project_cfg = self._config_loader.load_project(state.get("project"))
         # Explicit only (TASK-2026-00204): a validated-plan phase agent,
-        # else the gate-validated hint. Nothing here reads ticket text;
-        # undecided work never reaches this node (the run pre-stage
-        # plans every pedido) and waits fail-closed if it ever does.
-        selected_agent = self._phase_agent_override(state)
-        if selected_agent is None:
-            selected_agent = resolve_explicit_name(
-                state.get("agent_hint"), state.get("coding_tool"))
+        # else the gate-validated hint resolved through the catalog
+        # (aliases first, then any catalog name to itself,
+        # TASK-2026-00244). Nothing here reads ticket text; undecided
+        # work never reaches this node (the run pre-stage plans every
+        # pedido) and waits fail-closed if it ever does.
+        catalog = self._catalog if self._catalog is not None \
+            else load_catalog()
+        phase_agent = self._phase_agent_override(state)
+        if phase_agent is not None:
+            selected_agent: str | None = phase_agent.value
+        else:
+            selected_agent = resolve_selected_agent(
+                state.get("agent_hint"), state.get("coding_tool"), catalog)
 
         step = {
             "step": "ceo_route",
@@ -206,7 +214,7 @@ class OpenCEOGraph:
         }
 
         return {
-            "selected_agent": selected_agent.value
+            "selected_agent": selected_agent
             if selected_agent is not None else "",
             "project_config": project_cfg,
             "steps": [*(state.get("steps") or []), step],
@@ -242,9 +250,9 @@ class OpenCEOGraph:
         return AgentName(raw_agent) if raw_agent in AgentName._value2member_map_ else None
 
     @staticmethod
-    def _route_detail(selected_agent: AgentName | None,
+    def _route_detail(selected_agent: str | None,
                       state: GraphState) -> str:
-        name = selected_agent.value if selected_agent is not None \
+        name = selected_agent if selected_agent is not None \
             else "undecided"
         phase_key = str(state.get("phase") or "").strip()
         phases = state.get("workflow_phases") or []
@@ -266,12 +274,20 @@ class OpenCEOGraph:
         return f"Task routed to {name} (explicit)"
 
     def _after_ceo_route(self, state: GraphState) -> str:
-        if state.get("selected_agent") == AgentName.DEV.value:
-            return "dev"
-        if state.get("selected_agent") in {AgentName.OPERATIONS.value,
-                                           AgentName.SECRETARY.value,
-                                           AgentName.FINANCE.value,
-                                           AgentName.RESEARCH.value}:
+        """Route by catalog (TASK-2026-00244): wired names to their node,
+        enabled AI catalog names to the generic node, anything else to
+        unsupported. No manual agent list: a new card routes without
+        touching this method, and the generic node re-validates."""
+        selected = state.get("selected_agent")
+        if selected in WIRED_AGENTS:
+            return selected
+        if not selected or selected == AgentName.CEO.value:
+            return "unsupported"
+        catalog = self._catalog if self._catalog is not None \
+            else load_catalog()
+        entry = catalog.agents.get(selected)
+        if entry is not None and entry.enabled \
+                and entry.type is AgentType.AI:
             return "generic_agent"
         return "unsupported"
 

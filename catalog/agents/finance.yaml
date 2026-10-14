@@ -3,6 +3,7 @@ name: finance
 type: ai
 engine: muse-code
 profile: profiles/finance.yaml
+department: finance
 boundary_tools:
   - openceo_search_tickets
   - openceo_get_ticket

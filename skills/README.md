@@ -52,6 +52,17 @@ evidence:               # required evidence names (TASK-2026-00216)
   operator needs the map (review 00006). List the skill on its card as well,
   or the service still refuses to boot.
 
+## Transfer between roles (TASK-2026-00244)
+
+A skill has exactly one owner: the role dir it lives in. To specialize,
+move the dir (`skills/<old>/<skill>/` → `skills/<new>/<skill>/`), update
+both cards and profiles (skills coverage is cross-checked both ways),
+drop the stale `.codex/skills/<skill>` link and recreate it with
+`catalog.sync_skill_links`. The header keeps its creation `ticket` as
+history; each role still learns only inside its own scope, and no shared
+listing exists — reuse common steps via helpers under `references/` or
+`scripts/`, never by copying the recipe.
+
 ## Exact skills (no LLM)
 
 A skill dir may carry `workflow.yaml` (same format as `workflows/`): when a
