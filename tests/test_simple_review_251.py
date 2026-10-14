@@ -500,6 +500,33 @@ class FixVerdictTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(checkpoint["resolutions"][0]["verdict"],
                          "missing")
 
+    async def test_stale_fix_file_never_satisfies_verdicts(self) -> None:
+        tmp = _repo()
+        self.addCleanup(tmp.cleanup)
+        repo = Path(tmp.name)
+        manager = _manager()
+        task = _task(coding_tool="tier_c")
+        config = _config(repo, pool=_pool())
+        branch = _open_branch(manager, task, config,
+                              CodingTool.TIER_C, repo)
+        (repo / ".openceo" / "FIX_1.md").write_text(
+            "F1: CORREGIDO — stale verdict from another ticket\n")
+        reviewers = _ScriptedReviewers({"nemotron": (0, FINDING, {})})
+
+        async def refused(*args: Any, **kwargs: Any) -> None:
+            return None
+
+        with patch.object(manager, "_simple_reviewer_executor",
+                          return_value=reviewers), \
+                patch.object(manager, "_simple_followup", new=refused):
+            output = await manager._finish_simple_tool(
+                task, config, CodingTool.TIER_C, _output(), branch)
+        self.assertEqual(output.status, TaskStatus.WAITING)
+        assert output.waiting_reason is not None
+        self.assertTrue(output.waiting_reason.startswith("needs_owner"),
+                        output.waiting_reason)
+        self.assertIn("F1", output.waiting_reason)
+
     async def test_out_of_scope_dismissal_recorded(self) -> None:
         tmp = _repo()
         self.addCleanup(tmp.cleanup)

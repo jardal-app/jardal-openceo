@@ -1180,6 +1180,9 @@ class DevSessionManager:
         """Builder fix verdicts + final gates. None = proceed to squash."""
         repo = branch.repo
         fix_path = repo / ".openceo" / "FIX_1.md"
+        # .openceo/ is gitignored and survives branch drops: a stale FIX_1.md
+        # from another ticket must never satisfy this round's verdicts.
+        fix_path.unlink(missing_ok=True)
         verdicts: dict[int, list[Any]] = {}
         missing = [item.id for item in findings]
         for turn in range(1, SIMPLE_REVIEW_MAX_FIX_TURNS + 1):
