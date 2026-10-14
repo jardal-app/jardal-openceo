@@ -58,6 +58,8 @@ def select_next_eligible(
 
     Accepts business (``Completed``) and execution (``completed``) status
     vocabularies. Children outside ``order`` trail in input order.
+    Only completed/cancelled count as closed: failed/escalated stay
+    eligible, since they need attention rather than a silent done.
     """
     rows = [c for c in children if isinstance(c, Mapping)]
     closed = {

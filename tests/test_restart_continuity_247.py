@@ -94,6 +94,7 @@ class FakeRepo:
             "status": status,
             "waiting_reason": waiting_reason,
             "resume_at": None,
+            "error": None,
             "params": params,
         })
         self.writes += 1
@@ -105,7 +106,7 @@ class DecideTests(unittest.TestCase):
         decision = decide(_ticket("t1"), now=_NOW)
         self.assertEqual(decision.action, "requeue")
         self.assertEqual(decision.status, TaskStatus.QUEUED.value)
-        assert decision.recovery_meta is not None
+        self.assertIsNotNone(decision.recovery_meta)
         self.assertEqual(decision.recovery_meta["attempt"], 1)
         self.assertEqual(decision.recovery_meta["from"], "interrupted")
 
@@ -168,12 +169,14 @@ class RecoverTests(unittest.IsolatedAsyncioTestCase):
             _ticket("run-1"),
             _ticket("run-2", autorun=False),
             _ticket("run-3", coding_tool="tier_s"),
-            _ticket("run-4", params={"secret_block": {"secret": "X"}}),
+            _ticket("run-4", params={"secret_block": {"secret": "X"}},
+                    error="Service restart interrupted task execution"),
             _ticket("done-1", status="completed"),
         ])
         result = await recover_interrupted(repo)
         self.assertEqual(result["requeued"], ["run-1"])
         self.assertEqual(result["to_waiting"], ["run-4"])
+        self.assertIsNone(repo.tasks["run-4"]["error"])
         self.assertEqual(result["skipped"].get("autorun_off"), 1)
         self.assertEqual(result["skipped"].get("tier_s_manual"), 1)
         again = await recover_interrupted(repo)
@@ -182,10 +185,12 @@ class RecoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(repo.writes, 2)
 
     async def test_requeue_preserves_params_and_bumps_attempt(self) -> None:
-        repo = FakeRepo([_ticket("run-1")])
+        repo = FakeRepo([_ticket(
+            "run-1", error="Service restart interrupted task execution")])
         await recover_interrupted(repo)
         doc = repo.tasks["run-1"]
         self.assertEqual(doc["status"], "queued")
+        self.assertIsNone(doc["error"])
         self.assertEqual(doc["params"]["ticket_outputs"], {"report": "done"})
         self.assertEqual(doc["params"]["engine"], "muse-code")
         self.assertEqual(doc["params"]["_recovery"]["attempt"], 1)
@@ -233,7 +238,7 @@ class CheckpointTests(unittest.TestCase):
                 )
                 save_close_checkpoint(path, checkpoint)
                 back = load_close_checkpoint(path)
-                assert back is not None
+                self.assertIsNotNone(back)
                 self.assertEqual(back.ticket, "TASK-2026-00247")
                 self.assertEqual(back.published, {"commit": "abc"})
                 self.assertTrue(back.created_at)
@@ -271,7 +276,7 @@ class CheckpointTests(unittest.TestCase):
 
             with self.assertRaises(RuntimeError):
                 complete_close_once(path, _boom)
-            assert load_close_checkpoint(path) is not None
+            self.assertIsNotNone(load_close_checkpoint(path))
 
 
 def _child(name: str, status: str,
@@ -375,7 +380,7 @@ class CloseFlowTests(unittest.TestCase):
             self.assertFalse(second["completed"])
             self.assertEqual(effects, ["smoke:TASK-2026-00247",
                                        "close:TASK-2026-00247"])
-            assert nxt is not None
+            self.assertIsNotNone(nxt)
             self.assertEqual(nxt["name"], "TASK-2026-00244")
 
 

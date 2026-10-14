@@ -30,8 +30,10 @@ __all__ = [
 #: Execution record slot for the resume identity (attempt count survives).
 RECOVERY_PARAM_KEY = "_recovery"
 
-#: After this many automatic recoveries the ticket parks in waiting for a
-#: manual relaunch instead of looping through restart after restart.
+#: After this many lifetime recoveries the ticket parks in waiting for a
+#: manual relaunch. Cumulative on purpose: every recovery is followed by a
+#: claim, so resetting on claim would disarm the brake; six restarts without
+#: a completion means the ticket cannot finish between boots.
 MAX_RECOVERY_ATTEMPTS = 5
 
 _HUMAN_QA_STATES = frozenset({"pending", "changes_requested"})
