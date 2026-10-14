@@ -259,6 +259,11 @@ sin reviewers") keeps the tier, builder and gates and only skips
 reviewer invocations — a generic ask for speed never implies it.
 Tier S always reviews and rejects off. Preserve an explicit
 instruction on the decided ticket or child; omit the field otherwise.
+A reviewed A/B/C ticket runs build → gates → one quorum round
+(three reviewers, two independent families) → builder fix verdicts →
+final gates → close; the round never recurses and never copies the S
+pipeline. Pedido examples: "C sin reviewers", "A sin reviewers" and
+"B sin reviewers" set off; "rápido" alone never does.
 
 ## 28. Quota is separate from technical routing
 

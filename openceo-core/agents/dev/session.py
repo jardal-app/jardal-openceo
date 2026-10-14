@@ -12,10 +12,10 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from .review_links import ReviewLinksExtraction, apply_review_links_to_params, extract_review_links
-from .review_policy import (resolve_review, review_wait_reason,
+from .review_policy import (REVIEW_OFF, resolve_review, review_wait_reason,
                             stamp_effective_review)
 from .routing import (ROUTING_MISSING_REASON, TIER_C_CHAIN, RoutingDecision,
                       resolve_coding_tool, select_tier_c_link)
@@ -37,7 +37,8 @@ from objectives.ticket_cost import COST_RUNS_KEY
 from objectives import ticket_cost as cost_mod
 from orchestration.inbox import InMemoryInboxStore, MongoInboxStore
 from orchestration.knowledge import detect_prompt_lang, with_preamble
-from orchestration.live import AllowAllQuota, ProcessExecutor, RateMonitorQuota
+from orchestration.live import (TIMEOUT_RETURNCODE, AllowAllQuota,
+                                ProcessExecutor, RateMonitorQuota)
 from orchestration.role_claude import (
     CLAUDE_MCP_OVERLAY_RELPATH,
     claude_config_bytes,
@@ -75,6 +76,8 @@ from objectives.service import (
     objectives_process_executor,
     objectives_wiring_config,
 )
+from orchestration import findings as findings_mod
+from orchestration import review as review_mod
 from orchestration.review import InMemoryReviewStore, InMemorySlotStore, MongoReviewStore, MongoSlotStore, parse_pool
 from .tier_s.stores import (
     InMemoryLockStore,
@@ -201,6 +204,78 @@ class _SimpleBranch:
 
 #: Provenance marker for the explicit-dev tier default (TASK-2026-00204).
 EXPLICIT_DEFAULT_BY = "explicit_default/v1"
+
+#: Params key carrying the simple-tier review checkpoint (00251).
+REVIEW_ROUND_PARAMS_KEY = "review_round"
+
+#: The simple round launches three reviewers with these families first;
+#: alternatives still fill in when preferred slots are unavailable.
+SIMPLE_REVIEW_PREFER_FAMILIES = ("nemotron", "mimo", "gemini")
+
+#: One round, three candidates, quorum of two independent families.
+SIMPLE_REVIEW_COUNT = 3
+SIMPLE_REVIEW_QUORUM = 2
+
+#: No-quorum waits before the ticket parks for the owner (00251).
+SIMPLE_REVIEW_MAX_NO_QUORUM_WAITS = 3
+
+#: Builder fix turns before unaddressed findings park for the owner.
+SIMPLE_REVIEW_MAX_FIX_TURNS = 2
+
+#: Effective builder family per simple tier/link (self-review rule).
+#: Tier C links resolve through the recorded executor link; unknown
+#: links default to the primary, like the historical default.
+_SIMPLE_BUILDER_FAMILIES = {"tier_a": "claude", "tier_b": "codex"}
+_SIMPLE_C_LINK_FAMILIES = {"muse": "muse", "dsh": "deepseek",
+                           "claudep": "deepseek"}
+
+
+def _simple_builder_family(tool: CodingTool,
+                           params: dict[str, Any] | None) -> str:
+    """Family of the effective simple-tier builder (00251)."""
+    if tool == CodingTool.TIER_C:
+        link = str((params or {}).get("executor_link") or "").strip()
+        return _SIMPLE_C_LINK_FAMILIES.get(link, "muse")
+    return _SIMPLE_BUILDER_FAMILIES.get(tool.value, "muse")
+
+
+def _read_review_checkpoint(
+        params: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Validated simple-round checkpoint, or None when absent/malformed."""
+    if not isinstance(params, dict):
+        return None
+    checkpoint = params.get(REVIEW_ROUND_PARAMS_KEY)
+    if not isinstance(checkpoint, dict):
+        return None
+    if checkpoint.get("phase") not in ("round", "reviewed", "done",
+                                       "skipped"):
+        return None
+    return dict(checkpoint)
+
+
+def _rehydrate_findings(records: list[Any]) -> list[Any]:
+    """Finding objects back from checkpoint records (resume path)."""
+    findings: list[Any] = []
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        try:
+            anchors = [findings_mod.Anchor(
+                raw=str(item.get("raw") or ""), path=item.get("path"),
+                line=item.get("line"), base=bool(item.get("base")),
+                criterion=item.get("criterion"))
+                for item in record.get("anchors") or []]
+            findings.append(findings_mod.Finding(
+                id=int(record.get("id") or 0),
+                severity=str(record.get("severity") or ""),
+                category=str(record.get("category") or ""),
+                anchors=anchors, problem=str(record.get("problem") or ""),
+                fix=str(record.get("fix") or ""),
+                strength=str(record.get("strength") or ""),
+                families=list(record.get("families") or [])))
+        except (TypeError, ValueError):
+            continue
+    return [item for item in findings if item.id > 0]
 
 
 def _task_with_default_tier(task: dict[str, Any]) -> dict[str, Any]:
@@ -449,6 +524,9 @@ class DevSessionManager:
                 task, tool, branch, code_result, output.params)
 
         if branch is None:
+            if resolve_review(task).mode != REVIEW_OFF:
+                output.steps.append(self._step(
+                    "review", "skipped", "no repo snapshot available"))
             output.status = TaskStatus.COMPLETED
             return output
         return await self._finish_simple_tool(
@@ -663,6 +741,506 @@ class DevSessionManager:
                 f"({branch.oracle_frozen.get('oracle_type')})"))
         return None
 
+    async def _run_simple_gates(
+        self,
+        task: dict[str, Any],
+        project_config: dict[str, Any],
+        tool: CodingTool,
+        branch: _SimpleBranch,
+        output: DevExecutionOutput,
+        specs: list[Any],
+        budgets: dict[str, Any],
+    ) -> Any:
+        """Gate loop with builder fix retries. Results when green, else the
+        wait/fail output to return (material failure, tampered oracle)."""
+        repo = branch.repo
+        retries = int(budgets.get("gate_retries", 2) or 0)
+        attempt = 0
+        while True:
+            results = await asyncio.to_thread(run_gates, repo, specs)
+            failed = gates_failed(results)
+            output.steps.append(self._step(
+                "gates", "ok" if not failed else "failed",
+                "; ".join(f"{item.name}={item.status}" for item in results)
+                or "no gates configured"))
+            if not failed:
+                return results
+            if tool == CodingTool.TIER_C:
+                await self._record_tier_c_event(task, "cycle_failure")
+            if attempt >= retries:
+                names = ", ".join(item.name for item in failed)
+                return await self._material_simple_failure(
+                    task, project_config, tool, branch,
+                    f"gates failed after {retries} retries: {names}",
+                    prior_steps=output.steps, params_base=output.params,
+                    cost_runs=output.cost_runs)
+            tail = "\n\n".join(
+                f"[{item.name}] {item.status}: {item.detail}\n{item.output_tail}"
+                for item in failed)
+            followup = await self._simple_followup(
+                tool, project_config, repo,
+                f"Gates failed:\n{tail[:6000]}\nFix the code (no commits), "
+                "keep HANDOFF.md truthful. Never edit the frozen oracle "
+                "files: fix the code under test.",
+                task_id=str(task.get("task_id") or ""),
+                project=str(task.get("project") or ""),
+                badge_ticket=badge_ticket_for_task(task) or "")
+            if followup is not None:
+                output.cost_runs.append(followup)
+            # The retry saw the failing oracle's output: re-verify its hashes
+            # before running the gates again (a "fix" by editing the test is
+            # the oracle being redefined).
+            tampered_out = await self._oracle_integrity(
+                task, project_config, tool, branch, output, recheck=True)
+            if tampered_out is not None:
+                return tampered_out
+            attempt += 1
+
+    def _simple_reviewer_executor(
+        self, pool: Sequence[Mapping[str, Any]],
+    ) -> ProcessExecutor:
+        """Reviewer executor over the pool (seam for scripted tests)."""
+        return ProcessExecutor(pool=list(pool))
+
+    @staticmethod
+    def _store_review_checkpoint(
+        task: dict[str, Any],
+        output: DevExecutionOutput,
+        checkpoint: dict[str, Any],
+    ) -> None:
+        """Checkpoint on the FULL params (the funnel replaces them)."""
+        full = dict(output.params if isinstance(output.params, dict)
+                    else (task.get("params") or {}))
+        full[REVIEW_ROUND_PARAMS_KEY] = checkpoint
+        output.params = full
+
+    @staticmethod
+    def _simple_fix_prompt(count: int, missing: list[int]) -> str:
+        """Fix-or-discard prompt reusing the FIX verdict contract (§7.9)."""
+        scope = (f"Decide every finding in .openceo/FINDINGS_1.md "
+                 f"({count} findings).")
+        if missing:
+            names = ", ".join(f"F{index}" for index in missing)
+            scope = (f"Still missing verdicts for {names} in "
+                     f".openceo/FINDINGS_1.md ({count} findings). "
+                     f"Decide them now.")
+        return (
+            f"{scope} They are verified: they point at real code. Judge "
+            "the reasoning: is the problem real, is the proposed fix "
+            "correct, is it in this ticket's scope?\n"
+            "Write .openceo/FIX_1.md with one line per finding: "
+            "`F<n>: CORREGIDO — <what you changed>` (and change the code, "
+            "no commits) or `F<n>: DESCARTADO — <verifiable technical "
+            "reason>`. `I disagree` is not a reason. Keep HANDOFF.md "
+            "truthful. Do not rewrite uninvolved code.")
+
+    async def _run_simple_reviewer(
+        self,
+        *,
+        executor: Any,
+        slots: Any,
+        reviews: Any,
+        repo: Path,
+        review_sha: str,
+        request: str,
+        request_name: str,
+        handoff: str,
+        base_sha: str,
+        acceptance: list[str],
+        task_id: str,
+        project: str,
+        timeout_default: Any,
+        cost_runs: list[dict[str, Any]],
+        tag_prefix: str,
+        slot: review_mod.ReviewSlot,
+        attempt: int,
+        previous: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """One reviewer attempt on a detached read-only worktree (00251).
+
+        Mirrors the Tier S attempt (classify, write detection, parse,
+        verify, persist) without the cycle context; scope ``simple`` keeps
+        these reports out of the S precision stats.
+        """
+        outcome = review_mod.new_outcome(slot, attempt)
+        outcome["review_id"] = f"rev-{uuid.uuid4().hex[:12]}"
+        suffix = f"-a{attempt}" if attempt > 1 else ""
+        try:
+            worktree = await asyncio.to_thread(
+                review_mod.create_worktree, repo, review_sha,
+                f"{tag_prefix}-{slot.label}{suffix}")
+        except RuntimeError as exc:
+            outcome.update(kind="worktree", reason=str(exc)[:200])
+            return outcome
+        try:
+            (worktree / request_name).write_text(request, encoding="utf-8")
+            (worktree / "HANDOFF.md").write_text(handoff, encoding="utf-8")
+            before = await asyncio.to_thread(
+                review_mod.worktree_snapshot, worktree)
+            timeout_s = review_mod.slot_timeout_s(
+                slot, timeout_default, previous)
+            result = await executor.run(
+                f"review:{slot.label}",
+                review_mod.reviewer_prompt(
+                    slot.label, request_name, "simple", 1,
+                    repo=worktree, retry=review_mod.retry_note(previous)),
+                worktree, timeout_s)
+            elapsed = float(result.elapsed_s or 0.0)
+            outcome.update(elapsed_s=elapsed,
+                           exit_code=result.returncode)
+            cost_runs.append(cost_mod.normalize_run({
+                "engine": f"review:{slot.label}", "duration_s": elapsed}))
+            after = await asyncio.to_thread(
+                review_mod.worktree_snapshot, worktree)
+            if before and after and before != after:
+                outcome.update(kind="write_attempt", reason="write_attempt")
+                return outcome
+            text = (result.output_tail or "").strip()
+            if result.returncode != 0:
+                if (result.returncode == TIMEOUT_RETURNCODE
+                        or (result.usage or {}).get("timeout")):
+                    outcome.update(
+                        kind="timeout",
+                        reason=text[:200] or f"timeout after {timeout_s}s")
+                else:
+                    action, patch = review_mod.classify_slot_error(
+                        text, slot)
+                    if action in {"cooling_down", "disabled"}:
+                        await slots.set_slot(slot.label, patch)
+                    outcome.update(
+                        kind=(action if action in {"cooling_down",
+                                                  "disabled"}
+                              else "slot_error"),
+                        reason=f"slot error ({action}): {text[:200]}")
+                return outcome
+            try:
+                raw = findings_mod.parse_report(text)
+            except findings_mod.ReportMalformed as exc:
+                outcome.update(kind="malformed",
+                               reason=f"malformed: {exc}")
+                return outcome
+            verdicts = await asyncio.to_thread(
+                findings_mod.verify_report, raw, repo, review_sha,
+                base_sha, slot.label, slot.family, acceptance)
+            outcome.update(verdicts=verdicts, valid=True, kind="valid")
+            return outcome
+        finally:
+            await asyncio.to_thread(
+                review_mod.remove_worktree, repo, worktree)
+            if reviews is not None:
+                try:
+                    await reviews.create_review(
+                        findings_mod.review_document(
+                            review_id=str(outcome.get("review_id") or ""),
+                            task_id=task_id, run_id=f"simple-{tag_prefix}",
+                            scope="simple", round_no=1, slot=slot.label,
+                            family=slot.family,
+                            valid=bool(outcome.get("valid")),
+                            verdicts=list(outcome.get("verdicts") or []),
+                            invalid_reason=str(outcome.get("reason") or ""),
+                            meta={"attempt": attempt,
+                                  "kind": str(outcome.get("kind") or ""),
+                                  "elapsed_s": float(
+                                      outcome.get("elapsed_s") or 0.0),
+                                  "exit_code": outcome.get("exit_code"),
+                                  "project": project,
+                                  "account": slot.account,
+                                  "model": slot.model}))
+                except Exception:
+                    pass  # telemetry persistence never fails a round
+
+    async def _maybe_simple_review(
+        self,
+        task: dict[str, Any],
+        project_config: dict[str, Any],
+        tool: CodingTool,
+        output: DevExecutionOutput,
+        branch: _SimpleBranch,
+        gate_results: list[Any],
+        specs: list[Any],
+        budgets: dict[str, Any],
+    ) -> DevExecutionOutput | None:
+        """Single optional review round (00251). None = proceed to squash.
+
+        Review=off returns untouched: zero reviewer invocations and no
+        pool, quota or auth touched. Review=on fixes a snapshot commit,
+        runs one quorum round over the common pool, drives builder fix
+        verdicts and re-runs the final gates. Waits keep the checkpoint
+        in params; unrecoverable states park for the owner.
+        """
+        # run() gates invalid input and S+off first; only on/off arrive.
+        if resolve_review(task).mode == REVIEW_OFF:
+            return None
+        pool_raw = project_config.get("review", {}).get("reviewers") or []
+        if not pool_raw:
+            output.steps.append(self._step(
+                "review", "skipped", "no review pool configured"))
+            self._store_review_checkpoint(task, output, {
+                "phase": "skipped", "mode": "on",
+                "reason": "no review pool configured"})
+            return None
+        repo = branch.repo
+        try:
+            pool = review_mod.parse_pool(pool_raw)
+        except review_mod.ReviewerConfigError as exc:
+            self._drop_simple_branch(branch)
+            output.status = TaskStatus.WAITING
+            output.waiting_reason = f"config: review pool: {exc}"
+            return output
+        self._simple_git(repo, "add", "-A", "--", ".", ":!.openceo")
+        tree_sha = self._simple_git(repo, "write-tree").stdout.strip()
+        full = dict(output.params if isinstance(output.params, dict)
+                    else (task.get("params") or {}))
+        checkpoint = _read_review_checkpoint(full)
+        if (checkpoint is not None
+                and checkpoint.get("tree_sha") == tree_sha
+                and checkpoint.get("base_sha") == branch.base_sha
+                and checkpoint.get("phase") in ("reviewed", "done")):
+            kept = checkpoint.get("reports") or []
+            output.steps.append(self._step(
+                "review", "reused",
+                f"same snapshot {tree_sha[:12]}: {len(kept)} stored "
+                "report(s) kept, no reviewer runs"))
+            if checkpoint.get("phase") == "done":
+                return None
+            findings = _rehydrate_findings(checkpoint.get("findings") or [])
+            self._write_simple_findings(repo, checkpoint)
+            return await self._simple_review_fixes(
+                task, project_config, tool, output, branch, specs,
+                budgets, findings, checkpoint)
+        identity: list[str] = []
+        name = self._simple_git(repo, "config", "user.name").stdout.strip()
+        email = self._simple_git(repo, "config", "user.email").stdout.strip()
+        if not (name and email):
+            identity = ["-c", "user.name=OpenCEO",
+                        "-c", "user.email=openceo@jardal.app"]
+        if self._simple_git(
+                repo, *identity, "commit", "-qm",
+                f"review checkpoint {branch.ref}").returncode != 0:
+            output.status = TaskStatus.FAILED
+            output.error = "review checkpoint commit failed"
+            return output
+        review_sha = self._simple_git(
+            repo, "rev-parse", "HEAD").stdout.strip()
+        builder_family = _simple_builder_family(tool, full)
+        slots = (MongoSlotStore(self._repo)
+                 if self._repo is not None else InMemorySlotStore())
+        reviews = (MongoReviewStore(self._repo)
+                   if self._repo is not None else InMemoryReviewStore())
+        plan = await review_mod.select_round(
+            pool, slots, SIMPLE_REVIEW_COUNT,
+            builder_family=builder_family,
+            prefer_families=SIMPLE_REVIEW_PREFER_FAMILIES,
+            include_extras=False)
+        review_cfg = project_config.get("review", {}).get("review", {})
+        acceptance = [str(item) for item in
+                      (task.get("acceptance") or [])]
+        handoff_path = repo / ".openceo" / "HANDOFF.md"
+        try:
+            handoff = handoff_path.read_text(
+                encoding="utf-8", errors="replace")
+        except OSError:
+            handoff = ""
+        diff_stat = self._simple_git(
+            repo, "diff", "--stat",
+            branch.base_sha, review_sha).stdout
+        request = review_mod.build_review_request(
+            1, goal=str(task.get("title") or ""),
+            acceptance=acceptance, base_sha=branch.base_sha,
+            head_sha=review_sha, diff_stat=diff_stat,
+            files=self._simple_changed_files(branch), out_of_plan=[],
+            gates_section=handoff_gates_section(gate_results),
+            handoff_path=".openceo/HANDOFF.md")
+        request_name = "REVIEW_REQUEST_1.md"
+        (repo / ".openceo" / request_name).write_text(
+            request, encoding="utf-8")
+        executor = self._simple_reviewer_executor(pool_raw)
+
+        async def run_one(
+            slot: review_mod.ReviewSlot, attempt: int,
+            previous: Mapping[str, Any] | None,
+        ) -> dict[str, Any]:
+            return await self._run_simple_reviewer(
+                executor=executor, slots=slots, reviews=reviews,
+                repo=repo, review_sha=review_sha, request=request,
+                request_name=request_name, handoff=handoff,
+                base_sha=branch.base_sha, acceptance=acceptance,
+                task_id=str(task.get("task_id") or ""),
+                project=str(task.get("project") or ""),
+                timeout_default=review_cfg.get(
+                    "reviewer_timeout_minutes", 15),
+                cost_runs=output.cost_runs, tag_prefix=branch.ref,
+                slot=slot, attempt=attempt, previous=previous)
+
+        result = await review_mod.run_quorum_round(
+            pool, slots, plan, run_one, builder_family=builder_family,
+            quorum=SIMPLE_REVIEW_QUORUM)
+        reports = [{
+            "slot": str(item.get("slot")),
+            "family": str(next(
+                (slot.family for slot in pool
+                 if slot.label == str(item.get("slot"))), "")),
+            "account": str(next(
+                (slot.account for slot in pool
+                 if slot.label == str(item.get("slot"))), "")),
+            "model": str(next(
+                (slot.model for slot in pool
+                 if slot.label == str(item.get("slot"))), "")),
+            "review_id": str(item.get("review_id") or ""),
+            "valid": bool(item.get("valid")),
+            "kind": str(item.get("kind") or "")} for item in result.outcomes]
+        if not result.met:
+            waits = int(
+                (checkpoint or {}).get("no_quorum_waits") or 0) + 1
+            self._store_review_checkpoint(task, output, {
+                "phase": "round", "mode": "on",
+                "base_sha": branch.base_sha, "review_sha": review_sha,
+                "tree_sha": tree_sha, "builder_family": builder_family,
+                "reviewers": [slot.label for slot in result.reviewers],
+                "reports": reports, "quorum": False,
+                "no_quorum_waits": waits})
+            if waits >= SIMPLE_REVIEW_MAX_NO_QUORUM_WAITS:
+                output.status = TaskStatus.WAITING
+                output.waiting_reason = (
+                    "needs_owner: review quorum unreachable after "
+                    f"{waits} attempts: {result.summary()} "
+                    f"(branch kept: {branch.branch})")
+                return output
+            self._drop_simple_branch(branch)
+            output.status = TaskStatus.WAITING
+            output.waiting_reason = (
+                f"review_no_quorum: {result.summary()}")
+            output.resume_at = (datetime.now(timezone.utc)
+                                + timedelta(minutes=60))
+            return output
+        consolidated = findings_mod.consolidate(result.verdicts)
+        findings_text = findings_mod.render_findings(
+            consolidated, 1, review_sha, builder_family=builder_family)
+        (repo / ".openceo" / "FINDINGS_1.md").write_text(
+            findings_text, encoding="utf-8")
+        prior_waits = int((checkpoint or {}).get(
+            "no_quorum_waits") or 0)
+        checkpoint = {
+            "phase": "reviewed", "mode": "on",
+            "base_sha": branch.base_sha, "review_sha": review_sha,
+            "tree_sha": tree_sha, "builder_family": builder_family,
+            "reviewers": [slot.label for slot in result.reviewers],
+            "reports": reports, "quorum": True,
+            "findings_text": findings_text,
+            "findings": [{
+                "id": item.id, "severity": item.severity,
+                "category": item.category,
+                "anchors": [{
+                    "raw": anchor.raw, "path": anchor.path,
+                    "line": anchor.line, "base": anchor.base,
+                    "criterion": anchor.criterion}
+                    for anchor in item.anchors],
+                "problem": item.problem, "fix": item.fix,
+                "strength": item.strength,
+                "families": list(item.families)} for item in consolidated],
+            "no_quorum_waits": prior_waits}
+        self._store_review_checkpoint(task, output, checkpoint)
+        valid_n = sum(1 for report in reports if report["valid"])
+        output.steps.append(self._step(
+            "review", "ok",
+            f"quorum {valid_n} valid report(s) from "
+            f"{len({report['family'] for report in reports if report['valid']})} "
+            f"families; {len(consolidated)} consolidated finding(s)"))
+        if not consolidated:
+            checkpoint["phase"] = "done"
+            self._store_review_checkpoint(task, output, checkpoint)
+            return None
+        return await self._simple_review_fixes(
+            task, project_config, tool, output, branch, specs,
+            budgets, consolidated, checkpoint)
+
+    def _write_simple_findings(
+        self, repo: Path, checkpoint: Mapping[str, Any],
+    ) -> None:
+        """Rewrite FINDINGS_1.md from the checkpoint (resume path)."""
+        try:
+            (repo / ".openceo").mkdir(parents=True, exist_ok=True)
+            (repo / ".openceo" / "FINDINGS_1.md").write_text(
+                str(checkpoint.get("findings_text") or ""), encoding="utf-8")
+        except OSError:
+            pass
+
+    async def _simple_review_fixes(
+        self,
+        task: dict[str, Any],
+        project_config: dict[str, Any],
+        tool: CodingTool,
+        output: DevExecutionOutput,
+        branch: _SimpleBranch,
+        specs: list[Any],
+        budgets: dict[str, Any],
+        findings: list[Any],
+        checkpoint: dict[str, Any],
+    ) -> DevExecutionOutput | None:
+        """Builder fix verdicts + final gates. None = proceed to squash."""
+        repo = branch.repo
+        fix_path = repo / ".openceo" / "FIX_1.md"
+        verdicts: dict[int, list[Any]] = {}
+        missing = [item.id for item in findings]
+        for turn in range(1, SIMPLE_REVIEW_MAX_FIX_TURNS + 1):
+            followup = await self._simple_followup(
+                tool, project_config, repo,
+                self._simple_fix_prompt(
+                    len(findings), missing if turn > 1 else []),
+                task_id=str(task.get("task_id") or ""),
+                project=str(task.get("project") or ""),
+                badge_ticket=badge_ticket_for_task(task) or "")
+            if followup is not None:
+                output.cost_runs.append(followup)
+            try:
+                text = fix_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+            verdicts = review_mod.parse_fix(text)
+            missing, _dup = review_mod.fix_gaps(findings, verdicts)
+            if not missing:
+                break
+        resolutions = []
+        for item in findings:
+            first = (verdicts.get(item.id) or [None])[0]
+            resolutions.append({
+                "id": item.id,
+                "verdict": first.verdict if first is not None else "missing",
+                "reason": first.reason if first is not None else "",
+                "out_of_scope": bool(first is not None
+                                     and first.out_of_scope)})
+        fix_files = sorted({
+            part for part in self._simple_git(
+                repo, "diff", "--name-only", "-z", checkpoint.get("review_sha", ""),
+                "--", ".").stdout.split("\0") if part})
+        checkpoint.update(fix_turns=turn, resolutions=resolutions,
+                          fix_files=fix_files)
+        if missing:
+            names = ", ".join(f"F{index}" for index in missing)
+            self._store_review_checkpoint(task, output, checkpoint)
+            output.status = TaskStatus.WAITING
+            output.waiting_reason = (
+                f"needs_owner: review findings without verdict: {names} "
+                f"(branch kept: {branch.branch}; see .openceo/FIX_1.md)")
+            return output
+        out_of_scope = sum(1 for entry in resolutions
+                           if entry["out_of_scope"])
+        if out_of_scope:
+            output.steps.append(self._step(
+                "review", "ok",
+                f"{out_of_scope} out-of-scope dismissal(s) recorded; "
+                "simple tiers keep no inbox"))
+        gated = await self._run_simple_gates(
+            task, project_config, tool, branch, output, specs, budgets)
+        if isinstance(gated, DevExecutionOutput):
+            return gated
+        checkpoint["phase"] = "done"
+        self._store_review_checkpoint(task, output, checkpoint)
+        output.steps.append(self._step(
+            "review", "ok",
+            f"{len(resolutions)} finding(s) resolved, final gates green"))
+        return None
+
     async def _finish_simple_tool(
         self,
         task: dict[str, Any],
@@ -739,47 +1317,11 @@ class DevSessionManager:
                     "(resolved to no file): " + ", ".join(unverified)))
         elif oracle_note:
             output.steps.append(self._step("oracle_run", "skipped", oracle_note))
-        retries = int(budgets.get("gate_retries", 2) or 0)
-        attempt = 0
-        while True:
-            results = await asyncio.to_thread(run_gates, repo, specs)
-            failed = gates_failed(results)
-            output.steps.append(self._step(
-                "gates", "ok" if not failed else "failed",
-                "; ".join(f"{item.name}={item.status}" for item in results)
-                or "no gates configured"))
-            if not failed:
-                break
-            if tool == CodingTool.TIER_C:
-                await self._record_tier_c_event(task, "cycle_failure")
-            if attempt >= retries:
-                names = ", ".join(item.name for item in failed)
-                return await self._material_simple_failure(
-                    task, project_config, tool, branch,
-                    f"gates failed after {retries} retries: {names}",
-                    prior_steps=output.steps, params_base=output.params,
-                    cost_runs=output.cost_runs)
-            tail = "\n\n".join(
-                f"[{item.name}] {item.status}: {item.detail}\n{item.output_tail}"
-                for item in failed)
-            followup = await self._simple_followup(
-                tool, project_config, repo,
-                f"Gates failed:\n{tail[:6000]}\nFix the code (no commits), "
-                "keep HANDOFF.md truthful. Never edit the frozen oracle "
-                "files: fix the code under test.",
-                task_id=str(task.get("task_id") or ""),
-                project=str(task.get("project") or ""),
-                badge_ticket=badge_ticket_for_task(task) or "")
-            if followup is not None:
-                output.cost_runs.append(followup)
-            # The retry saw the failing oracle's output: re-verify its hashes
-            # before running the gates again (a "fix" by editing the test is
-            # the oracle being redefined).
-            tampered_out = await self._oracle_integrity(
-                task, project_config, tool, branch, output, recheck=True)
-            if tampered_out is not None:
-                return tampered_out
-            attempt += 1
+        gated = await self._run_simple_gates(
+            task, project_config, tool, branch, output, specs, budgets)
+        if isinstance(gated, DevExecutionOutput):
+            return gated
+        results = gated
 
         files_n, lines_n = self._simple_diff_sizes(branch, exclude)
         files_budget = int(budgets.get("files_per_ticket", 8) or 8)
@@ -820,7 +1362,16 @@ class DevSessionManager:
                     f"needs_owner: missing HANDOFF.md (branch kept: {branch.branch})")
                 return output
 
+        reviewed = await self._maybe_simple_review(
+            task, project_config, tool, output, branch, results, specs,
+            budgets)
+        if reviewed is not None:
+            return reviewed
+
         # Squash + merge (§12): only the orchestrator commits.
+        # Undo the review checkpoint commit when the round ran (no-op
+        # when HEAD is still the base): the squash below stays single.
+        self._simple_git(repo, "reset", "--soft", branch.base_sha)
         self._simple_git(repo, "add", "-A", "--", ".", ":!.openceo")
         identity: list[str] = []
         name = self._simple_git(repo, "config", "user.name").stdout.strip()
