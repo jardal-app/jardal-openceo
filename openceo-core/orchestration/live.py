@@ -33,7 +33,14 @@ from orchestration.role_claude import (
     ensure_mcp_placeholder,
     profile_box_tools,
 )
+from orchestration.role_agy import (
+    agy_config_bytes,
+    overlay_relpath as agy_overlay_relpath,
+)
+from orchestration.role_agy import render_argv_extras as agy_argv_extras
 from orchestration.role_claude import render_argv_extras as claude_argv_extras
+from orchestration.role_codex import codex_mcp_env
+from orchestration.role_codex import render_argv_extras as codex_argv_extras
 from orchestration.role_muse import (
     SETTINGS_OVERLAY_RELPATH,
     RoleProfileError,
@@ -144,6 +151,7 @@ class ProcessExecutor:
                 output_tail=f"role {role} has no command")
         badge: str | None = None
         file_overlays: dict[str, bytes] | None = None
+        translator_env: dict[str, str] = {}
         profile_name = spec.get("role_profile")
         if profile_name:
             if self._badge_provider is None:
@@ -194,10 +202,20 @@ class ProcessExecutor:
                         profile, home, servers)
                     file_overlays = {OPENCODE_OVERLAY_RELPATH: rendered}
                     config_argv += opencode_argv_extras(profile.name)
+                elif provider == "codex":
+                    config_argv += codex_argv_extras()
+                    translator_env.update(codex_mcp_env(badge))
+                elif provider == "agy":
+                    account = str(spec.get("account") or "")
+                    rendered = agy_config_bytes(home, account, servers)
+                    file_overlays = {
+                        agy_overlay_relpath(account): rendered}
+                    config_argv += agy_argv_extras()
                 else:
                     raise RoleProfileError(
                         f"no translator for provider {provider!r}: "
-                        "profile runs support muse, claude and opencode")
+                        "profile runs support muse, claude, opencode, "
+                        "codex and agy")
             except (RoleProfileError, CatalogError, ValueError,
                     OSError) as exc:
                 await self._badge_provider.revoke(badge)
@@ -216,7 +234,7 @@ class ProcessExecutor:
             stdin_payload = prompt
         else:
             full_argv.append(prompt)
-        overlay = {**extra_env, **{
+        overlay = {**extra_env, **translator_env, **{
             str(k): str(v)
             for k, v in dict(spec.get("env") or {}).items()}}
         if role.startswith("review:"):

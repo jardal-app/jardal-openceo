@@ -321,12 +321,21 @@ class LiveDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--agent", config_args)
         self.assertIn("operations", config_args)
 
-    async def test_codex_provider_with_profile_refused(self) -> None:
+    async def test_codex_provider_renders_override(self) -> None:
+        # TASK-2026-00246 redefines this: codex has a translator now
+        # (badged MCP via -c override, Tier B pattern), so the run
+        # renders instead of refusing.
         spec = {"provider": "codex", "command": ["codexj", "exec"],
                 "prompt_via": "stdin", "role_profile": "dev"}
-        result, _seen = await self._run(spec)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("no translator", result.output_tail)
+        result, seen = await self._run(spec)
+        self.assertIn("sandbox refused", result.output_tail)
+        config_args = seen["config_args"]
+        assert isinstance(config_args, list)
+        self.assertIn("-c", config_args)
+        override = config_args[config_args.index("-c") + 1]
+        self.assertIn("mcp_servers.openceo-internal.bearer_token_env_var",
+                      override)
+        self.assertEqual({}, seen["overlays"])
 
 
 class TierExecutorTranslatorTests(unittest.IsolatedAsyncioTestCase):

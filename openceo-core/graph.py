@@ -11,6 +11,7 @@ from agents.dev.session import DevSessionManager
 from catalog import AgentType, Catalog, load_catalog
 from config_loader import ConfigLoader
 from objectives.ticket_cost import COST_RUNS_KEY
+from orchestration.engines import ENGINE_SPECS
 from orchestration.generic_agent import (
     GenericAgentWiring,
     run_generic_agent,
@@ -53,9 +54,10 @@ def resolve_agent_gate(
     decision, F0 pilot 00097). Otherwise the explicit hint wins and the
     planner target (``params.target_agent``) backs it up: a wired name
     routes to its legacy node by name, never by text; an enabled AI
-    name with a muse-code profile routes to the generic node
-    (TASK-2026-00205); unknown, disabled, human, untranslated-engine
-    or ``ceo`` names wait with ``routing_missing`` and their reason.
+    name with a known-engine profile routes to the generic node
+    (TASK-2026-00205; engines TASK-2026-00246); unknown, disabled,
+    human, unknown-engine or ``ceo`` names wait with ``routing_missing``
+    and their reason.
     No hint and no target means an undecided ticket: the node waits
     fail-closed (TASK-2026-00204) — in production the run pre-stage
     plans every pedido, so the node never sees one.
@@ -92,12 +94,11 @@ def resolve_agent_gate(
                 False, None,
                 f"routing_missing: agent {name!r} is human (humans "
                 "answer from the cockpit, never execute tickets)")
-        if entry.engine != "muse-code":
+        if entry.engine not in ENGINE_SPECS:
             return AgentGateDecision(
                 False, None,
                 f"routing_missing: agent {name!r} engine "
-                f"{entry.engine!r} has no runner yet (translator "
-                "TASK-2026-00200)")
+                f"{entry.engine!r} has no runner yet (unknown engine)")
         if not (entry.profile or "").strip():
             return AgentGateDecision(
                 False, None,

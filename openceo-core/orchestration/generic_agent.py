@@ -5,9 +5,9 @@ Two paths, no silent reclassification:
 * exact skill: the suggested skill carries ``workflow.yaml`` (its exact
   part) and the ticket targets it via ``params.skill`` — the YAML engine
   runs it, the LLM is never invoked;
-* LLM: one fenced Muse run with the role profile (card, skills, tool
-  box badge), the ticket folder, the crystallization draft instruction
-  and the structured verdict schema.
+* LLM: one fenced run on the resolved engine (muse default) with the
+  role profile (card, skills, tool box badge), the ticket folder, the
+  crystallization draft instruction and the structured verdict schema.
   Skilled runs stage their skill links into the ticket folder and mount
   the repo read-only; creation agents also mount the creation roots
   writable (TASK-2026-00214).
@@ -44,6 +44,7 @@ from catalog import (
     CatalogError,
     RoleProfile,
     catalog_root,
+    default_engine_account,
     load_catalog,
     load_role_profile,
     load_role_skills,
@@ -57,6 +58,17 @@ from objectives.agent_result import (
 from objectives import ticket_cost as cost_mod
 from orchestration.agent_sandbox import ensure_ticket_dir
 from orchestration.crystallization import CRYSTALLIZATION_PROMPT
+from orchestration.engines import (
+    ATTEMPT_PARAMS_KEY,
+    ENGINE_ACCOUNT_PARAMS_KEY,
+    ENGINE_PARAMS_KEY,
+    ENGINE_SPECS,
+    EngineResolutionError,
+    EngineSelection,
+    check_engine_available,
+    command_for,
+    resolve_engine,
+)
 from orchestration.live import ProcessExecutor
 from orchestration.ticket_handoff import (
     UPSTREAM_OUTPUTS_KEY,
@@ -83,6 +95,7 @@ __all__ = [
     "muse_role_spec",
     "resolve_exact_skill_path",
     "role_extra_mounts",
+    "role_spec_for_engine",
     "run_generic_agent",
     "stage_skill_links",
 ]
@@ -95,9 +108,6 @@ GENERIC_AGENT_TIMEOUT_S = 1800
 
 #: House Muse model until cards pin their own.
 GENERIC_MUSE_MODEL = "muse-spark-1.3-contributor"
-
-#: Engine with a role translator today (OpenCode/Claude land in 00200).
-_MUSE_ENGINE = "muse-code"
 
 
 def default_executor_factory(
@@ -213,16 +223,45 @@ def muse_role_spec(profile: RoleProfile, label: str) -> dict[str, Any]:
         raise CatalogError(
             f"role profile {profile.name!r}: output_schema "
             f"{schema_rel!r} is missing, refusing the run")
+    engine = ENGINE_SPECS["muse-code"]
     return {
-        "provider": "muse",
-        "account": "muse",
+        "provider": engine.provider,
+        "account": default_engine_account("muse-code"),
         "label": label,
-        "model": GENERIC_MUSE_MODEL,
-        "effort": "max",
+        "model": engine.model,
+        "effort": engine.effort,
         "active": True,
-        "command": ["musej", "exec", "--model", GENERIC_MUSE_MODEL],
+        "command": list(engine.command),
         "headless_args": ["--output-schema", str(schema)],
-        "prompt_via": "argv",
+        "prompt_via": engine.prompt_via,
+        "role_profile": profile.name,
+    }
+
+
+def role_spec_for_engine(
+    selection: EngineSelection,
+    profile: RoleProfile,
+    label: str,
+) -> dict[str, Any]:
+    """One-shot spec for a resolved engine (TASK-2026-00246).
+
+    Muse keeps its schema-pinned builder; other engines render from the
+    registry (their CLIs take the verdict contract from the prompt, and
+    their translators add the MCP extras at launch).
+    """
+    if selection.engine == "muse-code":
+        return muse_role_spec(profile, label)
+    spec = ENGINE_SPECS[selection.engine]
+    return {
+        "provider": spec.provider,
+        "account": selection.account,
+        "label": label,
+        "model": spec.model,
+        "effort": spec.effort,
+        "active": True,
+        "command": command_for(selection.engine, selection.account),
+        "headless_args": list(spec.headless_args),
+        "prompt_via": spec.prompt_via,
         "role_profile": profile.name,
     }
 
@@ -233,6 +272,7 @@ def build_agent_prompt(
     upstream_section: str = "",
     skill_outputs: Sequence[str] = (),
     skill_evidence: Sequence[str] = (),
+    skill_source: str | None = None,
 ) -> str:
     """Ticket + upstream outputs + suggested skill + verdict block."""
     lines = [
@@ -253,10 +293,12 @@ def build_agent_prompt(
     if upstream_section.strip():
         lines.extend(["", upstream_section.strip()])
     if skill:
+        where = f" at {skill_source}" if (skill_source or "").strip() \
+            else ""
         lines.extend([
             "",
-            f"Suggested skill: {skill} — read its SKILL.md and follow it; "
-            "you decide how.",
+            f"Suggested skill: {skill} — read its SKILL.md{where} and "
+            "follow it; you decide how.",
         ])
         declared: list[str] = []
         if list(skill_outputs):
@@ -328,11 +370,21 @@ async def run_generic_agent(
         return _waiting(agent_name,
                         f"routing_missing: agent {agent_name!r} is not an "
                         "enabled AI executor", params)
-    if entry.engine != _MUSE_ENGINE:
-        return _waiting(agent_name,
-                        f"routing_missing: agent {agent_name!r} engine "
-                        f"{entry.engine!r} has no runner yet (translator "
-                        "TASK-2026-00200)", params)
+    try:
+        selection = resolve_engine(entry.engine, entry.account, params)
+    except EngineResolutionError as exc:
+        if str(params.get(ENGINE_PARAMS_KEY)
+               or params.get(ENGINE_ACCOUNT_PARAMS_KEY) or "").strip():
+            reason = (f"config: invalid engine override for "
+                      f"{agent_name!r}: {exc}")
+        else:
+            reason = (f"routing_missing: agent {agent_name!r} engine "
+                      f"{entry.engine!r} has no runner yet ({exc})")
+        return _waiting(agent_name, reason, params)
+    unavailable = check_engine_available(selection.engine,
+                                         selection.account)
+    if unavailable is not None:
+        return _waiting(agent_name, f"config: {unavailable}", params)
     if not (entry.profile or "").strip():
         return _waiting(agent_name,
                         f"routing_missing: agent {agent_name!r} is enabled "
@@ -361,8 +413,8 @@ async def run_generic_agent(
         return await _run_exact_skill(
             agent_name, task, params, profile, skill_name or "", exact,
             wiring, upstream=upstream)
-    return await _run_llm(agent_name, task, params, profile, skill_name,
-                          wiring, skills, upstream=upstream)
+    return await _run_llm(agent_name, task, params, profile, selection,
+                          skill_name, wiring, skills, upstream=upstream)
 
 
 #: Exact verdict citations stay bounded: lines, then chars per value.
@@ -535,12 +587,16 @@ def _exact_skill_run(duration_s: float) -> dict[str, Any]:
 
 async def _run_llm(
     agent_name: str, task: dict[str, Any], params: dict[str, Any],
-    profile: RoleProfile, skill_name: str | None,
+    profile: RoleProfile, selection: EngineSelection,
+    skill_name: str | None,
     wiring: GenericAgentWiring,
     skills: Mapping[str, Any] | None = None,
     upstream: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """One fenced Muse run with profile, badge, folder and verdict schema."""
+    """One fenced run on the resolved engine, with profile, badge, folder
+    and verdict schema. The spec is built once and the selection recorded
+    in the result params, so a config change mid-run cannot hot-swap the
+    engine; the next invocation re-resolves."""
     if wiring.settings is None:
         return _waiting(agent_name,
                         "config: generic runs need service settings", params)
@@ -558,9 +614,15 @@ async def _run_llm(
             return TicketBadgeProvider(issuer, settings, agent, ticket,
                                        project)
     try:
-        spec = muse_role_spec(profile, agent_name)
+        spec = role_spec_for_engine(selection, profile, agent_name)
     except CatalogError as exc:
         return _waiting(agent_name, f"config: {exc}", params)
+    run_params = {**params, ATTEMPT_PARAMS_KEY: {
+        "engine": selection.engine,
+        "account": selection.account,
+        "model": str(spec.get("model") or ""),
+        "via": selection.via,
+    }}
     task_id = str(task.get("task_id") or "")
     try:
         workdir = ensure_ticket_dir(task_id,
@@ -591,6 +653,7 @@ async def _run_llm(
     executor = factory(agent_name, spec, provider)
     declared_outputs: list[str] = []
     declared_evidence: list[str] = []
+    skill_source: str | None = None
     if skill_name and skills:
         found = skills.get(skill_name)
         if found is not None:
@@ -600,9 +663,11 @@ async def _run_llm(
             declared_evidence = [str(item)
                                  for item in
                                  (getattr(found, "evidence", []) or [])]
+            skill_source = str(getattr(found, "source", "") or "") or None
     prompt = build_agent_prompt(
         profile, task, skill=skill_name, upstream_section=section,
-        skill_outputs=declared_outputs, skill_evidence=declared_evidence)
+        skill_outputs=declared_outputs, skill_evidence=declared_evidence,
+        skill_source=skill_source)
     try:
         result = await executor.run(agent_name, prompt, workdir,
                                     wiring.timeout_s)
@@ -617,7 +682,7 @@ async def _run_llm(
     truncated = bool(usage.get("truncated"))
     runs = [cost_mod.run_from_exec_result(
         usage=usage, elapsed_s=result.elapsed_s,
-        engine=str(profile.engine), model=result.model)]
+        engine=selection.engine, model=result.model)]
     if result.returncode != 0:
         detail = (f"agent run failed (returncode {result.returncode})"
                   + (f": {result.output_tail.strip()[:500]}"
@@ -629,7 +694,7 @@ async def _run_llm(
                 resultado=AgentOutcome.BLOQUEADO,
                 motivo=(f"run crashed (returncode {result.returncode}); "
                         f"the agent claimed hecho: {verdict.motivo}"))
-        return _failed(agent_name, params, "LLM run", error=detail,
+        return _failed(agent_name, run_params, "LLM run", error=detail,
                        verdict=verdict, cost_runs=runs)
     if truncated:
         motivo = (f"agent output truncated "
@@ -637,7 +702,7 @@ async def _run_llm(
                   "unreadable")
         if verdict is not None:
             motivo += f"; last parsed claim: {verdict.motivo}"
-        return _failed(agent_name, params, "LLM run",
+        return _failed(agent_name, run_params, "LLM run",
                        error=motivo,
                        verdict=AgentResult(
                            resultado=AgentOutcome.BLOQUEADO, motivo=motivo),
@@ -649,14 +714,14 @@ async def _run_llm(
             "status": TaskStatus.COMPLETED.value,
             "steps": [_step("generic_agent", "ok",
                             "LLM run completed without a verdict (legacy)")],
-            "params": dict(params),
+            "params": dict(run_params),
             "last_response_summary": summary[:500],
             "error": None,
             "result_comment": f"{agent_name}: {summary[:500]}",
             cost_mod.COST_RUNS_KEY: runs,
         }
     if verdict.resultado is AgentOutcome.HECHO:
-        out_params = {**params,
+        out_params = {**run_params,
                       "agent_result": verdict.model_dump(mode="json")}
         return {
             "selected_agent": agent_name,
@@ -669,7 +734,7 @@ async def _run_llm(
             "result_comment": f"{agent_name}: hecho: {verdict.motivo}",
             cost_mod.COST_RUNS_KEY: runs,
         }
-    return _failed(agent_name, params, "LLM run",
+    return _failed(agent_name, run_params, "LLM run",
                    error=verdict.motivo, verdict=verdict, cost_runs=runs)
 
 

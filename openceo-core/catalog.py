@@ -47,6 +47,7 @@ __all__ = [
     "CatalogError",
     "CatalogStatus",
     "Department",
+    "ENGINE_ACCOUNTS",
     "IndexEntry",
     "KNOWN_ENGINES",
     "RoleCard",
@@ -61,6 +62,7 @@ __all__ = [
     "check_catalog",
     "check_skill_links",
     "check_skill_names_unique",
+    "default_engine_account",
     "discover_role_skills",
     "find_consumer_mismatches",
     "is_staff_active",
@@ -103,8 +105,20 @@ PROJECT_SKILLS_DIR = ".codex/skills"
 RESERVED_NAMES = ("ceo", "planner")
 
 #: Engines a role profile may name (TASK-2026-00197; TASK-2026-00200 adds
-#: translators, not engines: agents keep running muse-code by default).
-KNOWN_ENGINES = ("muse-code",)
+#: translators; TASK-2026-00246 opens engine selection: an agent card names
+#: any of these, agents keep running muse-code by default).
+KNOWN_ENGINES = ("muse-code", "claude-code", "opencode", "codex-cli", "agy")
+
+#: Accounts each engine accepts (TASK-2026-00246). Only agy has several:
+#: one CLI, three Owner OAuth logins. Other engines run their single
+#: headless wrapper; a card account outside its engine fails the load.
+ENGINE_ACCOUNTS: dict[str, tuple[str, ...]] = {
+    "muse-code": ("muse",),
+    "claude-code": ("claudej",),
+    "opencode": ("opencode",),
+    "codex-cli": ("codexj",),
+    "agy": ("agyd", "agyj", "agy2"),
+}
 
 #: Every tool the MCP mounts may expose (TASK-2026-00199). A card box
 #: naming anything else fails the load; a registration outside this set
@@ -222,6 +236,7 @@ class AgentCard(BaseModel):
     engine: str | None = None
     profile: str | None = None
     department: str | None = None
+    account: str | None = None
     boundary_tools: list[str] = Field(default_factory=list)
     skills_dir: str
     skills: list[str] = Field(default_factory=list)
@@ -238,7 +253,7 @@ class AgentCard(BaseModel):
             raise ValueError(f"name: {value!r} is reserved, never an executor")
         return value
 
-    @field_validator("engine", "profile", "department")
+    @field_validator("engine", "profile", "department", "account")
     @classmethod
     def _optional_nonempty(cls, value: str | None) -> str | None:
         if value is None:
@@ -267,6 +282,14 @@ class AgentCard(BaseModel):
             raise ValueError("engine: required for ai agents")
         if self.type is AgentType.HUMAN and self.engine is not None:
             raise ValueError("engine: must be null for human agents")
+        if self.account is not None:
+            if self.type is not AgentType.AI:
+                raise ValueError("account: only ai agents run an engine")
+            allowed = ENGINE_ACCOUNTS.get(self.engine or "")
+            if not allowed or self.account not in allowed:
+                raise ValueError(
+                    f"account: {self.account!r} is not an account of "
+                    f"engine {self.engine!r}")
         if self.enabled:
             if self.disabled_reason is not None:
                 raise ValueError(
@@ -765,6 +788,12 @@ def suggestable_skills(
         elif name == "owner":
             mapping[name] = list(card.skills)
     return mapping
+
+
+def default_engine_account(engine: str | None) -> str | None:
+    """Default account of an engine (None when unknown)."""
+    accounts = ENGINE_ACCOUNTS.get(str(engine or ""))
+    return accounts[0] if accounts else None
 
 
 def load_catalog(root: str | Path | None = None) -> Catalog:
