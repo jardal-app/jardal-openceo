@@ -67,7 +67,7 @@ scripts/openceo-core-host.sh restart|status
   any work on a company project/repo goes to ERPNext first.
 - No secrets, credentials, or personal data in notes or temp docs.
 - Conventions over configuration: mirror sibling code, reuse its helpers.
-- Owner rule (2026-10-14; current epic TASK-2026-00245): validation uses
+- Owner rule (2026-10-14; current epic TASK-2026-00248): validation uses
   only simple, targeted logic/contract/communication tests with mocks,
   simulated executors/CLIs, or non-generative echo/help/version checks.
   No validation calls to live models, extensive integrated rehearsals

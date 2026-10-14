@@ -8,7 +8,7 @@ Trabajo temporal de tickets: `docs/work/TASK-2026-000NN-tema.md`.
 
 Instrucciones operativas del repo (F7a): `AGENTS.md` — los CLI del roster lo cargan directamente; las sesiones del Owner leen este archivo, que lo importa en §10.
 
-Continuar el roadmap vigente (épico **TASK-2026-00245**: departamentos y empleados, CLIs intercambiables y continuidad tras reinicios): el Owner escribe **`sigue`** y la sesión aplica la receta de §11. TASK-2026-00187 está cerrado; sus pilotos reales siguen separados en **TASK-2026-00233**, solo con **`valida`** (§11), y no son una condición de cierre del épico nuevo.
+Continuar el roadmap vigente (épico **TASK-2026-00248**: revisión opcional activada por defecto en A/B/C y Gemini en el pool de S): el Owner escribe **`sigue`** y la sesión aplica la receta de §11. TASK-2026-00245 y TASK-2026-00187 están cerrados; los pilotos reales siguen separados en **TASK-2026-00233**, solo con **`valida`** (§11), y no son una condición de cierre del épico nuevo.
 
 ---
 
@@ -264,30 +264,32 @@ Los CLI del roster leen `AGENTS.md` directamente. El resto de este archivo es el
 
 Solo sesiones del Owner; los ejecutores Tier S lo ignoran (§10).
 
-Cuando el Owner escriba **`sigue`** (también `SIGUE`), no preguntes: aplica esta receta al épico **TASK-2026-00245**. `sigue TASK-2026-000NN` fija un hijo; `sigue TASK-2026-00245` fija explícitamente el épico. Si el identificador es otro grupo, confirma su proyecto y estado antes de tomar sus hijos; un grupo ya `Completed` se confirma como terminado y no dispara trabajo de otro épico. TASK-2026-00187 y TASK-2026-00110 son la base cerrada, no el trabajo pendiente actual.
+Cuando el Owner escriba **`sigue`** (también `SIGUE`), no preguntes: aplica esta receta al épico **TASK-2026-00248**. `sigue TASK-2026-000NN` fija un hijo; `sigue TASK-2026-00248` fija explícitamente el épico. Si el identificador es otro grupo, confirma su proyecto y estado y usa ese grupo como target de toda la receta antes de tomar sus hijos; un grupo ya `Completed` se confirma como terminado y no dispara trabajo de otro épico. TASK-2026-00245, TASK-2026-00187 y TASK-2026-00110 son la base cerrada, no el trabajo pendiente actual.
 
-La descripción y el comentario **«ROADMAP DE AJUSTES FINALES»** de 00245 en ERPNext son la fuente del alcance y del orden. El Owner agrupó el trabajo en tres entregables amplios: departamentos y especialización de empleados; selección de CLI; continuidad tras reinicios y trabajo nocturno. No crear microtickets por CLI, flujo pequeño o prueba: diagnosticar y resolver lo que pertenezca al hijo existente. Una observación registrada es una hipótesis que se debe contrastar, no una orden de modificar código sin diagnóstico.
+La descripción y el comentario **«ROADMAP DE REVISIÓN»** de 00248 en ERPNext son la fuente del alcance y del orden. El Owner agrupó el trabajo en tres entregables amplios: política de revisión por ticket y modo rápido; pool común con Gemini/AGY y OpenCode; integración de la ronda en A/B/C conservando el flujo de S. No crear microtickets por CLI, flujo pequeño o prueba: diagnosticar y resolver lo que pertenezca al hijo existente. Una observación registrada es una hipótesis que se debe contrastar, no una orden de modificar código sin diagnóstico. Para otro grupo explícito, usar su descripción, roadmap e hijos en lugar de los de 00248.
 
-**Entrada nocturna canónica:** `/home/develop/development/Jardal/jardal-automatico-temp/automatico.py` (defecto `--epic TASK-2026-00245`, estado separado por proyecto/epic en `.automatico/`); en el repo no existe scripts/automatico.py.
+**Rumbo de 00248.** A/B/C revisan por defecto con una ronda paralela; `review=off` explícito conserva tier, constructor y gates. S mantiene revisión obligatoria, planificación, dos rondas y arbitraje; Gemini se añade al pool existente. Quorum mínimo de dos informes válidos de familias distintas entre sí y del constructor efectivo; agyd/agyj/agy2 son cuentas de un único slot Gemini. Reutilizar TASK-2026-00246, ya Completed, y los adaptadores existentes. No importar íntegramente `MEJORA_TIER_S.md`, rediseñar el arbitraje o desarrollar balanceo avanzado de cuentas.
 
-**Alcance de `sigue` (orden del Owner, 2026-10-14).** Codificar y verificar los hijos de 00245 con tests simples de lógica, contrato o comunicación y ejecutores simulados. No correr pruebas extensas ni end-to-end con modelos. TASK-2026-00233 sigue fuera de este ciclo; sus pilotos no bloquean el trabajo ni el cierre de 00245.
-- Las próximas ejecuciones consumen esta receta; el registro de un ticket con `autorun=false` no lo lanza. No asumir que existe un runner en una ruta determinada: localizar la entrada canónica antes de cambiar su configuración. La recuperación automática del runtime sigue pendiente hasta verificar el hijo de continuidad; editar esta receta no la implementa.
+**Entrada nocturna canónica:** `/home/develop/development/Jardal/jardal-automatico-temp/automatico.py` (defecto `--epic TASK-2026-00248`, estado separado por proyecto/epic en `.automatico/`). Su prompt pasa `sigue <épico>` explícitamente; `--epic` cambia el target sin retocar esta receta. Los tres reviewers externos conservan su flujo actual mientras se implementa la política del runtime. En el repo no existe scripts/automatico.py.
+
+**Alcance de `sigue` (orden del Owner, 2026-10-14).** Codificar y verificar los hijos de 00248 con tests simples de lógica, contrato o comunicación y ejecutores simulados. No correr pruebas extensas ni end-to-end con modelos. TASK-2026-00233 sigue fuera de este ciclo; sus pilotos no bloquean el trabajo ni el cierre de 00248.
+- Las próximas ejecuciones consumen esta receta; el registro de un ticket con `autorun=false` no lo lanza. No asumir que existe un runner en una ruta determinada: localizar la entrada canónica antes de cambiar su configuración. Actualizar esta receta o el target del script prepara la ejecución, no inicia el ciclo ni implementa sus hijos. La continuidad de TASK-2026-00247 y los motores de TASK-2026-00246 son base ya cerrada que se reutiliza.
 - Si falta una credencial, cuota, autenticación o acción exclusiva del Owner, dejar el recurso, acción y condición de reanudación en el mismo ticket; mantenerlo `Working` y continuar otro hijo independiente. No trasladar esos bloqueos automáticamente a 00233 ni cerrar una aceptación parcial.
 - `Pending Review` solo si todo lo verificable está hecho y falta una aprobación o decisión exclusivamente humana exigida. Una falta técnica o dependencia abierta queda `Working` con motivo. Elegir por cuenta propia las decisiones técnicas rutinarias y reversibles.
 
 1. **Situarse, sin barridos.**
-   - `openceo_get_ticket TASK-2026-00245`, con sus comentarios actuales y dependencias, y releer los hijos identificados allí. Confirmar `project=jardal-openceo` y `parent_task` antes de tomar uno. Incluir `Open`, `Overdue` y `Working` al valorar pendientes; no confundir `execution_status` con el estado de negocio.
+   - `openceo_get_ticket` del épico seleccionado (por defecto `TASK-2026-00248`), con sus comentarios actuales y dependencias, y releer los hijos identificados allí. Confirmar `project=jardal-openceo` y `parent_task` antes de tomar uno. Incluir `Open`, `Overdue` y `Working` al valorar pendientes; no confundir `execution_status` con el estado de negocio.
    - Leer otros tickets solo para comprobar una dependencia o un posible duplicado. Si hace falta buscar, usar `openceo_search_tickets` con `project=jardal-openceo` y consulta dirigida; no listar el backlog entero ni añadir polling para elegir trabajo.
    - El primer párrafo de «Continuar aquí» en `STATUS.md`.
    - `git status`, actualizar las referencias remotas y revisar el log de `main` y `origin/main`, además de los diffs dirigidos que afecten al candidato. Si otra sesión tiene trabajo activo en el checkout, usar un worktree aislado; no cambiarle la rama ni incorporar sus cambios al propio ticket.
-2. **Elegir un ticket.** El indicado por el Owner. Si no hay, continuar el trabajo propio a medias; después seguir el orden recomendado del roadmap: **TASK-2026-00247** (continuidad/reinicio), **TASK-2026-00244** (departamentos/empleados), **TASK-2026-00246** (CLIs, depende de 00244). Verificar las dependencias como `Completed`; el orden recomendado no crea una dependencia artificial entre 00247 y 00244. Un ticket `Working` de otra sesión no se toma ni se duplica: comprobar qué cubre y elegir otro independiente. No deducir que la épica está terminada de un traspaso antiguo.
-   - Si TASK-2026-00245 ya está `Completed` en ERPNext, confirmar su cierre y terminar; no tomar tickets de 00233 ni reabrir 00187.
+2. **Elegir un ticket.** El indicado por el Owner. Si no hay, continuar el trabajo propio a medias dentro del target; después seguir el orden recomendado del roadmap: **TASK-2026-00249** (política on/off), **TASK-2026-00250** (pool Gemini/OpenCode), **TASK-2026-00251** (integración del ciclo, depende de 00249 y 00250). Verificar las dependencias como `Completed`; el orden recomendado no crea una dependencia artificial entre 00249 y 00250. Para otro grupo explícito, elegir únicamente entre sus hijos y dependencias reales. Un ticket `Working` de otra sesión no se toma ni se duplica: comprobar qué cubre y elegir otro independiente. No deducir que la épica está terminada de un traspaso antiguo.
+   - Si el épico seleccionado ya está `Completed` en ERPNext, confirmar su cierre y terminar; no tomar tickets de 00233 ni reabrir 00245 o 00187.
    - Si todos sus hijos están `Completed` o `Cancelled` y el épico sigue abierto, ir al paso 9.
    - Si ningún pendiente puede avanzar, explicar el bloqueo concreto y parar.
 3. **Contexto mínimo.**
    - Descripción y comentarios del ticket.
    - El workfile del épico y el del ticket, si existen.
-   - El rumbo y la restricción de pruebas del épico 00245. El porqué histórico, solo si hace falta: el diseño adjunto a 00187 o su decisión del vault (`decisions/2026-10-11-agentes-por-rol-planner-unico`). No cargar el vault para cambios ordinarios; si es necesario, aplicar el skill y el aislamiento del proyecto.
+   - El rumbo y la restricción de pruebas del épico seleccionado. Para 00248, el contrato aprobado está en su descripción y en sus hijos; los documentos `docs/work/TIER_S_DESIGN_FINAL.md` y `docs/work/MEJORA_TIER_S.md` son contexto, no una orden de adoptar todas sus propuestas. El porqué histórico, solo si hace falta: el diseño adjunto a 00187 o su decisión del vault (`decisions/2026-10-11-agentes-por-rol-planner-unico`). No cargar el vault para cambios ordinarios; si es necesario, aplicar el skill y el aislamiento del proyecto.
    - El contrato normativo: `docs/ARCHITECTURE_REFERENCE_2026.md` §Proactive CEO y la sección «Agentes por rol» cuando exista (+ `openceo-core/objectives/routing_policy.md` y `openceo-core/objectives/routing_policy.d/`, normativa del planner repartida por TASK-2026-00201).
    - Código: búsqueda dirigida + LSP.
 4. **Contrastar la observación antes de corregir.** Aplicar criterio técnico riguroso a cada afirmación del ticket: comprobar el contrato vigente, seguir el flujo completo de productores y consumidores y buscar evidencia que confirme o refute el problema. Las líneas citadas, el diagnóstico y el estado del ticket pueden haberse quedado atrás respecto al código.
@@ -308,26 +310,26 @@ La descripción y el comentario **«ROADMAP DE AJUSTES FINALES»** de 00245 en E
    - Cuando el resultado sea verificado sin cambios de código, registrar ese resultado y su evidencia; no fabricar una rama, merge o restart para aparentar una corrección.
 8. **Seguir o retomar.** Si queda margen, releer el épico/hijos y volver al paso 2. Tras un reinicio o cambio de sesión, releer el ticket activo, checkpoints, artefactos y estado de git antes de actuar: continuar la etapa pendiente, sin duplicar ejecuciones, efectos confirmados o cierres. No repetir un `Completed`, revivir un cancelado ni saltar una espera humana/dependencia. Aplicar únicamente la recuperación que el runtime tenga implementada y verificada; si falta, registrar el impedimento y continuar trabajo independiente. Al terminar, una línea con resultado y siguiente acción.
 9. **Cerrar el épico** cuando no le quede ningún hijo pendiente:
-   - criterios de los tres hijos cumplidos, con evidencia de sus tests simples y los checks obligatorios de §10 en verde; no exigir modelos en vivo, pilotos de 00233 ni la suite completa;
+   - criterios de todos los hijos del target cumplidos (los tres de 00248 por defecto), con evidencia de sus tests simples y los checks obligatorios de §10 en verde; no exigir modelos en vivo, pilotos de 00233 ni la suite completa;
    - `main` igual a `origin/main`; si hubo cambios de servicio, servicio actualizado con status y smoke;
-   - `openceo_transition_ticket` de TASK-2026-00245 a `Completed`, con esa evidencia, y relectura que confirme el estado;
+   - `openceo_transition_ticket` del épico seleccionado a `Completed`, con esa evidencia, y relectura que confirme el estado;
    - un párrafo al inicio de «Continuar aquí».
 
 Al Owner solo se le pide lo que únicamente él puede aportar, según el mandato y las reglas de acceso: gasto nuevo, acción irreversible, replanificación estratégica, cambio de mandato, revisión humana exigida o credenciales/datos propios. Registrar en el ticket actual la acción exacta y continuar trabajo independiente; no inventar aprobaciones ni declarar completo lo bloqueado. Lo demás se decide y se hace.
 
-**Consigna del Owner para TASK-2026-00245 (2026-10-14): solo tests simples de lógica, contrato o comunicación; sin tests complejos/extensos ni end-to-end con modelos.** Esta regla reemplaza para el ciclo actual el permiso anterior de gastar tokens en pruebas de componentes de 00187. Limita la validación, no las invocaciones de los CLI necesarias para implementar el trabajo autorizado.
+**Consigna del Owner para TASK-2026-00248 (2026-10-14): solo tests simples de lógica, contrato o comunicación; sin tests complejos/extensos ni end-to-end con modelos.** Esta regla reemplaza para el ciclo actual el permiso anterior de gastar tokens en pruebas de componentes de 00187. Limita la validación, no las invocaciones de los CLI necesarias para implementar el trabajo autorizado.
 
 Permitido:
 - tests unitarios/de contrato y comunicación pequeños, con mocks, fixtures y ejecutores/CLI simulados;
 - `muse --provider echo`, `help`/`version` u otra comprobación local no generativa, sin invocar modelos;
 - checks obligatorios de §10, `py_compile` y un smoke mínimo del endpoint cuando se despliegue un cambio de servicio.
 
-Fuera de la aceptación de 00245:
+Fuera de la aceptación de 00248:
 - pruebas de componente con modelos reales o validaciones que consuman tokens;
 - objetivos, misiones o ciclos Tier S completos como prueba, ensayos integrados extensos y flujos extremadamente grandes, aunque sean simulados;
 - crear microtickets de validación o exigir una corrida real para cerrar un entregable que se puede verificar con lógica/comunicación simulada.
 
-Los pilotos históricos de TASK-2026-00233, **TASK-2026-00219** y **TASK-2026-00224**, conservan su receta aparte: solo con `valida` y sus dependencias `Completed`. Nunca con `sigue` ni por el ciclo nocturno de 00245; tampoco se presentan como verificación ya realizada.
+Los pilotos históricos de TASK-2026-00233, **TASK-2026-00219** y **TASK-2026-00224**, conservan su receta aparte: solo con `valida` y sus dependencias `Completed`. Nunca con `sigue` ni por el ciclo nocturno de 00248; tampoco se presentan como verificación ya realizada.
 
 **Palabra clave `valida` (sesiones del Owner, con el Owner disponible).** Cuando el Owner escriba **`valida`**, corre las pruebas reales de **TASK-2026-00233**. No preguntes, salvo lo que la propia prueba le pida al Owner.
 1. **Situarse.** `openceo_get_ticket TASK-2026-00233` y sus hijos. Arrancar solo si TASK-2026-00187 está `Completed`, salvo una orden explícita del Owner para una prueba concreta.
