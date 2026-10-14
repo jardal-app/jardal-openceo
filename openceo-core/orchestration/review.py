@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
+from catalog import ENGINE_ACCOUNTS
 from orchestration.findings import (
     Finding,
     VerifiedFinding,
@@ -37,6 +38,10 @@ from orchestration.knowledge import with_preamble
 # Pool
 # ---------------------------------------------------------------------------
 
+class ReviewerConfigError(ValueError):
+    """A review slot entry is misconfigured; the message says why."""
+
+
 @dataclass(frozen=True)
 class ReviewSlot:
     """One ``(cli, model)`` review slot (§7.1)."""
@@ -44,6 +49,10 @@ class ReviewSlot:
     label: str
     family: str
     model: str = ""
+    # Account-selected slots (00250): the logical Gemini slot carries
+    # ``account`` (agyd/agyj/agy2, the account IS the command) instead
+    # of a static command; resolved by :func:`with_resolved_command`.
+    account: str = ""
     command: tuple[str, ...] = ()
     prompt_via: str = "argv"  # "argv" | "stdin"
     env: dict[str, str] = field(default_factory=dict)
@@ -59,6 +68,46 @@ class ReviewSlot:
     timeout_minutes: int = 0
 
 
+#: Providers whose review slots resolve the command from ``account``.
+#: The agy account IS the command (00246: agyd/agyj/agy2); entries for
+#: these providers carry no static command.
+ACCOUNT_COMMAND_PROVIDERS = frozenset({"agy", "gemini"})
+
+
+def with_resolved_command(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy of a pool entry with the executable command. Fail-closed.
+
+    Account-selected slots resolve ``[account]`` (validated against
+    the engine accounts); a static command contradicting the account
+    is an explicit error, never a silent pick. Entries without an
+    account pass through untouched. Single origin for both the
+    selection side (:func:`parse_pool`) and the executor (live
+    ``review:`` roles), so both always agree on the account.
+    """
+    out = dict(spec)
+    account = str(out.get("account") or "").strip()
+    if not account:
+        return out
+    provider = str(out.get("provider") or "").strip().lower()
+    if provider not in ACCOUNT_COMMAND_PROVIDERS:
+        return out
+    known = tuple(ENGINE_ACCOUNTS.get("agy", ()))
+    if account not in known:
+        raise ReviewerConfigError(
+            f"review slot {out.get('label')!r}: unknown agy account "
+            f"{account!r} (known: {', '.join(known)})")
+    command = out.get("command") or []
+    if isinstance(command, str):
+        command = [command]
+    command = [str(token) for token in command]
+    if command and command[0] != account:
+        raise ReviewerConfigError(
+            f"review slot {out.get('label')!r}: command {command[0]!r} "
+            f"contradicts account {account!r}")
+    out["command"] = [account, *command[1:]] if command else [account]
+    return out
+
+
 def parse_pool(raw: Sequence[Mapping[str, Any]] | None) -> list[ReviewSlot]:
     """Parse the global ``reviewers`` list (config_loader ``review``)."""
     slots: list[ReviewSlot] = []
@@ -69,7 +118,8 @@ def parse_pool(raw: Sequence[Mapping[str, Any]] | None) -> list[ReviewSlot]:
         family = str(entry.get("family") or "").strip().lower()
         if not label or not family:
             continue
-        command = entry.get("command") or []
+        resolved = with_resolved_command(entry)
+        command = resolved.get("command") or []
         if isinstance(command, str):
             command = [command]
         try:
@@ -83,6 +133,7 @@ def parse_pool(raw: Sequence[Mapping[str, Any]] | None) -> list[ReviewSlot]:
         slots.append(ReviewSlot(
             label=label, family=family,
             model=str(entry.get("model") or ""),
+            account=str(resolved.get("account") or "").strip(),
             command=tuple(str(token) for token in command),
             prompt_via=str(entry.get("prompt_via") or "argv"),
             env={str(k): str(v)
@@ -333,8 +384,11 @@ def new_outcome(slot: ReviewSlot, attempt: int = 1) -> dict[str, Any]:
 
     ``kind``: ``valid``, ``timeout``, ``malformed``, ``slot_error``,
     ``cooling_down``, ``disabled``, ``write_attempt`` or ``worktree``.
+    ``account``/``model`` keep the per-attempt identity (00250).
     """
-    return {"slot": slot.label, "family": slot.family, "attempt": attempt,
+    return {"slot": slot.label, "family": slot.family,
+            "account": slot.account, "model": slot.model,
+            "attempt": attempt,
             "valid": False, "kind": "", "reason": "", "verdicts": [],
             "elapsed_s": 0.0, "exit_code": None}
 
