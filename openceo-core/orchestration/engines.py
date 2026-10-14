@@ -139,6 +139,8 @@ ENGINE_SPECS: dict[str, EngineSpec] = {
         family="gemini",
         model="",
         effort="",
+        # Empty: the account IS the command (agyd/agyj/agy2);
+        # command_for() resolves it per selection.
         command=(),
         headless_args=(),
         prompt_via="argv",
@@ -153,7 +155,12 @@ class EngineResolutionError(ValueError):
 
 @dataclass(frozen=True)
 class EngineSelection:
-    """Resolved engine + account for one run."""
+    """Resolved engine + account for one run.
+
+    ``via`` names the origin of the engine ("params" when the ticket
+    overrides it, else "card"), not of the account: an account-only
+    override still records ``via="card"`` for a card engine.
+    """
 
     engine: str
     account: str

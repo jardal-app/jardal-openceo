@@ -150,9 +150,26 @@ class OpenCEOGraph:
         self._graph = builder.compile()
 
     async def execute(self, task: dict[str, Any], agent_hint: str | None = None) -> dict[str, Any]:
+        raw_params = task.get("params")
+        if raw_params is not None and not isinstance(raw_params, dict):
+            return {
+                "status": TaskStatus.WAITING.value,
+                "steps": [{
+                    "step": "agent_gate",
+                    "status": "waiting",
+                    "detail": "config: task params must be an object, "
+                              f"got {type(raw_params).__name__}",
+                    "timestamp": datetime.now(timezone.utc),
+                }],
+                "waiting_reason": "config: task params must be an object, "
+                                  f"got {type(raw_params).__name__}",
+                "resume_at": None,
+            }
+        params = raw_params if isinstance(raw_params, dict) else None
+        catalog = self._catalog if self._catalog is not None \
+            else load_catalog()
         gate = resolve_agent_gate(
-            agent_hint, task.get("params"), task.get("coding_tool"),
-            load_catalog())
+            agent_hint, params, task.get("coding_tool"), catalog)
         if not gate.proceed:
             return {
                 "status": TaskStatus.WAITING.value,
@@ -172,12 +189,10 @@ class OpenCEOGraph:
             "project": task.get("project"),
             "title": task["title"],
             "description": task["description"],
-            "params": task.get("params")
-            if isinstance(task.get("params"), dict) else None,
+            "params": params,
             "source": task["source"],
             "source_id": task.get("source_id"),
             "attachments": task.get("attachments", []),
-            "params": task.get("params"),
             "priority": task.get("priority", "medium"),
             "agent_hint": agent_hint,
             "phase": task.get("phase"),
@@ -378,7 +393,9 @@ class OpenCEOGraph:
 
     async def _unsupported_agent_node(self, state: GraphState) -> GraphState:
         selected = str(state.get("selected_agent", "unknown"))
-        entry = load_catalog().agents.get(selected)
+        catalog = self._catalog if self._catalog is not None \
+            else load_catalog()
+        entry = catalog.agents.get(selected)
         if entry is not None and not entry.enabled:
             ticket = f"; see {entry.decided_by_ticket}" \
                 if entry.decided_by_ticket else ""
