@@ -15,6 +15,8 @@ MCP server instead. Anything else fails the smoke test on upgrade.
 
 from __future__ import annotations
 
+from business.links import business_mirror
+
 import copy
 import json
 import logging
@@ -466,7 +468,7 @@ def _provider_servers(settings: Any, badge: str) -> dict[str, Any]:
 
 
 def badge_ticket_for_task(task: Mapping[str, Any]) -> str | None:
-    """ERPNext ticket name for an agent badge, None without a mirror.
+    """Business ticket name for an agent badge, None without a mirror.
 
     Agent badges bind to the business ticket (``TASK-2026-NNNNN``), never
     to the Mongo ``task_id`` uuid: the issuer refuses anything else, and
@@ -474,7 +476,7 @@ def badge_ticket_for_task(task: Mapping[str, Any]) -> str | None:
     """
     params = task.get("params")
     mirrors = params.get("_mirrors") if isinstance(params, dict) else None
-    mirror = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
+    mirror = business_mirror(mirrors)
     name = str(mirror.get("name") or "").strip() \
         if isinstance(mirror, dict) else ""
     return name or None

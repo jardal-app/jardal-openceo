@@ -26,6 +26,8 @@ human patterns only), so parked tickets never queue the owner.
 
 from __future__ import annotations
 
+from business.links import business_mirror
+
 import asyncio
 import logging
 from collections import Counter
@@ -92,7 +94,7 @@ def _erpnext_link_pending(ticket: dict[str, Any]) -> bool:
     mirrors = params.get("_mirrors")
     if not isinstance(mirrors, dict):
         return False
-    mirror = mirrors.get("erpnext")
+    mirror = business_mirror(mirrors)
     if not isinstance(mirror, dict):
         return False
     if mirror.get("pending"):

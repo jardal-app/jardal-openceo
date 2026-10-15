@@ -489,6 +489,9 @@ _ATTACHMENT_FIELDS = [
 class ERPNextTicketAdapter:
     """Superficie semantica de tickets. Envuelve al cliente HTTP."""
 
+    provider = "erpnext"
+    owns_visibility = False
+
     def __init__(self, settings: Settings, *, client: ERPNextClient | None = None) -> None:
         self._settings = settings
         self._client = client or ERPNextClient(settings)

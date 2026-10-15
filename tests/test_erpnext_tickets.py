@@ -616,7 +616,10 @@ class ReconciliationQueryTests(unittest.TestCase):
     def test_solo_mira_tickets_que_ya_intentaron_enlazar(self):
         """No hace backfill: los tickets historicos no se vuelven registros de negocio."""
         query = self._query([])
-        self.assertEqual(query["params._mirrors.erpnext"], {"$exists": True})
+        canonical, legacy = query["$or"]
+        self.assertEqual(canonical["params._mirrors.business"], {"$exists": True})
+        self.assertEqual(legacy["params._mirrors.business"], {"$exists": False})
+        self.assertEqual(legacy["params._mirrors.erpnext"], {"$exists": True})
 
 
 class ReversePathTests(unittest.TestCase):

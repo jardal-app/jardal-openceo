@@ -117,7 +117,8 @@ from orchestration.finance_voice import FinanceVoiceWiring, run_finance_skill
 from orchestration.generic_agent import GenericAgentWiring
 from task_service import TaskService
 from tools.notion import NotionTicketManager
-from tools.erpnext_tickets import ERPNextTicketAdapter
+from business.provider import build_business_work
+from business.webhooks import require_legacy_webhook
 from workflow_service import WorkflowService
 
 logger = logging.getLogger(__name__)
@@ -139,15 +140,10 @@ graph = OpenCEOGraph(
 realtime_hub = RealtimeHub()
 notion_manager = NotionTicketManager(settings) if settings.NOTION_API_TOKEN.strip() else None
 graph._notion = notion_manager  # late-bind after creation
-# Adapter de tickets hacia ERPNext. No es opcional: ERPNext es el registro de negocio de
-# los tickets, asi que construir el cliente siempre. Construirlo NO abre red (el
-# httpx.AsyncClient es perezoso); si falta configuracion se avisa fuerte al arrancar.
-erpnext_adapter = ERPNextTicketAdapter(settings)
-if not erpnext_adapter.is_enabled:
-    logger.error(
-        "ERPNext no esta configurado (%s). La creacion de tickets fallara hasta que lo este.",
-        erpnext_adapter.client.config_error(),
-    )
+business_adapter = build_business_work(settings)
+erpnext_adapter = business_adapter
+if not business_adapter.is_enabled:
+    logger.error("Business provider unavailable: %s", business_adapter.client.config_error())
 project_service = ProjectService(settings=settings, repo=repo, config_loader=config_loader)
 workflow_service = WorkflowService(
     settings=settings,
@@ -337,6 +333,7 @@ async def lifespan(_: FastAPI):
             await stack.enter_async_context(internal_mcp.lifespan())
 
         await repo.connect()
+        await repo.assert_business_authority(business_adapter.provider)
         # Planner policy: say at boot (not at the first planning cycle) if it
         # is missing or would be truncated. Never blocks or breaks startup.
         with suppress(Exception):
@@ -1147,11 +1144,7 @@ async def erpnext_task_webhook(
     No usa sesion de usuario (quien llama es ERPNext): se autentica con el secreto
     compartido `ERPNEXT_WEBHOOK_SECRET`.
     """
-    expected = (settings.ERPNEXT_WEBHOOK_SECRET or "").strip()
-    if not expected:
-        raise HTTPException(status_code=503, detail="ERPNEXT_WEBHOOK_SECRET no esta configurado.")
-    if not x_openceo_secret or not hmac.compare_digest(x_openceo_secret, expected):
-        raise HTTPException(status_code=401, detail="Secreto de webhook invalido.")
+    require_legacy_webhook(settings, business_adapter.provider, x_openceo_secret)
 
     # Frappe manda el documento anidado en `doc`; se acepta tambien plano para poder
     # probar el endpoint a mano y sobrevivir a cambios del formato del webhook.

@@ -14,6 +14,8 @@ Run it from ``openceo-core``::
 
 from __future__ import annotations
 
+from business.links import business_mirror
+
 import argparse
 import asyncio
 import json
@@ -143,7 +145,7 @@ def _ticket_row(doc: Mapping[str, Any]) -> dict[str, Any]:
     params = params if isinstance(params, dict) else {}
     cost = _cost_of(doc)
     return {
-        "ref": ((params.get("_mirrors") or {}).get("erpnext") or {}).get(
+        "ref": business_mirror(params.get("_mirrors")).get(
             "name") or doc.get("task_id"),
         "status": doc.get("status"),
         "agent": doc.get("selected_agent") or params.get("target_agent")
@@ -261,7 +263,7 @@ class MongoTrialReader:
     async def _ticket(self, ref: str) -> dict[str, Any] | None:
         if ref.startswith("TASK-"):
             row = await self._db["tasks"].find_one(
-                {"params._mirrors.erpnext.name": ref})
+                {"$or": [{"params._mirrors.business.name": ref}, {"params._mirrors.business": {"$exists": False}, "params._mirrors.erpnext.name": ref}]})
         else:
             row = await self._db["tasks"].find_one({"task_id": ref})
         return self._clean(row)
@@ -278,7 +280,7 @@ class MongoTrialReader:
         task_id = (ticket or {}).get("task_id") or ""
         params = ((ticket or {}).get("params") or {})
         mirrors = (params.get("_mirrors") or {})
-        mirror = (mirrors.get("erpnext") or {}).get("name") or ""
+        mirror = (business_mirror(mirrors)).get("name") or ""
         children: list[dict[str, Any]] = []
         if objective_id:
             cursor = self._db["tasks"].find({"objective_id": objective_id})
@@ -298,11 +300,7 @@ class MongoTrialReader:
                 {"params.owner_question.origin_task_id": {"$in": origins}})
             questions = [clean async for row in cursor
                          if (clean := self._clean(row)) is not None]
-        tickets = [mirror, task_id, *(((((doc.get("params") or {})
-                                          .get("_mirrors") or {})
-                                         .get("erpnext") or {}).get("name")
-                                        or "")
-                                       for doc in children)]
+        tickets = [mirror, task_id, *(business_mirror((doc.get("params") or {}).get("_mirrors")).get("name") or "" for doc in children)]
         tickets = sorted({name for name in tickets if name})
         denied: list[dict[str, Any]] = []
         if tickets:

@@ -28,6 +28,8 @@ the tier — TASK-2026-00204), :func:`on_ticket_closed`
 
 from __future__ import annotations
 
+from business.links import business_mirror
+
 import asyncio
 import logging
 import re
@@ -318,12 +320,12 @@ def find_duplicate(
 
 
 def erp_group_name(ticket: Mapping[str, Any] | None) -> str:
-    """Business ``TASK-…`` name from the ticket's ERPNext mirror ("" when none)."""
+    """Business ``TASK-…`` name from the ticket's business link ("" when none)."""
     if not isinstance(ticket, Mapping):
         return ""
     params = ticket.get("params")
     mirrors = params.get("_mirrors") if isinstance(params, Mapping) else None
-    mirror = mirrors.get("erpnext") if isinstance(mirrors, Mapping) else None
+    mirror = business_mirror(mirrors)
     if not isinstance(mirror, Mapping):
         return ""
     return str(mirror.get("name") or "").strip()

@@ -98,6 +98,12 @@ class Settings(BaseSettings):
     # de los tickets, asi que un modo que los cree solo en Mongo produciria tickets que el
     # sistema de negocio nunca vera, y la reconciliacion no los recupera. La resiliencia
     # ante un ERPNext caido la da la marca `erpnext_pending`, no un interruptor.
+    BUSINESS_PROVIDER: str = "erpnext"
+    BUSINESS_AUTHORITY_FILE: str = ""
+    JARDAL_ERP_URL: str = ""
+    JARDAL_ERP_SERVICE_TOKEN: str = ""
+    JARDAL_ERP_WORKSPACE_ID: str = ""
+
     ERPNEXT_URL: str = ""
     ERPNEXT_USER: str = ""
     ERPNEXT_API_KEY: str = ""

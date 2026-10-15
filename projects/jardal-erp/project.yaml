@@ -1,0 +1,36 @@
+project:
+  number: 6
+  name: jardal-erp
+  repos:
+    - name: jardal-erp
+      url: git@github-jardal:jardal-app/jardal-erp.git
+      branch_base: main
+      local_path: /home/develop/development/Jardal/jardal-erp
+
+dev:
+  default_provider: muse
+  branch_pattern: "{session_id}-{slug}"
+  auto_push: false
+  auto_merge: false
+  create_pr: true
+  providers:
+    muse:
+      command: ["/home/develop/.local/bin/musej"]
+      cwd: /home/develop/development/Jardal/jardal-erp
+      env: {}
+    codex:
+      command: ["/home/develop/.local/bin/codexf"]
+      cwd: /home/develop/development/Jardal/jardal-erp
+      env: {}
+    claude:
+      command: ["/home/develop/.local/bin/claudej"]
+      cwd: /home/develop/development/Jardal/jardal-erp
+      env: {}
+  gates:
+    - { name: typecheck, cmd: "bun run typecheck", timeout_minutes: 5, required: true }
+  oracle_cmd: "bun test {refs}"
+  oracle_timeout_minutes: 10
+  qa:
+    playwright: skip
+
+notifications: []
