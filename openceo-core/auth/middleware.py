@@ -9,21 +9,23 @@ from auth.jwt import decode_token
 from state import UserDocument
 
 
-async def _revalidate_federated_user(db: Any, user_doc: dict[str, Any], erp_token: str) -> dict[str, Any]:
+async def _revalidate_federated_user(db: Any, user_doc: dict[str, Any], erp_token: str,
+                                     mapped: dict[str, Any] | None = None) -> dict[str, Any]:
     from business.errors import BusinessError
     from settings import get_settings
 
     from auth.erp_identity import JardalERPIdentity
 
-    adapter = JardalERPIdentity(get_settings())
-    try:
-        mapped = await adapter.introspect(erp_token)
-    except BusinessError as exc:
-        if getattr(exc, "status_code", None) in (401, 403):
-            raise HTTPException(status_code=401, detail="Sesión ERP revocada o expirada") from None
-        raise HTTPException(status_code=503, detail="Identidad ERP no disponible") from None
-    finally:
-        await adapter.aclose()
+    if mapped is None:
+        adapter = JardalERPIdentity(get_settings())
+        try:
+            mapped = await adapter.introspect(erp_token)
+        except BusinessError as exc:
+            if getattr(exc, "status_code", None) in (401, 403):
+                raise HTTPException(status_code=401, detail="Sesión ERP revocada o expirada") from None
+            raise HTTPException(status_code=503, detail="Identidad ERP no disponible") from None
+        finally:
+            await adapter.aclose()
     if mapped["external_id"] != (user_doc.get("external_id") or ""):
         raise HTTPException(status_code=401, detail="Sesión ERP no corresponde al usuario")
     from business.personal import bind_request_erp_token
@@ -48,8 +50,18 @@ async def get_current_user(request: Request) -> UserDocument:
     except ValueError:
         raise HTTPException(status_code=503, detail="Proveedor de identidad no válido") from None
     token = request.cookies.get("openceo_session")
+    bearer = ""
     if not token:
+        header = str(request.headers.get("authorization") or "")
+        if header.lower().startswith("bearer ") and header[7:].strip() != "heaven":
+            bearer = header[7:].strip()
+    if not token and not bearer:
         raise HTTPException(status_code=401, detail="No autenticado")
+
+    # Get DB from app state
+    db = request.app.state.auth_db
+    if bearer and not token:
+        return await _user_from_bearer(request, db, bearer, erp_managed)
 
     payload = decode_token(token)
     if not payload:
@@ -62,8 +74,6 @@ async def get_current_user(request: Request) -> UserDocument:
     if not user_id:
         raise HTTPException(status_code=401, detail="Token corrupto")
 
-    # Get DB from app state
-    db = request.app.state.auth_db
     user_doc = db.users.find_one({"user_id": user_id, "is_active": True})
     if not user_doc:
         raise HTTPException(status_code=401, detail="Usuario no encontrado o inactivo")
@@ -74,6 +84,44 @@ async def get_current_user(request: Request) -> UserDocument:
         erp_token = request.cookies.get(ERP_SESSION_COOKIE) or ""
         user_doc = await _revalidate_federated_user(db, user_doc, erp_token)
 
+    user_doc.pop("_id", None)
+    return UserDocument(**user_doc)
+
+
+async def _user_from_bearer(request: Request, db: Any, bearer: str, erp_managed: bool) -> UserDocument:
+    """Header fallback for non-cookie ERP clients. Cookie stays primary."""
+    from business.errors import BusinessError
+    from settings import get_settings
+
+    from auth.erp_identity import JardalERPIdentity
+
+    payload = decode_token(bearer)
+    if payload and payload.get("type") == "access" and payload.get("sub"):
+        if erp_managed:
+            raise HTTPException(status_code=401, detail="Falta prueba de sesión ERP")
+        user_doc = db.users.find_one({"user_id": payload["sub"], "is_active": True})
+        if not user_doc:
+            raise HTTPException(status_code=401, detail="Usuario no encontrado o inactivo")
+        user_doc.pop("_id", None)
+        return UserDocument(**user_doc)
+    if not erp_managed:
+        raise HTTPException(status_code=401, detail="Token inválido o expirado")
+    adapter = JardalERPIdentity(get_settings())
+    try:
+        mapped = await adapter.introspect(bearer)
+    except BusinessError as exc:
+        if getattr(exc, "status_code", None) in (401, 403):
+            raise HTTPException(status_code=401, detail="Sesión ERP revocada o expirada") from None
+        raise HTTPException(status_code=503, detail="Identidad ERP no disponible") from None
+    finally:
+        await adapter.aclose()
+    link = db.identity_map.find_one({"erp_user_id": mapped["external_id"]})
+    if not link:
+        raise HTTPException(status_code=401, detail="Sin vínculo de identidad; canjear primero")
+    user_doc = db.users.find_one({"user_id": link["user_id"], "is_active": True})
+    if not user_doc:
+        raise HTTPException(status_code=401, detail="Usuario no encontrado o inactivo")
+    user_doc = await _revalidate_federated_user(db, user_doc, bearer, mapped)
     user_doc.pop("_id", None)
     return UserDocument(**user_doc)
 

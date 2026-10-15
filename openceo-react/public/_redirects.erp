@@ -1,0 +1,13 @@
+# Cutover redirects: legacy openceo-react -> ERP UI (TASK-2026-00265).
+# INACTIVE. Activate only after step-2 parity (tours, mobile update +
+# signature, deep links, login) by replacing {{ERP_UI}} with the ERP app
+# base URL, renaming this file to _redirects and redeploying the static host.
+/dashboard {{ERP_UI}}/dashboard 302
+/login {{ERP_UI}}/login 302
+/tickets/* {{ERP_UI}}/tickets/:splat 302
+/inbox {{ERP_UI}}/inbox 302
+/review {{ERP_UI}}/review 302
+/personal {{ERP_UI}}/personal 302
+/inicio {{ERP_UI}}/inicio 302
+/admin/* {{ERP_UI}}/admin/:splat 302
+/* {{ERP_UI}}/ 302
