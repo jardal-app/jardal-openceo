@@ -3,8 +3,10 @@
 Mocks and synthetic fixtures only; no live models, no network, no real data.
 """
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import httpx
@@ -522,6 +524,31 @@ def test_publish_mapping_and_provider_gating():
             assert (await live.event_store.get_outbox(entry["event_id"]))["state"] == "sent"
             assert entry["payload"]["business_reference"] == "TASK-2026-99999"
             assert entry["aggregate_id"] == "TASK-2026-99999"
+        finally:
+            await client.aclose()
+    asyncio.run(run())
+
+
+def test_outbound_envelope_carries_contract_routing():
+    async def run():
+        repo = FakeRepo()
+        repo.tasks["exec-1"] = linked_task()
+        seen: dict[str, Any] = {}
+
+        def handle(request):
+            seen.update(json.loads(request.content.decode()))
+            return httpx.Response(200, json={"ok": True})
+
+        client = JardalERPClient(settings(), transport=httpx.MockTransport(handle))
+        try:
+            live = make_service(repo, SimpleNamespace(provider="jardal_erp", is_enabled=True, client=client))
+            entry = await live._publish_execution_event("execution.started", await repo.get_task("exec-1"))
+            assert entry["workspace_id"] == "synthetic-workspace"
+            assert entry["project_key"] == "contract-test"
+            assert entry["actor"] == {"kind": "agent", "id": "openceo-runtime"}
+            assert seen["workspace_id"] == "synthetic-workspace"
+            assert seen["project_key"] == "contract-test"
+            assert seen["actor"] == {"kind": "agent", "id": "openceo-runtime"}
         finally:
             await client.aclose()
     asyncio.run(run())

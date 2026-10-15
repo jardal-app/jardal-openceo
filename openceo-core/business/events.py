@@ -110,7 +110,9 @@ def decide_inbound(entry: dict[str, Any] | None, cursor_version: int | None,
 
 def build_outbound_event(*, type: str, aggregate_id: str, aggregate_version: int,
                          payload: dict[str, Any], business_reference: str = "",
-                         correlation_id: str = "", causation_id: str = "") -> dict[str, Any]:
+                         correlation_id: str = "", causation_id: str = "",
+                         workspace_id: str = "", project_key: str = "",
+                         actor: dict[str, Any] | None = None) -> dict[str, Any]:
     if type not in OUTBOUND_TYPES:
         raise BusinessValidationError(f"Tipo de evento saliente inválido: {type}.", status_code=400)
     if not aggregate_id or aggregate_version < 0:
@@ -123,11 +125,14 @@ def build_outbound_event(*, type: str, aggregate_id: str, aggregate_version: int
         "schema_version": 1,
         "type": type,
         "origin": "openceo-core",
+        "workspace_id": workspace_id,
+        "project_key": project_key,
         "aggregate_id": aggregate_id,
         "aggregate_version": aggregate_version,
         "occurred_at": datetime.now(timezone.utc).isoformat(),
         "correlation_id": correlation_id or uuid.uuid4().hex,
         "causation_id": causation_id,
+        "actor": dict(actor) if actor else {"kind": "agent", "id": "openceo-runtime"},
         "payload": body,
         "state": "pending",
         "attempts": 0,
@@ -265,8 +270,9 @@ class MongoEventStore:
 async def deliver_outbound(client: Any, entry: dict[str, Any]) -> dict[str, Any]:
     """POST one outbox entry. Retries reuse the same event_id key."""
     body = {k: entry[k] for k in (
-        "event_id", "schema_version", "type", "origin", "aggregate_id",
-        "aggregate_version", "occurred_at", "correlation_id", "causation_id", "payload",
+        "event_id", "schema_version", "type", "origin", "workspace_id", "project_key",
+        "aggregate_id", "aggregate_version", "occurred_at", "correlation_id", "causation_id",
+        "actor", "payload",
     ) if k in entry}
     try:
         await client.request("POST", "/api/v1/integrations/openceo/events",

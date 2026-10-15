@@ -2289,6 +2289,8 @@ class TaskService:
                 type=type, aggregate_id=name or str(task.get("task_id") or ""),
                 aggregate_version=int(datetime.now(timezone.utc).timestamp() * 1000),
                 payload=payload, business_reference=name, causation_id=causation_id,
+                workspace_id=str(getattr(self._settings, "JARDAL_ERP_WORKSPACE_ID", "") or ""),
+                project_key=str(task.get("project") or ""),
             )
             store = self.event_store
             await store.put_outbox(entry)
