@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from business.links import assert_link_provider, business_mirror
 from business.errors import BusinessVersionConflict
+from business.events import MemoryEventStore, build_outbound_event, drain_outbox, replay_outbox_entry, reset_stuck_inbox
 
 import asyncio
 import hashlib
@@ -960,6 +961,9 @@ class TaskService:
                 return
             else:
                 await self._record_status_outcome(item, pushed=True)
+                push_type = self._push_event_type(item.get("status"), task)
+                if push_type is not None:
+                    await self._publish_execution_event(push_type, task)
                 self._enqueue_visibility(
                     str(item.get("task_id") or "") or None,
                     str(item.get("name") or ""),
@@ -1826,10 +1830,11 @@ class TaskService:
             # Una cancelacion del negocio no se reanuda nunca: se limpia el despertador.
             updates["resume_at"] = None
             updates["waiting_reason"] = None
+            origin_label = "Jardal ERP" if source_provider == "jardal_erp" else "ERPNext"
             updates["error"] = (
-                "El ticket fue eliminado en ERPNext."
+                f"El ticket fue eliminado en {origin_label}."
                 if deleted
-                else "El ticket fue cancelado en ERPNext."
+                else f"El ticket fue cancelado en {origin_label}."
             )
 
         updated = await self.patch_task(task["task_id"], updates)
@@ -1859,7 +1864,7 @@ class TaskService:
                 result["owner_answer"] = await self._continue_answered_question(
                     str(task.get("task_id") or ""),
                     approve=target == TaskStatus.COMPLETED.value,
-                    actor_id="erpnext-desk",
+                    actor_id=f"{source_provider}-desk",
                 )
             except Exception as exc:
                 logger.warning(
@@ -1935,6 +1940,411 @@ class TaskService:
             TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value,
         ):
             self._enqueue_visibility(exec_id, name, "webhook:manual")
+
+    # --- Puente de eventos ERP (TASK-2026-00262) -------------------------------
+    #
+    # Decisiones y cambios de negocio llegan por webhook con envelope de
+    # contrato; ejecución y evidencia salen por outbox durable. Sin polling
+    # global: drains acotados y replays dirigidos únicamente.
+
+    @property
+    def event_store(self) -> Any:
+        store = getattr(self, "_event_store", None)
+        if store is None:
+            db = getattr(getattr(self, "_repo", None), "db", None)
+            if db is not None:
+                from business.events import MongoEventStore
+
+                store = MongoEventStore(db)
+                self._event_store = store
+        return store or MemoryEventStore()
+
+    async def _resolve_erp_task(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        repo = getattr(self, "_repo", None)
+        if repo is None:
+            return None
+        exec_id = str(payload.get("execution_task_id") or "").strip()
+        if exec_id:
+            try:
+                task = await repo.get_task(exec_id)
+            except Exception:
+                task = None
+            if task:
+                return task
+        ref = str(payload.get("openceo_ref") or "").strip()
+        if ref:
+            try:
+                task = await self.find_task_for_business_ref(ref=ref)
+            except Exception:
+                task = None
+            if task:
+                return task
+        name = str(payload.get("business_reference") or "").strip()
+        if name:
+            try:
+                return await repo.find_task_by_business_name(name)
+            except Exception:
+                return None
+        return None
+
+    async def apply_erp_event(self, event: dict[str, Any], *, store: Any = None) -> dict[str, Any]:
+        """Route a validated inbound ERP event. Effects are idempotent."""
+        if store is not None:
+            self._event_store = store
+        kind = str(event.get("type") or "")
+        if kind == "approval.decision":
+            return await self._apply_erp_decision(event)
+        if kind == "task.status_changed":
+            return await self._apply_erp_status(event)
+        if kind == "execution.requested":
+            return await self._apply_erp_execution_request(event)
+        if kind == "task.progress_changed":
+            return await self._apply_erp_progress(event)
+        return {"ok": True, "status": "ignored", "reason": "unknown_type"}
+
+    def _erp_decision_books(self, task: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        params = self._task_params(task)
+        approvals = params.get("_erp_approvals")
+        decisions = params.get("_erp_decisions")
+        return (
+            dict(approvals) if isinstance(approvals, dict) else {},
+            dict(decisions) if isinstance(decisions, dict) else {},
+        )
+
+    async def register_erp_approval(self, task_id: str, approval: dict[str, Any]) -> None:
+        """Record an approval Core requested, so only its decision applies."""
+        repo = getattr(self, "_repo", None)
+        if repo is None:
+            return
+        task = await repo.get_task(str(task_id or ""))
+        if not task:
+            return
+        approvals, _ = self._erp_decision_books(task)
+        approvals[str(approval.get("id") or "")] = {
+            "version": approval.get("version", 0),
+            "status": approval.get("status", "pending"),
+            "expires_at": approval.get("expires_at"),
+        }
+        params = self._task_params(task)
+        params["_erp_approvals"] = approvals
+        await self.patch_task(str(task_id or ""), {"params": params})
+
+    async def _apply_erp_decision(self, event: dict[str, Any]) -> dict[str, Any]:
+        payload = event.get("payload") or {}
+        approval_id = str(payload.get("approval_id") or "").strip()
+        decision_id = str(payload.get("decision_id") or "").strip()
+        verdict = str(payload.get("verdict") or payload.get("decision") or "").strip().lower()
+        if not approval_id or not decision_id or verdict not in {"approved", "denied"}:
+            return {"ok": False, "status": "invalid_decision"}
+        task = await self._resolve_erp_task(payload)
+        if task is None:
+            return {"ok": False, "status": "not_found"}
+        assert_link_provider(task, "jardal_erp")
+        locks = getattr(self, "_erp_decision_locks", None)
+        if locks is None:
+            locks = {}
+            self._erp_decision_locks = locks
+        key = str(task.get("task_id") or "")
+        lock = locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[key] = lock
+        async with lock:
+            # Decisions bind by referenced execution, whether Core requested
+            # the approval or ERP policy created it; exact-once per decision.
+            fresh = await getattr(self, "_repo").get_task(key) or task
+            approvals, decisions = self._erp_decision_books(fresh)
+            if decision_id in decisions:
+                return {"ok": True, "status": "duplicate", "task_id": key}
+            known = approvals.get(approval_id)
+            known = known if isinstance(known, dict) else {}
+            expires_at = payload.get("expires_at") or known.get("expires_at")
+            if isinstance(expires_at, str) and expires_at.strip():
+                try:
+                    moment = datetime.fromisoformat(expires_at.strip().replace("Z", "+00:00"))
+                    if moment.tzinfo is None:
+                        moment = moment.replace(tzinfo=timezone.utc)
+                    if moment <= datetime.now(timezone.utc):
+                        return {"ok": False, "status": "expired", "task_id": key}
+                except ValueError:
+                    return {"ok": False, "status": "invalid_decision", "task_id": key}
+            try:
+                current_version = int(known.get("version", 0) or 0)
+                decision_version = int(payload.get("version", current_version) or 0)
+            except (TypeError, ValueError):
+                return {"ok": False, "status": "invalid_decision", "task_id": key}
+            if decision_version < current_version:
+                return {"ok": False, "status": "superseded", "task_id": key}
+            comment = " ".join(str(payload.get("comment") or payload.get("reason") or "").split())[:2000]
+            result = await self.apply_owner_decision(
+                key,
+                approve=verdict == "approved",
+                actor_id=f"erp:{event.get('actor', {}).get('id', 'unknown')}",
+                comment=comment,
+            )
+            if not result.get("applied"):
+                return {"ok": False, "status": "not_answerable", "task_id": key,
+                        "reason": result.get("reason"), "pending": True}
+            params = self._task_params(fresh)
+            books = dict(params.get("_erp_decisions") or {})
+            books[decision_id] = {"verdict": verdict, "approval_id": approval_id,
+                                  "applied_at": datetime.now(timezone.utc).isoformat()}
+            params["_erp_decisions"] = books
+            await self.patch_task(key, {"params": params})
+            return {"ok": True, "status": "applied", "task_id": key,
+                    "route": result.get("route")}
+
+    async def _execution_close_gated(self, task: dict[str, Any]) -> str | None:
+        """Gate reasons that keep an execution open despite a business close."""
+        if task.get("qa_review_required") and str(task.get("qa_review_state") or "") in {
+            "pending", "PENDING", "changes_requested", "CHANGES_REQUESTED",
+        }:
+            return "qa_pending"
+        if is_owner_question(task) and str(task.get("status") or "") == TaskStatus.WAITING.value:
+            return "owner_question_open"
+        if str(task.get("phase") or "") == ESCALATION_PHASE and str(task.get("status") or "") == TaskStatus.WAITING.value:
+            return "escalation_open"
+        if task_needs_human_review(task):
+            return "human_review_open"
+        try:
+            run = await getattr(self, "_repo").latest_workflow_run_for_task(str(task.get("task_id") or ""))
+        except Exception:
+            run = None
+        if run and str(run.get("status") or "") == WorkflowRunStatus.BLOCKED_HUMAN.value:
+            return "blocked_run_open"
+        for entry in task.get("blocked_by") or []:
+            raw = str(entry or "").strip()
+            if not raw or raw.upper().startswith("TASK-"):
+                continue
+            try:
+                blocker = await getattr(self, "_repo").get_task(raw)
+            except Exception:
+                blocker = None
+            if blocker and str(blocker.get("status") or "") not in {
+                TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value,
+            }:
+                return "dependency_open"
+        return None
+
+    async def _apply_erp_status(self, event: dict[str, Any]) -> dict[str, Any]:
+        payload = event.get("payload") or {}
+        task = await self._resolve_erp_task(payload)
+        if task is None:
+            name = str(payload.get("business_reference") or "").strip()
+            if name:
+                self._enqueue_visibility(None, name, "erp:untracked")
+            return {"ok": False, "status": "not_found"}
+        assert_link_provider(task, "jardal_erp")
+        business_status = str(payload.get("business_status") or payload.get("status") or "").strip()
+        deleted = payload.get("deleted") is True
+        if business_status == "Completed" and not deleted:
+            gate = await self._execution_close_gated(task)
+            if gate is not None:
+                mirror = {
+                    "business_status": business_status,
+                    "business_synced_at": datetime.now(timezone.utc).isoformat(),
+                }
+                await self.patch_task(str(task.get("task_id") or ""), {
+                    "params": self._merge_erpnext_mirror_params(self._task_params(task), mirror),
+                })
+                self._enqueue_visibility(
+                    str(task.get("task_id") or "") or None, self._webhook_name(task), "erp:gated")
+                return {"ok": True, "status": "gated", "task_id": task.get("task_id"), "gate": gate}
+        return await self.apply_business_status(
+            task_id=str(task.get("task_id") or ""),
+            ref=None,
+            business_status=business_status or None,
+            deleted=deleted,
+            parent_task=payload.get("parent_task", _WEBHOOK_PARENT_UNSET),
+            business_name=str(payload.get("business_reference") or "") or None,
+            source_provider="jardal_erp",
+        )
+
+    async def _apply_erp_execution_request(self, event: dict[str, Any]) -> dict[str, Any]:
+        payload = event.get("payload") or {}
+        order_id = str(payload.get("order_id") or "").strip()
+        if not order_id or len(order_id) > 128:
+            return {"ok": False, "status": "invalid_order"}
+        assignees = payload.get("assigned_to", payload.get("assignees", []))
+        if isinstance(assignees, str):
+            assignees = [assignees]
+        wanted = str(getattr(getattr(self, "_settings", None), "JARDAL_ERP_OPENCEO_USER",
+                             "openceo@jardal.app") or "").strip().lower()
+        if not any(str(entry or "").strip().lower() == wanted for entry in (assignees or [])):
+            return {"ok": True, "status": "ignored", "reason": "not_assigned_to_openceo"}
+        repo = getattr(self, "_repo", None)
+        if repo is None:
+            return {"ok": False, "status": "no_repo"}
+        source_id = f"jardal-erp:execution:{order_id}"
+        try:
+            existing = await repo.find_task_by_source(TaskSource.API.value, source_id)
+        except Exception:
+            existing = None
+        if existing:
+            return {"ok": True, "status": "already_adopted", "task_id": existing.get("task_id")}
+        name = str(payload.get("business_reference") or "").strip()
+        if not name:
+            return {"ok": False, "status": "invalid_order"}
+        request = TaskCreateRequest(
+            source=TaskSource.API,
+            source_id=source_id,
+            title=str(payload.get("title") or f"Orden ERP {name}").strip()[:300],
+            description=str(payload.get("reason") or payload.get("description") or "").strip()[:4000],
+            autorun=bool(payload.get("autorun", True)),
+            params={"_erp_order": {"order_id": order_id, "business_reference": name}},
+        )
+        doc = make_task_document(request)
+        applier = getattr(self, "_apply_default_phase_workflow_to_document", None)
+        if callable(applier):
+            await applier(doc)
+        if doc.ticket_number is None:
+            doc.ticket_number = await repo.get_next_ticket_number()
+        mirror = {"provider": "jardal_erp", "name": name,
+                  "business_status": str(payload.get("business_status") or "Open"),
+                  "business_synced_at": datetime.now(timezone.utc).isoformat(),
+                  "status_pushed": str(doc.status.value if hasattr(doc.status, "value") else doc.status or "")}
+        doc.params = self._merge_erpnext_mirror_params(doc.params, mirror)
+        try:
+            created = await repo.create_task(doc.model_dump(mode="python"))
+        except DuplicateKeyError:
+            existing = await repo.find_task_by_source(TaskSource.API.value, source_id)
+            if existing is None:
+                raise
+            return {"ok": True, "status": "already_adopted", "task_id": existing.get("task_id")}
+        self._wake_dispatcher()
+        created_task = dict(created)
+        created_task.setdefault("status", str(doc.status.value if hasattr(doc.status, "value") else doc.status or ""))
+        await self._publish_execution_event("execution.accepted", created_task,
+                                            causation_id=event.get("event_id", ""))
+        return {"ok": True, "status": "adopted", "task_id": created.get("task_id")}
+
+    async def _apply_erp_progress(self, event: dict[str, Any]) -> dict[str, Any]:
+        payload = event.get("payload") or {}
+        task = await self._resolve_erp_task(payload)
+        if task is None:
+            return {"ok": False, "status": "not_found"}
+        assert_link_provider(task, "jardal_erp")
+        try:
+            progress = float(payload.get("progress", -1))
+        except (TypeError, ValueError):
+            return {"ok": False, "status": "invalid_progress", "task_id": task.get("task_id")}
+        if not 0.0 <= progress <= 100.0:
+            return {"ok": False, "status": "invalid_progress", "task_id": task.get("task_id")}
+        rollup = str(getattr(getattr(self, "_settings", None), "ROLLUP_PROVIDER", "core") or "core").strip()
+        mirror = {"business_synced_at": datetime.now(timezone.utc).isoformat()}
+        if rollup == "erp":
+            mirror["business_progress"] = round(progress, 2)
+        else:
+            mirror["observed_business_progress"] = round(progress, 2)
+        await self.patch_task(str(task.get("task_id") or ""), {
+            "params": self._merge_erpnext_mirror_params(self._task_params(task), mirror),
+        })
+        self._enqueue_visibility(
+            str(task.get("task_id") or "") or None, self._webhook_name(task), "erp:progress")
+        return {"ok": True, "status": "recorded" if rollup == "erp" else "observed",
+                "task_id": task.get("task_id")}
+
+    def _push_event_type(self, status: Any, task: dict[str, Any] | None) -> str | None:
+        value = str(status or "")
+        if value == TaskStatus.IN_PROGRESS.value:
+            return "execution.started"
+        if value in {TaskStatus.COMPLETED.value, TaskStatus.FAILED.value,
+                     TaskStatus.CANCELLED.value}:
+            return "execution.finished"
+        if value == TaskStatus.WAITING.value:
+            if task is not None and task_needs_human_review(task):
+                return "execution.human_needed"
+            return "execution.paused"
+        return None
+
+    async def _publish_execution_event(
+        self, type: str, task: dict[str, Any] | None, *,
+        extra: dict[str, Any] | None = None, causation_id: str = "",
+    ) -> dict[str, Any] | None:
+        """Build, persist and deliver one execution event. Never raises."""
+        try:
+            adapter = getattr(self, "_erpnext", None)
+            if adapter is None or getattr(adapter, "provider", "erpnext") != "jardal_erp":
+                return None
+            if not isinstance(task, dict) or not task.get("task_id"):
+                return None
+            mirror = business_mirror(self._task_params(task).get("_mirrors"))
+            name = str(mirror.get("name") or "").strip()
+            payload = {
+                "business_reference": name,
+                "execution_task_id": str(task.get("task_id") or ""),
+                "ticket_number": task.get("ticket_number"),
+                "status": str(task.get("status") or ""),
+                "started_at": str(task.get("started_at") or "") or None,
+                "completed_at": str(task.get("completed_at") or "") or None,
+                "summary": str(task.get("last_response_summary") or "")[:500] or None,
+                "waiting_reason": str(task.get("waiting_reason") or "")[:300] or None,
+                "qa_required": bool(task.get("qa_review_required")),
+                "qa_state": str(task.get("qa_review_state") or "") or None,
+            }
+            payload.update(extra or {})
+            entry = build_outbound_event(
+                type=type, aggregate_id=name or str(task.get("task_id") or ""),
+                aggregate_version=int(datetime.now(timezone.utc).timestamp() * 1000),
+                payload=payload, business_reference=name, causation_id=causation_id,
+            )
+            store = self.event_store
+            await store.put_outbox(entry)
+            client = getattr(adapter, "client", None)
+            if client is None:
+                await store.update_outbox(entry["event_id"], {"state": "failed", "attempts": 1,
+                                                              "error": "no_client"})
+                return entry
+            from business.events import deliver_outbound
+
+            result = await deliver_outbound(client, entry)
+            if result["delivered"]:
+                await store.update_outbox(entry["event_id"], {"state": "sent", "attempts": 1,
+                                                              "error": None})
+            else:
+                await store.update_outbox(entry["event_id"], {
+                    "state": "retry" if result["outcome"] == "retry" else "failed",
+                    "attempts": 1, "error": result.get("error")})
+            return entry
+        except Exception:
+            logger.warning("No se pudo publicar evento de ejecución", exc_info=True)
+            return None
+
+    async def reset_stuck_erp_inbox(self, limit: int = 50) -> dict[str, Any]:
+        """Bounded reset of inbox rows stuck in processing. Never raises."""
+        try:
+            return await reset_stuck_inbox(self.event_store, limit)
+        except Exception:
+            logger.warning("No se pudo resetear el inbox ERP", exc_info=True)
+            return {"reset": 0, "error": True}
+
+    async def drain_erp_outbox_startup(self, limit: int = 50) -> dict[str, Any]:
+        """Bounded recovery drain. Never raises, never sweeps tickets."""
+        try:
+            adapter = getattr(self, "_erpnext", None)
+            if adapter is None or getattr(adapter, "provider", "erpnext") != "jardal_erp":
+                return {"sent": 0, "retried": 0, "failed": 0, "skipped": True}
+            client = getattr(adapter, "client", None)
+            if client is None:
+                return {"sent": 0, "retried": 0, "failed": 0, "skipped": True}
+            return await drain_outbox(self.event_store, client, limit)
+        except Exception:
+            logger.warning("No se pudo drenar el outbox ERP", exc_info=True)
+            return {"sent": 0, "retried": 0, "failed": 0, "error": True}
+
+    async def replay_erp_outbox_entry(self, event_id: str) -> dict[str, Any]:
+        """Directed replay of one outbox entry by id. Never raises."""
+        try:
+            adapter = getattr(self, "_erpnext", None)
+            if adapter is None or getattr(adapter, "provider", "erpnext") != "jardal_erp":
+                return {"replayed": False, "reason": "provider_inactive"}
+            client = getattr(adapter, "client", None)
+            if client is None:
+                return {"replayed": False, "reason": "no_client"}
+            return await replay_outbox_entry(self.event_store, client, event_id)
+        except Exception:
+            logger.warning("No se pudo reenviar evento ERP %s", event_id, exc_info=True)
+            return {"replayed": False, "reason": "error"}
 
     # --- Transicion explicita de estado (TASK-2026-00132) --------------------
     #

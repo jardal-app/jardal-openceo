@@ -107,6 +107,12 @@ class Settings(BaseSettings):
     # El cambio exige config ERP completa + manifiesto de autoridad listo (266);
     # nunca deja APIs sin autenticación ni convierte ERP-admin en acceso host.
     IDENTITY_PROVIDER: str = "local"
+    # Eventos ERP (00262): secreto del webhook entrante, usuario OpenCEO para
+    # adopción por asignación (orden 00156) y autoridad de rollup ("core"
+    # hasta verificar el cálculo ERP; "erp" solo tras ese corte).
+    JARDAL_ERP_WEBHOOK_SECRET: str = ""
+    JARDAL_ERP_OPENCEO_USER: str = "openceo@jardal.app"
+    ROLLUP_PROVIDER: str = "core"
 
     ERPNEXT_URL: str = ""
     ERPNEXT_USER: str = ""
