@@ -386,6 +386,10 @@ class UserDocument(BaseModel):
     last_login_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+    # Federación ERP (00261): "local" por defecto; federados no guardan hash.
+    auth_provider: str = "local"
+    external_id: str | None = None
+    auth_version: int = 0
 
 
 class LoginRequest(BaseModel):

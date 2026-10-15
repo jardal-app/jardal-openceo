@@ -103,6 +103,10 @@ class Settings(BaseSettings):
     JARDAL_ERP_URL: str = ""
     JARDAL_ERP_SERVICE_TOKEN: str = ""
     JARDAL_ERP_WORKSPACE_ID: str = ""
+    # Directorio humano: "local" (Mongo, defecto) o "jardal_erp" (federado).
+    # El cambio exige config ERP completa + manifiesto de autoridad listo (266);
+    # nunca deja APIs sin autenticación ni convierte ERP-admin en acceso host.
+    IDENTITY_PROVIDER: str = "local"
 
     ERPNEXT_URL: str = ""
     ERPNEXT_USER: str = ""
