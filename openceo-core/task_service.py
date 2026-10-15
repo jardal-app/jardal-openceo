@@ -964,6 +964,7 @@ class TaskService:
                 push_type = self._push_event_type(item.get("status"), task)
                 if push_type is not None:
                     await self._publish_execution_event(push_type, task)
+                await self._publish_work_interval(task)
                 self._enqueue_visibility(
                     str(item.get("task_id") or "") or None,
                     str(item.get("name") or ""),
@@ -2260,6 +2261,7 @@ class TaskService:
     async def _publish_execution_event(
         self, type: str, task: dict[str, Any] | None, *,
         extra: dict[str, Any] | None = None, causation_id: str = "",
+        event_id: str = "",
     ) -> dict[str, Any] | None:
         """Build, persist and deliver one execution event. Never raises."""
         try:
@@ -2291,6 +2293,7 @@ class TaskService:
                 payload=payload, business_reference=name, causation_id=causation_id,
                 workspace_id=str(getattr(self._settings, "JARDAL_ERP_WORKSPACE_ID", "") or ""),
                 project_key=str(task.get("project") or ""),
+                event_id=event_id,
             )
             store = self.event_store
             await store.put_outbox(entry)
@@ -2312,6 +2315,44 @@ class TaskService:
             return entry
         except Exception:
             logger.warning("No se pudo publicar evento de ejecución", exc_info=True)
+            return None
+
+    async def _publish_work_interval(self, task: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Report one closed work interval to the ERP. Never raises.
+
+        Fires on a pushed terminal execution status when the task has a real
+        start. The event id is deterministic per interval, so a repeated push
+        redelivers the same event instead of double-counting time.
+        """
+        try:
+            if not isinstance(task, dict):
+                return None
+            if str(task.get("status") or "") not in {
+                TaskStatus.COMPLETED.value, TaskStatus.FAILED.value, TaskStatus.CANCELLED.value,
+            }:
+                return None
+            started = task.get("started_at")
+            if started is None or started == "":
+                return None
+            mirror = business_mirror(self._task_params(task).get("_mirrors"))
+            name = str(mirror.get("name") or "").strip()
+            if not name:
+                return None
+            started_iso = started.isoformat() if isinstance(started, datetime) else str(started)
+            ended = task.get("completed_at") or datetime.now(timezone.utc)
+            ended_iso = ended.isoformat() if isinstance(ended, datetime) else str(ended)
+            event_id = hashlib.sha256(
+                f"work-interval:{task.get('task_id')}:{ended_iso}".encode()
+            ).hexdigest()
+            return await self._publish_execution_event(
+                "work_interval.recorded", task, event_id=event_id, extra={
+                    "ticket_id": name,
+                    "started_at": started_iso,
+                    "ended_at": ended_iso,
+                },
+            )
+        except Exception:
+            logger.warning("No se pudo publicar el intervalo de trabajo", exc_info=True)
             return None
 
     async def reset_stuck_erp_inbox(self, limit: int = 50) -> dict[str, Any]:

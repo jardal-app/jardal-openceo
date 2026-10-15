@@ -552,3 +552,69 @@ def test_outbound_envelope_carries_contract_routing():
         finally:
             await client.aclose()
     asyncio.run(run())
+
+
+def closed_task(**changes):
+    base = linked_task(
+        status=TaskStatus.COMPLETED.value,
+        started_at=datetime(2026, 10, 15, 14, 0, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 10, 15, 15, 30, tzinfo=timezone.utc),
+    )
+    base.update(changes)
+    return base
+
+
+def test_work_interval_emitted_with_erp_contract_fields():
+    async def run():
+        repo = FakeRepo()
+        repo.tasks["exec-1"] = closed_task()
+        service = make_service(repo, SimpleNamespace(provider="jardal_erp", is_enabled=True, client=None))
+        entry = await service._publish_work_interval(await repo.get_task("exec-1"))
+        assert entry is not None
+        assert entry["type"] == "work_interval.recorded"
+        assert entry["aggregate_id"] == "TASK-2026-99999"
+        assert entry["payload"]["ticket_id"] == "TASK-2026-99999"
+        assert entry["payload"]["started_at"] == "2026-10-15T14:00:00+00:00"
+        assert entry["payload"]["ended_at"] == "2026-10-15T15:30:00+00:00"
+        assert (await service.event_store.get_outbox(entry["event_id"])) is not None
+    asyncio.run(run())
+
+
+def test_work_interval_event_id_is_stable_per_interval():
+    async def run():
+        repo = FakeRepo()
+        repo.tasks["exec-1"] = closed_task()
+        service = make_service(repo, SimpleNamespace(provider="jardal_erp", is_enabled=True, client=None))
+        first = await service._publish_work_interval(await repo.get_task("exec-1"))
+        second = await service._publish_work_interval(await repo.get_task("exec-1"))
+        assert first["event_id"] == second["event_id"]
+        assert len(service.event_store.outbox) == 1
+    asyncio.run(run())
+
+
+def test_work_interval_skipped_without_start_name_or_terminal_status():
+    async def run():
+        repo = FakeRepo()
+        service = make_service(repo, SimpleNamespace(provider="jardal_erp", is_enabled=True, client=None))
+        repo.tasks["exec-1"] = closed_task(started_at=None)
+        assert await service._publish_work_interval(await repo.get_task("exec-1")) is None
+        repo.tasks["exec-1"] = closed_task(status=TaskStatus.IN_PROGRESS.value)
+        assert await service._publish_work_interval(await repo.get_task("exec-1")) is None
+        nameless = closed_task()
+        nameless["params"] = {"_mirrors": {"business": {"provider": "jardal_erp"}}}
+        repo.tasks["exec-1"] = nameless
+        assert await service._publish_work_interval(await repo.get_task("exec-1")) is None
+        assert service.event_store.outbox == {}
+    asyncio.run(run())
+
+
+def test_build_outbound_event_accepts_work_interval_with_explicit_id():
+    entry = build_outbound_event(
+        type="work_interval.recorded", aggregate_id="TASK-2026-99999",
+        aggregate_version=1, payload={"ticket_id": "TASK-2026-99999"}, event_id="fixed-id",
+    )
+    assert entry["event_id"] == "fixed-id"
+    assert build_outbound_event(
+        type="work_interval.recorded", aggregate_id="TASK-2026-99999",
+        aggregate_version=1, payload={},
+    )["event_id"] != "fixed-id"

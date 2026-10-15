@@ -33,6 +33,7 @@ OUTBOUND_TYPES = frozenset({
     "execution.finished",
     "execution.evidence",
     "execution.human_needed",
+    "work_interval.recorded",
 })
 
 
@@ -112,7 +113,8 @@ def build_outbound_event(*, type: str, aggregate_id: str, aggregate_version: int
                          payload: dict[str, Any], business_reference: str = "",
                          correlation_id: str = "", causation_id: str = "",
                          workspace_id: str = "", project_key: str = "",
-                         actor: dict[str, Any] | None = None) -> dict[str, Any]:
+                         actor: dict[str, Any] | None = None,
+                         event_id: str = "") -> dict[str, Any]:
     if type not in OUTBOUND_TYPES:
         raise BusinessValidationError(f"Tipo de evento saliente inválido: {type}.", status_code=400)
     if not aggregate_id or aggregate_version < 0:
@@ -121,7 +123,7 @@ def build_outbound_event(*, type: str, aggregate_id: str, aggregate_version: int
     if business_reference:
         body.setdefault("business_reference", business_reference)
     return {
-        "event_id": uuid.uuid4().hex,
+        "event_id": event_id or uuid.uuid4().hex,
         "schema_version": 1,
         "type": type,
         "origin": "openceo-core",
