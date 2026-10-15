@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "provider": "jardal_erp",
+  "state": "ready",
+  "workspace_id": "00000000-0000-0000-0000-000000000001",
+  "origin": "https://erp.jardal.app",
+  "execution_database": "openceo",
+  "evidence": {
+    "reconciled_at": "2026-10-15T16:16:03.642Z",
+    "tasks": {
+      "expected": 235,
+      "found": 235
+    },
+    "journals": {
+      "expected": 4,
+      "found": 4
+    },
+    "balance_months": [
+      "2026-09"
+    ],
+    "open_approvals": 0,
+    "backup_id": "jardal-erp-jardal_erp-20261015T161611Z",
+    "restore_verified": true,
+    "reconcile_sha256": "d32e21f129b8b5d567b7c918a1bb4aeffec20939c66ce7efb8531567f110b2ea"
+  }
+}
