@@ -2961,34 +2961,40 @@ class TaskService:
         if pending:
             logger.info("Startup reconcile ERPNext: %d tickets con enlace roto", len(pending))
             for task in pending:
-                params = self._task_params(task)
-                mirrors = params.get("_mirrors")
-                mirror = business_mirror(mirrors)
-                if not isinstance(mirror, dict):
-                    continue
+                try:
+                    params = self._task_params(task)
+                    mirrors = params.get("_mirrors")
+                    mirror = business_mirror(mirrors)
+                    if not isinstance(mirror, dict):
+                        continue
 
-                if not str(mirror.get("name") or "").strip():
-                    # El ticket de negocio nunca llego a crearse (o no se supo): reintentar.
-                    await self._enqueue_erpnext_registration(task)
-                    repaired += 1
-                    continue
+                    if not str(mirror.get("name") or "").strip():
+                        # El ticket de negocio nunca llego a crearse (o no se supo): reintentar.
+                        await self._enqueue_erpnext_registration(task)
+                        repaired += 1
+                        continue
 
-                # El ticket existe pero una transicion no se pudo empujar.
-                status = str(task.get("status") or "")
-                pending_status = str(mirror.get("pending_status") or "").strip()
-                if queue is not None and pending_status:
-                    item = {
-                        "task_id": task.get("task_id"),
-                        "name": mirror["name"],
-                        "status": status,
-                    }
-                    if resolve_erpnext_status(task) is None:
-                        # Ya no hay nada que empujar (p. ej. espera operativa sin
-                        # accion humana): se limpia el pendiente sin HTTP.
-                        await self._record_status_outcome(item, pushed=True)
-                    else:
-                        queue.put_nowait(item)
-                    repaired += 1
+                    # El ticket existe pero una transicion no se pudo empujar.
+                    status = str(task.get("status") or "")
+                    pending_status = str(mirror.get("pending_status") or "").strip()
+                    if queue is not None and pending_status:
+                        item = {
+                            "task_id": task.get("task_id"),
+                            "name": mirror["name"],
+                            "status": status,
+                        }
+                        if resolve_erpnext_status(task) is None:
+                            # Ya no hay nada que empujar (p. ej. espera operativa sin
+                            # accion humana): se limpia el pendiente sin HTTP.
+                            await self._record_status_outcome(item, pushed=True)
+                        else:
+                            queue.put_nowait(item)
+                        repaired += 1
+                except Exception:
+                    logger.warning(
+                        "Startup reconcile ERPNext: ticket %s omitido", task.get("task_id"), exc_info=True
+                    )
+                    continue
 
             logger.info("Startup reconcile ERPNext: %d reparados de %d", repaired, len(pending))
 
