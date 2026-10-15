@@ -12,6 +12,8 @@ el presupuesto de IA agotado.
 
 from __future__ import annotations
 
+from business.links import business_mirror
+
 import hashlib
 import logging
 from datetime import datetime, timezone
@@ -2035,7 +2037,7 @@ class HorizonService:
             else None
         )
         if isinstance(mirrors, dict):
-            erp = mirrors.get("erpnext")
+            erp = business_mirror(mirrors)
             if isinstance(erp, dict):
                 promotion_ref = str(erp.get("name") or "").strip() or None
         updates = {

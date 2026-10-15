@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from business.links import assert_link_provider, business_mirror
+from business.errors import BusinessVersionConflict
+
 import asyncio
 import hashlib
 import logging
@@ -132,7 +135,7 @@ from tools.erpnext_tickets import (
 import visibility
 
 if TYPE_CHECKING:
-    from tools.erpnext_tickets import ERPNextTicketAdapter
+    from business.ports import BusinessWork
     from tools.notion import NotionTicketManager
     from workflow_service import WorkflowExecutionOutcome, WorkflowService
 
@@ -302,7 +305,7 @@ class TaskService:
         rate_monitor: RateMonitor | None = None,
         qa_service: QAReviewService | None = None,
         workflow_service: WorkflowService | None = None,
-        erpnext: "ERPNextTicketAdapter | None" = None,
+        erpnext: "BusinessWork | None" = None,
         config_loader: Any | None = None,
     ) -> None:
         self._settings = settings
@@ -313,9 +316,7 @@ class TaskService:
         self._rate_monitor = rate_monitor
         self._qa_service = qa_service
         self._workflow_service = workflow_service
-        # Colaborador opcional: sin el (o con ERPNEXT_TICKETS_ENABLED=false) el servicio
-        # se comporta exactamente como antes de la integracion. Los tests construyen
-        # TaskService con __new__ y sin __init__, asi que todo uso tolera None.
+        self._business = erpnext
         self._erpnext = erpnext
         # Optional project.yaml reader (autonomy F4 TASK-2026-00118): the
         # default phase template skips human QA unless the project policy
@@ -538,14 +539,15 @@ class TaskService:
         self, params: dict[str, Any] | None, mirror: dict[str, Any]
     ) -> dict[str, Any]:
         merged = dict(params or {})
-        mirrors = merged.get("_mirrors")
-        if not isinstance(mirrors, dict):
-            mirrors = {}
-        current = mirrors.get("erpnext")
-        if isinstance(current, dict):
-            current.update(mirror)
-            mirror = current
-        mirrors["erpnext"] = mirror
+        raw_mirrors = merged.get("_mirrors")
+        mirrors = dict(raw_mirrors) if isinstance(raw_mirrors, dict) else {}
+        provider = getattr(getattr(self, "_erpnext", None), "provider", "erpnext")
+        current = business_mirror(mirrors)
+        current.update(mirror)
+        current["provider"] = provider
+        mirrors["business"] = current
+        if provider == "erpnext":
+            mirrors["erpnext"] = dict(current)
         merged["_mirrors"] = mirrors
         return merged
 
@@ -574,7 +576,7 @@ class TaskService:
                 logger.warning("No se pudo resolver el bloqueador %s", raw, exc_info=True)
                 blocker = None
             mirror = self._task_params(blocker or {}).get("_mirrors", {})
-            business = mirror.get("erpnext", {}) if isinstance(mirror, dict) else {}
+            business = business_mirror(mirror)
             name = str(business.get("name") or "").strip() if isinstance(business, dict) else ""
             if name and name not in names:
                 names.append(name)
@@ -637,8 +639,7 @@ class TaskService:
             if name not in business_deps:
                 business_deps.append(name)
 
-        try:
-            result = await adapter.create_ticket(
+        registration = dict(
                 ref=ref,
                 title=snapshot.get("title") or "",
                 description=snapshot.get("description") or "",
@@ -656,12 +657,17 @@ class TaskService:
                 parent_task=business_parent,
                 depends_on=business_deps or None,
                 is_group=is_group,
-            )
+        )
+        try:
+            result = await adapter.create_ticket(**registration)
         except ERPNextUnavailable as exc:
             logger.warning("ERPNext no respondio al registrar el ticket %s: %s", ref, exc)
             # Misma forma que la rama de exito, con `name` vacio: quien lea el espejo no
             # tiene que distinguir dos esquemas.
-            return {"name": None, "ref": ref, "pending": True, "linked_at": now}, True
+            pending_mirror = {"name": None, "ref": ref, "pending": True, "linked_at": now}
+            if getattr(adapter, "provider", "erpnext") == "jardal_erp":
+                pending_mirror["registration"] = registration
+            return pending_mirror, True
         except ERPNextError:
             logger.exception("ERPNext rechazo el registro del ticket %s", ref)
             raise
@@ -682,6 +688,11 @@ class TaskService:
             "pending": False,
             "linked_at": now,
         }
+        if getattr(adapter, "provider", "erpnext") == "jardal_erp":
+            mirror["business_ticket_id"] = task.get("business_ticket_id")
+            mirror["execution_task_id"] = task.get("openceo_task_id")
+            mirror["execution_ticket_number"] = task.get("openceo_ticket_number")
+            mirror["business_status"] = task.get("status")
         # Lo que se empujo de jerarquia queda en el espejo (retiene la referencia
         # de negocio, ARCH §Parent Task Tracking); la autoridad sigue en ERPNext.
         if business_parent:
@@ -703,9 +714,10 @@ class TaskService:
         if adapter is None or not adapter.is_enabled:
             return
 
+        assert_link_provider(task, getattr(adapter, "provider", "erpnext"))
         params = self._task_params(task)
         mirrors = params.get("_mirrors")
-        existing = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
+        existing = business_mirror(mirrors)
         if isinstance(existing, dict) and existing.get("name") and not existing.get("pending"):
             return
 
@@ -717,10 +729,17 @@ class TaskService:
 
         try:
             task_doc = await adapter.find_by_ref(ref)
+            if task_doc is None and getattr(adapter, "provider", "erpnext") == "jardal_erp" and existing.get("registration"):
+                result = await adapter.create_ticket(**existing["registration"])
+                task_doc = result.get("task")
+            if task_doc is not None and getattr(adapter, "provider", "erpnext") == "jardal_erp" and task_doc.get("openceo_task_id") != task["task_id"]:
+                raise ERPNextValidationError("La identidad de ejecución recuperada no coincide.", status_code=409)
             if task_doc is not None:
                 mirror = {
                     "name": task_doc.get("name"),
                     "ref": ref,
+                    "registration": None,
+                    "business_ticket_id": task_doc.get("business_ticket_id"),
                     # Vocabulario de OpenCEO, no el de ERPNext (ver _register_business_ticket).
                     "status_pushed": str(getattr(task.get("status"), "value", task.get("status")) or ""),
                     "pending": False,
@@ -772,7 +791,7 @@ class TaskService:
 
         params = self._task_params(task)
         mirrors = params.get("_mirrors")
-        mirror = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
+        mirror = business_mirror(mirrors)
         if not isinstance(mirror, dict):
             return
         name = str(mirror.get("name") or "").strip()
@@ -872,19 +891,15 @@ class TaskService:
         # `in_progress` también necesita el ticket: sus fechas reales
         # (started_at) viajan en el mismo PUT (TASK-2026-00147).
         task = None
-        if str(item.get("status") or "").strip().lower() in {
-            TaskStatus.COMPLETED.value,
-            TaskStatus.WAITING.value,
-            TaskStatus.IN_PROGRESS.value,
-        }:
-            try:
-                repo = getattr(self, "_repo", None)
-                if repo is not None:
-                    task = await repo.get_task(str(item.get("task_id") or ""))
-            except Exception:
-                logger.warning("No se pudo leer el ticket para QA condicional", exc_info=True)
-                task = None
-
+        try:
+            repo = getattr(self, "_repo", None)
+            if repo is not None:
+                task = await repo.get_task(str(item.get("task_id") or ""))
+        except Exception:
+            logger.warning("No se pudo leer el ticket para validar la transición", exc_info=True)
+        if task is None and getattr(adapter, "provider", "erpnext") == "jardal_erp":
+            raise ERPNextUnavailable("No se pudo verificar la identidad de ejecución antes de escribir negocio.")
+        assert_link_provider(task, getattr(adapter, "provider", "erpnext"))
         work_dates = self._work_dates_for_push(item.get("status"), task)
         span_extended = False
         delay = 1.0
@@ -935,6 +950,9 @@ class TaskService:
                 )
                 await self._record_status_outcome(item, pushed=False)
                 return
+            except BusinessVersionConflict:
+                await self._record_status_outcome(item, pushed=False)
+                return
             except ERPNextError:
                 logger.exception(
                     "ERPNext rechazo la transicion %s -> %s", item["name"], item["status"]
@@ -970,7 +988,7 @@ class TaskService:
         return dates or None
 
     async def _record_status_outcome(self, item: dict[str, Any], *, pushed: bool) -> None:
-        """Deja constancia del resultado en `params._mirrors.erpnext`.
+        """Deja constancia del resultado en el enlace de negocio.
 
         Un fallo no se pierde en silencio: queda como `pending_status` para que la
         reconciliacion de arranque lo reintente. Es el fallo que el espejo de Notion si
@@ -1039,9 +1057,22 @@ class TaskService:
             is_group=payload.is_group,
         )
         if erpnext_mirror is not None:
+            if erpnext_mirror.get("execution_task_id"):
+                doc.task_id = erpnext_mirror["execution_task_id"]
+                doc.ticket_number = erpnext_mirror.get("execution_ticket_number") or doc.ticket_number
+            if erpnext_mirror.get("business_status") in {"Completed", "Cancelled"}:
+                doc.autorun = False
             doc.params = self._merge_erpnext_mirror_params(doc.params, erpnext_mirror)
 
-        created = await self._repo.create_task(doc.model_dump(mode="python"))
+        try:
+            created = await self._repo.create_task(doc.model_dump(mode="python"))
+        except DuplicateKeyError:
+            if not payload.source_id:
+                raise
+            existing = await self._repo.find_task_by_source(payload.source.value, payload.source_id)
+            if existing is None or existing.get("task_id") != doc.task_id:
+                raise
+            return existing
         await self._hub.broadcast("task_created", created)
         self._enqueue_notion_mirror(created)
 
@@ -1081,15 +1112,15 @@ class TaskService:
         # wakes it. No direct launch and no pre-gate here, so priority order,
         # per-project/per-objective limits and Tier S reserves apply to every
         # ticket through a single path.
-        if self._settings.TASK_AUTORUN and payload.autorun:
+        if self._settings.TASK_AUTORUN and created.get("autorun") is not False and payload.autorun:
             self._wake_dispatcher()
 
         # Visibilidad (00146 + 00147): estima la hoja nueva y refresca al
         # padre si lo tiene. Job en cola, fuera del camino crítico.
         business_name = ""
         mirrors = self._task_params(created).get("_mirrors")
-        if isinstance(mirrors, dict) and isinstance(mirrors.get("erpnext"), dict):
-            business_name = str(mirrors["erpnext"].get("name") or "").strip()
+        if isinstance(mirrors, dict) and isinstance(business_mirror(mirrors), dict):
+            business_name = str(business_mirror(mirrors).get("name") or "").strip()
         if business_name:
             self._enqueue_visibility(
                 str(created.get("task_id") or "") or None, business_name, "create"
@@ -1724,6 +1755,7 @@ class TaskService:
         deleted: bool = False,
         parent_task: Any = _WEBHOOK_PARENT_UNSET,
         business_name: str | None = None,
+        source_provider: str = "erpnext",
     ) -> dict[str, Any]:
         """Aplica al runtime una decision tomada por un humano en ERPNext.
 
@@ -1744,6 +1776,8 @@ class TaskService:
         if adapter is None:
             return {"ok": False, "status": "no_adapter"}
 
+        if source_provider != getattr(adapter, "provider", "erpnext"):
+            return {"ok": False, "status": "authority_mismatch"}
         task = await self.find_task_for_business_ref(task_id=task_id, ref=ref)
         if task is None:
             if str(business_name or "").strip():
@@ -1752,6 +1786,7 @@ class TaskService:
                 self._enqueue_visibility(None, str(business_name).strip(), "webhook:untracked")
             return {"ok": False, "status": "not_found"}
 
+        assert_link_provider(task, source_provider)
         target = _ERPNEXT_BUSINESS_TO_TASK_STATUS.get(str(business_status or "").strip())
         if deleted:
             target = TaskStatus.CANCELLED.value
@@ -1859,8 +1894,8 @@ class TaskService:
         params = task.get("params")
         if isinstance(params, dict):
             mirrors = params.get("_mirrors")
-            if isinstance(mirrors, dict) and isinstance(mirrors.get("erpnext"), dict):
-                mirror = mirrors["erpnext"]
+            if isinstance(mirrors, dict) and isinstance(business_mirror(mirrors), dict):
+                mirror = business_mirror(mirrors)
         return str(mirror.get("name") or "").strip()
 
     async def _sync_webhook_parent(self, task: dict[str, Any], parent_task: Any) -> bool:
@@ -2096,7 +2131,7 @@ class TaskService:
     def _escalation_business_name(task: dict[str, Any] | None) -> str | None:
         params = (task or {}).get("params") or {}
         mirrors = params.get("_mirrors") or {}
-        business = mirrors.get("erpnext") or {}
+        business = business_mirror(mirrors)
         name = str(business.get("name") or "").strip()
         return name or None
 
@@ -2197,7 +2232,7 @@ class TaskService:
             exec_status = str((task or {}).get("status") or "")
             task_params = self._task_params(task or {})
             mirror = task_params.get("_mirrors", {})
-            pushed = mirror.get("erpnext", {}) if isinstance(mirror, dict) else {}
+            pushed = business_mirror(mirror)
             existing_marker = task_params.get(SECRET_BLOCK_PARAM)
             if (
                 task is not None
@@ -2325,13 +2360,16 @@ class TaskService:
                 exc_info=True,
             )
             transition_dates = None
+        transition_context = {}
+        if getattr(adapter, "provider", "erpnext") == "jardal_erp":
+            transition_context = {"reason": clean_reason, "evidence": evidence, "human_action": human_action}
         span_extended = False
         delay = 1.0
         for attempt in range(3):
             try:
                 try:
                     await adapter.transition_status(
-                        name, target, work_dates=transition_dates
+                        name, target, work_dates=transition_dates, **transition_context
                     )
                 except ERPNextDateBoundError:
                     # Como en `_push_status`: extender ancestros y reintentar
@@ -2346,7 +2384,7 @@ class TaskService:
                     )
                     span_extended = True
                     await adapter.transition_status(
-                        name, target, work_dates=transition_dates
+                        name, target, work_dates=transition_dates, **transition_context
                     )
                 break
             except ERPNextUnavailable as exc:
@@ -2511,7 +2549,7 @@ class TaskService:
             for task in pending:
                 params = self._task_params(task)
                 mirrors = params.get("_mirrors")
-                mirror = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
+                mirror = business_mirror(mirrors)
                 if not isinstance(mirror, dict):
                     continue
 
@@ -2584,7 +2622,7 @@ class TaskService:
             return {}
         params = execution.get("params")
         mirrors = params.get("_mirrors") if isinstance(params, dict) else None
-        mirror = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
+        mirror = business_mirror(mirrors)
         return dict(mirror) if isinstance(mirror, dict) else {}
 
     async def _patch_visibility_state(
@@ -2637,6 +2675,11 @@ class TaskService:
             return {"ok": False, "status": "no_name"}
         task_id = str(item.get("task_id") or "").strip() or None
         reason = str(item.get("reason") or "")
+        if task_id and getattr(adapter, "provider", "erpnext") == "jardal_erp":
+            task = await self._repo.get_task(task_id)
+            if task is None:
+                return {"ok": False, "status": "missing_execution"}
+            assert_link_provider(task, adapter.provider)
         try:
             try:
                 business = await adapter.resolve_task(name)
@@ -2675,6 +2718,10 @@ class TaskService:
                 "rolled": rolled,
                 "dependents": dependents,
             }
+        except BusinessVersionConflict:
+            if task_id:
+                await self._patch_visibility_state(task_id, None, mirror={"pending_visibility": name})
+            return {"ok": False, "status": "version_conflict"}
         except ERPNextUnavailable as exc:
             logger.warning(
                 "Visibilidad de %s pendiente: ERPNext caído (%s)", name, exc
@@ -2724,6 +2771,8 @@ class TaskService:
         desk también dejan su huella temporal en la ejecución
         (started_at/completed_at) cuando falta.
         """
+        if not getattr(adapter, "legacy_date_repairs", True) and business.get("status") != "Open":
+            return False
         if business.get("is_group"):
             return False
         status = str(business.get("status") or "").strip()
@@ -3051,6 +3100,10 @@ class TaskService:
         children = await adapter.list_children(
             name, limit=visibility.MAX_CHILDREN_ROLLUP
         )
+        rollup_view = getattr(adapter, "rollup_view", None)
+        if callable(rollup_view):
+            business = rollup_view(business)
+            children = [rollup_view(child) for child in children]
         explicit: str | None = None
         try:
             execution = await self.find_task_for_business_ref(
@@ -3851,7 +3904,7 @@ class TaskService:
             if task.get("wait_commented_for") == key:
                 return
             mirrors = (task.get("params") or {}).get("_mirrors") or {}
-            mirror = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
+            mirror = business_mirror(mirrors)
             name = str(mirror.get("name") or "") if isinstance(mirror, dict) else ""
             if not name:
                 return
@@ -3989,7 +4042,7 @@ class TaskService:
             if task is None:
                 return False
             mirrors = (task.get("params") or {}).get("_mirrors") or {}
-            mirror = mirrors.get("erpnext") if isinstance(mirrors, dict) else None
+            mirror = business_mirror(mirrors)
             name = str(mirror.get("name") or "") if isinstance(mirror, dict) else ""
             if not name or not str(text or "").strip():
                 return False

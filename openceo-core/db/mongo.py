@@ -501,6 +501,15 @@ class MongoRepository:
         await self.tasks.insert_one(doc)
         return await self.get_task(doc["task_id"])
 
+    async def assert_business_authority(self, provider: str) -> None:
+        if provider == "erpnext":
+            mismatch = {"params._mirrors.business.provider": {"$exists": True, "$ne": "erpnext"}}
+        else:
+            mismatch = {"params._mirrors.business.provider": {"$ne": provider}}
+        row = await self.tasks.find_one({**mismatch, **mirror_exclusion_filter()}, {"_id": 1})
+        if row:
+            raise RuntimeError("Business authority mismatch: complete and verify the directed link migration before startup.")
+
     async def get_task(self, task_id: str) -> dict[str, Any] | None:
         row = await self.tasks.find_one({"task_id": task_id})
         return self._clean(row)
@@ -517,7 +526,7 @@ class MongoRepository:
 
     async def find_task_by_business_name(self, name: str) -> dict[str, Any] | None:
         """Execution task by its ERPNext mirror name (tool locks, 00208)."""
-        row = await self.tasks.find_one({"params._mirrors.erpnext.name": name})
+        row = await self.tasks.find_one({"$or": [{"params._mirrors.business.name": name}, {"params._mirrors.business": {"$exists": False}, "params._mirrors.erpnext.name": name}]})
         return self._clean(row)
 
     async def list_tasks(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -894,10 +903,15 @@ class MongoRepository:
         Acotada por `limit`: es reconciliacion de arranque, no un barrido periodico.
         """
         query: dict[str, Any] = {
-            "params._mirrors.erpnext": {"$exists": True},
             "$or": [
-                {"params._mirrors.erpnext.name": {"$in": [None, ""]}},
-                {"params._mirrors.erpnext.pending_status": {"$ne": None}},
+                {"params._mirrors.business": {"$exists": True}, "$or": [
+                    {"params._mirrors.business.name": {"$in": [None, ""]}},
+                    {"params._mirrors.business.pending_status": {"$ne": None}},
+                ]},
+                {"params._mirrors.business": {"$exists": False}, "params._mirrors.erpnext": {"$exists": True}, "$or": [
+                    {"params._mirrors.erpnext.name": {"$in": [None, ""]}},
+                    {"params._mirrors.erpnext.pending_status": {"$ne": None}},
+                ]},
             ],
             **mirror_exclusion_filter(),
         }
@@ -914,10 +928,10 @@ class MongoRepository:
         Horizon como la consulta vecina. Acotada: arranque, no barrido.
         """
         query: dict[str, Any] = {
-            "params._mirrors.erpnext.pending_visibility": {
-                "$exists": True,
-                "$nin": [None, ""],
-            },
+            "$or": [
+                {"params._mirrors.business.pending_visibility": {"$exists": True, "$nin": [None, ""]}},
+                {"params._mirrors.business": {"$exists": False}, "params._mirrors.erpnext.pending_visibility": {"$exists": True, "$nin": [None, ""]}},
+            ],
             **mirror_exclusion_filter(),
         }
         rows = self.tasks.find(query).limit(limit)

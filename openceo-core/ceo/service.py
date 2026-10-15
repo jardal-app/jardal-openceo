@@ -9,6 +9,8 @@ from the global defaults — projects must not set it.
 
 from __future__ import annotations
 
+from business.links import business_mirror
+
 import logging
 from pathlib import Path
 from typing import Any, Mapping
@@ -276,7 +278,7 @@ class CEOService:
         mirrors = params.get("_mirrors")
         if not isinstance(mirrors, dict):
             return ""
-        mirror = mirrors.get("erpnext")
+        mirror = business_mirror(mirrors)
         if not isinstance(mirror, dict):
             return ""
         return str(mirror.get("name") or "")

@@ -32,6 +32,15 @@ from typing import Any
 
 import httpx
 
+from business.errors import (
+    BusinessError as ERPNextError,
+    BusinessUnavailable as ERPNextUnavailable,
+    BusinessValidationError as ERPNextValidationError,
+    BusinessPermissionError as ERPNextPermissionError,
+    BusinessDuplicateError as ERPNextDuplicateError,
+    BusinessDependencyBlockedError as ERPNextDependencyBlockedError,
+    BusinessDateBoundError as ERPNextDateBoundError,
+)
 from settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -65,70 +74,7 @@ _MAX_ATTEMPTS = 3
 _INITIAL_RETRY_DELAY_SECONDS = 0.5
 
 
-class ERPNextError(RuntimeError):
-    """Error base del adapter ERPNext."""
 
-    def __init__(self, message: str, *, status_code: int | None = None, payload: Any = None) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-        self.payload = payload
-
-
-class ERPNextUnavailable(ERPNextError):
-    """ERPNext no respondio o respondio con un fallo transitorio.
-
-    Es el caso "operacion pendiente": el llamador debe registrar el ticket como
-    pendiente de enlace, no como fallo de negocio.
-    """
-
-
-class ERPNextValidationError(ERPNextError):
-    """ERPNext rechazo los datos. Fallo duro: reintentar no cambia el resultado."""
-
-
-class ERPNextPermissionError(ERPNextValidationError):
-    """ERPNext nego el acceso (401/403): falta un rol, o el permiso es del autor.
-
-    Subclase de `ERPNextValidationError` para no cambiar el contrato de los llamadores
-    existentes (los dos son fallos duros, no se reintentan); se separa porque el
-    llamador necesita distinguir "los datos estan mal" de "no tienes permiso" al
-    clasificar el error. Caso real verificado el 2026-10-01: el principal de la API
-    (`Projects User` + `Accounts User`) puede leer y crear comentarios por los metodos
-    de la linea de tiempo, pero NO editar el comentario de otra persona ni borrar
-    ninguno: Frappe solo da ese permiso a `System Manager` / `Website Manager`.
-    """
-
-
-class ERPNextDuplicateError(ERPNextError):
-    """La clave de idempotencia ya existia (HTTP 417).
-
-    No es un fallo: significa que un intento anterior si llego a crear el documento.
-    El llamador debe releer por la clave y tratarlo como exito idempotente.
-    """
-
-
-class ERPNextDependencyBlockedError(ERPNextValidationError):
-    """Frappe rechazo completar porque hay dependientes abiertos (HTTP 417).
-
-    Es un fallo TRANSITORIO, no de datos: los hijos (`parent_task`) y las
-    dependencias (`depends_on`) cuentan como dependientes, y el ticket completa
-    cuando ellos cierren. El llamador debe reintentarlo mas tarde (marca
-    `pending_status`), no darlo por imposible. Verificado contra el sitio vivo
-    (TASK-2026-00013): `Cannot complete task ... dependant task ... are not
-    completed / cancelled`.
-    """
-
-
-class ERPNextDateBoundError(ERPNextValidationError):
-    """Frappe rechazo fechas que pasan el limite del padre (HTTP 417).
-
-    Es un fallo ACCIONABLE, no de datos: `Expected End Date should be less
-    than or equal to parent task's Expected End Date`. Quien escribe fechas
-    extiende los ancestros y reintenta una vez (el padre corto SI se acepta,
-    asi que extender nunca rebota). Verificado contra el sitio vivo
-    (TASK-2026-00147). Sigue siendo `ValidationError`: los llamadores que
-    solo distinguen duro/transitorio lo ven como duro.
-    """
 
 
 def _payload_texts(payload: Any) -> str:

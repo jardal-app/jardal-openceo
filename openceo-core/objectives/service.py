@@ -60,7 +60,7 @@ def _generic_verifiers_or_empty() -> dict[str, Any]:
 
 
 class ObjectiveErpAdapter:
-    """Engine-facing wrapper over the ERPNext ticket adapter (group ops)."""
+    """Engine-facing wrapper over the business work port."""
 
     def __init__(self, adapter: Any) -> None:
         self._adapter = adapter
@@ -71,7 +71,7 @@ class ObjectiveErpAdapter:
 
 def erp_for_task_service(task_service: Any) -> ObjectiveErpAdapter | None:
     """ObjectiveErp view of a TaskService, or None when ERP is unavailable."""
-    adapter = getattr(task_service, "_erpnext", None)
+    adapter = getattr(task_service, "_business", None) or getattr(task_service, "_erpnext", None)
     if adapter is None or not getattr(adapter, "is_enabled", False):
         return None
     return ObjectiveErpAdapter(adapter)

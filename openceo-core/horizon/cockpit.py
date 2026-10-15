@@ -18,6 +18,8 @@ Reglas que este modulo fija:
 
 from __future__ import annotations
 
+from business.links import business_mirror
+
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
@@ -43,7 +45,7 @@ def delivery_source_id(task_id: str) -> str:
 
 
 def erp_mirror_name(task: Mapping[str, Any] | None) -> str | None:
-    """Nombre de negocio (``TASK-...``) si el ticket ya viajo a ERPNext."""
+    """Nombre de negocio (``TASK-...``) del enlace empresarial."""
     if not task:
         return None
     params = task.get("params")
@@ -52,7 +54,7 @@ def erp_mirror_name(task: Mapping[str, Any] | None) -> str | None:
     mirrors = params.get("_mirrors")
     if not isinstance(mirrors, dict):
         return None
-    erp = mirrors.get("erpnext")
+    erp = business_mirror(mirrors)
     if not isinstance(erp, dict):
         return None
     name = str(erp.get("name") or "").strip()
