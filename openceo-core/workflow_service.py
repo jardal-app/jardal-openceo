@@ -499,6 +499,59 @@ class WorkflowToolRegistry:
             return None
         return f"{prefix}:{task_id}"
 
+    @staticmethod
+    def _finance_erp_write_status(exc: Any) -> str:
+        code = getattr(exc, "status_code", None)
+        if code is None or code in {401, 403, 408, 425, 429} or (isinstance(code, int) and code >= 500):
+            return "unavailable"
+        return "rejected"
+
+    async def _finance_register_expense_erp(self, parsed: Any, *, ref: str | None,
+                                            submit: bool = True) -> dict[str, Any]:
+        from agents.finance import erp_operations as _erp_ops
+        from agents.finance.money_text import MissingExchangeRateError
+        from business.errors import BusinessError
+        from business.finance import JardalERPFinance
+
+        if not submit:
+            return {"ok": False, "status": "rejected", "error": "draft_unsupported",
+                    "summary": "El ERP aún no soporta borradores; solo contabiliza."}
+        adapter = JardalERPFinance(self._settings)
+        try:
+            try:
+                return await _erp_ops.register_expense_erp(adapter, parsed, ref=ref)
+            except MissingExchangeRateError as exc:
+                return {"ok": False, "status": "invalid_input",
+                        "error": "missing_exchange_rate", "summary": str(exc)}
+            except BusinessError as exc:
+                return {"ok": False, "status": self._finance_erp_write_status(exc),
+                        "error": str(exc)[:300]}
+        finally:
+            await adapter.aclose()
+
+    async def _finance_register_income_erp(self, parsed: Any, *, ref: str | None,
+                                           submit: bool = True) -> dict[str, Any]:
+        from agents.finance import erp_operations as _erp_ops
+        from agents.finance.money_text import MissingExchangeRateError
+        from business.errors import BusinessError
+        from business.finance import JardalERPFinance
+
+        if not submit:
+            return {"ok": False, "status": "rejected", "error": "draft_unsupported",
+                    "summary": "El ERP aún no soporta borradores; solo contabiliza."}
+        adapter = JardalERPFinance(self._settings)
+        try:
+            try:
+                return await _erp_ops.register_income_erp(adapter, parsed, ref=ref)
+            except MissingExchangeRateError as exc:
+                return {"ok": False, "status": "invalid_input",
+                        "error": "missing_exchange_rate", "summary": str(exc)}
+            except BusinessError as exc:
+                return {"ok": False, "status": self._finance_erp_write_status(exc),
+                        "error": str(exc)[:300]}
+        finally:
+            await adapter.aclose()
+
     async def _finance_register_expense(
         self,
         text: str = "",
@@ -515,6 +568,7 @@ class WorkflowToolRegistry:
         """
         from agents.finance import voice_expense as _voice_expense
         from agents.finance.money_text import MissingExchangeRateError
+        from business.finance import finance_provider_is_erp
         from tools.erpnext_client import ERPNextClient
 
         rate = _rate_or_none(exchange_rate)
@@ -527,6 +581,14 @@ class WorkflowToolRegistry:
                         "Dime por ejemplo: 'registra gasto personal "
                         "carne 50 bolivianos'.")}
         ref = self._operation_ref("voice-expense", openceo_ref, context)
+        try:
+            erp_finance = finance_provider_is_erp(self._settings)
+        except ValueError:
+            return {"ok": False, "status": "unavailable",
+                    "error": "finance_provider_misconfigured",
+                    "summary": "Finanzas ERP sin manifiesto de autoridad listo."}
+        if erp_finance:
+            return await self._finance_register_expense_erp(parsed, ref=ref, submit=submit)
         client = ERPNextClient(self._settings)
         try:
             try:
@@ -568,11 +630,34 @@ class WorkflowToolRegistry:
         Explicit bounds win; else the dictated text sets them
         (TASK-2026-00221: the exact skill carries no LLM to compute them).
         """
+        from agents.finance import erp_operations as _erp_ops
         from agents.finance import scope_summary as _scope
+        from business.errors import BusinessError
+        from business.finance import JardalERPFinance, finance_provider_is_erp
         from tools.erpnext_client import ERPNextClient
 
         if not (date_from or date_to) and str(text or "").strip():
             date_from, date_to = _scope.period_bounds(text)
+        try:
+            erp_finance = finance_provider_is_erp(self._settings)
+        except ValueError:
+            return {"ok": False, "status": "unavailable",
+                    "error": "finance_provider_misconfigured"}
+        if erp_finance:
+            adapter = JardalERPFinance(self._settings)
+            try:
+                try:
+                    payload = await _erp_ops.scope_summary_erp(
+                        adapter, company=_scope.COMPANY,
+                        cost_center=cost_center or _scope.COST_CENTER,
+                        currency=_scope.CURRENCY, date_from=date_from,
+                        date_to=date_to)
+                except BusinessError as exc:
+                    return {"ok": False, "status": "unavailable", "error": str(exc)[:300]}
+            finally:
+                await adapter.aclose()
+            payload["ok"] = True
+            return payload
         client = ERPNextClient(self._settings)
         try:
             summary = await _scope.get_scope_summary(
@@ -605,6 +690,7 @@ class WorkflowToolRegistry:
         """
         from agents.finance import voice_income as _voice_income
         from agents.finance.money_text import MissingExchangeRateError
+        from business.finance import finance_provider_is_erp
         from tools.erpnext_client import ERPNextClient
 
         rate = _rate_or_none(exchange_rate)
@@ -617,6 +703,14 @@ class WorkflowToolRegistry:
                         "Dime por ejemplo: 'registra ingreso sueldo "
                         "6200 bolivianos'.")}
         ref = self._operation_ref("voice-income", openceo_ref, context)
+        try:
+            erp_finance = finance_provider_is_erp(self._settings)
+        except ValueError:
+            return {"ok": False, "status": "unavailable",
+                    "error": "finance_provider_misconfigured",
+                    "summary": "Finanzas ERP sin manifiesto de autoridad listo."}
+        if erp_finance:
+            return await self._finance_register_income_erp(parsed, ref=ref, submit=submit)
         client = ERPNextClient(self._settings)
         try:
             try:
@@ -659,11 +753,34 @@ class WorkflowToolRegistry:
         (mismo criterio que el resumen, TASK-2026-00221/00044).
         """
         from agents.finance import contribution as _contribution
+        from agents.finance import erp_operations as _erp_ops
         from agents.finance import scope_summary as _scope
+        from business.errors import BusinessError
+        from business.finance import JardalERPFinance, finance_provider_is_erp
         from tools.erpnext_client import ERPNextClient
 
         if not (date_from or date_to) and str(text or "").strip():
             date_from, date_to = _scope.period_bounds(text)
+        try:
+            erp_finance = finance_provider_is_erp(self._settings)
+        except ValueError:
+            return {"ok": False, "status": "unavailable",
+                    "error": "finance_provider_misconfigured"}
+        if erp_finance:
+            adapter = JardalERPFinance(self._settings)
+            try:
+                try:
+                    payload = await _erp_ops.contribution_status_erp(
+                        adapter, company=_contribution.COMPANY,
+                        cost_center=cost_center or _contribution.COST_CENTER,
+                        currency=_contribution.CURRENCY, date_from=date_from,
+                        date_to=date_to)
+                except BusinessError as exc:
+                    return {"ok": False, "status": "unavailable", "error": str(exc)[:300]}
+            finally:
+                await adapter.aclose()
+            payload["ok"] = True
+            return payload
         client = ERPNextClient(self._settings)
         try:
             status = await _contribution.get_contribution_10_status(

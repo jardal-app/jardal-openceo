@@ -113,6 +113,9 @@ class Settings(BaseSettings):
     JARDAL_ERP_WEBHOOK_SECRET: str = ""
     JARDAL_ERP_OPENCEO_USER: str = "openceo@jardal.app"
     ROLLUP_PROVIDER: str = "core"
+    # Finanzas (00263): "erpnext" (DocTypes, defecto) o "jardal_erp" (contrato
+    # financiero, exige manifiesto de autoridad listo como identidad/eventos).
+    FINANCE_PROVIDER: str = "erpnext"
 
     ERPNEXT_URL: str = ""
     ERPNEXT_USER: str = ""

@@ -436,6 +436,9 @@ async def lifespan(_: FastAPI):
         _auth_db.identity_map.create_index("user_id", unique=True)
         # Fail fast: refuse to start with an ERP directory that is not cut over.
         identity_provider_is_erp(settings)
+        from business.finance import finance_provider_is_erp
+
+        finance_provider_is_erp(settings)
         # Store in app state for router access
         app.state.auth_db = _auth_db
         # Create default admin user if needed
