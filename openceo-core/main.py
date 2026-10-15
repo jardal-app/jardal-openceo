@@ -26,6 +26,7 @@ from ceo.service import CEOService
 from agents.secretary.session import SecretarySessionManager
 from auth.router import auth_router
 from auth.middleware import get_current_user, require_admin, require_permissions
+from auth.erp_identity import ensure_local_directory, identity_provider_is_erp
 from auth.service import compute_user_permissions, get_groups_for_user, hash_password
 from config_loader import ConfigLoader
 from db.mongo import MongoRepository
@@ -429,6 +430,10 @@ async def lifespan(_: FastAPI):
         _auth_db.users.create_index("email", unique=True)
         _auth_db.groups.create_index("group_id", unique=True)
         _auth_db.groups.create_index("name", unique=True)
+        _auth_db.identity_map.create_index("erp_user_id", unique=True)
+        _auth_db.identity_map.create_index("user_id", unique=True)
+        # Fail fast: refuse to start with an ERP directory that is not cut over.
+        identity_provider_is_erp(settings)
         # Store in app state for router access
         app.state.auth_db = _auth_db
         # Create default admin user if needed
@@ -4754,6 +4759,7 @@ async def create_user(
     request: Request,
     current_user: UserDocument = Depends(require_permissions("manage_users")),
 ) -> dict[str, Any]:
+    ensure_local_directory(get_settings())
     db = get_auth_db()
     body = await request.json()
     username = str(body.get("username") or "").strip()
@@ -4805,6 +4811,7 @@ async def update_user(
     request: Request,
     current_user: UserDocument = Depends(require_permissions("manage_users")),
 ) -> dict[str, Any]:
+    ensure_local_directory(get_settings())
     db = get_auth_db()
     body = await request.json()
     allowed = ["display_name", "email", "is_active", "group_ids", "is_admin", "is_client", "allowed_projects", "password"]
@@ -4838,6 +4845,7 @@ async def delete_user(
     user_id: str,
     current_user: UserDocument = Depends(require_permissions("manage_users")),
 ) -> dict[str, bool]:
+    ensure_local_directory(get_settings())
     db = get_auth_db()
     db.users.update_one(
         {"user_id": user_id},
@@ -4862,6 +4870,7 @@ async def create_group(
     request: Request,
     current_user: UserDocument = Depends(require_permissions("manage_groups")),
 ) -> dict[str, Any]:
+    ensure_local_directory(get_settings())
     db = get_auth_db()
     body = await request.json()
     if db.groups.find_one({"name": body.get("name")}):
@@ -4891,6 +4900,7 @@ async def update_group(
     request: Request,
     current_user: UserDocument = Depends(require_permissions("manage_groups")),
 ) -> dict[str, Any]:
+    ensure_local_directory(get_settings())
     db = get_auth_db()
     body = await request.json()
     allowed = ["name", "display_name", "description", "permissions", "is_default"]
@@ -4917,6 +4927,7 @@ async def delete_group(
     group_id: str,
     current_user: UserDocument = Depends(require_permissions("manage_groups")),
 ) -> dict[str, Any]:
+    ensure_local_directory(get_settings())
     db = get_auth_db()
     # Only delete if no users assigned
     count = db.users.count_documents({"group_ids": group_id})

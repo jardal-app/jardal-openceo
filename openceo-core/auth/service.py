@@ -40,6 +40,14 @@ def create_default_user_if_needed(db: Any) -> None:
     """Create admin default + default groups if they don't exist."""
     from settings import get_settings
 
+    from auth.erp_identity import identity_provider_is_erp
+
+    try:
+        erp_managed = identity_provider_is_erp(get_settings())
+    except ValueError:
+        erp_managed = False
+    if erp_managed:
+        return
     settings = get_settings()
     admin_username = settings.DEFAULT_ADMIN_USERNAME
     admin_permissions = [

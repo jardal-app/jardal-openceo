@@ -15,6 +15,18 @@ from business.errors import (
 )
 
 
+def erp_service_configured(settings: Any) -> bool:
+    url = str(getattr(settings, "JARDAL_ERP_URL", "") or "").rstrip("/")
+    token = str(getattr(settings, "JARDAL_ERP_SERVICE_TOKEN", "") or "")
+    workspace = str(getattr(settings, "JARDAL_ERP_WORKSPACE_ID", "") or "")
+    if not url or not token or not workspace:
+        return False
+    parsed = urlsplit(url)
+    if parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/"):
+        return False
+    return parsed.scheme == "https" or (parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"})
+
+
 class JardalERPClient:
     def __init__(self, settings: Any, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self._url = str(settings.JARDAL_ERP_URL).rstrip("/")
@@ -46,6 +58,7 @@ class JardalERPClient:
     async def request(
         self, method: str, path: str, *, body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None, key: str | None = None,
+        bearer: str | None = None, anonymous: bool = False,
     ) -> dict[str, Any]:
         if self.config_error():
             raise BusinessUnavailable(self.config_error())
@@ -55,7 +68,9 @@ class JardalERPClient:
             raise BusinessValidationError("Método ERP inválido.", status_code=400)
         if method != "GET" and not key:
             raise BusinessValidationError("La escritura ERP requiere una clave idempotente.", status_code=400)
-        headers = {"Authorization": f"Bearer {self._token}", "X-Workspace-Id": self.workspace_id}
+        headers = {"X-Workspace-Id": self.workspace_id}
+        if not anonymous:
+            headers["Authorization"] = f"Bearer {bearer if bearer is not None else self._token}"
         if key:
             headers["Idempotency-Key"] = key
         for attempt in range(3):
