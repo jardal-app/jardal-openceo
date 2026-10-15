@@ -44,6 +44,8 @@ async def login(request: Request, response: Response) -> dict[str, Any]:
         erp_managed = identity_provider_is_erp(settings)
     except ValueError:
         raise HTTPException(status_code=503, detail="Proveedor de identidad no válido") from None
+    if body.get("erp_token") and not password:
+        return await _exchange_erp_token(request, response, settings, str(body.get("erp_token") or ""))
     if erp_managed:
         return await _login_via_erp(request, response, settings, username, password)
 
@@ -119,6 +121,52 @@ async def _login_via_erp(request: Request, response: Response, settings: Any,
     user_dict = user.model_dump()
     user_dict.pop("password_hash", None)
     return {"user": user_dict, "token": "heaven"}
+
+
+async def _exchange_erp_token(request: Request, response: Response, settings: Any,
+                              erp_token: str) -> dict[str, Any]:
+    """One-time ERP session -> Core mapping for non-cookie clients (265)."""
+    from business.errors import BusinessError
+
+    from auth.erp_identity import ERP_SESSION_COOKIE, JardalERPIdentity, upsert_mapped_user
+
+    if not erp_token or erp_token == "heaven":
+        raise HTTPException(status_code=401, detail="Sesión ERP inválida")
+    try:
+        from auth.erp_identity import identity_provider_is_erp
+
+        erp_managed = identity_provider_is_erp(settings)
+    except ValueError:
+        raise HTTPException(status_code=503, detail="Proveedor de identidad no válido") from None
+    if not erp_managed:
+        raise HTTPException(status_code=401, detail="Sesión ERP inválida")
+    adapter = JardalERPIdentity(settings)
+    try:
+        mapped = await adapter.introspect(erp_token)
+    except BusinessError as exc:
+        if getattr(exc, "status_code", None) in (401, 403):
+            raise HTTPException(status_code=401, detail="Sesión ERP revocada o expirada") from None
+        raise HTTPException(status_code=503, detail="Identidad ERP no disponible") from None
+    finally:
+        await adapter.aclose()
+    db = _get_db(request)
+    try:
+        user_doc = upsert_mapped_user(db, mapped)
+    except BusinessError as exc:
+        raise HTTPException(status_code=getattr(exc, "status_code", None) or 400,
+                            detail=str(exc)[:300]) from None
+    user = UserDocument(**{k: v for k, v in user_doc.items() if k != "_id"})
+    access_token = create_access_token(user.user_id, user.username)
+    refresh_token = create_refresh_token(user.user_id)
+    response.set_cookie(key="openceo_session", value=access_token,
+                        **cookie_settings(max_age=settings.JWT_EXPIRE_MINUTES * 60))
+    response.set_cookie(key="openceo_refresh", value=refresh_token,
+                        **cookie_settings(max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 86400, refresh=True))
+    response.set_cookie(key=ERP_SESSION_COOKIE, value=erp_token,
+                        **cookie_settings(max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 86400, refresh=True))
+    user_dict = user.model_dump()
+    user_dict.pop("password_hash", None)
+    return {"user": user_dict, "access_token": access_token, "refresh_token": refresh_token}
 
 
 @auth_router.post("/logout")
