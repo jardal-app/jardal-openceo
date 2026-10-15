@@ -399,6 +399,8 @@ async def lifespan(_: FastAPI):
         task_service.start_visibility_worker()
         await task_service.startup_reconcile_notion_mirrors()
         await task_service.startup_reconcile_erpnext()
+        await task_service.reset_stuck_erp_inbox()
+        await task_service.drain_erp_outbox_startup()
         await dispatcher.start()
         await ceo_loop.start()
         # Ojo: dentro de ``lifespan`` hay un ``settings = get_settings()`` mas
@@ -1170,6 +1172,64 @@ async def erpnext_task_webhook(
         parent_task=doc.get("parent_task"),
         business_name=doc.get("name"),
     )
+
+
+@app.post("/api/integrations/jardal-erp/events")
+async def jardal_erp_events(
+    payload: dict = Body(...),
+    x_openceo_secret: str | None = Header(default=None, alias="X-OpenCEO-Webhook-Secret"),
+) -> dict:
+    """Camino inverso ERP: decisiones y cambios de negocio llegan por evento.
+
+    Inbox durable por event_id + cursor por agregado: doble entrega, orden
+    invertido y restart no duplican efectos. Quien llama es Jardal ERP y se
+    autentica con `JARDAL_ERP_WEBHOOK_SECRET`; solo opera con provider
+    jardal_erp (409 en otro caso, igual que el webhook legacy).
+    """
+    from business.errors import BusinessError
+    from business.events import decide_inbound, validate_inbound_envelope
+    from business.webhooks import require_erp_webhook
+
+    require_erp_webhook(settings, business_adapter.provider, x_openceo_secret)
+    try:
+        event = validate_inbound_envelope(payload, settings=settings)
+    except BusinessError as exc:
+        raise HTTPException(status_code=getattr(exc, "status_code", None) or 400,
+                            detail=str(exc)[:300]) from None
+    if event.get("ignored"):
+        return {"ok": True, "status": "ignored", "reason": event.get("ignored")}
+    store = task_service.event_store
+    entry = await store.get_inbox(event["event_id"])
+    action = decide_inbound(entry, await store.get_cursor(event["aggregate_id"]), event)
+    if action == "duplicate":
+        return {"ok": True, "status": "duplicate", "event_id": event["event_id"]}
+    if action == "stale":
+        await store.put_inbox(event["event_id"], {"status": "stale", "type": event["type"],
+                                                 "aggregate_id": event["aggregate_id"]})
+        return {"ok": True, "status": "stale", "event_id": event["event_id"]}
+    claimed = await store.claim_inbox(event["event_id"], {"status": "processing", "type": event["type"],
+                                                          "aggregate_id": event["aggregate_id"]})
+    if not claimed:
+        return {"ok": True, "status": "duplicate", "event_id": event["event_id"]}
+    try:
+        result = await task_service.apply_erp_event(event, store=store)
+    except BusinessError as exc:
+        await store.put_inbox(event["event_id"], {"status": "failed", "type": event["type"],
+                                                 "aggregate_id": event["aggregate_id"],
+                                                 "error": str(exc)[:300]})
+        raise HTTPException(status_code=getattr(exc, "status_code", None) or 400,
+                            detail=str(exc)[:300]) from None
+    except Exception as exc:
+        await store.put_inbox(event["event_id"], {"status": "failed", "type": event["type"],
+                                                 "aggregate_id": event["aggregate_id"],
+                                                 "error": str(exc)[:300]})
+        raise HTTPException(status_code=503, detail="No se pudo aplicar el evento.") from None
+    await store.put_inbox(event["event_id"], {"status": "processed", "type": event["type"],
+                                              "aggregate_id": event["aggregate_id"],
+                                              "result": str(result.get("status") or "")[:120]})
+    await store.put_cursor(event["aggregate_id"], event["aggregate_version"])
+    return {"ok": True, "status": result.get("status"), "event_id": event["event_id"],
+            "task_id": result.get("task_id")}
 
 
 @app.get("/api/tasks")

@@ -96,6 +96,18 @@ class MongoRepository:
         return self.db["findings_inbox"]
 
     @property
+    def erp_event_inbox(self):
+        return self.db["erp_event_inbox"]
+
+    @property
+    def erp_event_outbox(self):
+        return self.db["erp_event_outbox"]
+
+    @property
+    def erp_event_cursors(self):
+        return self.db["erp_event_cursors"]
+
+    @property
     def dev_objectives(self):
         return self.db["objectives"]
 
@@ -265,6 +277,7 @@ class MongoRepository:
         await self.tier_s_runs.create_index([("owner_id", ASCENDING), ("updated_at", DESCENDING)])
         await self.findings_inbox.create_index([("project", ASCENDING), ("status", ASCENDING)])
         await self.findings_inbox.create_index([("project", ASCENDING), ("file", ASCENDING)])
+        await self.erp_event_outbox.create_index([("state", ASCENDING), ("attempts", ASCENDING)])
         await self.dev_missions.create_index([("mission_id", ASCENDING)], unique=True)
         await self.dev_missions.create_index([("project", ASCENDING), ("status", ASCENDING)])
         await self.dev_objectives.create_index([("objective_id", ASCENDING)], unique=True)
