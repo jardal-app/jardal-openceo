@@ -2268,6 +2268,8 @@ class TaskService:
                 return None
             if not isinstance(task, dict) or not task.get("task_id"):
                 return None
+            if is_personal_scope(task):
+                return None
             mirror = business_mirror(self._task_params(task).get("_mirrors"))
             name = str(mirror.get("name") or "").strip()
             payload = {

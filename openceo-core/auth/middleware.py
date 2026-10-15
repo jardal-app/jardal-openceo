@@ -26,6 +26,9 @@ async def _revalidate_federated_user(db: Any, user_doc: dict[str, Any], erp_toke
         await adapter.aclose()
     if mapped["external_id"] != (user_doc.get("external_id") or ""):
         raise HTTPException(status_code=401, detail="Sesión ERP no corresponde al usuario")
+    from business.personal import bind_request_erp_token
+
+    bind_request_erp_token(erp_token, user_doc.get("user_id"))
     updates = {"all_permissions": mapped["all_permissions"], "allowed_projects": mapped["allowed_projects"],
                "is_client": mapped["is_client"], "auth_version": mapped["auth_version"]}
     if any(user_doc.get(k) != v for k, v in updates.items()):

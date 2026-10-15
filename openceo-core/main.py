@@ -257,7 +257,15 @@ internal_mcp = build_internal_mcp_mount(
     settings, task_service, erpnext_adapter,
     issuer=mcp_token_issuer, audit=mcp_audit_sink,
     research_bridge=_ticket_research_bridge)
-horizon_service = HorizonService(settings=settings, repo=repo)
+from business.personal import ERPHorizonStore, JardalERPPersonal, horizon_store_is_erp
+
+try:
+    _horizon_erp = horizon_store_is_erp(settings)
+except ValueError as exc:
+    logger.warning("Horizon ERP mal configurado; lifespan rehusará el arranque: %s", exc)
+    _horizon_erp = False
+_horizon_repo = ERPHorizonStore(repo, JardalERPPersonal(settings)) if _horizon_erp else repo
+horizon_service = HorizonService(settings=settings, repo=_horizon_repo)
 # El timer unico de Horizon: duerme hasta el proximo vencimiento y lo despierta
 # cada encolado. No es un barrido (reglas permanentes de AGENTS.md).
 horizon_store = HorizonTriggerStore(repo, settings=settings)
@@ -439,6 +447,7 @@ async def lifespan(_: FastAPI):
         from business.finance import finance_provider_is_erp
 
         finance_provider_is_erp(settings)
+        horizon_store_is_erp(settings)
         # Store in app state for router access
         app.state.auth_db = _auth_db
         # Create default admin user if needed

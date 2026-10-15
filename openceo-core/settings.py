@@ -116,6 +116,10 @@ class Settings(BaseSettings):
     # Finanzas (00263): "erpnext" (DocTypes, defecto) o "jardal_erp" (contrato
     # financiero, exige manifiesto de autoridad listo como identidad/eventos).
     FINANCE_PROVIDER: str = "erpnext"
+    # Horizon personal (00264): "mongo" (defecto) o "jardal_erp" (dominio
+    # privado ERP para objetivos/capturas; exige manifiesto + identidad
+    # federada, pues cada llamada usa la sesión del usuario).
+    HORIZON_STORE: str = "mongo"
 
     ERPNEXT_URL: str = ""
     ERPNEXT_USER: str = ""
