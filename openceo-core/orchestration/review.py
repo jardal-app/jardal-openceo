@@ -16,10 +16,12 @@ slot's ``limit_patterns`` / ``expired_patterns``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +34,9 @@ from orchestration.findings import (
     _anchor_text,  # rendering only; anchors stay opaque otherwise
 )
 from orchestration.knowledge import with_preamble
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +71,7 @@ class ReviewSlot:
     # Per-slot reviewer timeout; 0 = the round default
     # (``review.reviewer_timeout_minutes``). TASK-2026-00162.
     timeout_minutes: int = 0
+    reserve_only: bool = False
 
 
 #: Providers whose review slots resolve the command from ``account``.
@@ -147,6 +153,7 @@ def parse_pool(raw: Sequence[Mapping[str, Any]] | None) -> list[ReviewSlot]:
             extra=bool(entry.get("extra", False)),
             active=entry.get("active", True) is not False,
             timeout_minutes=timeout_minutes,
+            reserve_only=bool(entry.get("reserve_only", False)),
         ))
     slots.sort(key=lambda slot: (slot.priority, slot.label))
     return slots
@@ -254,8 +261,14 @@ def classify_slot_error(text: str, slot: ReviewSlot) -> tuple[str, dict[str, Any
         if pattern.lower() in lowered:
             return "disabled", {"status": "disabled",
                                 "reason": f"expired pattern: {pattern}"}
-    if "model not found" in lowered or "model_not_found" in lowered:
+    if any(pattern in lowered for pattern in (
+            "model not found", "model_not_found", "modelnotfound")):
         return "disabled", {"status": "disabled", "reason": "model not found"}
+    if transient_slot_error(text):
+        return "cooling_down", {
+            "status": "cooling_down",
+            "until": (_utcnow() + timedelta(seconds=300)).isoformat(),
+            "reason": "transient provider error"}
     for pattern in slot.limit_patterns:
         if pattern.lower() in lowered:
             resume = _utcnow() + timedelta(minutes=60)
@@ -263,6 +276,19 @@ def classify_slot_error(text: str, slot: ReviewSlot) -> tuple[str, dict[str, Any
                                     "until": resume.isoformat(),
                                     "reason": f"limit pattern: {pattern}"}
     return "invalid_only", {}
+
+
+def transient_slot_error(text: str) -> bool:
+    """Recognize provider outages and transport failures across reviewer CLIs."""
+    lowered = (text or "").lower()
+    return any(pattern in lowered for pattern in (
+        "unavailable", "service is currently unavailable", "overloaded",
+        "rate limit", "rate_limit", "too many requests", "resource_exhausted",
+        "connection reset", "connection closed", "connection was closed",
+        "socket connection", "econnreset", "econnrefused", "etimedout",
+        "timed out", "timeout", "fetch failed", "bad gateway",
+        "internal server error", "gateway timeout", "temporarily unavailable",
+    )) or bool(re.search(r"\b(?:429|500|502|503|504)\b", lowered))
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +323,7 @@ async def select_round(
     eligible: list[ReviewSlot] = []
     extras: list[ReviewSlot] = []
     for slot in pool:
-        if slot.label in excluded:
+        if slot.label in excluded or slot.reserve_only:
             continue
         ok, _reason = slot_available(slot, await store.get_slot(slot.label))
         if not ok:
@@ -411,7 +437,7 @@ def slot_timeout_s(
 
 
 def retry_note(previous: Mapping[str, Any] | None) -> str:
-    """Prompt lead for a slot's second attempt ("" on a first attempt)."""
+    """Prompt lead for a retry (empty on the first attempt)."""
     if not previous:
         return ""
     kind = str(previous.get("kind") or "")
@@ -491,17 +517,16 @@ async def run_quorum_round(
     run_one: RunOne,
     builder_family: str = "muse",
     quorum: int = 2,
+    recovery: Mapping[str, Any] | None = None,
 ) -> QuorumRound:
-    """Run one round until quorum or exhaustion (§7.2; both engines).
+    """Run independent reviewers, preserving valid reports across failures.
 
-    Wave 1 runs the plan (reviewers + extras) in parallel. Short of quorum,
-    wave 2 runs ``shortfall + 1`` slots in parallel: untried eligible slots
-    of uncounted families first (relief), then ONE retry of first attempts
-    that failed for a retriable reason (:data:`RETRIABLE_KINDS`) on slots
-    still available. A failed slot never voids the others' reports; the
-    round only fails when no combination reaches quorum, and no slot runs
-    more than twice per round (bounded cost, TASK-2026-00162).
+    Recovery adds delayed retries and ranked reserves until its deadline;
+    without recovery, use two bounded waves and one retry per slot.
     """
+    if recovery:
+        return await _recover_quorum(
+            pool, store, plan, run_one, builder_family, quorum, recovery)
     first = [*plan.reviewers, *plan.extras]
     outcomes: list[dict[str, Any]] = list(await asyncio.gather(
         *[run_one(slot, 1, None) for slot in first]))
@@ -544,6 +569,148 @@ async def run_quorum_round(
     return QuorumRound(
         quorum_met(valid, reviewers, builder_family, quorum),
         outcomes, reviewers, valid)
+
+
+async def _recover_quorum(
+    pool: Sequence[ReviewSlot], store: SlotStore, plan: RoundPlan,
+    run_one: RunOne, builder_family: str, quorum: int,
+    recovery: Mapping[str, Any],
+) -> QuorumRound:
+    attempts_per_slot = max(1, int(recovery.get("attempts_per_slot", 3)))
+    delay = max(1, float(recovery.get("retry_delay_seconds", 300)))
+    deadline = time.monotonic() + max(1, float(recovery.get("max_wait_seconds", 43200)))
+    outcomes: list[dict[str, Any]] = []
+    reviewers = list(plan.reviewers)
+    attempts: dict[str, int] = {}
+    latest: dict[str, dict[str, Any]] = {}
+    tried_models: set[str] = set()
+
+    def recoverable(outcome: Mapping[str, Any]) -> bool:
+        kind = outcome.get("kind")
+        return (kind in {"timeout", "cooling_down"}
+                or (kind == "slot_error"
+                    and transient_slot_error(str(outcome.get("reason") or ""))))
+
+    async def pause(seconds: float) -> bool:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(seconds, remaining))
+        return time.monotonic() < deadline
+
+    async def run_slot(slot: ReviewSlot) -> None:
+        for local_attempt in range(attempts_per_slot):
+            if local_attempt and quorum_met(
+                    _valid_by_label(outcomes), reviewers, builder_family, quorum):
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            previous = latest.get(slot.label)
+            attempt = attempts.get(slot.label, 0) + 1
+            attempts[slot.label] = attempt
+            if slot.model:
+                tried_models.add(slot.model)
+            try:
+                outcome = await asyncio.wait_for(
+                    run_one(slot, attempt, previous), timeout=remaining)
+            except asyncio.TimeoutError:
+                outcome = new_outcome(slot, attempt)
+                outcome.update(kind="timeout", reason="review recovery deadline reached")
+            except Exception as exc:
+                outcome = new_outcome(slot, attempt)
+                outcome.update(kind="slot_error", reason=f"{type(exc).__name__}: {exc}"[:300])
+            outcomes.append(outcome)
+            latest[slot.label] = outcome
+            if outcome.get("valid"):
+                await store.set_slot(slot.label, {"status": "available"})
+                return
+            if quorum_met(_valid_by_label(outcomes), reviewers, builder_family, quorum):
+                return
+            if slot.extra or slot.family == builder_family:
+                return
+            retryable = recoverable(outcome)
+            if outcome.get("kind") in {"malformed", "worktree"}:
+                retryable = local_attempt == 0
+            if not retryable or local_attempt + 1 >= attempts_per_slot:
+                return
+            state = await store.get_slot(slot.label)
+            if state.get("status") == "disabled":
+                return
+            wait = delay
+            if state.get("until"):
+                try:
+                    until = datetime.fromisoformat(str(state["until"]))
+                    until = until.replace(tzinfo=timezone.utc) if until.tzinfo is None else until
+                    wait = max(wait, (until - _utcnow()).total_seconds())
+                except ValueError:
+                    return
+            logger.warning("Reviewer %s attempt %s failed (%s); retry in %.0fs",
+                           slot.label, attempt, outcome.get("kind"), wait)
+            if not await pause(wait):
+                return
+
+    batch = [*plan.reviewers, *plan.extras]
+    while time.monotonic() < deadline:
+        await asyncio.gather(*(run_slot(slot) for slot in batch))
+        valid = _valid_by_label(outcomes)
+        if quorum_met(valid, reviewers, builder_family, quorum):
+            return QuorumRound(True, outcomes, reviewers, valid)
+        counted = _counted_families(valid, reviewers, builder_family)
+        candidates: list[ReviewSlot] = []
+        for slot in sorted(pool, key=lambda item: (
+                not item.reserve_only, item.priority, item.label)):
+            if (slot.extra or slot.family == builder_family or slot.family in counted
+                    or slot.label in latest or (slot.model and slot.model in tried_models)):
+                continue
+            ok, _reason = slot_available(slot, await store.get_slot(slot.label))
+            if ok:
+                candidates.append(slot)
+        if not candidates:
+            waiting: list[ReviewSlot] = []
+            for slot in pool:
+                eligible, _reason = slot_available(slot, {"status": "available"})
+                if (slot.extra or slot.family == builder_family or slot.family in counted
+                        or not eligible):
+                    continue
+                state = await store.get_slot(slot.label)
+                if state.get("status") == "disabled":
+                    continue
+                outcome = latest.get(slot.label)
+                if ((outcome and recoverable(outcome))
+                        or (outcome is None and state.get("status") == "cooling_down")):
+                    waiting.append(slot)
+            if len(counted | {slot.family for slot in waiting}) < quorum:
+                break
+            logger.warning("Review quorum unavailable; keeping valid reports and waiting %.0fs", delay)
+            if not await pause(delay):
+                break
+            for slot in sorted(waiting, key=lambda item: (
+                    not item.reserve_only, item.priority, item.label)):
+                ok, _reason = slot_available(slot, await store.get_slot(slot.label))
+                if ok:
+                    candidates.append(slot)
+            if not candidates:
+                batch = []
+                continue
+        batch = []
+        covered = set(counted)
+        models: set[str] = set()
+        for slot in candidates:
+            if slot.family in covered or (slot.model and slot.model in models):
+                continue
+            batch.append(slot)
+            covered.add(slot.family)
+            if slot.model:
+                models.add(slot.model)
+            if slot.label not in {item.label for item in reviewers}:
+                reviewers.append(slot)
+            if len(batch) >= max(1, quorum - len(counted)) + 1:
+                break
+        logger.info("Review quorum recovery using %s",
+                    ", ".join(f"{slot.label} ({slot.model})" for slot in batch))
+    valid = _valid_by_label(outcomes)
+    return QuorumRound(False, outcomes, reviewers, valid)
 
 
 # ---------------------------------------------------------------------------

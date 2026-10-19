@@ -541,6 +541,11 @@ class ConfigLoader:
                     "min_available_families": 3,
                     "max_rounds": 2,
                     "reviewer_timeout_minutes": 15,
+                    "recovery": {
+                        "attempts_per_slot": 3,
+                        "retry_delay_seconds": 300,
+                        "max_wait_seconds": 43200,
+                    },
                 },
                 "reviewers": [
                     {"label": "qwen-max", "provider": "qwen", "model": "qwen3.8-max", "family": "qwen", "priority": 1, "active": True, "quota": "reactive", "expires_on": "2026-10-19", "prompt_via": "argv", "command": ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"], "limit_patterns": [], "expired_patterns": []},
@@ -672,7 +677,35 @@ class ConfigLoader:
                 "allowed_account_refs": [],
             },
         }
+        defaults["review"]["reviewers"].extend(
+            _reviewer_reserves(Path(__file__).resolve().parent.parent))
         return _deep_merge(defaults, cfg)
+
+
+def _reviewer_reserves(repo: Path) -> list[dict[str, Any]]:
+    path = repo / "catalog" / "reviewer_models.yaml"
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    entries = data.get("models") if isinstance(data, dict) else None
+    if not isinstance(entries, list) or not entries:
+        raise ValueError(f"{path}: models must be a nonempty ranked list")
+    slots = []
+    seen: set[str] = set()
+    for rank, entry in enumerate(entries):
+        model = str(entry.get("model") or "") if isinstance(entry, dict) else ""
+        family = str(entry.get("family") or "") if isinstance(entry, dict) else ""
+        if (not model.startswith("opencode/") or not family or model in seen
+                or not (model.endswith("-free") or model == "opencode/big-pickle")):
+            raise ValueError(f"{path}: invalid free reviewer at rank {rank + 1}")
+        seen.add(model)
+        slots.append({
+            "label": f"reserve-{model.split('/', 1)[1]}",
+            "provider": "opencode", "model": model, "family": family,
+            "priority": 100 + rank, "active": True, "reserve_only": True,
+            "extra": family == "anonymous",
+            "quota": "reactive", "prompt_via": "argv",
+            "command": ["opencode", "run", "--standalone", "--format", "json", "-m", model],
+        })
+    return slots
 
 
 def _planner_agents_from_catalog(

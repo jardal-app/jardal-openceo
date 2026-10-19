@@ -17,6 +17,7 @@ cycle and the objectives engine import them from here.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -115,6 +116,40 @@ OUTPUT_CAP_CHARS = 40000
 TIMEOUT_RETURNCODE = 124
 
 
+def _reviewer_output(stdout: str, stderr: str, provider: str,
+                     returncode: int) -> tuple[int, str]:
+    text = stdout.strip() or stderr.strip()
+    if provider in {"agy", "gemini"}:
+        try:
+            envelope = json.loads(stdout)
+        except ValueError:
+            envelope = None
+        if isinstance(envelope, dict) and "status" in envelope:
+            if envelope["status"] != "SUCCESS":
+                return returncode or 1, str(envelope.get("error") or envelope["status"])
+            text = str(envelope.get("response") or "")
+    elif provider == "opencode":
+        parts: dict[str, str] = {}
+        for index, line in enumerate(stdout.splitlines()):
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") == "error":
+                return returncode or 1, json.dumps(event.get("error") or event)
+            part = event.get("part")
+            if event.get("type") == "text" and isinstance(part, dict):
+                if isinstance(part.get("text"), str):
+                    parts[str(part.get("id", index))] = part["text"]
+        if parts:
+            text = "\n".join(parts.values())
+    if returncode and stderr.strip() and stderr.strip() != text:
+        text = stderr.strip() + "\n" + text
+    return returncode, text
+
+
 class ProcessExecutor:
     """One-shot process executor over global role/pool commands."""
 
@@ -160,6 +195,16 @@ class ProcessExecutor:
             return ExecResult(
                 returncode=1, elapsed_s=0.0,
                 output_tail=f"role {role} has no command")
+        if role.startswith("review:"):
+            provider = str(spec.get("provider") or "")
+            if provider in {"agy", "gemini"} and "--output-format" not in config_argv:
+                position = config_argv.index("--print") if "--print" in config_argv else len(config_argv)
+                config_argv[position:position] = ["--output-format", "json"]
+            elif provider == "opencode":
+                if "--format" not in config_argv:
+                    config_argv += ["--format", "json"]
+                if "--standalone" not in config_argv:
+                    config_argv.append("--standalone")
         badge: str | None = None
         file_overlays: dict[str, bytes] | None = None
         translator_env: dict[str, str] = {}
@@ -317,10 +362,14 @@ class ProcessExecutor:
             stdout = (raw_out or b"").decode("utf-8", errors="replace")
             stderr = (raw_err or b"").decode("utf-8", errors="replace")
             text = stdout.strip() or stderr.strip()
+            returncode = int(process.returncode or 0)
+            if role.startswith("review:"):
+                returncode, text = _reviewer_output(
+                    stdout, stderr, str(spec.get("provider") or ""), returncode)
             truncated = len(text) > OUTPUT_CAP_CHARS
             signal = self._read_signal(workdir, text)
             return ExecResult(
-                returncode=int(process.returncode or 0),
+                returncode=returncode,
                 elapsed_s=time.monotonic() - started,
                 signal=signal,
                 usage={"stdout_chars": len(stdout),

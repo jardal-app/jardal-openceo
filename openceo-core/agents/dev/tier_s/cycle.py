@@ -1267,11 +1267,10 @@ class TierSCycle:
                 ctx, slot, round_no, request, request_name, handoff, head,
                 attempt=attempt, previous=previous)
 
-        # Relief + one retry per slot (shared with the objective final
-        # review): one slow or sloppy slot no longer voids the round.
         result = await review_mod.run_quorum_round(
             ctx.pool, self._slots, plan, run_one,
-            builder_family=builder_family, quorum=quorum)
+            builder_family=builder_family, quorum=quorum,
+            recovery=ctx.review_cfg.get("recovery"))
         slots_run = sorted(result.valid)
         valid_reports = sum(1 for label in slots_run if result.valid.get(label))
         verdicts = result.verdicts
@@ -1409,6 +1408,7 @@ class TierSCycle:
                       "kind": str(outcome.get("kind") or ""),
                       "elapsed_s": float(outcome.get("elapsed_s") or 0.0),
                       "exit_code": outcome.get("exit_code"),
+                      "account": slot.account, "model": slot.model,
                       "project": ctx.ticket.get("project")}))
         except Exception:
             pass  # telemetry persistence never fails a round

@@ -1074,7 +1074,8 @@ class DevSessionManager:
 
         result = await review_mod.run_quorum_round(
             pool, slots, plan, run_one, builder_family=builder_family,
-            quorum=SIMPLE_REVIEW_QUORUM)
+            quorum=SIMPLE_REVIEW_QUORUM,
+            recovery=review_cfg.get("recovery"))
         reports = [{
             "slot": str(item.get("slot")),
             "family": str(next(

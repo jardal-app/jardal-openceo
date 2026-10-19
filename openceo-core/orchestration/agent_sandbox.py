@@ -346,8 +346,15 @@ def _gemini_state_ops(home: Path, scratch: Path,
         return []
     subdir = _GEMINI_BINARY_SUBDIRS.get(Path(str(argv[0])).name,
                                         ".gemini")
-    ops = [["--tmpfs", str(home / subdir / entry.split("/", 1)[1])]
-           for entry in _GEMINI_STATE_SUBDIRS]
+    account_dir = home / subdir
+    ops = [["--tmpfs", str(account_dir)]]
+    if account_dir.is_dir():
+        for entry in sorted(account_dir.iterdir()):
+            if entry.is_symlink():
+                continue
+            ops.append(["--ro-bind", str(entry), str(entry)])
+    ops.extend(["--tmpfs", str(account_dir / entry.split("/", 1)[1])]
+               for entry in _GEMINI_STATE_SUBDIRS)
     for name in _GEMINI_STATE_FILES:
         src = home / subdir / name
         if not src.is_file() or src.is_symlink():

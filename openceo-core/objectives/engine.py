@@ -3377,11 +3377,10 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
             env, slot, request, head, objective, attempt=attempt,
             previous=previous, review_no=reviews + 1)
 
-    # Same round machinery as the ticket cycle (TASK-2026-00162): relief
-    # slots plus one retry per slot before the objective parks.
     result = await review_mod.run_quorum_round(
         env.pool, env.slots, plan, run_one, builder_family="muse",
-        quorum=int(env.review_cfg.get("quorum", 2)))
+        quorum=int(env.review_cfg.get("quorum", 2)),
+        recovery=env.review_cfg.get("recovery"))
     if not result.met:
         return await _objective_park(
             env, objective, "no_quorum",
@@ -3537,6 +3536,8 @@ async def _persist_final_review(
                   "elapsed_s": float(outcome.get("elapsed_s") or 0.0),
                   "exit_code": outcome.get("exit_code"),
                   "final_review": review_no,
+                  "account": str(outcome.get("account") or ""),
+                  "model": str(outcome.get("model") or ""),
                   "project": objective.get("project")}))
     except Exception:
         pass  # telemetry persistence never fails a review

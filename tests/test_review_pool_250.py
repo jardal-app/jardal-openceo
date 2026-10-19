@@ -120,7 +120,7 @@ class LiveArgvTests(unittest.IsolatedAsyncioTestCase):
     async def test_gemini_argv_runs_account_print_prompt(self) -> None:
         config_args, argv, result = await self._argv(
             _gemini_spec(account="agyj"))
-        self.assertEqual(config_args, ["agyj", "--print"])
+        self.assertEqual(config_args, ["agyj", "--output-format", "json", "--print"])
         self.assertEqual(argv[-2:], ["--print", "review this"])
         self.assertEqual(argv[0], "agyj")
         self.assertEqual(result.slot, "agyj")
