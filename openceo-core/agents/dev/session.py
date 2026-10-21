@@ -38,7 +38,13 @@ from objectives import ticket_cost as cost_mod
 from orchestration.inbox import InMemoryInboxStore, MongoInboxStore
 from orchestration.knowledge import detect_prompt_lang, with_preamble
 from orchestration.live import (TIMEOUT_RETURNCODE, AllowAllQuota,
-                                ProcessExecutor, RateMonitorQuota)
+                                ProcessExecutor, RateMonitorQuota, _reviewer_output)
+from orchestration.provider_recovery import (
+    PROVIDER_RESUME_PROMPT,
+    PROVIDER_RETRY_DELAYS,
+    model_responded,
+    transient_provider_error,
+)
 from orchestration.role_claude import (
     CLAUDE_MCP_OVERLAY_RELPATH,
     claude_config_bytes,
@@ -89,8 +95,10 @@ from .tier_s.stores import (
 )
 from objectives.agent_result import (
     AGENT_RESULT_PROMPT,
+    AgentResult,
     SCHEMA_PATH as AGENT_RESULT_SCHEMA_PATH,
     parse_agent_result,
+    scheduled_resume,
 )
 from .tmux_runtime import TmuxRuntime
 from config_loader import ConfigLoader
@@ -311,6 +319,7 @@ class DevSessionManager:
     def __init__(self, settings: Settings, config_loader: ConfigLoader,
                  rate_monitor: RateMonitor | None = None, repo: Any | None = None) -> None:
         self._settings = settings
+        self._provider_responses: set[tuple[str, ...]] = set()
         self._config_loader = config_loader
         self._rate_monitor = rate_monitor
         self._repo = repo
@@ -426,8 +435,10 @@ class DevSessionManager:
             if output.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.ESCALATED):
                 await self._repo.release_repo_lock(repo, holder)
             elif output.status == TaskStatus.WAITING and output.resume_at is not None:
-                # Resumable wait (transient/quota): the session comes back.
-                await self._repo.touch_repo_lock(repo, holder)
+                if str(output.waiting_reason or "").startswith("scheduled_wait:"):
+                    await self._repo.release_repo_lock(repo, holder)
+                else:
+                    await self._repo.touch_repo_lock(repo, holder)
             elif output.status == TaskStatus.WAITING:
                 # Human wait (needs_owner, no resume): the session never comes
                 # back by itself (TASK-2026-00122); holding the lock would wedge
@@ -486,6 +497,11 @@ class DevSessionManager:
             task.get("params"),
             code_result.review_links,
         )
+        output.params = dict(output.params if output.params is not None else task.get("params") or {})
+        output.params.pop("dev_checkpoint", None)
+        output.params.pop("agent_result", None)
+        if code_result.agent_result is not None:
+            output.params["agent_result"] = code_result.agent_result
         if code_result.executor_link:
             # The Tier C chain link that ran this ticket (policy §25/§32):
             # the chain is availability, not selection, so the link is
@@ -506,7 +522,7 @@ class DevSessionManager:
             return output
         if code_result.error:
             if branch is not None:
-                self._drop_simple_branch(branch)
+                self._save_simple_checkpoint(branch, output.params)
             if "rate limit" in code_result.error.lower():
                 output.status = TaskStatus.WAITING
                 output.waiting_reason = code_result.error
@@ -561,6 +577,9 @@ class DevSessionManager:
     ) -> "_SimpleBranch | DevExecutionOutput":
         """Open the ticket work branch (+ baseline gates, §10/§12)."""
         dev_cfg = project_config.get("dev", {}) or {}
+        checkpoint = (task.get("params") or {}).get("dev_checkpoint")
+        if isinstance(checkpoint, dict):
+            return self._restore_simple_checkpoint(repo, checkpoint, task)
         repos = project_config.get("project", {}).get("repos", []) or []
         base = str((repos[0].get("branch_base") if repos else None) or "main")
         ref = self._simple_ref(task)
@@ -645,6 +664,59 @@ class DevSessionManager:
     def _drop_simple_branch(self, branch: _SimpleBranch) -> None:
         self._simple_git(branch.repo, "checkout", "-q", branch.base)
         self._simple_git(branch.repo, "branch", "-D", branch.branch)
+
+    def _save_simple_checkpoint(
+        self, branch: _SimpleBranch, params: dict[str, Any] | None,
+    ) -> None:
+        if params is None:
+            raise ValueError("cannot preserve a branch without execution params")
+        repo = branch.repo
+        if self._simple_git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() != branch.branch:
+            raise ValueError("cannot checkpoint a different branch")
+        self._simple_git(repo, "add", "-A", "--", ".", ":!.openceo")
+        if self._simple_git(repo, "diff", "--cached", "--quiet").returncode != 0:
+            commit = self._simple_git(
+                repo, "-c", "user.name=OpenCEO", "-c", "user.email=openceo@jardal.app",
+                "commit", "-qm", f"checkpoint {branch.ref}")
+            if commit.returncode != 0:
+                raise ValueError("cannot commit execution checkpoint")
+        artifacts = {}
+        handoff = repo / ".openceo" / "HANDOFF.md"
+        if handoff.is_file():
+            artifacts["HANDOFF.md"] = handoff.read_text(encoding="utf-8")[:64000]
+        params["dev_checkpoint"] = {
+            "branch": branch.branch, "base": branch.base,
+            "base_sha": branch.base_sha, "ref": branch.ref,
+            "head_sha": self._simple_git(repo, "rev-parse", "HEAD").stdout.strip(),
+            "oracle_frozen": branch.oracle_frozen,
+            "oracle_baseline_red": branch.oracle_baseline_red,
+            "artifacts": artifacts,
+        }
+        if self._simple_git(repo, "checkout", "-q", branch.base).returncode != 0:
+            raise ValueError("cannot release checkpoint branch")
+
+    def _restore_simple_checkpoint(
+        self, repo: Path, checkpoint: dict[str, Any], task: dict[str, Any],
+    ) -> _SimpleBranch | DevExecutionOutput:
+        branch = str(checkpoint.get("branch") or "")
+        expected = str(checkpoint.get("head_sha") or "")
+        tip = self._simple_git(repo, "rev-parse", "--verify", f"refs/heads/{branch}").stdout.strip()
+        if (not branch or not expected or tip != expected
+                or self._simple_git(repo, "checkout", "-q", branch).returncode != 0):
+            return DevExecutionOutput(
+                status=TaskStatus.WAITING,
+                waiting_reason="config: execution checkpoint branch is unavailable or changed",
+                params=dict(task.get("params") or {}))
+        scratch = repo / ".openceo"
+        scratch.mkdir(exist_ok=True)
+        for name, content in (checkpoint.get("artifacts") or {}).items():
+            if name == "HANDOFF.md":
+                (scratch / name).write_text(str(content), encoding="utf-8")
+        return _SimpleBranch(
+            repo=repo, branch=branch, base=str(checkpoint["base"]),
+            base_sha=str(checkpoint["base_sha"]), ref=str(checkpoint["ref"]),
+            oracle_frozen=checkpoint.get("oracle_frozen"),
+            oracle_baseline_red=str(checkpoint.get("oracle_baseline_red") or ""))
 
     def _simple_diff_sizes(
         self, branch: _SimpleBranch, exclude: list[str],
@@ -787,6 +859,8 @@ class DevSessionManager:
                 badge_ticket=badge_ticket_for_task(task) or "")
             if followup is not None:
                 output.cost_runs.append(followup)
+                if self._failed_followup(followup, branch, output):
+                    return output
             # The retry saw the failing oracle's output: re-verify its hashes
             # before running the gates again (a "fix" by editing the test is
             # the oracle being redefined).
@@ -1014,9 +1088,10 @@ class DevSessionManager:
         if not (name and email):
             identity = ["-c", "user.name=OpenCEO",
                         "-c", "user.email=openceo@jardal.app"]
-        if self._simple_git(
+        if (self._simple_git(repo, "diff", "--cached", "--quiet").returncode != 0
+                and self._simple_git(
                 repo, *identity, "commit", "-qm",
-                f"review checkpoint {branch.ref}").returncode != 0:
+                f"review checkpoint {branch.ref}").returncode != 0):
             output.status = TaskStatus.FAILED
             output.error = "review checkpoint commit failed"
             return output
@@ -1196,6 +1271,8 @@ class DevSessionManager:
                 badge_ticket=badge_ticket_for_task(task) or "")
             if followup is not None:
                 output.cost_runs.append(followup)
+                if self._failed_followup(followup, branch, output):
+                    return output
             try:
                 text = fix_path.read_text(encoding="utf-8", errors="replace")
             except OSError:
@@ -1277,10 +1354,13 @@ class DevSessionManager:
         if head != branch.base_sha:
             self._simple_git(repo, "reset", "--soft", branch.base_sha)
         if not self._simple_changed_files(branch):
-            self._drop_simple_branch(branch)
-            output.status = TaskStatus.WAITING
-            output.waiting_reason = "needs_owner: executor produced no changes"
-            return output
+            verdict = (output.params or {}).get("agent_result") or {}
+            if not (verdict.get("resultado") == "hecho" and verdict.get("entregables")
+                    and str(verdict.get("evidencia") or "").strip()):
+                self._drop_simple_branch(branch)
+                output.status = TaskStatus.WAITING
+                output.waiting_reason = "needs_owner: executor produced no changes"
+                return output
 
         tampered_out = await self._oracle_integrity(
             task, project_config, tool, branch, output)
@@ -1355,6 +1435,8 @@ class DevSessionManager:
                 badge_ticket=badge_ticket_for_task(task) or "")
             if followup is not None:
                 output.cost_runs.append(followup)
+                if self._failed_followup(followup, branch, output):
+                    return output
             try:
                 handoff = handoff_path.read_text(
                     encoding="utf-8", errors="replace")
@@ -1384,9 +1466,10 @@ class DevSessionManager:
             identity = ["-c", "user.name=OpenCEO",
                         "-c", "user.email=openceo@jardal.app"]
         title = " ".join(str(task.get("title", "")).split())[:72]
-        commit = self._simple_git(
-            repo, *identity, "commit", "-qm", f"{branch.ref}: {title}")
-        if commit.returncode != 0:
+        has_changes = self._simple_git(repo, "diff", "--cached", "--quiet").returncode != 0
+        commit = (self._simple_git(
+            repo, *identity, "commit", "-qm", f"{branch.ref}: {title}") if has_changes else None)
+        if commit is not None and commit.returncode != 0:
             self._drop_simple_branch(branch)
             output.status = TaskStatus.FAILED
             output.error = commit.stderr.strip()[:300] or "commit failed"
@@ -1473,6 +1556,39 @@ class DevSessionManager:
         return "\n".join(out) + "\n"
 
     async def _simple_followup(
+        self, tool: CodingTool, project_config: dict[str, Any], repo: Path,
+        prompt: str, *, task_id: str = "", project: str = "", badge_ticket: str = "",
+    ) -> dict[str, Any] | None:
+        elapsed = 0.0
+        for attempt in range(len(PROVIDER_RETRY_DELAYS) + 1):
+            result = await self._simple_followup_once(
+                tool, project_config, repo, PROVIDER_RESUME_PROMPT + prompt if attempt else prompt,
+                task_id=task_id, project=project, badge_ticket=badge_ticket)
+            if result is None:
+                return None
+            elapsed += float(result.get("duration_s") or 0)
+            result["duration_s"] = elapsed
+            if (not result.get("provider_retryable") or attempt == len(PROVIDER_RETRY_DELAYS)
+                    or await self._task_cancelled(task_id)):
+                return result
+            await asyncio.sleep(PROVIDER_RETRY_DELAYS[attempt])
+            if await self._task_cancelled(task_id):
+                return result
+        raise AssertionError("provider retry exhausted without a result")
+
+    def _failed_followup(
+        self, run: dict[str, Any], branch: _SimpleBranch, output: DevExecutionOutput,
+    ) -> bool:
+        if not run.get("error"):
+            return False
+        if output.params is None:
+            output.params = {}
+        self._save_simple_checkpoint(branch, output.params)
+        output.status = TaskStatus.FAILED
+        output.error = str(run["error"])
+        return True
+
+    async def _simple_followup_once(
         self,
         tool: CodingTool,
         project_config: dict[str, Any],
@@ -1523,7 +1639,7 @@ class DevSessionManager:
         started = time.monotonic()
         run_env = {**(executor.env or {}), **extra_env} or None
         try:
-            await self._run_process(
+            ok, output, err = await self._run_process(
                 command, stdin_payload=stdin_payload, timeout=1800,
                 cwd=str(repo), env=run_env,
                 config_argv=list(executor.argv),
@@ -1531,10 +1647,20 @@ class DevSessionManager:
         finally:
             if badge is not None and badge_provider is not None:
                 await badge_provider.revoke(badge)
-        return cost_mod.normalize_run({
+        run = cost_mod.normalize_run({
             "engine": str(executor.label),
             "duration_s": time.monotonic() - started,
         })
+        if executor.label == "tier_c:muse":
+            code, output = _reviewer_output(output, err, "muse", 0 if ok else 1)
+            ok = code == 0
+        if ok:
+            self._provider_responses.add(tuple(executor.argv))
+        else:
+            run["error"] = self._summarize_failure_output(output, err, fallback="follow-up failed")
+            run["provider_retryable"] = transient_provider_error(
+                err + "\n" + output, responded=tuple(executor.argv) in self._provider_responses)
+        return run
 
     async def _task_cancelled(self, task_id: str) -> bool:
         """Fresh cancel check against the stored ticket (fail-open).
@@ -1566,16 +1692,29 @@ class DevSessionManager:
         code_result: CodingStepResult,
         params_base: dict[str, Any] | None = None,
     ) -> DevExecutionOutput:
-        """Agent-declined simple tier (bloqueado/no_aplica, 00202).
-
-        Drops the work branch without running gates or merging: the
-        verdict was the agent's, not the orchestrator's. The failed
-        ticket carries ``params.agent_result`` for the post-persist
-        return; without an objective the verdict is just recorded.
-        """
+        verdict = dict(code_result.agent_result or {})
+        params = dict(params_base if params_base is not None else task.get("params") or {})
+        params["agent_result"] = verdict
+        try:
+            resume_at = scheduled_resume(AgentResult.model_validate(verdict))
+        except ValueError as exc:
+            if branch is not None:
+                self._save_simple_checkpoint(branch, params)
+            return DevExecutionOutput(
+                status=TaskStatus.FAILED, error=f"invalid scheduled wait: {exc}",
+                params=params, coding_tool=tool)
+        if resume_at is not None:
+            if branch is not None:
+                self._save_simple_checkpoint(branch, params)
+            reason = f"scheduled_wait: {verdict['motivo']}"
+            return DevExecutionOutput(
+                status=TaskStatus.WAITING, coding_tool=tool,
+                waiting_reason=reason, resume_at=resume_at, params=params,
+                last_response_summary=reason,
+                steps=[code_result.step, self._step("scheduled_wait", "waiting", reason)],
+                cost_runs=([code_result.cost_run] if code_result.cost_run else []))
         if branch is not None:
             self._reset_and_drop_branch(branch)
-        verdict = dict(code_result.agent_result or {})
         resultado = str(verdict.get("resultado") or "")
         motivo = str(verdict.get("motivo") or "")
         necesidad = str(verdict.get("necesidad") or "").strip()
@@ -1901,12 +2040,13 @@ class DevSessionManager:
                 params=s_params,
                 cost_runs=list(getattr(outcome, "cost_runs", None) or []),
             )
-        # Any non-completed cycle outcome mirrors as WAITING: the cycle
-        # already patched the task itself (waiting/transient/needs_owner),
-        # and this output must converge on those values, never override a
-        # needs_owner wait with a terminal FAILED.
+        outcome_params = dict(params or {})
+        if outcome.agent_result is not None:
+            outcome_params["agent_result"] = outcome.agent_result
+        declined = outcome.reason == "agent_blocked"
         return DevExecutionOutput(
-            status=TaskStatus.WAITING,
+            status=TaskStatus.FAILED if declined else TaskStatus.WAITING,
+            error=outcome.detail if declined else None,
             coding_tool=CodingTool.TIER_S,
             waiting_reason=(f"{outcome.reason}: {outcome.detail}"
                             if outcome.reason else "waiting"),
@@ -1914,7 +2054,7 @@ class DevSessionManager:
             last_response_summary=summary,
             steps=[self._step("cycle", "waiting",
                               f"{outcome.reason}: {outcome.detail}")],
-            params=params,
+            params=outcome_params,
             cost_runs=list(getattr(outcome, "cost_runs", None) or []),
         )
 
@@ -2118,12 +2258,44 @@ class DevSessionManager:
         return label.split(":", 1)[1] if label.startswith("tier_c:") else None
 
     async def _step_code(
+        self, task: dict[str, Any], config: dict[str, Any], tool: CodingTool,
+    ) -> CodingStepResult:
+        if self._settings.DEV_EXECUTION_MODE == "mock":
+            return await self._step_code_once(task, config, tool)
+        executor = await self._resolve_tier_executor(tool, config)
+        elapsed = 0.0
+        responded = tuple(executor.argv) in self._provider_responses
+        for attempt in range(len(PROVIDER_RETRY_DELAYS) + 1):
+            result = await self._step_code_once(
+                task, config, tool, executor=executor,
+                prompt_prefix=PROVIDER_RESUME_PROMPT if attempt else "",
+                responded=responded)
+            if result.cost_run is not None:
+                elapsed += float(result.cost_run.get("duration_s") or 0)
+                result.cost_run["duration_s"] = elapsed
+            responded = responded or result.provider_responded
+            if (not result.provider_retryable or attempt == len(PROVIDER_RETRY_DELAYS)
+                    or await self._task_cancelled(str(task.get("task_id") or ""))):
+                if attempt:
+                    result.step["provider_attempts"] = attempt + 1
+                return result
+            delay = PROVIDER_RETRY_DELAYS[attempt]
+            logger.warning("Coding provider failed for %s; retry %s in %ss",
+                           task.get("task_id"), attempt + 1, delay)
+            await asyncio.sleep(delay)
+            if await self._task_cancelled(str(task.get("task_id") or "")):
+                return result
+        raise AssertionError("provider retry exhausted without a result")
+
+    async def _step_code_once(
         self,
         task: dict[str, Any],
         config: dict[str, Any],
         tool: CodingTool,
+        *, executor: TierExecutor | None = None, prompt_prefix: str = "",
+        responded: bool = False,
     ) -> "CodingStepResult":
-        prompt = self._build_coding_prompt(task, config)
+        prompt = prompt_prefix + self._build_coding_prompt(task, config)
 
         if self._settings.DEV_EXECUTION_MODE == "mock":
             summary = (
@@ -2136,7 +2308,7 @@ class DevSessionManager:
                 summary=summary,
             )
 
-        executor = await self._resolve_tier_executor(tool, config)
+        executor = executor or await self._resolve_tier_executor(tool, config)
         if executor.prompt_via == "argv":
             command = [*executor.argv, prompt]
             stdin_payload: str | None = None
@@ -2192,8 +2364,17 @@ class DevSessionManager:
             "engine": str(executor.label),
             "duration_s": time.monotonic() - started,
         })
-
+        raw_output = output
+        if executor.label == "tier_c:muse":
+            code, output = _reviewer_output(output, err, "muse", 0 if ok else 1)
+            ok = code == 0
         if not ok:
+            model = ""
+            for flag in ("--model", "-m"):
+                if flag in executor.argv and executor.argv.index(flag) + 1 < len(executor.argv):
+                    model = str(executor.argv[executor.argv.index(flag) + 1])
+                    break
+            responded = responded or model_responded(raw_output, model)
             detail = self._summarize_failure_output(
                 output, err, fallback=f"{executor.label} execution failed")
             return CodingStepResult(
@@ -2203,12 +2384,21 @@ class DevSessionManager:
                 error=detail,
                 executor_link=self._executor_link(executor),
                 cost_run=run,
+                provider_retryable=transient_provider_error(
+                    err + "\n" + output, responded=responded),
+                provider_responded=responded,
             )
 
+        self._provider_responses.add(tuple(executor.argv))
         text = output or "ok"
         review_links = extract_review_links(text, self._review_base_url(config))
         summary = self._truncate(text, 500)
         verdict = parse_agent_result(output)
+        if verdict is None and "```agent-result" in output:
+            return CodingStepResult(
+                step=self._step("code", "failed", "invalid agent-result"),
+                prompt=prompt, summary="", error="invalid agent-result",
+                executor_link=self._executor_link(executor), cost_run=run)
         return CodingStepResult(
             step=self._step("code", "ok", f"Coding CLI finished ({executor.label})"),
             prompt=prompt,
@@ -2296,8 +2486,10 @@ class DevSessionManager:
                 provider_cfg = providers.get("muse", {}) or {}
                 argv = self._as_argv(link_cfg.get("command")) or self._as_argv(
                     provider_cfg.get("command")) or ["musej", "exec"]
-                argv = self._with_output_schema(
-                    argv + self._model_args(link_cfg))
+                argv = argv + self._model_args(link_cfg)
+                if "--json" not in argv:
+                    argv.append("--json")
+                argv = self._with_output_schema(argv)
                 profile_name = (link_cfg.get("role_profile")
                                 or provider_cfg.get("role_profile"))
                 if profile_name:
@@ -2456,6 +2648,11 @@ class DevSessionManager:
             lines.append(f"Ticket: #{ticket_num}")
         lines.append(f"Título: {task.get('title')}")
         lines.append(f"Descripción: {task.get('description')}")
+        previous = (task.get("params") or {}).get("agent_result")
+        if isinstance(previous, dict) and previous.get("resume_at"):
+            lines.extend(["", "REANUDACIÓN DE ESPERA PROGRAMADA",
+                          json.dumps(previous, ensure_ascii=False),
+                          "Verifica la condición pendiente y conserva los efectos ya confirmados."])
 
         answer = (task.get("params") or {}).get("owner_answer") or {}
         if isinstance(answer, dict):
@@ -2632,6 +2829,7 @@ class DevSessionManager:
             except (IsolationUnavailable, ValueError, OSError) as exc:
                 return ProcessRunResult(
                     False, "", f"sandbox refused: {exc}", None)
+        process = None
         try:
             stdin_target = (
                 asyncio.subprocess.PIPE
@@ -2660,12 +2858,18 @@ class DevSessionManager:
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
-            return ProcessRunResult(False, "", f"Command timeout: {' '.join(command)}", None)
+            return ProcessRunResult(False, "", "Coding command timeout", None)
         except FileNotFoundError:
             return ProcessRunResult(False, "", f"Command not found: {command[0]}", None)
         except Exception as exc:
             return ProcessRunResult(False, "", f"Command execution error: {exc}", None)
         finally:
+            if process is not None and process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                await process.wait()
             if plan is not None:
                 cleanup_sandbox_scratch(cwd or os.getcwd())
 
@@ -2731,6 +2935,8 @@ class CodingStepResult:
     agent_result: dict[str, Any] | None = None
     #: Measured cost of the coding CLI invocation, None when never spawned.
     cost_run: dict[str, Any] | None = None
+    provider_retryable: bool = False
+    provider_responded: bool = False
 
 
 @dataclass

@@ -309,7 +309,7 @@ class LooseSessionDefaultsTests(unittest.TestCase):
                 (providers.get("muse") or {}).get("command"),
                 ["/home/develop/.local/bin/musej"], name)
             codex_cmd = (providers.get("codex") or {}).get("command") or []
-            self.assertTrue(codex_cmd and str(codex_cmd[0]).endswith("codexf"), name)
+            self.assertTrue(codex_cmd and Path(str(codex_cmd[0])).name in {"codexf", "codexj"}, name)
             claude_cmd = (providers.get("claude") or {}).get("command") or []
             self.assertTrue(claude_cmd and str(claude_cmd[0]).endswith("claudej"), name)
 

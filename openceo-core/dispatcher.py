@@ -303,6 +303,11 @@ class Dispatcher:
             try:
                 if not self._service._task_allows_autorun(task):
                     continue
+                params = task.get("params") or {}
+                if (params.get("owner_question_id") or params.get("secret_block")
+                        or task.get("phase") == "owner_question"
+                        or task.get("qa_review_state") in {"pending", "changes_requested"}):
+                    continue
                 if task.get("blocked_by") and await self._service.blockers_open(task):
                     continue
                 await self._service.patch_task(
@@ -484,12 +489,14 @@ class Dispatcher:
         waiting = await self._repo.list_tasks_by_status(TaskStatus.WAITING)
         earliest: datetime | None = None
         holders = 0
+        scheduled_only = True
         for ticket in queued:
             if str(ticket.get("task_id") or "") in launched:
                 continue
             if not self._service._task_allows_autorun(ticket):
                 continue
             holders += 1
+            scheduled_only = False
             resume_at = _aware(ticket.get("resume_at"))
             if resume_at is not None and resume_at > now and (
                 earliest is None or resume_at < earliest
@@ -501,13 +508,15 @@ class Dispatcher:
             resume_at = _aware(ticket.get("resume_at"))
             if resume_at is not None and resume_at > now:
                 holders += 1
+                if not str(ticket.get("waiting_reason") or "").startswith("scheduled_wait:"):
+                    scheduled_only = False
                 if earliest is None or resume_at < earliest:
                     earliest = resume_at
         if holders == 0:
             await self._repo.clear_dispatcher_backup()
             return None
         due_at = now + timedelta(seconds=self._backup_seconds())
-        if earliest is not None and earliest < due_at:
+        if earliest is not None and (scheduled_only or earliest < due_at):
             due_at = earliest
         await self._repo.ensure_dispatcher_backup(due_at, f"{holders} waiting")
         return due_at

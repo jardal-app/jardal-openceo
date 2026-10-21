@@ -1,9 +1,9 @@
 """Structured agent result: hecho / bloqueado / no_aplica (TASK-2026-00202).
 
-Every agent ends with a verdict plus its reason. A ``bloqueado`` or
-``no_aplica`` objective child returns once to the same planner; loose
-tickets record the verdict without returning (TASK-2026-00204). The
-motivo is never checked against the catalog: no extra verifiers.
+Every agent ends with a verdict plus its reason. A scheduled technical
+block waits on its persisted ``resume_at``; other blocked or declined
+work returns once to the same planner. The motivo is never checked
+against the catalog: no extra verifiers.
 
 Dependency-free (stdlib + pydantic): sessions, the graph and the funnel
 import this without cycles.
@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 __all__ = [
     "AGENT_RESULT_FENCE",
@@ -28,6 +29,7 @@ __all__ = [
     "AgentResult",
     "legacy_blocked_result",
     "parse_agent_result",
+    "scheduled_resume",
 ]
 
 
@@ -45,6 +47,24 @@ class AgentResult(BaseModel):
     necesidad: str = ""
     entregables: list[str] = Field(default_factory=list)
     evidencia: str = ""
+    resume_at: datetime | None = None
+
+    @field_validator("resume_at", mode="before")
+    @classmethod
+    def _resume_is_timestamp(cls, value: Any) -> Any:
+        if value is not None and not isinstance(value, (str, datetime)):
+            raise ValueError("resume_at must be an ISO-8601 timestamp")
+        return value
+
+    @model_validator(mode="after")
+    def _scheduled_wait(self) -> AgentResult:
+        if self.resume_at is not None:
+            if self.resultado is not AgentOutcome.BLOQUEADO:
+                raise ValueError("resume_at requires resultado=bloqueado")
+            if self.resume_at.tzinfo is None:
+                raise ValueError("resume_at requires an explicit timezone")
+            self.resume_at = self.resume_at.astimezone(timezone.utc)
+        return self
 
     @field_validator("motivo")
     @classmethod
@@ -81,6 +101,7 @@ AGENT_RESULT_JSON_SCHEMA: dict[str, Any] = {
         "necesidad": {"type": "string"},
         "entregables": {"type": "array", "items": {"type": "string"}},
         "evidencia": {"type": "string"},
+        "resume_at": {"type": ["string", "null"], "format": "date-time"},
     },
 }
 
@@ -98,7 +119,18 @@ Reglas:
 - motivo siempre dice por qué, en una frase.
 - necesidad describe en palabras lo que te falta (nunca nombres de tools, que no ves).
 - entregables lista lo que dejaste; evidencia, dónde verificarlo (rutas, comandos).
+- Una espera técnica con fecha conocida (observación de 24 h, propagación o cuota) usa resultado=bloqueado y resume_at en ISO-8601 con zona UTC. Conserva en evidencia el inicio, plazo y qué se debe comprobar al vencer; no duermas dentro del CLI ni pidas una aprobación humana por el tiempo de espera.
+- Al reanudarte, comprueba el estado y la evidencia antes de actuar. No repitas un despliegue o un efecto confirmado. La llegada de resume_at solo permite volver a verificar: no demuestra que la prueba pasó.
+- Decisiones técnicas rutinarias se resuelven en el alcance. Solo pide al Owner decisiones reservadas, sus datos o credenciales que únicamente él pueda aportar; no uses resume_at para saltarte esa espera humana.
 - Si dudas entre hecho y bloqueado, elige bloqueado: los gates deciden el cierre, no tu veredicto."""
+
+
+def scheduled_resume(verdict: AgentResult, now: datetime | None = None) -> datetime | None:
+    if verdict.resume_at is None:
+        return None
+    if verdict.resume_at <= (now or datetime.now(timezone.utc)):
+        raise ValueError("resume_at must be in the future; verify the condition now")
+    return verdict.resume_at
 
 _FENCE_RE = re.compile(r"```agent-result\s*\n(.*?)\n```", re.DOTALL)
 
@@ -151,4 +183,4 @@ def legacy_blocked_result(motivo: str) -> dict[str, Any]:
     """
     text = str(motivo or "").strip() or "legacy FAILED sin detalle"
     return AgentResult(
-        resultado=AgentOutcome.BLOQUEADO, motivo=text).model_dump(mode="json")
+        resultado=AgentOutcome.BLOQUEADO, motivo=text).model_dump(mode="json", exclude_none=True)

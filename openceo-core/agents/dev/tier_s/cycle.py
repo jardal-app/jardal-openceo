@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import json
 import logging
 import re
 import shutil
@@ -37,6 +38,8 @@ from agents.dev.tier_s_contract import (
 from agents.dev.tier_s import gates as gate_mod
 from objectives import engine as objectives_mod
 from objectives import ticket_cost as cost_mod
+from objectives.agent_result import AGENT_RESULT_PROMPT, parse_agent_result, scheduled_resume
+from orchestration.provider_recovery import transient_provider_error
 from orchestration import findings as findings_mod
 from orchestration import inbox as inbox_mod
 from orchestration import knowledge as knowledge_mod
@@ -89,7 +92,7 @@ _ORCHESTRATOR_USER = ("OpenCEO", "openceo@jardal.app")
 
 #: Scratch artifacts a review checkpoint carries back on resume (§14.2: the
 #: approved plan and the written responses are reused, never redone).
-_CHECKPOINT_ARTIFACTS = ("PLAN.md", "PLAN_RESPONSE.md", "HANDOFF.md")
+_CHECKPOINT_ARTIFACTS = ("PLAN.md", "PLAN_RESPONSE.md", "HANDOFF.md", "WAIT.md")
 _CHECKPOINT_ARTIFACT_CAP = 64000
 
 
@@ -103,6 +106,7 @@ class CycleOutcome:
     commit_sha: str | None = None
     resume_at: str | None = None  # ISO-8601 UTC when the wait self-heals
     cost_runs: tuple[dict[str, Any], ...] = ()  # sessions of THIS execution
+    agent_result: dict[str, Any] | None = None
 
 
 @dataclass
@@ -151,6 +155,10 @@ class _Ctx:
     # (TASK-2026-00212): only sessions past this index travel as cost_runs,
     # so resumes never double-count.
     cost_sessions_base: int = 0
+    resume_phase: str = "review"
+    provider_parks: int = 0
+    parked_outcome: CycleOutcome | None = None
+    pool_resume_at: str | None = None
 
 
 def _utcnow_iso() -> str:
@@ -513,7 +521,7 @@ class TierSCycle:
         await self._runs.supersede_runs(task_id, ctx.run_id)
         if ctx.resumed:
             await self._runs.patch_run(ctx.run_id, {
-                "status": "running", "phase": "round1", "waiting": None,
+                "status": "running", "phase": ctx.resume_phase, "waiting": None,
                 "resumes": ctx.resumes, "active_repo": str(ctx.repo),
                 "updated_at": _utcnow_iso()})
         else:
@@ -561,7 +569,8 @@ class TierSCycle:
         pool_block = await self._pool_gate(ctx)
         if pool_block is not None:
             return await self._park(
-                ctx, "config", pool_block, patch_run=True)
+                ctx, "review_quorum" if ctx.pool_resume_at else "config", pool_block,
+                resume_at=ctx.pool_resume_at, patch_run=True)
         if ctx.resumed:
             return await self._resume_review(ctx)
 
@@ -582,6 +591,7 @@ class TierSCycle:
             return await self._park(
                 ctx, "transient", "cannot open work branch", patch_run=True)
         ctx.base_sha = _git(ctx.repo, "rev-parse", "HEAD").stdout.strip()
+        (_tier_dir(ctx.repo) / "WAIT.md").unlink(missing_ok=True)
         await self._runs.patch_run(ctx.run_id, {
             "base_sha": ctx.base_sha, "updated_at": _utcnow_iso()})
 
@@ -651,6 +661,16 @@ class TierSCycle:
             builder_family=self._builder_family(ctx))
         need = int(ctx.review_cfg.get("min_available_families", 3))
         if len(families) < need:
+            potential = set()
+            for slot in ctx.pool:
+                state = await self._slots.get_slot(slot.label)
+                eligible, _ = review_mod.slot_available(slot, {})
+                if (eligible and state.get("status") != "disabled"
+                        and not slot.extra and slot.family != self._builder_family(ctx)):
+                    potential.add(slot.family)
+            if len(potential) >= need:
+                ctx.pool_resume_at = (datetime.now(timezone.utc) + timedelta(
+                    minutes=self._backoff(ctx, 0))).isoformat()
             return (f"review pool has {len(families)} eligible families "
                     f"({sorted(families) or 'none'}), need {need}")
         return None
@@ -729,13 +749,6 @@ class TierSCycle:
     async def _resume_point(
         self, task_id: str, repo: Path,
     ) -> dict[str, Any] | None:
-        """The task's parked run that can resume at review, else None.
-
-        Only a no-quorum park after a successful build leaves a review
-        checkpoint. It resumes while its branch still points at the
-        checkpoint head; anything else starts a fresh run (which supersedes
-        the parked one). Read-only: safe before the repo lock.
-        """
         try:
             run = await self._runs.resumable_run(task_id)
             checkpoint = (run or {}).get("checkpoint") or {}
@@ -758,6 +771,8 @@ class TierSCycle:
     def _restore_checkpoint(self, ctx: _Ctx, run: Mapping[str, Any]) -> None:
         checkpoint = dict(run.get("checkpoint") or {})
         ctx.resumed = True
+        ctx.resume_phase = str(checkpoint.get("phase") or "review")
+        ctx.provider_parks = int(checkpoint.get("provider_parks") or 0)
         ctx.resumes = int(run.get("resumes") or 0) + 1
         ctx.review_parks = int(checkpoint.get("review_parks") or 0)
         ctx.base_branch = str(checkpoint.get("base_branch") or ctx.base_branch)
@@ -789,19 +804,12 @@ class TierSCycle:
             "build_sha": ctx.build_sha,
             "head_sha": ctx.head_sha or ctx.build_sha,
             "review_parks": ctx.review_parks,
+            "provider_parks": ctx.provider_parks,
             "artifacts": artifacts,
             "at": _utcnow_iso(),
         }
 
     async def _resume_review(self, ctx: _Ctx) -> CycleOutcome:
-        """Back on the parked branch, straight to the review rounds.
-
-        Planning, plan review, build and its gates are not redone: the
-        approved plan, responses and handoff come back from the checkpoint
-        and the final gates still run before the merge (§14.2). A branch
-        that cannot be restored drops the checkpoint, so the next launch
-        starts fresh instead of retrying the same resume.
-        """
         checked_out = _git(ctx.repo, "checkout", "-q", ctx.branch).returncode == 0
         head = _git(ctx.repo, "rev-parse", "HEAD").stdout.strip()
         if not checked_out or head != ctx.head_sha:
@@ -816,7 +824,55 @@ class TierSCycle:
         tier_dir.mkdir(exist_ok=True)
         for name, text in ctx.resume_artifacts.items():
             (tier_dir / name).write_text(text, encoding="utf-8")
+        if ctx.resume_phase == "build":
+            plan = parse_plan(self._read_artifact(ctx, "PLAN.md"))
+            if plan is None:
+                return await self._park(ctx, "config", "checkpoint has no valid plan", patch_run=True)
+            if not await self._build(ctx, plan):
+                return await self._run_waited(ctx)
         return await self._close(ctx)
+
+    async def _park_build(
+        self, ctx: _Ctx, reason: str, detail: str,
+        *, resume_at: str | None = None, agent_result: dict[str, Any] | None = None,
+    ) -> None:
+        fenced = await self._fenced_cancelled(ctx)
+        if fenced is not None:
+            ctx.parked_outcome = fenced
+            return
+        if agent_result is not None:
+            _tier_dir(ctx.repo).mkdir(exist_ok=True)
+            (_tier_dir(ctx.repo) / "WAIT.md").write_text(
+                json.dumps(agent_result, ensure_ascii=False), encoding="utf-8")
+        self._commit_if_changed(ctx, f"checkpoint {ctx.ref}: {reason}")
+        ctx.head_sha = ctx.head_sha or ctx.base_sha
+        checkpoint = self._review_checkpoint(ctx)
+        checkpoint["phase"] = "build"
+        await self._runs.patch_run(ctx.run_id, {"checkpoint": checkpoint})
+        if _git(ctx.repo, "checkout", "-q", ctx.base_branch).returncode != 0:
+            resume_at = None
+            detail = f"checkpoint saved but cannot release branch: {detail}"
+            reason = "config"
+        outcome = await self._park(ctx, reason, detail, resume_at=resume_at,
+                                   patch_run=True, notify=True)
+        if agent_result is not None:
+            ctx.parked_outcome = replace(outcome, agent_result=agent_result)
+
+    async def _park_builder_failure(self, ctx: _Ctx, result: ExecResult) -> None:
+        ctx.provider_parks += 1
+        transient = transient_provider_error(
+            result.output_tail, responded=bool((result.usage or {}).get("model_responded")))
+        resume_at = None
+        if transient and ctx.provider_parks <= 3:
+            resume_at = (datetime.now(timezone.utc) + timedelta(
+                minutes=self._backoff(ctx, ctx.provider_parks - 1))).isoformat()
+        detail = f"builder failed: {result.output_tail[-600:]}"
+        verdict = None if resume_at else {
+            "resultado": "bloqueado", "motivo": detail,
+            "necesidad": "Resolver el fallo del proveedor antes de continuar este checkpoint"}
+        await self._park_build(
+            ctx, "transient" if resume_at else "agent_blocked", detail,
+            resume_at=resume_at, agent_result=verdict)
 
     async def _park_review_quorum(self, ctx: _Ctx, round_no: int) -> CycleOutcome:
         """No quorum: checkpoint, backoff 15/30/60, then needs_owner (§14.2).
@@ -912,6 +968,13 @@ class TierSCycle:
             result = await self._exec.run("planner", prompt, ctx.repo, timeout_s)
             self._record_session(
                 ctx, "planner", "planner", result)
+            if result.returncode != 0:
+                await self._park(
+                    ctx, "transient" if transient_provider_error(result.output_tail) else "config",
+                    f"planner failed: {result.output_tail[-600:]}",
+                    resume_in_min=self._backoff(ctx, 0) if transient_provider_error(result.output_tail) else None,
+                    patch_run=True, drop_branch=True)
+                return None
             status = _read_status(ctx.repo)
             if plan_declares_objective_needed(status or result.signal or ""):
                 sizing = self._read_artifact(ctx, "SIZING.md")
@@ -972,7 +1035,7 @@ class TierSCycle:
             ctx.repo, timeout_s)
         self._record_session(ctx, "plan_reviewer", "plan_reviewer", review)
         observations = parse_plan_observations(
-            self._read_artifact(ctx, "PLAN_REVIEW.md"))
+            self._read_artifact(ctx, "PLAN_REVIEW.md")) if review.returncode == 0 else []
         verified = [obs for obs in observations
                     if verify_plan_anchor(obs, plan_path, ctx.repo)]
         response = await self._exec.run(
@@ -980,7 +1043,7 @@ class TierSCycle:
             ctx.repo, timeout_s)
         self._record_session(ctx, "planner", "planner", response)
         responses = parse_plan_responses(
-            self._read_artifact(ctx, "PLAN_RESPONSE.md"))
+            self._read_artifact(ctx, "PLAN_RESPONSE.md")) if response.returncode == 0 else {}
         missing, _dup = plan_response_gaps(verified, responses)
         if missing:
             retry = await self._exec.run(
@@ -990,7 +1053,7 @@ class TierSCycle:
                 ctx.repo, timeout_s)
             self._record_session(ctx, "planner", "planner", retry)
             responses = parse_plan_responses(
-                self._read_artifact(ctx, "PLAN_RESPONSE.md"))
+                self._read_artifact(ctx, "PLAN_RESPONSE.md")) if retry.returncode == 0 else {}
             missing, _dup = plan_response_gaps(verified, responses)
         accepted = sum(1 for obs in verified
                        if responses.get(obs.id, [""])[0] == "ACEPTADA")
@@ -1022,19 +1085,42 @@ class TierSCycle:
                              f"builder left branch {ctx.branch} for {current}",
                              patch_run=True)
             return False
+        if result.returncode != 0:
+            await self._park_builder_failure(ctx, result)
+            return False
+        verdict = parse_agent_result(result.output_tail)
+        if verdict is None and "```agent-result" in result.output_tail:
+            await self._park_build(ctx, "config", "invalid builder agent-result")
+            return False
+        if verdict is not None and verdict.resultado.value in {"bloqueado", "no_aplica"}:
+            try:
+                resume_at = scheduled_resume(verdict)
+            except ValueError as exc:
+                await self._park_build(ctx, "config", str(exc))
+                return False
+            await self._park_build(
+                ctx, "scheduled_wait" if resume_at else "agent_blocked", verdict.motivo,
+                resume_at=resume_at.isoformat() if resume_at else None,
+                agent_result=verdict.model_dump(mode="json"))
+            return False
         head = _git(ctx.repo, "rev-parse", "HEAD").stdout.strip()
         if head != ctx.base_sha:
             _git(ctx.repo, "reset", "--soft", ctx.base_sha)
         if not self._changed_files(ctx):
-            await self._park(ctx, "needs_owner", "builder produced no changes",
-                             patch_run=True, drop_branch=True)
-            return False
+            if not (verdict is not None and verdict.resultado.value == "hecho"
+                    and verdict.entregables and verdict.evidencia.strip()):
+                await self._park(ctx, "needs_owner", "builder produced no changes",
+                                 patch_run=True, drop_branch=True)
+                return False
         handoff = self._read_artifact(ctx, "HANDOFF.md")
         if not handoff or _handoff_word_count(handoff) > 600:
             fix = await self._exec.run(
                 "builder", _handoff_fix_prompt(SIGNALS["build_done"], ctx.repo),
                 ctx.repo, timeout_s)
             self._record_session(ctx, "builder", "builder", fix)
+            if fix.returncode != 0:
+                await self._park_builder_failure(ctx, fix)
+                return False
             handoff = self._read_artifact(ctx, "HANDOFF.md")
             if not handoff:
                 await self._park(ctx, "needs_owner", "missing HANDOFF.md",
@@ -1066,6 +1152,9 @@ class TierSCycle:
                 _gates_fix_prompt(tail, SIGNALS["build_done"], ctx.repo),
                 ctx.repo, timeout_s)
             self._record_session(ctx, "builder", "builder", fix)
+            if fix.returncode != 0:
+                await self._park_builder_failure(ctx, fix)
+                return False
             attempt += 1
         # Deterministic size brake on the real diff (§6.6).
         files_real, lines_real = _diff_sizes(
@@ -1090,7 +1179,8 @@ class TierSCycle:
                 "(work discarded; no objective env wired)",
                 patch_run=True, drop_branch=True)
             return False
-        ctx.build_sha = self._commit(ctx, f"wip({ctx.ref}) build")
+        ctx.build_sha = (self._commit(ctx, f"wip({ctx.ref}) build")
+                         if self._changed_files(ctx) else ctx.base_sha)
         ctx.head_sha = ctx.build_sha
         await self._runs.patch_run(ctx.run_id, {
             "head_sha": ctx.build_sha, "metrics": ctx.metrics,
@@ -1435,6 +1525,9 @@ class TierSCycle:
                 repo=ctx.repo),
             ctx.repo, timeout_s)
         self._record_session(ctx, "builder", "builder", result)
+        if result.returncode != 0:
+            await self._park_builder_failure(ctx, result)
+            return None
         verdicts = review_mod.parse_fix(self._read_artifact(ctx, fix_name))
         missing, _dup = review_mod.fix_gaps(findings, verdicts)
         if missing:
@@ -1443,6 +1536,9 @@ class TierSCycle:
                 _fix_retry_prompt(fix_name, missing, round_no, ctx.repo),
                 ctx.repo, timeout_s)
             self._record_session(ctx, "builder", "builder", retry)
+            if retry.returncode != 0:
+                await self._park_builder_failure(ctx, retry)
+                return None
             verdicts = review_mod.parse_fix(self._read_artifact(ctx, fix_name))
             missing, _dup = review_mod.fix_gaps(findings, verdicts)
         if ctx.rounds:
@@ -1481,6 +1577,9 @@ class TierSCycle:
                 "builder", _fix_gates_retry_prompt(round_no, tail, ctx.repo),
                 ctx.repo, timeout_s)
             self._record_session(ctx, "builder", "builder", fix)
+            if fix.returncode != 0:
+                await self._park_builder_failure(ctx, fix)
+                return None
         self._commit_if_changed(ctx, f"wip({ctx.ref}) fix{round_no}")
         return verdicts
 
@@ -1512,13 +1611,13 @@ class TierSCycle:
                     finding, muse_reason, quote, repo=ctx.repo),
                 ctx.repo, timeout_s)
             self._record_session(ctx, "arbiter", "arbiter", result)
-            verdict = self._parse_arbiter_verdict(result.output_tail or "")
+            verdict = self._parse_arbiter_verdict(result.output_tail or "") if result.returncode == 0 else None
             if verdict is None:
                 retry = await self._exec.run(
                     "arbiter", _arbiter_retry_prompt(ctx.repo),
                     ctx.repo, timeout_s)
                 self._record_session(ctx, "arbiter", "arbiter", retry)
-                verdict = self._parse_arbiter_verdict(retry.output_tail or "")
+                verdict = self._parse_arbiter_verdict(retry.output_tail or "") if retry.returncode == 0 else None
             if verdict is None:
                 await self._record_disputed(ctx, finding)
                 ctx.arbitrations.append({
@@ -1785,9 +1884,9 @@ class TierSCycle:
     def _commit_if_changed(self, ctx: _Ctx, message: str) -> None:
         """Wip checkpoint only when the worktree moved since the last one."""
         since = ctx.head_sha or ctx.build_sha or ctx.base_sha
-        proc = _git(ctx.repo, "diff", "--quiet", since, "--", ".")
+        proc = _git(ctx.repo, "diff", "--quiet", since, "--", ".", ":!.openceo")
         untracked = _git(
-            ctx.repo, "ls-files", "--others", "--exclude-standard", "-z")
+            ctx.repo, "ls-files", "--others", "--exclude-standard", "-z", "--", ".", ":!.openceo")
         dirty = proc.returncode != 0 or bool(untracked.stdout.strip("\0"))
         if not dirty:
             return
@@ -1824,7 +1923,8 @@ class TierSCycle:
         _git(ctx.repo, "update-ref", f"refs/tier-s/{ctx.run_id}/wip", "HEAD")
         _git(ctx.repo, "reset", "--soft", ctx.base_sha)
         title = re.sub(r"\s+", " ", ctx.ticket.get("title", "")).strip()[:72]
-        ctx.final_sha = self._commit(ctx, f"{ctx.ref}: {title}")
+        ctx.final_sha = (self._commit(ctx, f"{ctx.ref}: {title}")
+                         if self._changed_files(ctx) else ctx.base_sha)
         files = self._changed_files(ctx)
         handoff = self._read_artifact(ctx, "HANDOFF.md")
         discarded = ("none" if not ctx.discarded_notes
@@ -2101,9 +2201,10 @@ class TierSCycle:
         if notify:
             await self._say(ctx, f"{reason}: {detail}"
                             + (f"\n{extra_comment}" if extra_comment else ""))
-        return CycleOutcome(status="waiting", run_id=ctx.run_id, reason=reason,
-                            detail=detail, branch=ctx.branch,
-                            resume_at=resume_at)
+        ctx.parked_outcome = CycleOutcome(
+            status="waiting", run_id=ctx.run_id, reason=reason,
+            detail=detail, branch=ctx.branch, resume_at=resume_at)
+        return ctx.parked_outcome
 
     async def _cleanup(self, ctx: _Ctx) -> None:
         roles = ["planner", "plan_reviewer", "builder", "arbiter",
@@ -2142,6 +2243,8 @@ class TierSCycle:
                                 detail="ticket cancelled in ERPNext; "
                                 "park fenced",
                                 branch=None)
+        if ctx.parked_outcome is not None:
+            return ctx.parked_outcome
         return CycleOutcome(status="waiting", run_id=ctx.run_id,
                             branch=ctx.branch)
 
@@ -2246,6 +2349,8 @@ class TierSCycle:
             "Do NOT commit, push, rebase, stash, or change branches: leave your "
             "work uncommitted; the orchestrator integrates it.\n"
             "Write .openceo/HANDOFF.md (§16.6, executor sections ≤300 words) "
-            f"and emit {SIGNALS['build_done']} in .openceo/status."
+            f"and emit {SIGNALS['build_done']} in .openceo/status.\n"
+            f"Previous checkpoint (recheck; never repeat confirmed effects):\n{self._read_artifact(ctx, 'WAIT.md')}\n"
+            + AGENT_RESULT_PROMPT
         )
         return knowledge_mod.with_preamble(body, ctx.repo, "en")

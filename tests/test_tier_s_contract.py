@@ -148,10 +148,10 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tier_s["roles"]["builder"]["account"], "muse")
         reviewers = cfg["review"]["reviewers"]
         by_label = {item["label"]: item for item in reviewers}
-        # Pool §7.1: qwen + glm + deepseek (dsh) active, claudep reserve,
-        # muse-review extra.
-        for label in ("qwen-max", "qwen-glm", "dsh"):
+        for label in ("dsh", "mimo", "nemotron", "gemini"):
             self.assertTrue(by_label[label]["active"], label)
+        for label in ("qwen-max", "qwen-glm"):
+            self.assertFalse(by_label[label]["active"], label)
         self.assertEqual(by_label["dsh"]["family"], "deepseek")
         self.assertFalse(by_label["claudep"]["active"])
         self.assertEqual(by_label["claudep"]["family"], "deepseek")

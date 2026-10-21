@@ -224,7 +224,7 @@ class TierExecutorSchemaFlagTests(unittest.IsolatedAsyncioTestCase):
             CodingTool.TIER_C, _dev_config())
         self.assertEqual(
             executor.argv,
-            ["musej", "exec", "--output-schema", str(SCHEMA_PATH)])
+            ["musej", "exec", "--json", "--output-schema", str(SCHEMA_PATH)])
         self.assertEqual(executor.label, "tier_c:muse")
         self.assertTrue(SCHEMA_PATH.is_file())
 
