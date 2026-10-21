@@ -33,7 +33,7 @@ dev:
 
   providers:
     codex:
-      command: ["/home/develop/.local/bin/codexf"]
+      command: ["/home/develop/.local/bin/codexj"]
       cwd: /home/develop/development/Jardal/jardal-openceo
       env: {}
 

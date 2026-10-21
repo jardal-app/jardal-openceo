@@ -968,6 +968,10 @@ def _planner_prompt(
         blockers = item.get("blocked_by") or []
         if blockers:
             line += f" blocked_by={list(blockers)}"
+        if item.get("waiting_reason"):
+            line += f" wait={str(item['waiting_reason'])[:300]}"
+        if item.get("resume_at"):
+            line += f" resume_at={item['resume_at']}"
         return line
 
     def _failure_line(item: Any) -> str:
@@ -1695,6 +1699,7 @@ async def _plan_objective_inner(
     # never overlap (plan_objective single-flight), hence dropping the
     # previous cycle's file here is safe.
     result_path = scratch / PLANNER_RESULT_FILE
+    base_prompt = prompt
     for _attempt in range(2):
         # Drop any previous cycle output: a run that writes nothing must
         # read as missing, never as the last cycle's valid file.
@@ -1702,9 +1707,11 @@ async def _plan_objective_inner(
             result_path.unlink()
         except OSError:
             pass
-        await env.executor.run("objective_planner", prompt, env.repo, timeout_s)
+        execution = await env.executor.run("objective_planner", prompt, env.repo, timeout_s)
         text = _read(result_path)
-        if not text:
+        if execution.returncode != 0:
+            errors = [f"planner process failed ({execution.returncode}): {execution.output_tail[-500:]}"]
+        elif not text:
             errors = [f"no {PLANNER_RESULT_FILE}"]
         else:
             try:
@@ -1728,7 +1735,7 @@ async def _plan_objective_inner(
                     result = candidate
         if not errors:
             break
-        prompt = _planner_retry_prompt(errors, env.repo)
+        prompt = base_prompt + "\n\n" + _planner_retry_prompt(errors, env.repo)
     try:
         await env.executor.cleanup("objective_planner")
     except Exception:
@@ -2049,9 +2056,11 @@ async def _plan_pedido_inner(
             result_path.unlink()
         except OSError:
             pass
-        await env.executor.run("objective_planner", prompt, env.repo, timeout_s)
+        execution = await env.executor.run("objective_planner", prompt, env.repo, timeout_s)
         text = _read(result_path)
-        if not text:
+        if execution.returncode != 0:
+            errors = [f"planner process failed ({execution.returncode}): {execution.output_tail[-500:]}"]
+        elif not text:
             errors = [f"no {PLANNER_RESULT_FILE}"]
         else:
             try:
@@ -2944,6 +2953,8 @@ async def on_ticket_closed(
 
 
 async def _blocked(env: ObjectiveEnv, ticket: Mapping[str, Any]) -> bool:
+    if str(ticket.get("status") or "") == "waiting":
+        return True
     for dep in ticket.get("blocked_by") or []:
         row = await env.tasks.get_task(str(dep))
         if str((row or {}).get("status") or "") not in TERMINAL_TICKET_STATUS:
@@ -3631,13 +3642,13 @@ async def _close_objective(
     except Exception:
         pass
     text = _read(result_path)
-    verdicts = parse_closure(text)
+    verdicts = parse_closure(text) if first.returncode == 0 else {}
     missing = [item.id for item in consolidated if item.id not in verdicts]
     attempts = [first]
     if missing:
         attempts.append(await env.executor.run(
             "closer",
-            _closure_retry_prompt(
+            prompt + "\n\n" + _closure_retry_prompt(
                 missing, env.repo,
                 result_path=str(result_path.relative_to(env.repo))),
             env.repo, timeout_s))
@@ -3646,7 +3657,7 @@ async def _close_objective(
         except Exception:
             pass
         text = _read(result_path)
-        verdicts = parse_closure(text)
+        verdicts = parse_closure(text) if attempts[-1].returncode == 0 else {}
         missing = [item.id for item in consolidated if item.id not in verdicts]
     if missing:
         # No verdict is never FALSO (TASK-2026-00170): a silent, failed
@@ -3708,6 +3719,8 @@ async def _arbitrate_final(
         await env.executor.cleanup("arbiter")
     except Exception:
         pass
+    if result.returncode != 0:
+        return True
     for line in (result.output_tail or "").splitlines():
         upper = line.strip().upper()
         if upper.startswith("REAL"):

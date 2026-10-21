@@ -21,7 +21,7 @@ Continuar el roadmap vigente (épico **TASK-2026-00248**: revisión opcional act
 - **Voz en Tiempo Real**: LiveKit + Silero VAD + Groq Whisper STT + OpenAI TTS (`openceo-voice/`)
 - **App Móvil**: Android Jetpack Compose + LiveKit SDK (`openceo-voice-android/`)
 - **Dashboard**: React 19 + Vite 6 + Tailwind CSS v4 (`openceo-react/`)
-- **Coding Providers**: `musej`/`muse` (muse-spark-1.3-contributor), `codexj` (gpt-6.1-sol), `claudej` (opus/opusplan), `qwen` (qwen3.8-max, glm-5.3), `dsh` (deepseek-v4.1-flash); reservas `claudep`, `agyd`, `opencode`; QA con Kimi CLI y OpenCode (roster vigente en `openceo-core/config_loader.py`)
+- **Coding Providers**: `musej`/`muse` (muse-spark-1.3-contributor), `codexj` (gpt-6.1-sol), `claudej` (opus/opusplan), `dsh` (deepseek-v4.1-flash), `claudep`, `opencode` y Gemini con `agyd`/`agyj`/`agy2`. Qwen Code y GLM de suscripción quedan configurados e inactivos; GLM gratuito de OpenCode sigue como reserva (roster vigente en `openceo-core/config_loader.py`).
 
 ---
 

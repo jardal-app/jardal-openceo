@@ -1175,6 +1175,8 @@ class DevSessionService:
         """Resolve the interactive command, env vars, and cwd for a provider."""
         pkey = provider.value
         provider_cfg = (config.get("dev", {}).get("providers", {}) or {}).get(pkey, {})
+        if provider_cfg.get("enabled") is False:
+            raise ValueError(f"Coding provider {pkey} is disabled")
 
         cmd_from_config = provider_cfg.get("command")
 

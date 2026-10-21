@@ -280,15 +280,9 @@ def classify_slot_error(text: str, slot: ReviewSlot) -> tuple[str, dict[str, Any
 
 def transient_slot_error(text: str) -> bool:
     """Recognize provider outages and transport failures across reviewer CLIs."""
-    lowered = (text or "").lower()
-    return any(pattern in lowered for pattern in (
-        "unavailable", "service is currently unavailable", "overloaded",
-        "rate limit", "rate_limit", "too many requests", "resource_exhausted",
-        "connection reset", "connection closed", "connection was closed",
-        "socket connection", "econnreset", "econnrefused", "etimedout",
-        "timed out", "timeout", "fetch failed", "bad gateway",
-        "internal server error", "gateway timeout", "temporarily unavailable",
-    )) or bool(re.search(r"\b(?:429|500|502|503|504)\b", lowered))
+    from orchestration.provider_recovery import transient_provider_error
+
+    return transient_provider_error(text)
 
 
 # ---------------------------------------------------------------------------

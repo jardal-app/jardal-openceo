@@ -203,14 +203,14 @@ class RealPoolTests(unittest.TestCase):
                     by_label["nemotron"]["family"]}
         self.assertEqual(families, {"mimo", "nemotron"})
 
-    def test_s_top3_rounds_and_quorum_unchanged(self) -> None:
+    def test_s_active_top3_rounds_and_quorum(self) -> None:
         reviewers, cfg = _real_reviewers()
         active = sorted(
             (item for item in reviewers
              if item["active"] and not item.get("extra")),
             key=lambda item: (item["priority"], item["label"]))
         self.assertEqual([item["label"] for item in active[:3]],
-                         ["qwen-max", "qwen-glm", "dsh"])
+                         ["dsh", "mimo", "nemotron"])
         self.assertEqual(cfg["quorum"], 2)
         self.assertEqual(cfg["distinct_by"], "family")
         self.assertEqual(cfg["round1_parallel"], 3)

@@ -54,6 +54,7 @@ from objectives.agent_result import (
     AgentOutcome,
     AgentResult,
     parse_agent_result,
+    scheduled_resume,
 )
 from objectives import ticket_cost as cost_mod
 from orchestration.agent_sandbox import ensure_ticket_dir
@@ -720,6 +721,19 @@ async def _run_llm(
             "result_comment": f"{agent_name}: {summary[:500]}",
             cost_mod.COST_RUNS_KEY: runs,
         }
+    try:
+        resume_at = scheduled_resume(verdict)
+    except ValueError as exc:
+        return _failed(agent_name, run_params, "LLM run",
+                       error=str(exc), verdict=verdict, cost_runs=runs)
+    if resume_at is not None:
+        reason = f"scheduled_wait: {verdict.motivo}"
+        out = _waiting(agent_name, reason, {
+            **run_params, "agent_result": verdict.model_dump(mode="json")})
+        out.update(resume_at=resume_at, last_response_summary=verdict.motivo,
+                   result_comment=f"{agent_name}: {reason}; resume_at={resume_at.isoformat()}")
+        out[cost_mod.COST_RUNS_KEY] = runs
+        return out
     if verdict.resultado is AgentOutcome.HECHO:
         out_params = {**run_params,
                       "agent_result": verdict.model_dump(mode="json")}

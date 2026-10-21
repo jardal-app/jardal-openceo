@@ -73,7 +73,7 @@ class InMemoryRunStore:
             checkpoint = run.get("checkpoint") or {}
             if (run.get("task_id") == task_id
                     and run.get("status") == "waiting"
-                    and checkpoint.get("phase") == "review"):
+                    and checkpoint.get("phase") in {"review", "build"}):
                 found = run
         return dict(found) if found is not None else None
 

@@ -1169,10 +1169,10 @@ class MongoRepository:
         return self._clean(row)
 
     async def resumable_tier_s_run(self, task_id: str) -> dict[str, Any] | None:
-        """Latest waiting run of the task with a review checkpoint (§14.2)."""
+        """Latest waiting run with a saved build or review checkpoint."""
         return self._clean(await self.tier_s_runs.find_one(
             {"task_id": task_id, "status": "waiting",
-             "checkpoint.phase": "review"},
+             "checkpoint.phase": {"$in": ["review", "build"]}},
             sort=[("updated_at", DESCENDING)],
         ))
 

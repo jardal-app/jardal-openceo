@@ -21,7 +21,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
@@ -43,6 +43,12 @@ from orchestration.role_claude import render_argv_extras as claude_argv_extras
 from orchestration.role_codex import codex_mcp_env
 from orchestration.role_codex import render_argv_extras as codex_argv_extras
 from orchestration.review import ReviewerConfigError, with_resolved_command
+from orchestration.provider_recovery import (
+    PROVIDER_RESUME_PROMPT,
+    PROVIDER_RETRY_DELAYS,
+    model_responded,
+    transient_provider_error,
+)
 from orchestration.role_muse import (
     SETTINGS_OVERLAY_RELPATH,
     RoleProfileError,
@@ -119,7 +125,21 @@ TIMEOUT_RETURNCODE = 124
 def _reviewer_output(stdout: str, stderr: str, provider: str,
                      returncode: int) -> tuple[int, str]:
     text = stdout.strip() or stderr.strip()
-    if provider in {"agy", "gemini"}:
+    if provider == "muse":
+        terminal = None
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if (isinstance(event, dict)
+                    and str(event.get("payload_type") or "").startswith("run.terminal.")):
+                terminal = event.get("payload")
+        if isinstance(terminal, dict):
+            text = str(terminal.get("text") or terminal.get("error") or "")
+            if terminal.get("terminal") != "completed" or not text.strip():
+                returncode = returncode or 1
+    elif provider in {"agy", "gemini"}:
         try:
             envelope = json.loads(stdout)
         except ValueError:
@@ -163,6 +183,7 @@ class ProcessExecutor:
         self._pool = {str(slot.get("label")): dict(slot)
                       for slot in (pool or []) if slot.get("label")}
         self._badge_provider = badge_provider
+        self._responded: set[tuple[str, str]] = set()
 
     # -- Executor protocol -------------------------------------------------
 
@@ -173,11 +194,60 @@ class ProcessExecutor:
         workdir: Path,
         timeout_s: int,
     ) -> ExecResult:
+        retryable_role = role.replace("-", "_") in {
+            "planner", "plan_reviewer", "builder", "arbiter", "closer",
+            "objective_planner", "ceo_reviewer",
+        }
+        elapsed = 0.0
+        attempts: list[dict[str, Any]] = []
+        for attempt in range(len(PROVIDER_RETRY_DELAYS) + 1):
+            result = await self._run_once(
+                role, PROVIDER_RESUME_PROMPT + prompt if attempt else prompt,
+                workdir, timeout_s)
+            elapsed += result.elapsed_s
+            key = (result.slot, result.model)
+            responded = key in self._responded or model_responded(
+                result.output_tail, result.model) or bool(
+                    (result.usage or {}).get("model_responded"))
+            if responded or result.returncode == 0:
+                self._responded.add(key)
+            attempts.append({"returncode": result.returncode,
+                             "elapsed_s": result.elapsed_s})
+            if (result.returncode == 0 or not retryable_role
+                    or attempt == len(PROVIDER_RETRY_DELAYS)
+                    or not transient_provider_error(
+                        result.output_tail, responded=responded)):
+                usage = dict(result.usage or {})
+                if len(attempts) > 1:
+                    usage["provider_attempts"] = attempts
+                if responded:
+                    usage["model_responded"] = True
+                return replace(result, elapsed_s=elapsed, usage=usage)
+            delay = PROVIDER_RETRY_DELAYS[attempt]
+            logger.warning("Role %s provider failed; retry %s in %ss",
+                           role, attempt + 1, delay)
+            if role == "objective_planner":
+                for line in prompt.splitlines():
+                    if line.startswith("OUTPUT: write "):
+                        relative = line[len("OUTPUT: write "):].split(" with exactly")[0].strip()
+                        output = (workdir / relative).resolve()
+                        if (output.name == "PLANNER_RESULT.json"
+                                and output.is_relative_to((workdir / ".openceo").resolve())):
+                            output.unlink(missing_ok=True)
+            await asyncio.sleep(delay)
+        raise AssertionError("provider retry exhausted without a result")
+
+    async def _run_once(
+        self, role: str, prompt: str, workdir: Path, timeout_s: int,
+    ) -> ExecResult:
         spec, via, extra_env = self._resolve(role)
         if spec is None:
             return ExecResult(
                 returncode=1, elapsed_s=0.0,
                 output_tail=f"unknown live role: {role}")
+        if spec.get("active") is False:
+            return ExecResult(returncode=1, elapsed_s=0.0,
+                              output_tail=f"role {role} is disabled")
         if role.startswith("review:"):
             try:
                 spec = with_resolved_command(spec)
@@ -195,6 +265,8 @@ class ProcessExecutor:
             return ExecResult(
                 returncode=1, elapsed_s=0.0,
                 output_tail=f"role {role} has no command")
+        if spec.get("provider") == "muse" and "--json" not in config_argv:
+            config_argv.append("--json")
         if role.startswith("review:"):
             provider = str(spec.get("provider") or "")
             if provider in {"agy", "gemini"} and "--output-format" not in config_argv:
@@ -318,6 +390,7 @@ class ProcessExecutor:
                 await self._badge_provider.revoke(badge)
             raise
         started = time.monotonic()
+        process = None
         try:
             try:
                 process = await asyncio.create_subprocess_exec(
@@ -361,11 +434,9 @@ class ProcessExecutor:
                     usage={"timeout": True})
             stdout = (raw_out or b"").decode("utf-8", errors="replace")
             stderr = (raw_err or b"").decode("utf-8", errors="replace")
-            text = stdout.strip() or stderr.strip()
             returncode = int(process.returncode or 0)
-            if role.startswith("review:"):
-                returncode, text = _reviewer_output(
-                    stdout, stderr, str(spec.get("provider") or ""), returncode)
+            returncode, text = _reviewer_output(
+                stdout, stderr, str(spec.get("provider") or ""), returncode)
             truncated = len(text) > OUTPUT_CAP_CHARS
             signal = self._read_signal(workdir, text)
             return ExecResult(
@@ -374,10 +445,17 @@ class ProcessExecutor:
                 signal=signal,
                 usage={"stdout_chars": len(stdout),
                        "stderr_chars": len(stderr),
+                       "model_responded": model_responded(stdout, model),
                        "truncated": truncated},
                 output_tail=text[:OUTPUT_CAP_CHARS],
                 model=model, slot=slot)
         finally:
+            if process is not None and process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                await process.wait()
             if badge is not None and self._badge_provider is not None:
                 await self._badge_provider.revoke(badge)
             cleanup_sandbox_scratch(workdir)

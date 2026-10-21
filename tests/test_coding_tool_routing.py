@@ -304,11 +304,9 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
         manager._rate_monitor = MagicMock()
         manager._rate_monitor.can_launch = AsyncMock(return_value=True)
         executor = await manager._resolve_tier_executor(CodingTool.TIER_C, self._config())
-        # Deliberate contract change (TASK-2026-00202): the muse link
-        # shapes its answer with the agent-result schema.
         self.assertEqual(
             executor.argv,
-            ["musej", "exec", "--output-schema", str(AGENT_RESULT_SCHEMA)])
+            ["musej", "exec", "--json", "--output-schema", str(AGENT_RESULT_SCHEMA)])
         self.assertEqual(executor.prompt_via, "argv")
         self.assertEqual(executor.label, "tier_c:muse")
 
