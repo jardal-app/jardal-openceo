@@ -1,0 +1,33 @@
+{
+  "type": "user",
+  "id": "6adad0c842029a87313b873c",
+  "name": "jardalapp",
+  "fullname": "Jardal App",
+  "isPro": false,
+  "avatarUrl": "/avatars/e21de74cfabf3d69463abfb38fd3efa0.svg",
+  "orgs": [],
+  "auth": {
+    "type": "access_token",
+    "accessToken": {
+      "displayName": "OpenCEO",
+      "role": "fineGrained",
+      "createdAt": "2026-10-23T03:16:20.475Z",
+      "fineGrained": {
+        "canReadGatedRepos": true,
+        "global": [],
+        "scoped": [
+          {
+            "entity": {
+              "_id": "6adad0c842029a87313b873c",
+              "type": "user",
+              "name": "jardalapp"
+            },
+            "permissions": [
+              "repo.content.read"
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

@@ -103,13 +103,13 @@ def test_collect_status_reflects_filesystem(isolated_home):
 def test_cli_status_json(isolated_home, capsys):
     assert router_cli.main(["status", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert router_models.StatusReport.model_validate(payload).phase == "F0"
+    assert router_models.StatusReport.model_validate(payload).phase == "F1"
 
 
 def test_cli_status_human(isolated_home, capsys):
     assert router_cli.main(["status"]) == 0
     out = capsys.readouterr().out
-    assert "free-router status (phase F0" in out
+    assert "free-router status (phase F1" in out
     assert str(isolated_home) in out
 
 

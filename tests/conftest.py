@@ -17,8 +17,11 @@ from __future__ import annotations
 import fastmcp  # noqa: F401  (se importa por su efecto en sys.modules)
 import motor.motor_asyncio  # noqa: F401  (se importa por su efecto en sys.modules)
 
+import os  # noqa: E402
 import sys  # noqa: E402
 from pathlib import Path  # noqa: E402
+
+import pytest  # noqa: E402
 
 _REPO = Path(__file__).resolve().parents[1]
 _CORE = _REPO / "openceo-core"
@@ -38,3 +41,20 @@ try:
     sync_skill_links(discover_role_skills())
 except OSError:
     pass
+
+
+def pytest_configure(config):
+    """Register the free-router ``live`` marker (TASK-2026-00287)."""
+    config.addinivalue_line(
+        "markers", "live: real-provider calls, only with FREE_ROUTER_LIVE=1"
+    )
+
+
+def pytest_collection_modifyitems(items):
+    """Skip live tests unless the harness is explicitly enabled."""
+    if os.environ.get("FREE_ROUTER_LIVE") == "1":
+        return
+    skip_live = pytest.mark.skip(reason="live tests need FREE_ROUTER_LIVE=1")
+    for item in items:
+        if "live" in item.keywords:
+            item.add_marker(skip_live)
