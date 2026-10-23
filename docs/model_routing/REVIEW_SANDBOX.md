@@ -130,3 +130,25 @@ efectivo y cita literal de errores:
 - Confirmar el canal de informe (fichero frente a stdout), que
   `settings.json` de AGY no declara servidores, y valorar un validador
   de `reviewer_config` al estilo `assert_worker_config_is_closed`.
+
+## Cableado (TASK-2026-00293, 2026-10-23)
+
+- Canal confirmado: stdout (`report=None`). El canal fichero cambiaría
+  el contrato de parseo de ambos motores sin que el ticket lo pida.
+- Los slots OpenCode gratuitos de A/B/C/S van a `plan_reviewer` con
+  `--agent review` (`review_hardened`, `orchestration/live.py`);
+  `--standalone` y `--format json` se conservan. dsh/claudep/gemini/
+  muse-review no cambian por orden del ticket, así que el cableado AGY
+  (`--sandbox`, `settings.json`, MCP vacío en producción) queda futuro.
+- Prueba viva: 1 llamada real (`opencode/nemotron-3-ultra-free`, diff
+  sintético diminuto) bajo el fence, informe válido y recibo §11.7
+  (`tests/test_model_routing_review_live.py`). Sin 403 de capa
+  gratuita; si aparece, la rama endurecida no rota modelos ante 403
+  (`ROTATE_CLASSES` en `review_wiring.py`) para no quemar modelos ante
+  un problema de config.
+- Negativas bajo el cableado real con binario falso: marca ausente →
+  fence anterior intacto; `FREE_ROUTER_*` en el entorno → `sandbox
+  refused` (`tests/test_model_routing_review_wiring.py`,
+  `HardenedExecutorTests`).
+- Validador de `reviewer_config` al estilo worker: pendiente, no lo
+  exige la aceptación de 00293.

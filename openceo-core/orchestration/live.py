@@ -27,6 +27,10 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
 from catalog import CatalogError, load_role_profile
+from model_routing.reviewer_isolation import (
+    opencode_argv_extras as reviewer_agent_extras,
+)
+from model_routing.reviewer_isolation import plan_reviewer
 from orchestration.agent_sandbox import cleanup_sandbox_scratch, plan_agent
 from orchestration.role_claude import (
     CLAUDE_MCP_OVERLAY_RELPATH,
@@ -277,6 +281,13 @@ class ProcessExecutor:
                     config_argv += ["--format", "json"]
                 if "--standalone" not in config_argv:
                     config_argv.append("--standalone")
+        hardened = (role.startswith("review:")
+                    and bool(spec.get("review_hardened"))
+                    and len(config_argv) > 0
+                    and Path(config_argv[0]).name == "opencode")
+        if hardened:
+            config_argv += [token for token in reviewer_agent_extras()
+                            if token not in config_argv]
         badge: str | None = None
         file_overlays: dict[str, bytes] | None = None
         translator_env: dict[str, str] = {}
@@ -370,14 +381,22 @@ class ProcessExecutor:
         model = str(spec.get("model") or "")
         slot = str(spec.get("account") or spec.get("label") or role)
         try:
-            plan = plan_agent(argv=full_argv, workspace=workdir,
-                              base=os.environ, overlay=overlay,
-                              config_args=config_argv,
-                              home_file_overlays=file_overlays,
-                              extra_read_roots=spec.get(
-                                  "extra_read_roots") or (),
-                              extra_write_roots=spec.get(
-                                  "extra_write_roots") or ())
+            if hardened:
+                plan = plan_reviewer(
+                    argv=full_argv, workspace=workdir, base=os.environ,
+                    report=None, project=workdir, overlay=overlay,
+                    config_args=config_argv,
+                    extra_read_roots=spec.get("extra_read_roots") or (),
+                    extra_write_roots=spec.get("extra_write_roots") or ())
+            else:
+                plan = plan_agent(argv=full_argv, workspace=workdir,
+                                  base=os.environ, overlay=overlay,
+                                  config_args=config_argv,
+                                  home_file_overlays=file_overlays,
+                                  extra_read_roots=spec.get(
+                                      "extra_read_roots") or (),
+                                  extra_write_roots=spec.get(
+                                      "extra_write_roots") or ())
         except (IsolationUnavailable, ValueError, OSError) as exc:
             if badge is not None and self._badge_provider is not None:
                 await self._badge_provider.revoke(badge)
@@ -459,6 +478,19 @@ class ProcessExecutor:
             if badge is not None and self._badge_provider is not None:
                 await self._badge_provider.revoke(badge)
             cleanup_sandbox_scratch(workdir)
+
+    def register_pool_entries(
+        self, entries: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Upsert round-scoped pool entries by label.
+
+        The dev engines refresh ranking-fed slots and hardening marks
+        per review round (TASK-2026-00293); scripted executors resolve
+        roles by name and never need this.
+        """
+        for entry in entries:
+            if isinstance(entry, Mapping) and entry.get("label"):
+                self._pool[str(entry["label"])] = dict(entry)
 
     async def cleanup(self, role: str) -> None:
         """One-shot processes own nothing between calls."""

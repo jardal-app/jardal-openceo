@@ -82,6 +82,7 @@ from objectives.service import (
     objectives_process_executor,
     objectives_wiring_config,
 )
+from model_routing import review_wiring as wiring_mod
 from orchestration import findings as findings_mod
 from orchestration import review as review_mod
 from orchestration.review import InMemoryReviewStore, InMemorySlotStore, MongoReviewStore, MongoSlotStore, parse_pool
@@ -929,6 +930,7 @@ class DevSessionManager:
         slot: review_mod.ReviewSlot,
         attempt: int,
         previous: Mapping[str, Any] | None,
+        routing: wiring_mod.RoundRouting | None = None,
     ) -> dict[str, Any]:
         """One reviewer attempt on a detached read-only worktree (00251).
 
@@ -953,12 +955,14 @@ class DevSessionManager:
                 review_mod.worktree_snapshot, worktree)
             timeout_s = review_mod.slot_timeout_s(
                 slot, timeout_default, previous)
+            started = datetime.now(timezone.utc).isoformat()
             result = await executor.run(
                 f"review:{slot.label}",
                 review_mod.reviewer_prompt(
                     slot.label, request_name, "simple", 1,
                     repo=worktree, retry=review_mod.retry_note(previous)),
                 worktree, timeout_s)
+            finished = datetime.now(timezone.utc).isoformat()
             elapsed = float(result.elapsed_s or 0.0)
             outcome.update(elapsed_s=elapsed,
                            exit_code=result.returncode)
@@ -997,12 +1001,29 @@ class DevSessionManager:
                 findings_mod.verify_report, raw, repo, review_sha,
                 base_sha, slot.label, slot.family, acceptance)
             outcome.update(verdicts=verdicts, valid=True, kind="valid")
+            if routing is not None and slot.label in routing.states:
+                receipt = wiring_mod.record_receipt(
+                    routing, slot.label, report_text=text,
+                    reviewed_commit=review_sha, started_at=started,
+                    finished_at=finished)
+                outcome["receipt"] = receipt.to_dict()
             return outcome
         finally:
             await asyncio.to_thread(
                 review_mod.remove_worktree, repo, worktree)
             if reviews is not None:
                 try:
+                    meta: dict[str, Any] = {
+                        "attempt": attempt,
+                        "kind": str(outcome.get("kind") or ""),
+                        "elapsed_s": float(
+                            outcome.get("elapsed_s") or 0.0),
+                        "exit_code": outcome.get("exit_code"),
+                        "project": project,
+                        "account": slot.account,
+                        "model": slot.model}
+                    if isinstance(outcome.get("receipt"), dict):
+                        meta["receipt"] = outcome["receipt"]
                     await reviews.create_review(
                         findings_mod.review_document(
                             review_id=str(outcome.get("review_id") or ""),
@@ -1012,14 +1033,7 @@ class DevSessionManager:
                             valid=bool(outcome.get("valid")),
                             verdicts=list(outcome.get("verdicts") or []),
                             invalid_reason=str(outcome.get("reason") or ""),
-                            meta={"attempt": attempt,
-                                  "kind": str(outcome.get("kind") or ""),
-                                  "elapsed_s": float(
-                                      outcome.get("elapsed_s") or 0.0),
-                                  "exit_code": outcome.get("exit_code"),
-                                  "project": project,
-                                  "account": slot.account,
-                                  "model": slot.model}))
+                            meta=meta))
                 except Exception:
                     pass  # telemetry persistence never fails a round
 
@@ -1098,6 +1112,24 @@ class DevSessionManager:
         review_sha = self._simple_git(
             repo, "rev-parse", "HEAD").stdout.strip()
         builder_family = _simple_builder_family(tool, full)
+        review_cfg = project_config.get("review", {}).get("review", {})
+        try:
+            assembly = wiring_mod.assemble_review_pool(
+                pool_raw, review_cfg=review_cfg,
+                run_id=f"simple-{task.get('task_id') or branch.ref}",
+                round="1", builder_family=builder_family,
+                receipts_dir=repo / ".openceo" / "review_receipts")
+        except wiring_mod.ReviewRoutingError as exc:
+            self._drop_simple_branch(branch)
+            output.status = TaskStatus.WAITING
+            output.waiting_reason = f"config: free-router: {exc}"
+            return output
+        routing = assembly.routing
+        if routing is not None:
+            pool = review_mod.parse_pool(assembly.raw_pool)
+            prefer_families = (*assembly.prefer_families, "gemini")
+        else:
+            prefer_families = SIMPLE_REVIEW_PREFER_FAMILIES
         slots = (MongoSlotStore(self._repo)
                  if self._repo is not None else InMemorySlotStore())
         reviews = (MongoReviewStore(self._repo)
@@ -1105,9 +1137,8 @@ class DevSessionManager:
         plan = await review_mod.select_round(
             pool, slots, SIMPLE_REVIEW_COUNT,
             builder_family=builder_family,
-            prefer_families=SIMPLE_REVIEW_PREFER_FAMILIES,
+            prefer_families=prefer_families,
             include_extras=False)
-        review_cfg = project_config.get("review", {}).get("review", {})
         acceptance = [str(item) for item in
                       (task.get("acceptance") or [])]
         handoff_path = repo / ".openceo" / "HANDOFF.md"
@@ -1129,42 +1160,99 @@ class DevSessionManager:
         request_name = "REVIEW_REQUEST_1.md"
         (repo / ".openceo" / request_name).write_text(
             request, encoding="utf-8")
-        executor = self._simple_reviewer_executor(pool_raw)
+        executor = self._simple_reviewer_executor(assembly.raw_pool)
 
         async def run_one(
             slot: review_mod.ReviewSlot, attempt: int,
             previous: Mapping[str, Any] | None,
         ) -> dict[str, Any]:
-            return await self._run_simple_reviewer(
-                executor=executor, slots=slots, reviews=reviews,
-                repo=repo, review_sha=review_sha, request=request,
-                request_name=request_name, handoff=handoff,
-                base_sha=branch.base_sha, acceptance=acceptance,
-                task_id=str(task.get("task_id") or ""),
-                project=str(task.get("project") or ""),
-                timeout_default=review_cfg.get(
-                    "reviewer_timeout_minutes", 15),
-                cost_runs=output.cost_runs, tag_prefix=branch.ref,
-                slot=slot, attempt=attempt, previous=previous)
+            async def run_attempt(
+                current: review_mod.ReviewSlot,
+                tried: Mapping[str, Any] | None,
+            ) -> dict[str, Any]:
+                return await self._run_simple_reviewer(
+                    executor=executor, slots=slots, reviews=reviews,
+                    repo=repo, review_sha=review_sha, request=request,
+                    request_name=request_name, handoff=handoff,
+                    base_sha=branch.base_sha, acceptance=acceptance,
+                    task_id=str(task.get("task_id") or ""),
+                    project=str(task.get("project") or ""),
+                    timeout_default=review_cfg.get(
+                        "reviewer_timeout_minutes", 15),
+                    cost_runs=output.cost_runs, tag_prefix=branch.ref,
+                    slot=current, attempt=attempt, previous=tried,
+                    routing=routing)
+            if (routing is not None and slot.label in routing.states
+                    and attempt == 1 and previous is None):
+                hit = wiring_mod.load_valid_receipt(
+                    routing.receipts_dir, run_id=routing.run_id,
+                    round=routing.round, slot=slot.label,
+                    reviewed_commit=review_sha)
+                if hit is not None:
+                    receipt, text = hit
+                    try:
+                        raw = findings_mod.parse_report(text)
+                    except findings_mod.ReportMalformed:
+                        raw = None
+                    if raw is not None:
+                        verdicts = await asyncio.to_thread(
+                            findings_mod.verify_report, raw, repo,
+                            review_sha, branch.base_sha, slot.label,
+                            receipt.family_id, acceptance)
+                        routing.receipts[slot.label] = receipt
+                        outcome = review_mod.new_outcome(slot, attempt)
+                        outcome["review_id"] = f"rev-{uuid.uuid4().hex[:12]}"
+                        outcome.update(
+                            verdicts=verdicts, valid=True, kind="valid",
+                            receipt=receipt.to_dict())
+                        return outcome
+            outcome = await run_attempt(slot, previous)
+            last = previous
+            while (routing is not None and slot.label in routing.states
+                   and not outcome.get("valid")):
+                kind = str(outcome.get("kind") or "")
+                last_kind = str((last or {}).get("kind") or "")
+                nxt = wiring_mod.plan_fallback(
+                    routing, slot.label, outcome_kind=kind,
+                    text=str(outcome.get("reason") or ""),
+                    timeout_repeat=(kind == "timeout"
+                                    and last_kind == "timeout"))
+                if nxt is None:
+                    break
+                await slots.set_slot(slot.label, {"status": "available"})
+                wiring_mod.sync_executor_pool(executor, [
+                    wiring_mod.dynamic_entry(
+                        slot.label, slot.priority, nxt)])
+                last = outcome
+                outcome = await run_attempt(
+                    wiring_mod.derive_slot(slot, nxt), None)
+            return outcome
 
-        result = await review_mod.run_quorum_round(
-            pool, slots, plan, run_one, builder_family=builder_family,
-            quorum=SIMPLE_REVIEW_QUORUM,
-            recovery=review_cfg.get("recovery"))
+        try:
+            result = await review_mod.run_quorum_round(
+                pool, slots, plan, run_one, builder_family=builder_family,
+                quorum=SIMPLE_REVIEW_QUORUM,
+                recovery=review_cfg.get("recovery"))
+        finally:
+            if routing is not None:
+                routing.close()
         reports = [{
             "slot": str(item.get("slot")),
-            "family": str(next(
+            "family": str(item.get("family") or next(
                 (slot.family for slot in pool
                  if slot.label == str(item.get("slot"))), "")),
-            "account": str(next(
+            "account": str(item.get("account") or next(
                 (slot.account for slot in pool
                  if slot.label == str(item.get("slot"))), "")),
-            "model": str(next(
+            "model": str(item.get("model") or next(
                 (slot.model for slot in pool
                  if slot.label == str(item.get("slot"))), "")),
             "review_id": str(item.get("review_id") or ""),
             "valid": bool(item.get("valid")),
-            "kind": str(item.get("kind") or "")} for item in result.outcomes]
+            "kind": str(item.get("kind") or ""),
+            **({"receipt": item["receipt"]}
+               if isinstance(item.get("receipt"), dict) else {})}
+            for item in result.outcomes]
         if not result.met:
             waits = int(
                 (checkpoint or {}).get("no_quorum_waits") or 0) + 1

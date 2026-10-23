@@ -542,6 +542,16 @@ class ConfigLoader:
                         "retry_delay_seconds": 300,
                         "max_wait_seconds": 43200,
                     },
+                    # Free-model router feeding (epic TASK-2026-00283,
+                    # TASK-2026-00293): the two best free-review models
+                    # feed the free OpenCode slots. Active by Owner
+                    # decision; the manual list stays as fallback and
+                    # `enabled: False` reverts to it entirely.
+                    "free_router": {
+                        "enabled": True,
+                        "round2_policy": "reuse_best_plus_novel",
+                        "snapshot_max_age_hours": 30,
+                    },
                 },
                 "reviewers": [
                     {"label": "qwen-max", "provider": "qwen", "model": "qwen3.8-max", "family": "qwen", "priority": 1, "active": False, "quota": "reactive", "expires_on": "2026-10-19", "prompt_via": "argv", "command": ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"], "limit_patterns": [], "expired_patterns": []},

@@ -36,6 +36,7 @@ from agents.dev.tier_s_contract import (
     verify_plan_anchor,
 )
 from agents.dev.tier_s import gates as gate_mod
+from model_routing import review_wiring as wiring_mod
 from objectives import engine as objectives_mod
 from objectives import ticket_cost as cost_mod
 from objectives.agent_result import AGENT_RESULT_PROMPT, parse_agent_result, scheduled_resume
@@ -132,6 +133,7 @@ class _Ctx:
     gate_runs: list[dict[str, Any]] = field(default_factory=list)
     lock_held: bool = False
     pool: list[Any] = field(default_factory=list)  # review.ReviewSlot
+    reviewers_raw: list[dict[str, Any]] = field(default_factory=list)
     review_cfg: dict[str, Any] = field(default_factory=dict)
     inbox_rule: dict[str, Any] = field(default_factory=dict)
     fix_tiers: dict[str, str] = field(default_factory=dict)
@@ -451,6 +453,9 @@ class TierSCycle:
             roles=dict(cycle_cfg.get("roles", {}) or {}),
             pool=list(review_mod.parse_pool(
                 cycle_cfg.get("reviewers", []) or [])),
+            reviewers_raw=[dict(entry)
+                           for entry in cycle_cfg.get("reviewers", []) or []
+                           if isinstance(entry, Mapping)],
             review_cfg={**REVIEW_DEFAULTS,
                         **dict(cycle_cfg.get("review", {}) or {})},
             inbox_rule=dict(cycle_cfg.get("inbox_rule", {}) or {}),
@@ -1199,21 +1204,69 @@ class TierSCycle:
                 f"{metrics.get('discarded', 0)} discarded, "
                 f"{metrics.get('arbitrations', 0)} arbitrations.")
 
+    @staticmethod
+    def _r1_result(
+        pool: Sequence[Any],
+        routing: wiring_mod.RoundRouting | None,
+        round1: Mapping[str, Any],
+    ) -> wiring_mod.R1Result:
+        """Valid R1 families plus tried ones for the §11.3 R2 policy."""
+        by_label = {slot.label: slot for slot in pool}
+        receipts: list[wiring_mod.ReviewReceipt] = []
+        fams: set[str] = set()
+        for item in round1.get("receipts") or []:
+            if not isinstance(item, dict):
+                continue
+            receipt = wiring_mod.ReviewReceipt.from_dict(item)
+            receipts.append(receipt)
+            fams.add(receipt.family_id)
+        for label, ok in (round1.get("valid") or {}).items():
+            if not ok or label in {item.slot for item in receipts}:
+                continue
+            slot = by_label.get(label)
+            if slot is None or not slot.family or slot.extra:
+                continue
+            fams.add(slot.family)
+        tried = set(fams)
+        if routing is not None:
+            for state in routing.states.values():
+                tried |= set(state.tried_families)
+        return wiring_mod.R1Result(
+            receipts=tuple(receipts),
+            round_families=frozenset(fams), tried_families=frozenset(tried))
+
     async def _review_rounds(self, ctx: _Ctx) -> CycleOutcome | None:
         """R1 → FIX → R2 → FIX → arbitration. None = proceed to final gates."""
         if not ctx.pool:
             return None
         builder_family = self._builder_family(ctx)
         quorum = int(ctx.review_cfg.get("quorum", 2))
+        receipts_dir = _tier_dir(ctx.repo) / "review_receipts"
 
         await self._runs.patch_run(ctx.run_id, {
             "phase": "round1", "updated_at": _utcnow_iso()})
+        try:
+            assembly1 = wiring_mod.assemble_review_pool(
+                ctx.reviewers_raw, review_cfg=ctx.review_cfg,
+                run_id=ctx.run_id, round="1",
+                builder_family=builder_family, receipts_dir=receipts_dir)
+        except wiring_mod.ReviewRoutingError as exc:
+            return await self._park(
+                ctx, "config", f"free-router: {exc}", patch_run=True)
+        wiring_mod.sync_executor_pool(self._exec, assembly1.raw_pool)
+        pool1 = (review_mod.parse_pool(assembly1.raw_pool)
+                 if assembly1.routing is not None else ctx.pool)
         plan1 = await review_mod.select_round(
-            ctx.pool, self._slots,
+            pool1, self._slots,
             int(ctx.review_cfg.get("round1_parallel", 3)),
             builder_family=builder_family)
-        round1 = await self._run_round(ctx, 1, plan1, "", quorum,
-                                       builder_family)
+        try:
+            round1 = await self._run_round(
+                ctx, 1, plan1, "", quorum, builder_family,
+                pool=pool1, routing=assembly1.routing)
+        finally:
+            if assembly1.routing is not None:
+                assembly1.routing.close()
         if round1 is None:
             return await self._park_review_quorum(ctx, 1)
         fix1 = await self._muse_fix(ctx, 1, round1["findings"])
@@ -1224,13 +1277,35 @@ class TierSCycle:
             round1["findings"], fix1)
         await self._runs.patch_run(ctx.run_id, {
             "phase": "round2", "updated_at": _utcnow_iso()})
+        r1info = self._r1_result(pool1, assembly1.routing, round1)
+        try:
+            assembly2 = wiring_mod.assemble_review_pool(
+                ctx.reviewers_raw, review_cfg=ctx.review_cfg,
+                run_id=ctx.run_id, round="2",
+                builder_family=builder_family, receipts_dir=receipts_dir,
+                r1=r1info)
+        except wiring_mod.RoundBlocked as exc:
+            ctx.quorum_detail = str(exc)
+            return await self._park_review_quorum(ctx, 2)
+        except wiring_mod.ReviewRoutingError as exc:
+            return await self._park(
+                ctx, "config", f"free-router: {exc}", patch_run=True)
+        wiring_mod.sync_executor_pool(self._exec, assembly2.raw_pool)
+        pool2 = (review_mod.parse_pool(assembly2.raw_pool)
+                 if assembly2.routing is not None else ctx.pool)
         plan2 = await review_mod.select_round(
-            ctx.pool, self._slots,
+            pool2, self._slots,
             int(ctx.review_cfg.get("round2_parallel", 2)),
-            builder_family=builder_family, prefer_families=prefer)
+            builder_family=builder_family,
+            prefer_families=[*assembly2.prefer_families, *prefer])
         extra = self._round2_context(ctx, round1, fix1)
-        round2 = await self._run_round(ctx, 2, plan2, extra, quorum,
-                                       builder_family)
+        try:
+            round2 = await self._run_round(
+                ctx, 2, plan2, extra, quorum, builder_family,
+                pool=pool2, routing=assembly2.routing)
+        finally:
+            if assembly2.routing is not None:
+                assembly2.routing.close()
         if round2 is None:
             return await self._park_review_quorum(ctx, 2)
         fix2 = await self._muse_fix(ctx, 2, round2["findings"])
@@ -1328,6 +1403,8 @@ class TierSCycle:
         extra_context: str,
         quorum: int,
         builder_family: str,
+        pool: Sequence[review_mod.ReviewSlot] | None = None,
+        routing: wiring_mod.RoundRouting | None = None,
     ) -> dict[str, Any] | None:
         """Run one round; None when quorum is unreachable (§7.2)."""
         head = ctx.head_sha or ctx.build_sha
@@ -1353,13 +1430,63 @@ class TierSCycle:
             attempt: int,
             previous: Mapping[str, Any] | None,
         ) -> dict[str, Any]:
-            return await self._run_reviewer(
-                ctx, slot, round_no, request, request_name, handoff, head,
-                attempt=attempt, previous=previous)
+            async def run_attempt(
+                current: review_mod.ReviewSlot,
+                tried: Mapping[str, Any] | None,
+            ) -> dict[str, Any]:
+                return await self._run_reviewer(
+                    ctx, current, round_no, request, request_name,
+                    handoff, head, attempt=attempt, previous=tried,
+                    routing=routing)
+            if (routing is not None and slot.label in routing.states
+                    and attempt == 1 and previous is None):
+                hit = wiring_mod.load_valid_receipt(
+                    routing.receipts_dir, run_id=routing.run_id,
+                    round=routing.round, slot=slot.label,
+                    reviewed_commit=head)
+                if hit is not None:
+                    receipt, text = hit
+                    try:
+                        raw = findings_mod.parse_report(text)
+                    except findings_mod.ReportMalformed:
+                        raw = None
+                    if raw is not None:
+                        verdicts = await asyncio.to_thread(
+                            findings_mod.verify_report, raw, ctx.repo,
+                            head, ctx.base_sha, slot.label,
+                            receipt.family_id, self._acceptance(ctx))
+                        routing.receipts[slot.label] = receipt
+                        outcome = review_mod.new_outcome(slot, attempt)
+                        outcome.update(
+                            verdicts=verdicts, valid=True, kind="valid",
+                            receipt=receipt.to_dict())
+                        return outcome
+            outcome = await run_attempt(slot, previous)
+            last = previous
+            while (routing is not None and slot.label in routing.states
+                   and not outcome.get("valid")):
+                kind = str(outcome.get("kind") or "")
+                last_kind = str((last or {}).get("kind") or "")
+                nxt = wiring_mod.plan_fallback(
+                    routing, slot.label, outcome_kind=kind,
+                    text=str(outcome.get("reason") or ""),
+                    timeout_repeat=(kind == "timeout"
+                                    and last_kind == "timeout"))
+                if nxt is None:
+                    break
+                await self._slots.set_slot(
+                    slot.label, {"status": "available"})
+                wiring_mod.sync_executor_pool(self._exec, [
+                    wiring_mod.dynamic_entry(
+                        slot.label, slot.priority, nxt)])
+                last = outcome
+                outcome = await run_attempt(
+                    wiring_mod.derive_slot(slot, nxt), None)
+            return outcome
 
         result = await review_mod.run_quorum_round(
-            ctx.pool, self._slots, plan, run_one,
-            builder_family=builder_family, quorum=quorum,
+            pool if pool is not None else ctx.pool, self._slots, plan,
+            run_one, builder_family=builder_family, quorum=quorum,
             recovery=ctx.review_cfg.get("recovery"))
         slots_run = sorted(result.valid)
         valid_reports = sum(1 for label in slots_run if result.valid.get(label))
@@ -1386,7 +1513,10 @@ class TierSCycle:
             "rounds": ctx.rounds, "metrics": ctx.metrics,
             "updated_at": _utcnow_iso()})
         return {"findings": consolidated, "verdicts": verdicts,
-                "slots": slots_run, "valid": result.valid}
+                "slots": slots_run, "valid": result.valid,
+                "receipts": [dict(outcome["receipt"])
+                             for outcome in result.outcomes
+                             if isinstance(outcome.get("receipt"), dict)]}
 
     async def _run_reviewer(
         self,
@@ -1399,6 +1529,7 @@ class TierSCycle:
         head_sha: str,
         attempt: int = 1,
         previous: Mapping[str, Any] | None = None,
+        routing: wiring_mod.RoundRouting | None = None,
     ) -> dict[str, Any]:
         """One reviewer attempt on its own detached read-only worktree (§7.5).
 
@@ -1426,11 +1557,13 @@ class TierSCycle:
             timeout_s = review_mod.slot_timeout_s(
                 slot, ctx.review_cfg.get("reviewer_timeout_minutes", 15),
                 previous)
+            started = datetime.now(timezone.utc).isoformat()
             result = await self._exec.run(
                 role, review_mod.reviewer_prompt(
                     slot.label, request_name, "ticket", round_no,
                     repo=worktree, retry=review_mod.retry_note(previous)),
                 worktree, timeout_s)
+            finished = datetime.now(timezone.utc).isoformat()
             self._record_session(ctx, "reviewer", role, result)
             outcome.update(elapsed_s=float(result.elapsed_s or 0.0),
                            exit_code=result.returncode)
@@ -1469,6 +1602,12 @@ class TierSCycle:
                 findings_mod.verify_report, raw, ctx.repo, head_sha,
                 ctx.base_sha, slot.label, slot.family, self._acceptance(ctx))
             outcome.update(verdicts=verdicts, valid=True, kind="valid")
+            if routing is not None and slot.label in routing.states:
+                receipt = wiring_mod.record_receipt(
+                    routing, slot.label, report_text=text,
+                    reviewed_commit=head_sha, started_at=started,
+                    finished_at=finished)
+                outcome["receipt"] = receipt.to_dict()
             await self._persist_review(ctx, slot, round_no, outcome)
             return outcome
         finally:
@@ -1486,6 +1625,15 @@ class TierSCycle:
         if self._reviews is None:
             return
         try:
+            meta: dict[str, Any] = {
+                "attempt": int(outcome.get("attempt") or 1),
+                "kind": str(outcome.get("kind") or ""),
+                "elapsed_s": float(outcome.get("elapsed_s") or 0.0),
+                "exit_code": outcome.get("exit_code"),
+                "account": slot.account, "model": slot.model,
+                "project": ctx.ticket.get("project")}
+            if isinstance(outcome.get("receipt"), dict):
+                meta["receipt"] = outcome["receipt"]
             await self._reviews.create_review(findings_mod.review_document(
                 review_id=f"rev-{uuid.uuid4().hex[:12]}",
                 task_id=str(ctx.ticket.get("task_id", "")),
@@ -1494,12 +1642,7 @@ class TierSCycle:
                 valid=bool(outcome.get("valid")),
                 verdicts=list(outcome.get("verdicts") or []),
                 invalid_reason=str(outcome.get("reason") or ""),
-                meta={"attempt": int(outcome.get("attempt") or 1),
-                      "kind": str(outcome.get("kind") or ""),
-                      "elapsed_s": float(outcome.get("elapsed_s") or 0.0),
-                      "exit_code": outcome.get("exit_code"),
-                      "account": slot.account, "model": slot.model,
-                      "project": ctx.ticket.get("project")}))
+                meta=meta))
         except Exception:
             pass  # telemetry persistence never fails a round
 
