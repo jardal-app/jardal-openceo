@@ -85,6 +85,16 @@ _GEMINI_STATE_FILES = ("settings.json", "state.json", "projects.json",
                        "trustedFolders.json", "google_accounts.json")
 _GEMINI_BINARIES = frozenset({"agy", "agyd", "agyj", "agy2"})
 
+#: Reviewer home profiles (TASK-2026-00288): each reviewer CLI keeps only
+#: its own auth/config; sibling motor dirs stay unmounted. ``None`` keeps
+#: the full agent home (builders and other roles, unchanged).
+_HOME_PROFILE_DIRS = {
+    "opencode": frozenset({".opencode", ".config/opencode"}),
+}
+_HOME_PROFILE_FILES = {
+    "opencode": frozenset(),
+}
+
 #: agy binary → home subdir holding its state (account dirs come from
 #: the agy translator; bare ``agy`` shares the default dir).
 _GEMINI_BINARY_SUBDIRS = {"agyj": ".gemini-j", "agy2": ".gemini-2"}
@@ -368,30 +378,51 @@ def _gemini_state_ops(home: Path, scratch: Path,
     return ops
 
 
-def _home_ops(home: Path, opencode_state_rw: bool) -> list[list[str]]:
+def _reviewer_home_keep(profile: str, account: str | None) -> tuple[
+        frozenset[str] | None, frozenset[str] | None]:
+    """Home dirs/files a reviewer profile keeps (``None`` = all)."""
+    if profile == "agy":
+        subdir = _GEMINI_BINARY_SUBDIRS.get(account or "agy", ".gemini")
+        files = {".local/bin/agy"}
+        if account and account != "agy":
+            files.add(f".local/bin/{account}")
+        return frozenset({subdir}), frozenset(files)
+    if profile in _HOME_PROFILE_DIRS:
+        return _HOME_PROFILE_DIRS[profile], _HOME_PROFILE_FILES[profile]
+    raise ValueError(f"unknown home profile: {profile!r}")
+
+
+def _home_ops(home: Path, opencode_state_rw: bool,
+              keep_dirs: frozenset[str] | None = None,
+              keep_files: frozenset[str] | None = None) -> list[list[str]]:
     ops: list[list[str]] = []
     for entry in _HOME_DIRS_RO:
+        if keep_dirs is not None and entry not in keep_dirs:
+            continue
         path = home / entry
         if path.exists():
             ops.append(["--ro-bind", str(path), str(path)])
     for entry in _HOME_FILES_RO:
+        if keep_files is not None and entry not in keep_files:
+            continue
         path = home / entry
         if path.is_file() and not path.is_symlink():
             ops.append(["--ro-bind", str(path), str(path)])
-    for pattern in _HOME_FILE_GLOBS_RO:
-        for match in sorted(home.glob(pattern)):
-            if match.is_file() and not match.is_symlink():
-                ops.append(["--ro-bind", str(match), str(match)])
-    for entry in _HOME_SYMLINKS:
-        link = home / entry
-        if link.is_symlink():
-            try:
-                real = link.resolve()
-            except OSError:
-                continue
-            if real.is_file():
-                ops.append(["--ro-bind", str(real), str(real)])
-                ops.append(["--symlink", str(real), str(link)])
+    if keep_files is None:
+        for pattern in _HOME_FILE_GLOBS_RO:
+            for match in sorted(home.glob(pattern)):
+                if match.is_file() and not match.is_symlink():
+                    ops.append(["--ro-bind", str(match), str(match)])
+        for entry in _HOME_SYMLINKS:
+            link = home / entry
+            if link.is_symlink():
+                try:
+                    real = link.resolve()
+                except OSError:
+                    continue
+                if real.is_file():
+                    ops.append(["--ro-bind", str(real), str(real)])
+                    ops.append(["--symlink", str(real), str(link)])
     for entry in _HOME_TMPFS:
         if entry == ".local/share/opencode" and opencode_state_rw:
             continue
@@ -443,8 +474,16 @@ def plan_agent(
     home_file_overlays: Mapping[str, bytes | str] | None = None,
     extra_read_roots: Sequence[str | Path] = (),
     extra_write_roots: Sequence[str | Path] = (),
+    extra_ops: Sequence[Sequence[str]] = (),
+    home_profile: str | None = None,
 ) -> IsolationPlan:
     """Fenced argv/env/cwd for one agent run. Raises IsolationUnavailable.
+
+    ``extra_ops`` appends caller-built bwrap ops (reviewer secret masks,
+    TASK-2026-00288); the backend still rejects unknown op names.
+    ``home_profile`` (``"opencode"``/``"agy"``) mounts only that CLI's
+    own home entries instead of the full agent home; ``None`` keeps the
+    full home (builders and other roles, unchanged).
 
     ``home_file_overlays`` bind-mounts rendered content over
     home-relative paths (role settings, TASK-2026-00197): each value is
@@ -469,7 +508,14 @@ def plan_agent(
     env = sandbox_env(base, overlay)
     scratch = ensure_sandbox_scratch(workdir)
     full_argv = [str(token) for token in argv]
-    ops = _home_ops(host_home, opencode_state_rw)
+    if home_profile == "opencode" and opencode_state_rw:
+        raise ValueError("opencode reviewers never persist opencode state")
+    if home_profile is not None:
+        account = Path(full_argv[0]).name if full_argv else None
+        keep_dirs, keep_files = _reviewer_home_keep(home_profile, account)
+    else:
+        keep_dirs, keep_files = None, None
+    ops = _home_ops(host_home, opencode_state_rw, keep_dirs, keep_files)
     ops.extend(_snapshot_dsh_profile(overlay, scratch))
     ops.extend(_gemini_state_ops(host_home, scratch, full_argv))
     config_ops = _config_path_roots(
@@ -543,6 +589,7 @@ def plan_agent(
             os.chmod(target, 0o600)
             ops.append(["--ro-bind", str(target),
                         str(host_home / relpath)])
+    ops.extend([str(token) for token in op] for op in extra_ops)
     return backend.plan(
         argv=list(argv),
         workspace=workdir,
