@@ -24,6 +24,8 @@ __all__ = [
     "PROVIDERS_FILENAME",
     "RANKINGS_FILENAME",
     "STATE_DIRNAME",
+    "UPDATER_LOCK_FILENAME",
+    "UPDATER_LOG_FILENAME",
     "availability_db_path",
     "catalog_path",
     "config_dir",
@@ -44,6 +46,8 @@ RANKINGS_FILENAME = "rankings.json"
 HISTORY_DIRNAME = "history"
 AVAILABILITY_DB_FILENAME = "availability.sqlite"
 LIVE_BUDGET_FILENAME = "live-budget.json"
+UPDATER_LOCK_FILENAME = "update.lock"
+UPDATER_LOG_FILENAME = "updater.log"
 
 
 def _xdg_base(var: str, fallback: Path) -> Path:

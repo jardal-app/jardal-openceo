@@ -187,6 +187,7 @@ class ProfileRequirements:
     needs_tools: bool = False
     min_context_tokens: int | None = None
     min_tpm: int | None = None
+    min_rpm: int | None = None
     min_rpd: int | None = None
     confidentiality: Confidentiality | None = None
 
@@ -528,6 +529,9 @@ def meets_profile(entry: CatalogEntry, deployment: Deployment,
     if requirements.min_tpm is not None and (
             deployment.limits.tpm is None or deployment.limits.tpm < requirements.min_tpm):
         return False, "TPM below the profile floor"
+    if requirements.min_rpm is not None and (
+            deployment.limits.rpm is None or deployment.limits.rpm < requirements.min_rpm):
+        return False, "RPM below the profile floor"
     if requirements.min_rpd is not None and (
             deployment.limits.rpd is None or deployment.limits.rpd < requirements.min_rpd):
         return False, "RPD below the profile floor"

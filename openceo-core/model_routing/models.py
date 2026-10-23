@@ -2,9 +2,9 @@
 
 F0 status report plus the F1 catalog subset: catalog entries with the
 three identity levels (SPEC §6.2, §6.3), policy/providers documents
-(SPEC §18 subset) and the live-budget ledger. Ranking and availability
-models arrive with their own tickets (00291, 00292). Every document is
-fail-closed (``extra="forbid"``) and validated on each read.
+(SPEC §18 subset), the live-budget ledger and the published rankings
+(TASK-2026-00292). Every document is fail-closed (``extra="forbid"``)
+and validated on each read.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from model_routing.paths import (
     catalog_path,
@@ -30,7 +30,8 @@ __all__ = [
     "MODULE_PHASE",
     "POLICY_SCHEMA_VERSION",
     "PROVIDERS_SCHEMA_VERSION",
-    "STATUS_SCHEMA_VERSION",
+    "RANKINGS_SCHEMA_VERSION",
+    "SCORING_DIMENSIONS",
     "BenchmarkScore",
     "Capabilities",
     "CatalogDocument",
@@ -39,9 +40,17 @@ __all__ = [
     "DataPolicy",
     "Deployment",
     "DeploymentLimits",
+    "ExperimentalEntry",
     "LiveBudget",
+    "PendingTop3",
+    "ProfileRanking",
+    "ProfileScoring",
     "ProviderEntry",
     "ProvidersDocument",
+    "RankedDeployment",
+    "RankedEntry",
+    "RankingProvenance",
+    "RankingsDocument",
     "RouterPolicy",
     "StatusReport",
     "Usability",
@@ -55,6 +64,9 @@ MODULE_PHASE = "F1"
 CATALOG_SCHEMA_VERSION = 1
 POLICY_SCHEMA_VERSION = 1
 PROVIDERS_SCHEMA_VERSION = 1
+RANKINGS_SCHEMA_VERSION = 1
+
+SCORING_DIMENSIONS = ("coding", "agentic", "intelligence")
 
 
 class DataPolicy(str, Enum):
@@ -174,6 +186,37 @@ class CatalogDocument(BaseModel):
         return self
 
 
+class ProfileScoring(BaseModel):
+    """Per-profile scoring knobs (SPEC §8.3, §8.4); None keeps the default."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    weights: dict[str, float] | None = None
+    quality_floor: float | None = None
+    max_quality_drop: float | None = None
+
+    @field_validator("weights")
+    @classmethod
+    def _check_weights(cls, value: dict[str, float] | None) -> dict[str, float] | None:
+        if value is None:
+            return None
+        unknown = sorted(set(value) - set(SCORING_DIMENSIONS))
+        if unknown:
+            raise ValueError(f"unknown scoring dimensions: {', '.join(unknown)}")
+        if any(weight < 0 for weight in value.values()):
+            raise ValueError("scoring weights must be non-negative")
+        if sum(value.values()) <= 0:
+            raise ValueError("scoring weights must sum above zero")
+        return value
+
+    @field_validator("quality_floor", "max_quality_drop")
+    @classmethod
+    def _check_unit(cls, value: float | None) -> float | None:
+        if value is not None and not 0.0 <= value <= 1.0:
+            raise ValueError(f"score bound must sit in 0..1: {value}")
+        return value
+
+
 class RouterPolicy(BaseModel):
     """Approved persistent rules; SPEC §18 subset for the catalog stage."""
 
@@ -186,6 +229,7 @@ class RouterPolicy(BaseModel):
     use_only_verified_endpoints: bool = True
     confidentiality_default: Confidentiality = Confidentiality.INTERNAL
     live_budgets: dict[str, int] = Field(default_factory=dict)
+    profiles: dict[str, ProfileScoring] = Field(default_factory=dict)
 
 
 class ProviderEntry(BaseModel):
@@ -290,3 +334,93 @@ def usability(deployment: Deployment, policy: RouterPolicy) -> Usability:
 def is_usable(deployment: Deployment, policy: RouterPolicy) -> bool:
     """Catalog-level gate only; health/capacity/privacy arrive in 00291/00292."""
     return usability(deployment, policy) == "usable"
+
+
+class RankedDeployment(BaseModel):
+    """One servable route for a ranked canonical model."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    deployment_id: str
+    provider: str
+
+
+class RankedEntry(BaseModel):
+    """One ordered canonical model with its primary route and backups (T05)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    rank: int
+    canonical_model_id: str
+    family_id: str
+    primary: RankedDeployment
+    backups: list[RankedDeployment] = Field(default_factory=list)
+    quality: float
+    coverage: float
+    dimensions: dict[str, float] = Field(default_factory=dict)
+    quality_sources: list[str] = Field(default_factory=list)
+
+
+class ExperimentalEntry(BaseModel):
+    """Thin-evidence canonical model; never ranked, only listed with a reason."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    canonical_model_id: str
+    family_id: str
+    reason: str
+    observations: int = 0
+
+
+class PendingTop3(BaseModel):
+    """Challenger top-3 held back until it repeats (SPEC §8.3; T19)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    proposed: list[str]
+    previous: list[str]
+    first_seen: str
+    consecutive_refreshes: int = 1
+    reason: str = ""
+    catalog_snapshot: str = ""
+
+
+class RankingProvenance(BaseModel):
+    """Where one profile order came from and under which rules."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    catalog_snapshot: str
+    catalog_sha256: str
+    sources: list[str] = Field(default_factory=list)
+    observed_at: str = ""
+    weights: dict[str, float] = Field(default_factory=dict)
+    quality_floor: float = 0.0
+    context_floor: int | None = None
+    aa_index_version: float | None = None
+    lmarena_target: str | None = None
+
+
+class ProfileRanking(BaseModel):
+    """Effective order for one profile plus its held-back challenger."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile: str
+    order: list[RankedEntry] = Field(default_factory=list)
+    experimental: list[ExperimentalEntry] = Field(default_factory=list)
+    pending_top3: PendingTop3 | None = None
+    provenance: RankingProvenance
+
+
+class RankingsDocument(BaseModel):
+    """Published per-profile orders; consumers freeze it for the round."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = RANKINGS_SCHEMA_VERSION
+    generated_at: datetime | None = None
+    generator: str = ""
+    catalog_snapshot: str = ""
+    catalog_sha256: str = ""
+    profiles: dict[str, ProfileRanking] = Field(default_factory=dict)

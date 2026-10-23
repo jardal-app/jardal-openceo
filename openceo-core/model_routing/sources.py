@@ -17,11 +17,14 @@ never name suffixes:
   key; the catalog stores the effective free-tier price (0.0), since
   list prices are paid-tier prices for another deployment.
 
-Fetchers never set ``healthy``, ``tools`` or ``streaming``: probes do
-that after serving (only ``context_tokens`` comes from list metadata).
+Fetchers never set ``healthy`` or ``streaming``: probes do that
+after serving. ``tools`` comes from provider-declared list metadata
+where published (OpenRouter ``supported_parameters``; TASK-2026-00292),
+declared support gating the ranking while probes verify reliability.
 Families stay ``unknown-family`` until TASK-2026-00290 resolves them;
-canonical ids are provider-scoped until then. The error taxonomy here
-is fetcher-local; TASK-2026-00291 unifies SPEC §9.2.
+canonical ids are provider-scoped until TASK-2026-00292 unifies them.
+The error taxonomy here is fetcher-local; TASK-2026-00291 unifies
+SPEC §9.2.
 """
 
 from __future__ import annotations
@@ -303,13 +306,14 @@ def _base_entry(
     output_price: float | None,
     source: str,
     context: int | None = None,
+    tools: bool = False,
 ) -> CatalogEntry:
     deployment_id = f"{provider}/{model_id}"
     return CatalogEntry(
         family_id=UNKNOWN_FAMILY,
         canonical_model_id=deployment_id,
         display_name=model_id,
-        capabilities=Capabilities(context_tokens=context),
+        capabilities=Capabilities(context_tokens=context, tools=tools),
         deployments=[
             Deployment(
                 deployment_id=deployment_id,
@@ -386,6 +390,8 @@ def parse_openrouter_models(
             and not extras_paid
             and quota_ok
         )
+        declared = item.get("supported_parameters")
+        tools = isinstance(declared, list) and "tools" in declared
         entries.append(
             _base_entry(
                 "openrouter",
@@ -397,6 +403,7 @@ def parse_openrouter_models(
                 output_price=completion,
                 source="openrouter-models+key" if key_info is not None else "openrouter-models",
                 context=_context_tokens(item.get("context_length")),
+                tools=tools,
             )
         )
     return entries
@@ -626,7 +633,12 @@ def merge_with_previous(
     fetched: list[FetchedCatalog],
     failed: Mapping[str, str],
 ) -> tuple[CatalogDocument, bool, str | None]:
-    """Keep the last good entries for dead sources instead of emptying."""
+    """Keep the last good deployments for dead sources instead of emptying.
+
+    Rescue runs per deployment: a unified previous entry may mix
+    providers, so carrying it whole would either drop live routes or
+    collide with the fresh ones.
+    """
     doc = build_catalog(fetched)
     if not failed:
         return doc, False, None
@@ -634,11 +646,12 @@ def merge_with_previous(
     if previous is None:
         return doc.model_copy(update={"stale": True, "stale_reason": reason}), True, reason
     failed_providers = set(failed)
-    carried = [
-        entry
-        for entry in previous.entries
-        if entry.deployments and entry.deployments[0].provider in failed_providers
-    ]
+    carried = []
+    for entry in previous.entries:
+        rescued = [deployment for deployment in entry.deployments
+                   if deployment.provider in failed_providers]
+        if rescued:
+            carried.append(entry.model_copy(update={"deployments": rescued}))
     merged = doc.model_copy(update={"entries": [*doc.entries, *carried]})
     try:
         merged = CatalogDocument.model_validate(merged.model_dump())
