@@ -4,7 +4,7 @@ Honours ``XDG_CONFIG_HOME``/``XDG_STATE_HOME`` per SPEC §6.1; relative
 or empty XDG values fall back to ``~``. Secrets stay in
 ``openceo-core/.env.free-router.local`` (epic TASK-2026-00283 decision,
 deviating from SPEC §6.1 ``secrets.env``), never under these
-directories. F0 subset: ``gateway.generated.yaml``, ``updater.log``,
+directories. ``gateway.generated.yaml`` arrives with TASK-2026-00295;
 ``gateway.log`` and ``reviews/`` arrive with their own tickets. Pure
 path joins; creates nothing.
 """
@@ -18,6 +18,8 @@ __all__ = [
     "AVAILABILITY_DB_FILENAME",
     "CATALOG_FILENAME",
     "CONFIG_DIRNAME",
+    "GATEWAY_FROZEN_FILENAME",
+    "GATEWAY_GENERATED_FILENAME",
     "HISTORY_DIRNAME",
     "POLICY_FILENAME",
     "PROVIDERS_FILENAME",
@@ -28,6 +30,7 @@ __all__ = [
     "availability_db_path",
     "catalog_path",
     "config_dir",
+    "gateway_config_path",
     "history_dir",
     "policy_path",
     "providers_path",
@@ -42,6 +45,8 @@ PROVIDERS_FILENAME = "providers.yaml"
 CATALOG_FILENAME = "catalog.json"
 RANKINGS_FILENAME = "rankings.json"
 HISTORY_DIRNAME = "history"
+GATEWAY_GENERATED_FILENAME = "gateway.generated.yaml"
+GATEWAY_FROZEN_FILENAME = "gateway.frozen"
 AVAILABILITY_DB_FILENAME = "availability.sqlite"
 UPDATER_LOCK_FILENAME = "update.lock"
 UPDATER_LOG_FILENAME = "updater.log"
@@ -83,6 +88,11 @@ def catalog_path() -> Path:
 def rankings_path() -> Path:
     """Per-profile order with provenance."""
     return config_dir() / RANKINGS_FILENAME
+
+
+def gateway_config_path() -> Path:
+    """Generated gateway contract (SPEC §6.1, §13.1; HOLD, never deployed)."""
+    return config_dir() / GATEWAY_GENERATED_FILENAME
 
 
 def history_dir() -> Path:

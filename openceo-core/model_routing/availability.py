@@ -349,6 +349,17 @@ class AvailabilityStore:
         return {"until_ts": row[0], "reason": row[1],
                 "retry_after_s": row[2], "failures": row[3]}
 
+    def active_cooldowns(self, *, now: float | None = None) -> list[dict]:
+        """Every active cooldown; expired rows read as absent (TASK-2026-00295)."""
+        current = time.time() if now is None else now
+        rows = self._db.execute(
+            "SELECT deployment_id, until_ts, reason, retry_after_s, failures FROM cooldowns"
+            " WHERE until_ts > ? ORDER BY deployment_id",
+            (current,)).fetchall()
+        return [{"deployment_id": deployment, "until_ts": until, "reason": reason,
+                 "retry_after_s": retry_after, "failures": failures}
+                for deployment, until, reason, retry_after, failures in rows]
+
     def block_provider(self, provider: str, reason: str, *, seconds: float,
                        now: float | None = None) -> None:
         """Disable a provider until its window resets (daily quota, bad credential)."""

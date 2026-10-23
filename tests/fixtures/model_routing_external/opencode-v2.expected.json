@@ -1,0 +1,26 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    "free-gateway": {
+      "name": "Free Gateway local",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "env": [
+        "FREE_GATEWAY_KEY"
+      ],
+      "settings": {
+        "baseURL": "http://127.0.0.1:4000/v1"
+      },
+      "models": {
+        "free-research": {
+          "name": "Free Research"
+        },
+        "free-review": {
+          "name": "Free Review"
+        },
+        "free-general": {
+          "name": "Free General"
+        }
+      }
+    }
+  }
+}

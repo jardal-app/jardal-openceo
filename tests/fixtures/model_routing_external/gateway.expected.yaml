@@ -1,0 +1,48 @@
+# gateway.generated.yaml - generated, do not edit by hand.
+# Logical contract in the SPEC 13.1 grammar; HOLD: never deploy
+# without the SPEC 14.1 security approval.
+# eligible-sha256: ea6c82e3f8555e9a7842e53cd7e31f2165df72522987f6978b9f9f44fa25e586
+model_list:
+  - model_name: free-research
+    litellm_params:
+      model: openrouter/example/alpha:free
+      api_key: os.environ/FREE_ROUTER_OPENROUTER_API_KEY
+      order: 1
+  - model_name: free-research
+    litellm_params:
+      model: groq/gpt-alpha
+      api_key: os.environ/FREE_ROUTER_GROQ_API_KEY
+      order: 2
+  - model_name: free-research
+    litellm_params:
+      model: nvidia_nim/org/beta
+      api_key: os.environ/FREE_ROUTER_NVIDIA_NIM_API_KEY
+      order: 3
+  - model_name: free-review
+    litellm_params:
+      model: groq/gpt-alpha
+      api_key: os.environ/FREE_ROUTER_GROQ_API_KEY
+      order: 1
+  - model_name: free-review
+    litellm_params:
+      model: gemini/gamma-flash
+      api_key: os.environ/FREE_ROUTER_GEMINI_API_KEY
+      order: 2
+  - model_name: review-candidate-001
+    litellm_params:
+      model: groq/gpt-alpha
+      api_key: os.environ/FREE_ROUTER_GROQ_API_KEY
+      num_retries: 0
+  - model_name: review-candidate-002
+    litellm_params:
+      model: gemini/gamma-flash
+      api_key: os.environ/FREE_ROUTER_GEMINI_API_KEY
+      num_retries: 0
+router_settings:
+  allowed_fails: 3
+  cooldown_time: 30
+litellm_settings:
+  drop_params: false
+  turn_off_message_logging: true
+general_settings:
+  master_key: os.environ/FREE_ROUTER_LITELLM_MASTER_KEY

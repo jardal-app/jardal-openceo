@@ -1,7 +1,8 @@
 """free-router command line (TASK-2026-00285, TASK-2026-00287, TASK-2026-00291).
 
 ``status``, ``validate-config``, ``errors``, ``models``, ``explain``,
-``simulate-fallback``, ``sources`` and ``update``; further subcommands
+``simulate-fallback``, ``sources``, ``update``, ``reserve``,
+``release``, ``cooldowns`` and ``reservations``; further subcommands
 arrive with their tickets. Usage from
 the repo root::
 
@@ -25,10 +26,11 @@ if __name__ == "__main__":
     if _CORE not in sys.path:
         sys.path.insert(0, _CORE)
 
-from model_routing.availability import AvailabilityStore  # noqa: E402
+from model_routing.availability import AvailabilityStore, ReservationConflict  # noqa: E402
 from model_routing.config import ConfigError, load_policy, validate_config  # noqa: E402
 from model_routing.models import RouterPolicy, collect_status  # noqa: E402
 from model_routing.paths import (  # noqa: E402
+    AVAILABILITY_DB_FILENAME,
     CATALOG_FILENAME,
     POLICY_FILENAME,
     RANKINGS_FILENAME,
@@ -88,6 +90,30 @@ def build_parser() -> argparse.ArgumentParser:
     kind.add_argument("--benchmarks", action="store_true", help="Cron A: benchmarks (24 h)")
     update.add_argument("--config-dir", default=None)
     update.add_argument("--state-dir", default=None)
+    reserve = sub.add_parser("reserve", help="Hold one run/round/slot (external coordinators)")
+    reserve.add_argument("--run-id", required=True)
+    reserve.add_argument("--round", required=True)
+    reserve.add_argument("--slot", required=True)
+    reserve.add_argument("--canonical", required=True, help="Canonical model id")
+    reserve.add_argument("--family", required=True, help="Family id")
+    reserve.add_argument("--deployment", required=True, help="Deployment id")
+    reserve.add_argument("--ttl-s", type=float, default=3600.0)
+    reserve.add_argument("--state-dir", default=None)
+    reserve.add_argument("--json", action="store_true", help="Machine-readable output")
+    release = sub.add_parser("release", help="Free one held slot")
+    release.add_argument("--run-id", required=True)
+    release.add_argument("--round", required=True)
+    release.add_argument("--slot", required=True)
+    release.add_argument("--state-dir", default=None)
+    release.add_argument("--json", action="store_true", help="Machine-readable output")
+    cooldowns = sub.add_parser("cooldowns", help="List active deployment cooldowns")
+    cooldowns.add_argument("--state-dir", default=None)
+    cooldowns.add_argument("--json", action="store_true", help="Machine-readable output")
+    reservations = sub.add_parser("reservations", help="List active reservations of one round")
+    reservations.add_argument("--run-id", required=True)
+    reservations.add_argument("--round", required=True)
+    reservations.add_argument("--state-dir", default=None)
+    reservations.add_argument("--json", action="store_true", help="Machine-readable output")
     return parser
 
 
@@ -295,6 +321,98 @@ def _run_update(args: argparse.Namespace) -> int:
     return code
 
 
+def _state_path(args: argparse.Namespace) -> Path:
+    base = Path(args.state_dir) if args.state_dir else state_dir()
+    return base / AVAILABILITY_DB_FILENAME
+
+
+def _run_reserve(args: argparse.Namespace) -> int:
+    if args.ttl_s <= 0:
+        print("reserve: --ttl-s must be above zero")
+        return 2
+    store = AvailabilityStore(_state_path(args))
+    try:
+        held = store.reserve(
+            args.run_id, args.round, args.slot, args.canonical,
+            args.family, args.deployment, ttl_s=args.ttl_s)
+    except ReservationConflict as exc:
+        print(f"reserve: {exc}")
+        return 1
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps({
+            "run_id": held.run_id, "round": held.round, "slot": held.slot,
+            "canonical_model_id": held.canonical_model_id,
+            "family_id": held.family_id, "deployment_id": held.deployment_id,
+            "expires_at": held.expires_at,
+        }, indent=2))
+        return 0
+    print(f"reserved {held.slot} -> {held.deployment_id}"
+          f" (family {held.family_id}) for {held.run_id}/{held.round}")
+    return 0
+
+
+def _run_release(args: argparse.Namespace) -> int:
+    store = AvailabilityStore(_state_path(args))
+    try:
+        freed = store.release(args.run_id, args.round, args.slot)
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps({"released": freed}, indent=2))
+        return 0
+    if freed:
+        print(f"released {args.slot} for {args.run_id}/{args.round}")
+    else:
+        print(f"no reservation held for {args.slot} in {args.run_id}/{args.round}")
+    return 0
+
+
+def _run_cooldowns(args: argparse.Namespace) -> int:
+    store = AvailabilityStore(_state_path(args))
+    try:
+        rows = store.active_cooldowns()
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        print("no active cooldowns")
+        return 0
+    for row in rows:
+        moment = datetime.fromtimestamp(row["until_ts"], timezone.utc).isoformat()
+        print(f"{row['deployment_id']} until {moment}"
+              f" ({row['reason']}, failures {row['failures']})")
+    return 0
+
+
+def _run_reservations(args: argparse.Namespace) -> int:
+    store = AvailabilityStore(_state_path(args))
+    try:
+        held = store.reservations(args.run_id, args.round)
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps([{
+            "slot": item.slot, "canonical_model_id": item.canonical_model_id,
+            "family_id": item.family_id, "deployment_id": item.deployment_id,
+            "expires_at": item.expires_at, "exception": item.exception,
+        } for item in held], indent=2))
+        return 0
+    if not held:
+        print(f"no reservations for {args.run_id}/{args.round}")
+        return 0
+    for item in held:
+        line = (f"{item.slot} -> {item.deployment_id}"
+                f" (family {item.family_id}, canonical {item.canonical_model_id})")
+        if item.exception:
+            line += f" [exception: {item.exception}]"
+        print(line)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI; 0 on success (missing F0 artifacts are expected)."""
     parser = build_parser()
@@ -315,6 +433,14 @@ def main(argv: list[str] | None = None) -> int:
         return _run_sources(args)
     if args.command == "update":
         return _run_update(args)
+    if args.command == "reserve":
+        return _run_reserve(args)
+    if args.command == "release":
+        return _run_release(args)
+    if args.command == "cooldowns":
+        return _run_cooldowns(args)
+    if args.command == "reservations":
+        return _run_reservations(args)
     parser.error(f"unknown command: {args.command}")
     return 2
 
