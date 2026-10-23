@@ -1,0 +1,246 @@
+{
+  "splits": [
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "agent",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "agent",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "agent_bash_recovery_steps",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "agent_bash_recovery_steps",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "agent_bash_reliability",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "agent_bash_reliability",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "agent_bash_reliability_no_prereq",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "agent_bash_reliability_no_prereq",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "agent_praise_complaint",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "agent_praise_complaint",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "agent_steerability",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "agent_steerability",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "agent_task_outcome_explicit",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "agent_task_outcome_explicit",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "agent_tool_hallucination",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "agent_tool_hallucination",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "document",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "document",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "document_style_control",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "document_style_control",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "image_edit",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "image_edit",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "image_to_video",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "image_to_video",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "search",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "search",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "search_factuality",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "search_factuality",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "search_style_control",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "search_style_control",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "text",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "text",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "text_factuality",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "text_factuality",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "text_style_control",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "text_style_control",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "text_to_image",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "text_to_image",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "text_to_video",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "text_to_video",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "video_edit",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "video_edit",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "vision",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "vision",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "vision_style_control",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "vision_style_control",
+      "split": "full"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "webdev",
+      "split": "latest"
+    },
+    {
+      "dataset": "lmarena-ai/leaderboard-dataset",
+      "config": "webdev",
+      "split": "full"
+    }
+  ],
+  "pending": [],
+  "failed": []
+}

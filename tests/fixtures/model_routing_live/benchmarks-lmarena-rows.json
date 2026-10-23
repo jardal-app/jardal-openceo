@@ -1,0 +1,998 @@
+{
+  "features": [
+    {
+      "feature_idx": 0,
+      "name": "model_name",
+      "type": {
+        "dtype": "string",
+        "_type": "Value"
+      }
+    },
+    {
+      "feature_idx": 1,
+      "name": "organization",
+      "type": {
+        "dtype": "string",
+        "_type": "Value"
+      }
+    },
+    {
+      "feature_idx": 2,
+      "name": "license",
+      "type": {
+        "dtype": "string",
+        "_type": "Value"
+      }
+    },
+    {
+      "feature_idx": 3,
+      "name": "score",
+      "type": {
+        "dtype": "float64",
+        "_type": "Value"
+      }
+    },
+    {
+      "feature_idx": 4,
+      "name": "score_ci_lower",
+      "type": {
+        "dtype": "float64",
+        "_type": "Value"
+      }
+    },
+    {
+      "feature_idx": 5,
+      "name": "score_ci_upper",
+      "type": {
+        "dtype": "float64",
+        "_type": "Value"
+      }
+    },
+    {
+      "feature_idx": 6,
+      "name": "observation_count",
+      "type": {
+        "dtype": "float64",
+        "_type": "Value"
+      }
+    },
+    {
+      "feature_idx": 7,
+      "name": "session_count",
+      "type": {
+        "dtype": "float64",
+        "_type": "Value"
+      }
+    },
+    {
+      "feature_idx": 8,
+      "name": "rank",
+      "type": {
+        "dtype": "int64",
+        "_type": "Value"
+      }
+    },
+    {
+      "feature_idx": 9,
+      "name": "category",
+      "type": {
+        "dtype": "string",
+        "_type": "Value"
+      }
+    },
+    {
+      "feature_idx": 10,
+      "name": "leaderboard_publish_date",
+      "type": {
+        "dtype": "string",
+        "_type": "Value"
+      }
+    }
+  ],
+  "rows": [
+    {
+      "row_idx": 0,
+      "row": {
+        "model_name": "Claude Opus 5.5 (Max)",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "score": 0.2091822189574691,
+        "score_ci_lower": 0.18415497905445666,
+        "score_ci_upper": 0.23420945886048156,
+        "observation_count": 1629669.0,
+        "session_count": 11538.0,
+        "rank": 1,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 1,
+      "row": {
+        "model_name": "GPT-6 Astra (Max)",
+        "organization": "openai",
+        "license": "Proprietary",
+        "score": 0.1469659422787175,
+        "score_ci_lower": 0.1253286073759659,
+        "score_ci_upper": 0.1686032771814691,
+        "observation_count": 1098148.0,
+        "session_count": 14216.0,
+        "rank": 2,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 2,
+      "row": {
+        "model_name": "Claude Fable 5.1 (Max)",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "score": 0.14170823395519294,
+        "score_ci_lower": 0.12219316780332157,
+        "score_ci_upper": 0.16122330010706432,
+        "observation_count": 2003615.0,
+        "session_count": 16896.0,
+        "rank": 3,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 3,
+      "row": {
+        "model_name": "GPT-6.1 Sol (Max)",
+        "organization": "openai",
+        "license": "Proprietary",
+        "score": 0.13547264096101108,
+        "score_ci_lower": 0.11836999861014583,
+        "score_ci_upper": 0.15257528331187634,
+        "observation_count": 1240051.0,
+        "session_count": 15208.0,
+        "rank": 4,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 4,
+      "row": {
+        "model_name": "Claude Sonnet 5.5 (Max)",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "score": 0.12668877920175825,
+        "score_ci_lower": 0.09683492134289629,
+        "score_ci_upper": 0.15654263706062022,
+        "observation_count": 1024189.0,
+        "session_count": 7955.0,
+        "rank": 5,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 5,
+      "row": {
+        "model_name": "Gemini 4 Argon (High)",
+        "organization": "google",
+        "license": "Proprietary",
+        "score": 0.1202745694445483,
+        "score_ci_lower": 0.10968736448303086,
+        "score_ci_upper": 0.13086177440606575,
+        "observation_count": 3877344.0,
+        "session_count": 37164.0,
+        "rank": 6,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 6,
+      "row": {
+        "model_name": "GPT-6 Sol (Max)",
+        "organization": "openai",
+        "license": "Proprietary",
+        "score": 0.0935684625078399,
+        "score_ci_lower": 0.07587058041739328,
+        "score_ci_upper": 0.11126634459828652,
+        "observation_count": 1936294.0,
+        "session_count": 9725.0,
+        "rank": 7,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 7,
+      "row": {
+        "model_name": "Claude Fable 5 (High)",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "score": 0.08308625451189791,
+        "score_ci_lower": 0.06868385232003116,
+        "score_ci_upper": 0.09748865670376466,
+        "observation_count": 2632490.0,
+        "session_count": 43368.0,
+        "rank": 8,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 8,
+      "row": {
+        "model_name": "Claude Opus 5 (Max)",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "score": 0.08093237935898312,
+        "score_ci_lower": 0.06434788049093298,
+        "score_ci_upper": 0.09751687822703325,
+        "observation_count": 3261571.0,
+        "session_count": 24224.0,
+        "rank": 9,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 9,
+      "row": {
+        "model_name": "GPT-5.6 Sol (xHigh)",
+        "organization": "openai",
+        "license": "Proprietary",
+        "score": 0.06589992111207546,
+        "score_ci_lower": 0.05223131317723044,
+        "score_ci_upper": 0.07956852904692048,
+        "observation_count": 4602453.0,
+        "session_count": 37308.0,
+        "rank": 10,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 10,
+      "row": {
+        "model_name": "Claude Sonnet 5 (High)",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "score": 0.041528067419613734,
+        "score_ci_lower": 0.024611220283453486,
+        "score_ci_upper": 0.05844491455577398,
+        "observation_count": 3698012.0,
+        "session_count": 33766.0,
+        "rank": 11,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 11,
+      "row": {
+        "model_name": "Muse Wonder (Max)",
+        "organization": "meta",
+        "license": "Proprietary",
+        "score": 0.0374648690190007,
+        "score_ci_lower": 0.0218068333748959,
+        "score_ci_upper": 0.0531229046631055,
+        "observation_count": 1273739.0,
+        "session_count": 10084.0,
+        "rank": 12,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 12,
+      "row": {
+        "model_name": "MiMo-V2.6-Pro",
+        "organization": "xiaomi",
+        "license": "MIT",
+        "score": 0.0368180657412052,
+        "score_ci_lower": 0.028039660468830056,
+        "score_ci_upper": 0.045596471013580345,
+        "observation_count": 3748190.0,
+        "session_count": 38839.0,
+        "rank": 13,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 13,
+      "row": {
+        "model_name": "Gemini 3.8 Flash (High)",
+        "organization": "google",
+        "license": "Proprietary",
+        "score": 0.03574878859294555,
+        "score_ci_lower": 0.025007507883822402,
+        "score_ci_upper": 0.0464900693020687,
+        "observation_count": 5742366.0,
+        "session_count": 39360.0,
+        "rank": 14,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 14,
+      "row": {
+        "model_name": "Muse Spark 1.3 (Max)",
+        "organization": "meta",
+        "license": "Proprietary",
+        "score": 0.03448215438177892,
+        "score_ci_lower": 0.026233780749437777,
+        "score_ci_upper": 0.04273052801412007,
+        "observation_count": 7802939.0,
+        "session_count": 77316.0,
+        "rank": 15,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 15,
+      "row": {
+        "model_name": "Grok 4.7 (xHigh)",
+        "organization": "xai",
+        "license": "Proprietary",
+        "score": 0.03177250366860225,
+        "score_ci_lower": 0.0162196758561916,
+        "score_ci_upper": 0.0473253314810129,
+        "observation_count": 2748526.0,
+        "session_count": 16263.0,
+        "rank": 16,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 16,
+      "row": {
+        "model_name": "GPT-5.5 (xHigh)",
+        "organization": "openai",
+        "license": "Proprietary",
+        "score": 0.03120313955899052,
+        "score_ci_lower": 0.018605492017260854,
+        "score_ci_upper": 0.04380078710072018,
+        "observation_count": 2736244.0,
+        "session_count": 54420.0,
+        "rank": 17,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 17,
+      "row": {
+        "model_name": "GPT-6 Luna (Max)",
+        "organization": "openai",
+        "license": "Proprietary",
+        "score": 0.030287932370715785,
+        "score_ci_lower": 0.026087489528386062,
+        "score_ci_upper": 0.034488375213045507,
+        "observation_count": 28176699.0,
+        "session_count": 186259.0,
+        "rank": 18,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 18,
+      "row": {
+        "model_name": "DeepSeek-V4.1-Flash-20260910 (Max)",
+        "organization": "deepseek",
+        "license": "MIT",
+        "score": 0.02573615533275527,
+        "score_ci_lower": 0.02230361531867421,
+        "score_ci_upper": 0.029168695346836332,
+        "observation_count": 41420251.0,
+        "session_count": 259628.0,
+        "rank": 19,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 19,
+      "row": {
+        "model_name": "MiMo-V2.6-Flash",
+        "organization": "xiaomi",
+        "license": "MIT",
+        "score": 0.025229139475039117,
+        "score_ci_lower": 0.011538927773144891,
+        "score_ci_upper": 0.03891935117693334,
+        "observation_count": 2422619.0,
+        "session_count": 21908.0,
+        "rank": 20,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 20,
+      "row": {
+        "model_name": "Hy4 preview",
+        "organization": "tencent",
+        "license": "Apache 2.0",
+        "score": 0.02412857344532544,
+        "score_ci_lower": 0.017688633214667678,
+        "score_ci_upper": 0.030568513675983202,
+        "observation_count": 9401050.0,
+        "session_count": 91085.0,
+        "rank": 21,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 21,
+      "row": {
+        "model_name": "GLM-5.2 (Max)",
+        "organization": "zai",
+        "license": "MIT",
+        "score": 0.0211111360739428,
+        "score_ci_lower": 0.012872230213440878,
+        "score_ci_upper": 0.02935004193444472,
+        "observation_count": 7194231.0,
+        "session_count": 89361.0,
+        "rank": 22,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 22,
+      "row": {
+        "model_name": "Kimi K3 (Max)",
+        "organization": "moonshot",
+        "license": "Kimi K3 license",
+        "score": 0.01767081320690437,
+        "score_ci_lower": 0.010312729492164486,
+        "score_ci_upper": 0.025028896921644252,
+        "observation_count": 12870754.0,
+        "session_count": 138654.0,
+        "rank": 23,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 23,
+      "row": {
+        "model_name": "Qwen3.8-Max",
+        "organization": "alibaba",
+        "license": "Proprietary",
+        "score": 0.016143300343487665,
+        "score_ci_lower": 0.010116140145754975,
+        "score_ci_upper": 0.022170460541220356,
+        "observation_count": 6996397.0,
+        "session_count": 73548.0,
+        "rank": 24,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 24,
+      "row": {
+        "model_name": "Claude Haiku 5.5 (High)",
+        "organization": "anthropic",
+        "license": "Proprietary",
+        "score": 0.014883960383813984,
+        "score_ci_lower": 0.004831293744522838,
+        "score_ci_upper": 0.024936627023105132,
+        "observation_count": 2963226.0,
+        "session_count": 26803.0,
+        "rank": 25,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 25,
+      "row": {
+        "model_name": "GLM-5.3 (Max)",
+        "organization": "zai",
+        "license": "MIT",
+        "score": 0.014138757122147471,
+        "score_ci_lower": 0.005780667182517673,
+        "score_ci_upper": 0.02249684706177727,
+        "observation_count": 9712672.0,
+        "session_count": 87921.0,
+        "rank": 26,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 26,
+      "row": {
+        "model_name": "GPT-5.4 (High)",
+        "organization": "openai",
+        "license": "Proprietary",
+        "score": 0.01359757877358846,
+        "score_ci_lower": 0.0028320347642708504,
+        "score_ci_upper": 0.024363122782906067,
+        "observation_count": 3904758.0,
+        "session_count": 81933.0,
+        "rank": 27,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 27,
+      "row": {
+        "model_name": "Grok 4.6 (xHigh)",
+        "organization": "xai",
+        "license": "Proprietary",
+        "score": 0.0073856660459570836,
+        "score_ci_lower": -0.0037498530840068154,
+        "score_ci_upper": 0.01852118517592098,
+        "observation_count": 3485404.0,
+        "session_count": 29651.0,
+        "rank": 28,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 28,
+      "row": {
+        "model_name": "GPT-5.6 Terra (xHigh)",
+        "organization": "openai",
+        "license": "Proprietary",
+        "score": 0.0046700175547326655,
+        "score_ci_lower": -0.008308395889904847,
+        "score_ci_upper": 0.01764843099937018,
+        "observation_count": 1759054.0,
+        "session_count": 24904.0,
+        "rank": 29,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 29,
+      "row": {
+        "model_name": "DeepSeek-V4-Pro (High, 20260813)",
+        "organization": "deepseek",
+        "license": "MIT",
+        "score": 0.000691158211285471,
+        "score_ci_lower": -0.0166215059575587,
+        "score_ci_upper": 0.018003822380129646,
+        "observation_count": 878683.0,
+        "session_count": 7333.0,
+        "rank": 30,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 30,
+      "row": {
+        "model_name": "GPT-5.5",
+        "organization": "openai",
+        "license": "Proprietary",
+        "score": -0.005077094474821081,
+        "score_ci_lower": -0.017344435546082525,
+        "score_ci_upper": 0.0071902465964403615,
+        "observation_count": 2210725.0,
+        "session_count": 82719.0,
+        "rank": 31,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 31,
+      "row": {
+        "model_name": "Gemini 3.7 Flash (High)",
+        "organization": "google",
+        "license": "Proprietary",
+        "score": -0.009650135329381674,
+        "score_ci_lower": -0.019199149154769522,
+        "score_ci_upper": -0.00010112150399382326,
+        "observation_count": 5103505.0,
+        "session_count": 55949.0,
+        "rank": 32,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 32,
+      "row": {
+        "model_name": "Step 5 Preview",
+        "organization": "stepfun",
+        "license": "Proprietary",
+        "score": -0.014717978422220678,
+        "score_ci_lower": -0.029425519171928517,
+        "score_ci_upper": -1.0437672512837379e-05,
+        "observation_count": 2193512.0,
+        "session_count": 15016.0,
+        "rank": 33,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 33,
+      "row": {
+        "model_name": "GLM-5.3-Flash",
+        "organization": "zai",
+        "license": "MIT",
+        "score": -0.015736131451080337,
+        "score_ci_lower": -0.022436735653066878,
+        "score_ci_upper": -0.009035527249093794,
+        "observation_count": 12023088.0,
+        "session_count": 91269.0,
+        "rank": 34,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 34,
+      "row": {
+        "model_name": "GPT-5.6 Luna (xHigh)",
+        "organization": "openai",
+        "license": "Proprietary",
+        "score": -0.023322547362270542,
+        "score_ci_lower": -0.03073779694933538,
+        "score_ci_upper": -0.015907297775205706,
+        "observation_count": 4159936.0,
+        "session_count": 44057.0,
+        "rank": 35,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 35,
+      "row": {
+        "model_name": "Qwen3.8-Flash-Next",
+        "organization": "alibaba",
+        "license": "qwen-community-1.0",
+        "score": -0.03109783054695588,
+        "score_ci_lower": -0.037832736986441254,
+        "score_ci_upper": -0.024362924107470506,
+        "observation_count": 14772865.0,
+        "session_count": 103655.0,
+        "rank": 36,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 36,
+      "row": {
+        "model_name": "Gemini 3.1 Pro Preview",
+        "organization": "google",
+        "license": "Proprietary",
+        "score": -0.03694397314844581,
+        "score_ci_lower": -0.05014887184846648,
+        "score_ci_upper": -0.023739074448425136,
+        "observation_count": 2869604.0,
+        "session_count": 87565.0,
+        "rank": 37,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 37,
+      "row": {
+        "model_name": "Qwen3.8-27B",
+        "organization": "alibaba",
+        "license": "Apache 2.0",
+        "score": -0.03774003265650255,
+        "score_ci_lower": -0.04562515499945064,
+        "score_ci_upper": -0.029854910313554466,
+        "observation_count": 7675272.0,
+        "session_count": 62280.0,
+        "rank": 38,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 38,
+      "row": {
+        "model_name": "Beam 1.0 501B A23B",
+        "organization": "reflection",
+        "license": "Apache 2.0",
+        "score": -0.043544820090408935,
+        "score_ci_lower": -0.06567203849697692,
+        "score_ci_upper": -0.021417601683840954,
+        "observation_count": 654036.0,
+        "session_count": 12000.0,
+        "rank": 39,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 39,
+      "row": {
+        "model_name": "Mistral Large 4",
+        "organization": "mistral",
+        "license": "Proprietary",
+        "score": -0.04551203207826911,
+        "score_ci_lower": -0.06458066965010006,
+        "score_ci_upper": -0.026443394506438147,
+        "observation_count": 1013237.0,
+        "session_count": 14042.0,
+        "rank": 40,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 40,
+      "row": {
+        "model_name": "GPT-6 Luna (Low)",
+        "organization": "openai",
+        "license": "Proprietary",
+        "score": -0.04592779459506731,
+        "score_ci_lower": -0.05790956283209284,
+        "score_ci_upper": -0.03394602635804178,
+        "observation_count": 876647.0,
+        "session_count": 14197.0,
+        "rank": 41,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 41,
+      "row": {
+        "model_name": "Hy3",
+        "organization": "tencent",
+        "license": "Apache 2.0",
+        "score": -0.06173348837397774,
+        "score_ci_lower": -0.0763944186468957,
+        "score_ci_upper": -0.04707255810105979,
+        "observation_count": 1178913.0,
+        "session_count": 31784.0,
+        "rank": 42,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 42,
+      "row": {
+        "model_name": "Qwen3.7-Max",
+        "organization": "alibaba",
+        "license": "Proprietary",
+        "score": -0.062412162928367154,
+        "score_ci_lower": -0.07393057943120766,
+        "score_ci_upper": -0.05089374642552664,
+        "observation_count": 2183674.0,
+        "session_count": 42552.0,
+        "rank": 43,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 43,
+      "row": {
+        "model_name": "Muse Spark 1.1",
+        "organization": "meta",
+        "license": "Proprietary",
+        "score": -0.0659993040767089,
+        "score_ci_lower": -0.07247919474067292,
+        "score_ci_upper": -0.059519413412744866,
+        "observation_count": 8141555.0,
+        "session_count": 148932.0,
+        "rank": 44,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 44,
+      "row": {
+        "model_name": "Qwen3.7-Plus",
+        "organization": "alibaba",
+        "license": "Proprietary",
+        "score": -0.06688623409135103,
+        "score_ci_lower": -0.08278046739451518,
+        "score_ci_upper": -0.05099200078818687,
+        "observation_count": 1198010.0,
+        "session_count": 23779.0,
+        "rank": 45,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 45,
+      "row": {
+        "model_name": "Muse Spark 1.2 (xHigh)",
+        "organization": "meta",
+        "license": "Proprietary",
+        "score": -0.06750599264185214,
+        "score_ci_lower": -0.075706083938211,
+        "score_ci_upper": -0.05930590134549328,
+        "observation_count": 3487822.0,
+        "session_count": 53217.0,
+        "rank": 46,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 46,
+      "row": {
+        "model_name": "MiMo-V2.5-Pro",
+        "organization": "xiaomi",
+        "license": "MIT",
+        "score": -0.08196231441858429,
+        "score_ci_lower": -0.09206694332860811,
+        "score_ci_upper": -0.07185768550856046,
+        "observation_count": 2479533.0,
+        "session_count": 49473.0,
+        "rank": 47,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 47,
+      "row": {
+        "model_name": "MiniMax-M3",
+        "organization": "minimax",
+        "license": "MiniMax Community License",
+        "score": -0.09631520210472189,
+        "score_ci_lower": -0.10861649975459432,
+        "score_ci_upper": -0.08401390445484945,
+        "observation_count": 3406890.0,
+        "session_count": 43495.0,
+        "rank": 48,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 48,
+      "row": {
+        "model_name": "Mistral Medium 3.5",
+        "organization": "mistral",
+        "license": "Modified MIT",
+        "score": -0.11816222472036185,
+        "score_ci_lower": -0.1352051420077741,
+        "score_ci_upper": -0.10111930743294961,
+        "observation_count": 568027.0,
+        "session_count": 13241.0,
+        "rank": 49,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 49,
+      "row": {
+        "model_name": "Nemotron 3 Ultra",
+        "organization": "nvidia",
+        "license": "OpenMDW-1.1",
+        "score": -0.12265778221070545,
+        "score_ci_lower": -0.16597394830817247,
+        "score_ci_upper": -0.07934161611323842,
+        "observation_count": 182757.0,
+        "session_count": 13139.0,
+        "rank": 50,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 50,
+      "row": {
+        "model_name": "Inkling",
+        "organization": "thinky",
+        "license": "Apache 2.0",
+        "score": -0.14142210231315794,
+        "score_ci_lower": -0.1556544274279446,
+        "score_ci_upper": -0.12718977719837127,
+        "observation_count": 1688028.0,
+        "session_count": 43799.0,
+        "rank": 51,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 51,
+      "row": {
+        "model_name": "Inkling-Small",
+        "organization": "thinky",
+        "license": "Apache 2.0",
+        "score": -0.15829790080817074,
+        "score_ci_lower": -0.17652257215563538,
+        "score_ci_upper": -0.1400732294607061,
+        "observation_count": 520315.0,
+        "session_count": 14299.0,
+        "rank": 52,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 52,
+      "row": {
+        "model_name": "Solar Pro 4",
+        "organization": "upstage",
+        "license": "Proprietary",
+        "score": -0.19609822526463208,
+        "score_ci_lower": -0.2185786614929237,
+        "score_ci_upper": -0.17361778903634045,
+        "observation_count": 485540.0,
+        "session_count": 10496.0,
+        "rank": 53,
+        "category": "overall",
+        "leaderboard_publish_date": "2026-10-20"
+      },
+      "truncated_cells": []
+    }
+  ],
+  "num_rows_total": 53,
+  "num_rows_per_page": 100,
+  "partial": false
+}
