@@ -1,0 +1,27 @@
+{
+  "recorded_at": "2026-10-23T13:30:33.463129+00:00",
+  "turns": 5,
+  "rotations_first_turn": 1,
+  "effective_model": "openrouter/recursive/flint-v1.0:free",
+  "input_tokens": [
+    9,
+    9,
+    9,
+    9,
+    9
+  ],
+  "output_tokens": [
+    28,
+    28,
+    28,
+    28,
+    28
+  ],
+  "errors": [
+    {
+      "class": "rate_limited",
+      "deployment": "openrouter/dead-route"
+    }
+  ],
+  "note": "receipts only: no prompts, answers or tool payloads recorded"
+}
