@@ -21,7 +21,6 @@ from model_routing import probes as router_probes
 from model_routing import secrets as router_secrets
 from model_routing import sources as router_sources
 from model_routing import terms as router_terms
-from model_routing.config import ConfigError, load_policy
 
 pytestmark = pytest.mark.live
 
@@ -31,18 +30,6 @@ _RAW: dict[str, dict] = {}
 _ENTRIES: dict[str, list] = {}
 _USAGE_BEFORE: float | None = None
 
-
-def _policy():
-    try:
-        return load_policy()
-    except ConfigError:
-        return None
-
-
-def _budget_guard(provider: str) -> None:
-    budget = router_live.read_budget()
-    if budget.used.get(provider, 0) >= router_live.effective_cap(provider, _policy()):
-        pytest.skip(f"daily live budget exhausted for {provider}")
 
 
 def _secrets():
@@ -98,7 +85,6 @@ def _verified_ids(provider: str) -> list[str]:
 def test_openrouter_catalog_live():
     global _USAGE_BEFORE
     key, secret_values = _key("FREE_ROUTER_OPENROUTER_API_KEY")
-    _budget_guard("openrouter")
     terms = router_terms.load_terms()
     with _skip_on_429("openrouter"):
         raw = router_sources.fetch_openrouter_models()
@@ -131,12 +117,10 @@ def test_openrouter_catalog_live():
         secret_values,
     )
     _record("sources-openrouter-key-before.json", key_payload, secret_values)
-    router_live.spend("openrouter", 2, policy=_policy())
 
 
 def test_opencode_catalog_live():
     secret_values = _redaction_secrets()
-    _budget_guard("opencode")
     terms = router_terms.load_terms()
     with _skip_on_429("opencode"):
         raw = router_sources.fetch_opencode_models()
@@ -146,12 +130,10 @@ def test_opencode_catalog_live():
     _RAW["opencode"] = raw
     _ENTRIES["opencode"] = entries
     _record("sources-opencode-catalog.json", raw, secret_values)
-    router_live.spend("opencode", policy=_policy())
 
 
 def test_groq_catalog_live():
     key, secret_values = _key("FREE_ROUTER_GROQ_API_KEY")
-    _budget_guard("groq")
     terms = router_terms.load_terms()
     with _skip_on_429("groq"):
         raw = router_sources.fetch_groq_models(key)
@@ -162,12 +144,10 @@ def test_groq_catalog_live():
     _RAW["groq"] = raw
     _ENTRIES["groq"] = entries
     _record("sources-groq-catalog.json", raw, secret_values)
-    router_live.spend("groq", policy=_policy())
 
 
 def test_gemini_catalog_live():
     key, secret_values = _key("FREE_ROUTER_GEMINI_API_KEY")
-    _budget_guard("gemini")
     terms = router_terms.load_terms()
     with _skip_on_429("gemini"):
         raw = router_sources.fetch_gemini_models(key)
@@ -178,12 +158,10 @@ def test_gemini_catalog_live():
     _RAW["gemini"] = raw
     _ENTRIES["gemini"] = entries
     _record("sources-gemini-catalog.json", raw, secret_values)
-    router_live.spend("gemini", policy=_policy())
 
 
 def test_nvidia_catalog_live():
     key, secret_values = _key("FREE_ROUTER_NVIDIA_NIM_API_KEY")
-    _budget_guard("nvidia")
     terms = router_terms.load_terms()
     with _skip_on_429("nvidia"):
         raw = router_sources.fetch_nvidia_models(key)
@@ -193,7 +171,6 @@ def test_nvidia_catalog_live():
     _RAW["nvidia"] = raw
     _ENTRIES["nvidia"] = entries
     _record("sources-nvidia-catalog.json", raw, secret_values)
-    router_live.spend("nvidia", policy=_policy())
 
 
 # Minimal probes with free models
@@ -299,10 +276,9 @@ def _run_with_candidates(provider, runner, candidates, headers, secret_values, s
 
 def _run_chat(provider: str, model: str, headers: dict, secret_values: list[str]):
     _require_catalog(provider)
-    _budget_guard(provider)
     try:
         result, raw = router_probes.run_probe(
-            provider, "chat", model, headers, enabled=True, policy=_policy()
+            provider, "chat", model, headers, enabled=True
         )
     except router_live.LiveRateLimited:
         pytest.skip(f"real 429 for {provider}; resume tomorrow")
@@ -313,10 +289,9 @@ def _run_chat(provider: str, model: str, headers: dict, secret_values: list[str]
 
 def _run_tools(provider: str, model: str, headers: dict, secret_values: list[str]):
     _require_catalog(provider)
-    _budget_guard(provider)
     try:
         result, raw = router_probes.run_probe(
-            provider, "tool_calls", model, headers, enabled=True, policy=_policy()
+            provider, "tool_calls", model, headers, enabled=True
         )
     except router_live.LiveRateLimited:
         pytest.skip(f"real 429 for {provider}; resume tomorrow")
@@ -344,8 +319,7 @@ def test_opencode_direct_api_blocked_live():
     # answers 403 FreeTierError: the free tier only serves from within the
     # OpenCode CLI (verified 2026-10-23). This pins that behavior: if the
     # provider ever opens direct calls, the failure tells us to re-enable
-    # HTTPS probes. No budget impact: failures never spend, and the raw
-    # POST helper bypasses the pre-check so the block stays provable at cap.
+    # HTTPS probes.
     secret_values = _redaction_secrets()
     router_live.assert_no_auth({})
     url = "https://opencode.ai/inference/openai/v1/chat/completions"
@@ -376,7 +350,7 @@ def test_opencode_direct_api_blocked_live():
 def test_opencode_cli_probe_live(tmp_path):
     # big-pickle serves from within the CLI (the only allowed free path):
     # one run proves both text answers and tool calls, with a cost:0 receipt.
-    # Honors the live budget (guard + spend) and runs only with FREE_ROUTER_LIVE=1.
+    # Runs only with FREE_ROUTER_LIVE=1.
     import re
     import shutil
     import subprocess
@@ -384,7 +358,6 @@ def test_opencode_cli_probe_live(tmp_path):
     secret_values = _redaction_secrets()
     if shutil.which("opencode") is None:
         pytest.skip("opencode CLI is not installed")
-    _budget_guard("opencode")
     prompt = "Use a file tool to list the files in the current directory, then reply with exactly: ok"
     try:
         completed = subprocess.run(
@@ -442,7 +415,6 @@ def test_opencode_cli_probe_live(tmp_path):
         },
         secret_values,
     )
-    router_live.spend("opencode", policy=_policy())
     terms = router_terms.load_terms()
     recorded = json.loads((FIXTURES / "sources-opencode-catalog.json").read_text(encoding="utf-8"))
     entries = router_sources.parse_opencode_models(
@@ -533,7 +505,6 @@ def test_openrouter_credits_unchanged_live():
     if _USAGE_BEFORE is None:
         pytest.skip("openrouter catalog test did not run")
     key, _secret_values = _key("FREE_ROUTER_OPENROUTER_API_KEY")
-    _budget_guard("openrouter")
     try:
         key_payload = router_sources.fetch_openrouter_key(key)
     except router_live.LiveRateLimited:
@@ -544,5 +515,3 @@ def test_openrouter_credits_unchanged_live():
         raise
     info = router_live.parse_openrouter_key_info(key_payload)
     router_live.assert_usage_unchanged(_USAGE_BEFORE, info.usage)
-    router_live.spend("openrouter", policy=_policy())
-    assert router_live.read_budget().used.get("openrouter", 0) >= 3

@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 
 from model_routing import benchmarks as router_benchmarks
-from model_routing import live as router_live
 from model_routing import ranking as router_ranking
 from model_routing import refresh as router_refresh
 from model_routing import schedule as router_schedule
@@ -826,9 +825,6 @@ def test_update_providers_publishes_catalog_and_rankings(isolated_home, tmp_path
     rankings = router_ranking.load_rankings(config / "rankings.json")
     assert rankings.catalog_snapshot == report.catalog_snapshot
     assert rankings.profiles["free-general"].provenance.catalog_sha256
-    budget = router_live.read_budget()
-    assert budget.used["openrouter"] == 2
-    assert budget.used["groq"] == 1
 
 
 def test_update_providers_preserves_previous_benchmarks(isolated_home, tmp_path):
@@ -938,19 +934,6 @@ def test_update_providers_all_failed_keeps_previous_byte_identical(isolated_home
     assert "FAIL" in (state / "updater.log").read_text(encoding="utf-8")
 
 
-def test_update_providers_budget_exhaustion_degrades_source(isolated_home, tmp_path):
-    config, _state = _provider_config(tmp_path)
-    for _ in range(10):
-        router_live.spend("groq")
-    get = _routed_get(_provider_routes(
-        [_or_model("example/alpha:free")], groq_ids=["alpha-groq"]))
-    report = router_refresh.update_providers(
-        config, get=get, secrets=_secrets(), terms=_fresh_terms(),
-        aliases=_tiny_aliases(), providers=["openrouter", "groq"])
-    assert report.stale is True
-    assert any("groq" in failure for failure in report.failed)
-
-
 # Benchmark refresh
 
 
@@ -1013,9 +996,6 @@ def test_update_benchmarks_attaches_quality_and_publishes(isolated_home, tmp_pat
     assert general.order[0].canonical_model_id == "example/alpha"
     assert general.provenance.aa_index_version == pytest.approx(4.3)
     assert general.provenance.lmarena_target == "agent/train"
-    budget = router_live.read_budget()
-    assert budget.used["artificial_analysis"] == 2
-    assert budget.used["huggingface"] == 2
 
 
 def test_update_benchmarks_aa_major_move_fails_closed(isolated_home, tmp_path):

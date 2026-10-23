@@ -147,14 +147,6 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _precheck(provider: str, count: int, policy: RouterPolicy | None) -> None:
-    budget = router_live.read_budget()
-    used = budget.used.get(provider, 0)
-    cap = router_live.effective_cap(provider, policy)
-    if used + count > cap:
-        raise router_live.BudgetExhausted(provider, cap, used)
-
-
 def _load_policy(path: Path | None = None) -> RouterPolicy:
     try:
         return load_policy(path) if path else load_policy()
@@ -201,7 +193,6 @@ def _fetch_providers(
     providers: list[str],
     terms: TermsFile,
     secrets: RouterSecrets | None,
-    policy: RouterPolicy | None,
     get: GetJson | None,
 ) -> tuple[list[FetchedCatalog], dict[str, str]]:
     fetched: list[FetchedCatalog] = []
@@ -210,17 +201,10 @@ def _fetch_providers(
         if provider not in SOURCE_TTLS:
             failed[provider] = f"unsupported provider: {provider}"
             continue
-        calls = 2 if provider == "openrouter" and _provider_key(secrets, provider) else 1
         try:
-            _precheck(provider, calls, policy)
             catalog = router_sources.refresh_source(
                 provider, terms, api_key=_provider_key(secrets, provider), get=get)
         except (SourceError, router_live.LiveError) as exc:
-            failed[provider] = str(exc)
-            continue
-        try:
-            router_live.spend(provider, calls, policy=policy)
-        except router_live.LiveError as exc:
             failed[provider] = str(exc)
             continue
         fetched.append(catalog)
@@ -290,7 +274,7 @@ def update_providers(
     terms = terms if terms is not None else _load_terms()
     aliases = aliases if aliases is not None else _load_aliases()
     secrets = _load_secrets() if secrets is None and get is None else secrets
-    fetched, failed = _fetch_providers(wanted, terms, secrets, active, get)
+    fetched, failed = _fetch_providers(wanted, terms, secrets, get)
     if not fetched:
         detail = "; ".join(f"{name}: {failed[name]}" for name in sorted(failed)) or "no providers"
         raise RefreshError(f"all provider sources failed ({detail}); previous snapshot kept")
@@ -374,20 +358,16 @@ def _republish_rankings(
     )
 
 
-def _fetch_aa_pages(
-    api_key: str, policy: RouterPolicy | None, get: GetJson | None
-) -> AAResult:
+def _fetch_aa_pages(api_key: str, get: GetJson | None) -> AAResult:
     page = 1
     combined: AAResult | None = None
     while True:
-        _precheck("artificial_analysis", 1, policy)
         try:
             raw = router_benchmarks.fetch_aa_models(api_key, get, page=page)
         except SourceError as exc:
             if page == 1:
                 raise
             raise RefreshError(f"AA page {page} failed; cohort incomplete, keeping previous") from exc
-        router_live.spend("artificial_analysis", 1, policy=policy)
         parsed = router_benchmarks.parse_aa_models(raw)
         if combined is None:
             combined = parsed
@@ -402,17 +382,12 @@ def _fetch_aa_pages(
     return combined
 
 
-def _fetch_arena(
-    token: str, policy: RouterPolicy | None, get: GetJson | None
-) -> tuple[LMArenaResult, str]:
-    _precheck("huggingface", 2, policy)
+def _fetch_arena(token: str, get: GetJson | None) -> tuple[LMArenaResult, str]:
     raw_splits = router_benchmarks.fetch_lmarena_splits(token, get)
-    router_live.spend("huggingface", 1, policy=policy)
     catalog = router_benchmarks.parse_lmarena_splits(raw_splits)
     target = router_benchmarks.select_lmarena_target(catalog)
     raw_rows = router_benchmarks.fetch_lmarena_rows(
         token, target.config, target.split, get, length=LMARENA_ROWS_LENGTH)
-    router_live.spend("huggingface", 1, policy=policy)
     result = router_benchmarks.parse_lmarena_rows(raw_rows, target.config, target.split)
     return result, f"{target.config}/{target.split}"
 
@@ -448,14 +423,14 @@ def update_benchmarks(
         failed.append("artificial_analysis: key unset")
     else:
         try:
-            aa = _fetch_aa_pages(aa_key, active, get)
+            aa = _fetch_aa_pages(aa_key, get)
         except (SourceError, router_live.LiveError, RefreshError) as exc:
             failed.append(f"artificial_analysis: {exc}")
     if not hf_token:
         failed.append("huggingface: token unset")
     else:
         try:
-            arena, arena_target = _fetch_arena(hf_token, active, get)
+            arena, arena_target = _fetch_arena(hf_token, get)
         except (SourceError, router_live.LiveError) as exc:
             failed.append(f"huggingface: {exc}")
     if aa is None and arena is None:

@@ -24,7 +24,6 @@ from model_routing import probes as router_probes
 from model_routing import secrets as router_secrets
 from model_routing import sources as router_sources
 from model_routing.availability import Candidate, get_next_candidate
-from model_routing.config import ConfigError, load_policy
 
 pytestmark = pytest.mark.live
 
@@ -40,18 +39,6 @@ def _openrouter_candidates() -> list[str]:
     assert ordered, "no verified :free model recorded today"
     return ordered
 
-
-def _policy():
-    try:
-        return load_policy()
-    except ConfigError:
-        return None
-
-
-def _budget_guard(provider: str) -> None:
-    budget = router_live.read_budget()
-    if budget.used.get(provider, 0) >= router_live.effective_cap(provider, _policy()):
-        pytest.skip(f"daily live budget exhausted for {provider}")
 
 
 def _secrets():
@@ -89,7 +76,6 @@ def _key_usage(key: str) -> float:
     with _skip_on_429("openrouter"):
         payload = router_sources.fetch_openrouter_key(key)
     info = router_live.parse_openrouter_key_info(payload)
-    router_live.spend("openrouter", policy=_policy())
     return info.usage
 
 
@@ -97,10 +83,9 @@ def _run_chat_with_candidates(provider: str, candidates, headers: dict,
                               statuses=(400, 404, 503)):
     last_error: Exception | None = None
     for model in candidates:
-        _budget_guard(provider)
         try:
             return router_probes.run_probe(
-                provider, "chat", model, headers, enabled=True, policy=_policy())
+                provider, "chat", model, headers, enabled=True)
         except router_live.LiveRateLimited:
             pytest.skip(f"real 429 for {provider}; resume tomorrow")
         except router_probes.ProbeError as exc:
@@ -120,8 +105,6 @@ def test_failover_injected_429_to_real_chat_live(tmp_path):
     # only timeouts and per-account 404s during this cycle (see the
     # ticket comment), so it cannot carry the real leg today.
     or_key, or_secrets = _key("FREE_ROUTER_OPENROUTER_API_KEY")
-    _budget_guard("openrouter")
-    _budget_guard("nvidia")
     store = router_availability.AvailabilityStore(tmp_path / "availability.sqlite")
     try:
         usage_before = _key_usage(or_key)
@@ -171,7 +154,6 @@ def test_failover_injected_429_to_real_chat_live(tmp_path):
 
 def test_nonexistent_model_not_found_recorded_live(tmp_path):
     or_key, secret_values = _key("FREE_ROUTER_OPENROUTER_API_KEY")
-    _budget_guard("openrouter")
     store = router_availability.AvailabilityStore(tmp_path / "availability.sqlite")
     try:
         usage_before = _key_usage(or_key)
@@ -179,7 +161,7 @@ def test_nonexistent_model_not_found_recorded_live(tmp_path):
         try:
             router_probes.run_probe(
                 "openrouter", "chat", bogus, {"Authorization": f"Bearer {or_key}"},
-                enabled=True, policy=_policy())
+                enabled=True)
         except router_probes.ProbeError as exc:
             # OpenRouter answers unknown models with 400, not 404
             # ("not a valid model ID", verified 2026-10-23); pin that shape.

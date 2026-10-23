@@ -2,9 +2,8 @@
 
 Runs only with ``FREE_ROUTER_LIVE=1``; default runs skip the whole
 file. Metadata only, no generation: one ``update --providers`` and one
-``update --benchmarks`` per test into throwaway directories, within
-the TASK-2026-00287 daily caps. A real 429 skips until the next UTC
-day. Never prints secrets: assertions touch published snapshots only.
+``update --benchmarks`` per test into throwaway directories. A real
+429 skips until the next UTC day. Never prints secrets: assertions touch published snapshots only.
 """
 
 from __future__ import annotations
@@ -19,26 +18,12 @@ from model_routing import ranking as router_ranking
 from model_routing import refresh as router_refresh
 from model_routing import secrets as router_secrets
 from model_routing import sources as router_sources
-from model_routing.config import ConfigError, load_policy
 from model_routing.publish import load_catalog_doc
 
 pytestmark = pytest.mark.live
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "model_routing_live"
 
-
-def _policy():
-    try:
-        return load_policy()
-    except ConfigError:
-        return None
-
-
-def _budget_guard(provider: str, needed: int) -> None:
-    budget = router_live.read_budget()
-    remaining = router_live.effective_cap(provider, _policy()) - budget.used.get(provider, 0)
-    if remaining < needed:
-        pytest.skip(f"daily live budget too low for {provider} (need {needed})")
 
 
 def _secrets():
@@ -68,7 +53,6 @@ def _skip_on_real_429(report) -> None:
 
 def _key_usage(key: str) -> float:
     payload = router_sources.fetch_openrouter_key(key)
-    router_live.spend("openrouter", policy=_policy())
     return router_live.parse_openrouter_key_info(payload).usage
 
 
@@ -88,9 +72,6 @@ def _assert_tops_comply(config: Path) -> None:
 
 
 def test_update_providers_live(tmp_path):
-    for provider, needed in (("openrouter", 4), ("groq", 1), ("gemini", 1),
-                             ("nvidia", 1), ("opencode", 1)):
-        _budget_guard(provider, needed)
     key = _key("FREE_ROUTER_OPENROUTER_API_KEY")
     config = tmp_path / "config"
     config.mkdir()
@@ -113,10 +94,6 @@ def test_update_providers_live(tmp_path):
 
 
 def test_update_benchmarks_live(tmp_path):
-    for provider, needed in (("openrouter", 2), ("groq", 1), ("gemini", 1),
-                             ("nvidia", 1), ("opencode", 1),
-                             ("artificial_analysis", 4), ("huggingface", 2)):
-        _budget_guard(provider, needed)
     _key("FREE_ROUTER_AA_API_KEY")
     _key("FREE_ROUTER_HF_TOKEN")
     config = tmp_path / "config"

@@ -1,4 +1,4 @@
-"""Selective capability probes with budget and TTL (TASK-2026-00289).
+"""Selective capability probes with TTL (TASK-2026-00289).
 
 Probes spend real free-tier quota, so every runner stays disabled unless
 the caller passes ``enabled=True``; production refresh (TASK-2026-00292)
@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from model_routing import live as router_live
-from model_routing.models import Capabilities, RouterPolicy
+from model_routing.models import Capabilities
 
 __all__ = [
     "CHAT_MAX_TOKENS",
@@ -443,9 +443,8 @@ def run_probe(
     messages: list[dict] | None = None,
     post: PostJson | None = None,
     post_stream: PostStream | None = None,
-    policy: RouterPolicy | None = None,
 ) -> tuple[ProbeResult, dict]:
-    """Run one probe; disabled, over-budget or failed probes never spend."""
+    """Run one probe; disabled unless the caller passes ``enabled=True``."""
     if not enabled:
         raise ProbeError(provider, kind, "probes are disabled by default")
     if provider == "opencode":
@@ -465,11 +464,6 @@ def run_probe(
         payload = openai_chat_payload(model)
     else:
         raise ProbeError(provider, kind, f"unknown probe kind: {kind}")
-    budget = router_live.read_budget()
-    if budget.used.get(provider, 0) >= router_live.effective_cap(provider, policy):
-        raise router_live.BudgetExhausted(
-            provider, router_live.effective_cap(provider, policy), budget.used.get(provider, 0)
-        )
     sender = post or (lambda u, h, p: _http_post_json(provider, kind, u, h, p))
     if kind == "streaming":
         streamer = post_stream or (lambda u, h, p: _http_post_stream(provider, kind, u, h, p))
@@ -500,7 +494,6 @@ def run_probe(
             parse_openai_chat(provider, raw)
             capabilities = Capabilities()
         counts = _usage_counts(raw)
-    router_live.spend(provider, policy=policy)
     result = ProbeResult(
         provider=provider,
         deployment_id=f"{provider}/{model}",

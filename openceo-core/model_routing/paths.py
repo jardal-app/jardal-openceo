@@ -19,7 +19,6 @@ __all__ = [
     "CATALOG_FILENAME",
     "CONFIG_DIRNAME",
     "HISTORY_DIRNAME",
-    "LIVE_BUDGET_FILENAME",
     "POLICY_FILENAME",
     "PROVIDERS_FILENAME",
     "RANKINGS_FILENAME",
@@ -30,7 +29,6 @@ __all__ = [
     "catalog_path",
     "config_dir",
     "history_dir",
-    "live_budget_path",
     "policy_path",
     "providers_path",
     "rankings_path",
@@ -45,7 +43,6 @@ CATALOG_FILENAME = "catalog.json"
 RANKINGS_FILENAME = "rankings.json"
 HISTORY_DIRNAME = "history"
 AVAILABILITY_DB_FILENAME = "availability.sqlite"
-LIVE_BUDGET_FILENAME = "live-budget.json"
 UPDATER_LOCK_FILENAME = "update.lock"
 UPDATER_LOG_FILENAME = "updater.log"
 
@@ -96,8 +93,3 @@ def history_dir() -> Path:
 def availability_db_path() -> Path:
     """Health, cooldowns, usage, locks and reservations store."""
     return state_dir() / AVAILABILITY_DB_FILENAME
-
-
-def live_budget_path() -> Path:
-    """Daily live-test call accounting (TASK-2026-00287)."""
-    return state_dir() / LIVE_BUDGET_FILENAME

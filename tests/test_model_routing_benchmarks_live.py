@@ -19,7 +19,6 @@ from model_routing import benchmarks as router_benchmarks
 from model_routing import live as router_live
 from model_routing import secrets as router_secrets
 from model_routing import sources as router_sources
-from model_routing.config import ConfigError, load_policy
 
 pytestmark = pytest.mark.live
 
@@ -31,18 +30,6 @@ _TARGET = None
 
 _AA_ATTRIBUTION = "Benchmark data by Artificial Analysis (artificialanalysis.ai)"
 
-
-def _policy():
-    try:
-        return load_policy()
-    except ConfigError:
-        return None
-
-
-def _budget_guard(provider: str) -> None:
-    budget = router_live.read_budget()
-    if budget.used.get(provider, 0) >= router_live.effective_cap(provider, _policy()):
-        pytest.skip(f"daily live budget exhausted for {provider}")
 
 
 def _key(name: str) -> tuple[str, list[str]]:
@@ -75,7 +62,6 @@ def _skip_on_429(provider: str):
 def test_aa_page_live():
     global _AA
     key, secret_values = _key("FREE_ROUTER_AA_API_KEY")
-    _budget_guard("artificial_analysis")
     with _skip_on_429("artificial_analysis"):
         raw = router_benchmarks.fetch_aa_models(key)
     parsed = router_benchmarks.parse_aa_models(raw)
@@ -105,13 +91,11 @@ def test_aa_page_live():
         },
         secret_values,
     )
-    router_live.spend("artificial_analysis", policy=_policy())
 
 
 def test_lmarena_splits_live():
     global _TARGET
     token, secret_values = _key("FREE_ROUTER_HF_TOKEN")
-    _budget_guard("huggingface")
     with _skip_on_429("lmarena"):
         raw = router_benchmarks.fetch_lmarena_splits(token)
     _record("benchmarks-lmarena-splits.json", raw, secret_values)
@@ -119,14 +103,12 @@ def test_lmarena_splits_live():
     assert catalog.splits, "datasets-server returned no splits"
     _TARGET = router_benchmarks.select_lmarena_target(catalog)
     assert _TARGET.config in router_benchmarks.WANTED_LMARENA_CONFIGS
-    router_live.spend("huggingface", policy=_policy())
 
 
 def test_lmarena_rows_live():
     if _TARGET is None:
         pytest.skip("splits test did not select a target")
     token, secret_values = _key("FREE_ROUTER_HF_TOKEN")
-    _budget_guard("huggingface")
     with _skip_on_429("lmarena"):
         raw = router_benchmarks.fetch_lmarena_rows(token, _TARGET.config, _TARGET.split)
     serialized = json.dumps(raw)
@@ -155,4 +137,3 @@ def test_lmarena_rows_live():
     )
     assert len(qualities) == len(aliases.aliases)
     assert all(item.reason for item in unresolved)
-    router_live.spend("huggingface", policy=_policy())

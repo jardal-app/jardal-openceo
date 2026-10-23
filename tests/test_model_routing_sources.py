@@ -776,10 +776,9 @@ def test_probe_refuses_opencode_credentials(isolated_home):
             "opencode", "chat", "big-pickle", headers, enabled=True,
             post=_fake_post(_chat_response()),
         )
-    assert router_live.read_budget().used.get("opencode", 0) == 0
 
 
-def test_probe_chat_success_spends_budget(isolated_home):
+def test_probe_chat_success(isolated_home):
     seen: list = []
     result, raw = router_probes.run_probe(
         "groq", "chat", "openai/gpt-oss-20b", {"Authorization": "Bearer synthetic"},
@@ -789,7 +788,6 @@ def test_probe_chat_success_spends_budget(isolated_home):
     assert (result.input_tokens, result.output_tokens) == (12, 2)
     assert raw["choices"][0]["message"]["content"] == "ok"
     assert seen[0][0] == "https://api.groq.com/openai/v1/chat/completions"
-    assert router_live.read_budget().used.get("groq") == 1
 
 
 def test_probe_tool_success_marks_tools_capability(isolated_home):
@@ -800,27 +798,13 @@ def test_probe_tool_success_marks_tools_capability(isolated_home):
     assert result.capabilities.tools is True
 
 
-def test_probe_exhausted_budget_makes_no_call(isolated_home):
-    for _ in range(router_live.LIVE_DAILY_CAPS["groq"]):
-        router_live.spend("groq")
-
-    def _post(url, headers, payload):
-        raise AssertionError("over-budget probe must not call the network")
-
-    with pytest.raises(router_live.BudgetExhausted):
-        router_probes.run_probe(
-            "groq", "chat", "m", {"Authorization": "Bearer synthetic"}, enabled=True, post=_post
-        )
-
-
-def test_probe_rate_limit_propagates_without_spending(isolated_home):
+def test_probe_rate_limit_propagates(isolated_home):
     error = router_live.LiveRateLimited("groq", "https://example.test", None)
     with pytest.raises(router_live.LiveRateLimited):
         router_probes.run_probe(
             "groq", "chat", "m", {"Authorization": "Bearer synthetic"},
             enabled=True, post=_fake_post(_chat_response(), error=error),
         )
-    assert router_live.read_budget().used.get("groq", 0) == 0
 
 
 def test_probe_rejects_unknown_provider_kind_and_shapes(isolated_home):

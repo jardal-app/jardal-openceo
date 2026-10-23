@@ -1,15 +1,12 @@
-"""Live-test harness: fixed daily budgets, zero-cost guards, cassettes (TASK-2026-00287).
+"""Live-test harness: zero-cost guards and cassettes (TASK-2026-00287).
 
-Budgets are hard daily ceilings per provider that the loop cannot raise:
-``policy.yaml`` may only lower them. Live tests run only with
-``FREE_ROUTER_LIVE=1`` (see the ``live`` pytest marker), spend from
-``live-budget.json``, and record sanitized fixtures. Errors never carry
-credentials: URLs are stripped of query strings and headers are dropped.
+Live tests run only with ``FREE_ROUTER_LIVE=1`` (see the ``live`` pytest
+marker) and record sanitized fixtures. Errors never carry credentials:
+URLs are stripped of query strings and headers are dropped.
 """
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
@@ -21,15 +18,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from model_routing.models import CatalogDocument, LiveBudget, RouterPolicy
-from model_routing.paths import live_budget_path, state_dir
+from model_routing.models import CatalogDocument
 from model_routing.publish import atomic_write_json
 
 __all__ = [
-    "LIVE_DAILY_CAPS",
     "LIVE_ENV_VAR",
-    "BudgetExhausted",
-    "LiveBudgetState",
     "LiveError",
     "LiveGuardError",
     "LiveRateLimited",
@@ -37,31 +30,17 @@ __all__ = [
     "assert_free_verified",
     "assert_no_auth",
     "assert_usage_unchanged",
-    "budget_state",
-    "effective_cap",
     "http_get_json",
     "live_enabled",
     "load_fixture",
     "parse_openrouter_key_info",
-    "read_budget",
     "record_fixture",
     "redact_text",
     "scan_for_secrets",
-    "spend",
     "today_utc",
 ]
 
 LIVE_ENV_VAR = "FREE_ROUTER_LIVE"
-
-LIVE_DAILY_CAPS: dict[str, int] = {
-    "openrouter": 20,
-    "groq": 10,
-    "gemini": 10,
-    "nvidia": 10,
-    "opencode": 10,
-    "artificial_analysis": 5,
-    "huggingface": 3,
-}
 
 _AUTH_HEADERS = ("authorization", "x-api-key", "api-key", "x-goog-api-key")
 
@@ -85,16 +64,6 @@ class LiveGuardError(LiveError):
     """A zero-cost guard tripped."""
 
 
-class BudgetExhausted(LiveError):
-    """Hard daily cap reached; wait for the next UTC day."""
-
-    def __init__(self, provider: str, cap: int, used: int) -> None:
-        self.provider = provider
-        self.cap = cap
-        self.used = used
-        super().__init__(f"live budget exhausted for {provider}: used {used}/{cap} today")
-
-
 class LiveRateLimited(LiveError):
     """A real 429: stop live calls for this provider until tomorrow."""
 
@@ -114,108 +83,14 @@ class OpenRouterKeyInfo:
     free_remaining: int | None
 
 
-@dataclass(frozen=True)
-class LiveBudgetState:
-    """Effective caps with today's usage for ``live-budget`` output."""
-
-    date: str
-    caps: dict[str, int]
-    used: dict[str, int]
-
-
 def live_enabled() -> bool:
     """Live tests run only with ``FREE_ROUTER_LIVE=1``."""
     return os.environ.get(LIVE_ENV_VAR) == "1"
 
 
 def today_utc() -> str:
-    """Current UTC calendar day (budget rollover boundary)."""
+    """Current UTC calendar day."""
     return datetime.now(timezone.utc).date().isoformat()
-
-
-def effective_cap(provider: str, policy: RouterPolicy | None = None) -> int:
-    """Ceiling wins: policy may lower a cap, never raise it."""
-    ceiling = LIVE_DAILY_CAPS.get(provider)
-    if ceiling is None:
-        return 0
-    if policy is None:
-        return ceiling
-    configured = policy.live_budgets.get(provider)
-    if configured is None:
-        return ceiling
-    return max(0, min(configured, ceiling))
-
-
-def _read_locked(handle, *, allow_empty: bool = False) -> LiveBudget:
-    handle.seek(0)
-    raw = handle.read()
-    if not raw.strip():
-        if allow_empty:
-            return LiveBudget(date=today_utc())
-        raise LiveError("live budget ledger is corrupt; fix or remove it")
-    try:
-        budget = LiveBudget.model_validate(json.loads(raw))
-    except ValueError as exc:
-        raise LiveError("live budget ledger is corrupt; fix or remove it") from exc
-    if budget.date != today_utc():
-        return LiveBudget(date=today_utc())
-    return budget
-
-
-def read_budget(state: Path | None = None) -> LiveBudget:
-    """Read today's ledger without spending (missing file means zero use)."""
-    path = live_budget_path() if state is None else state / live_budget_path().name
-    if not path.is_file():
-        return LiveBudget(date=today_utc())
-    with open(path, encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
-        try:
-            return _read_locked(handle)
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
-def spend(
-    provider: str,
-    count: int = 1,
-    *,
-    state: Path | None = None,
-    policy: RouterPolicy | None = None,
-) -> LiveBudget:
-    """Charge ``count`` calls to today's ledger or raise ``BudgetExhausted``."""
-    if count < 1:
-        raise ValueError(f"spend count must be positive: {count}")
-    cap = effective_cap(provider, policy)
-    directory = state_dir() if state is None else state
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / live_budget_path().name
-    existed_before = path.is_file()
-    with open(path, "a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            budget = _read_locked(handle, allow_empty=not existed_before)
-            used = budget.used.get(provider, 0)
-            if used + count > cap:
-                raise BudgetExhausted(provider, cap, used)
-            budget.used[provider] = used + count
-            handle.seek(0)
-            handle.truncate()
-            handle.write(budget.model_dump_json(indent=2))
-            handle.flush()
-            os.fsync(handle.fileno())
-            return budget
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
-def budget_state(policy: RouterPolicy | None = None, state: Path | None = None) -> LiveBudgetState:
-    """Effective caps with today's usage."""
-    budget = read_budget(state)
-    return LiveBudgetState(
-        date=budget.date,
-        caps={name: effective_cap(name, policy) for name in LIVE_DAILY_CAPS},
-        used={name: budget.used.get(name, 0) for name in LIVE_DAILY_CAPS},
-    )
 
 
 def assert_no_auth(headers: Mapping[str, str]) -> None:

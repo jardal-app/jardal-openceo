@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import urllib.error
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -109,10 +108,10 @@ def _usability(deployment):
 
 def test_policy_and_providers_round_trip(tmp_path):
     policy_file = tmp_path / "policy.yaml"
-    policy_file.write_text("policy_version: 1\nlive_budgets: {openrouter: 5}\n")
+    policy_file.write_text("policy_version: 1\nallow_unknown_price: true\n")
     policy = router_config.load_policy(policy_file)
     assert policy.strict_zero_cost is True
-    assert policy.live_budgets == {"openrouter": 5}
+    assert policy.allow_unknown_price is True
     providers_file = tmp_path / "providers.yaml"
     providers_file.write_text("providers:\n  - {name: openrouter}\n")
     providers = router_config.load_providers(providers_file)
@@ -250,48 +249,6 @@ def test_load_catalog_rejects_broken(tmp_path):
         router_publish.load_catalog_doc(tmp_path / "missing.json")
 
 
-def test_budget_spend_and_hard_cutoff(tmp_path):
-    state = tmp_path / "state"
-    for _ in range(3):
-        router_live.spend("huggingface", state=state)
-    with pytest.raises(router_live.BudgetExhausted) as exc:
-        router_live.spend("huggingface", state=state)
-    assert exc.value.cap == 3
-    assert router_live.read_budget(state).used["huggingface"] == 3
-
-
-def test_policy_may_lower_but_never_raise_caps(tmp_path):
-    state = tmp_path / "state"
-    lowered = router_models.RouterPolicy(live_budgets={"openrouter": 2})
-    assert router_live.effective_cap("openrouter", lowered) == 2
-    raised = router_models.RouterPolicy(live_budgets={"openrouter": 999})
-    assert router_live.effective_cap("openrouter", raised) == 20
-    assert router_live.effective_cap("unknown-provider", raised) == 0
-    router_live.spend("openrouter", count=2, state=state, policy=lowered)
-    with pytest.raises(router_live.BudgetExhausted):
-        router_live.spend("openrouter", state=state, policy=lowered)
-
-
-def test_budget_rolls_over_daily(tmp_path):
-    state = tmp_path / "state"
-    state.mkdir()
-    yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
-    (state / "live-budget.json").write_text(json.dumps({"date": yesterday, "used": {"groq": 10}}))
-    budget = router_live.read_budget(state)
-    assert budget.date != yesterday
-    assert budget.used == {}
-    router_live.spend("groq", state=state)
-    assert router_live.read_budget(state).used == {"groq": 1}
-
-
-def test_budget_rejects_corrupt_ledger(tmp_path):
-    state = tmp_path / "state"
-    state.mkdir()
-    (state / "live-budget.json").write_text("{corrupt")
-    with pytest.raises(router_live.LiveError):
-        router_live.read_budget(state)
-
-
 def test_assert_no_auth():
     router_live.assert_no_auth({})
     router_live.assert_no_auth({"Accept": "application/json"})
@@ -425,15 +382,6 @@ def test_cli_validate_config_valid(isolated_home, capsys, monkeypatch):
     assert "policy: ok" in capsys.readouterr().out
 
 
-def test_cli_live_budget(isolated_home, capsys):
-    assert router_cli.main(["live-budget"]) == 0
-    out = capsys.readouterr().out
-    assert "openrouter: used 0/20" in out
-    assert router_cli.main(["live-budget", "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["budgets"]["huggingface"] == {"cap": 3, "used": 0}
-
-
 def test_status_reports_policy_and_providers(isolated_home):
     from model_routing.paths import config_dir
 
@@ -470,24 +418,6 @@ def test_catalog_rejects_duplicate_ids():
         router_models.CatalogDocument(generator="test", entries=[first, second])
 
 
-def test_spend_rejects_non_positive_count(tmp_path):
-    state = tmp_path / "state"
-    with pytest.raises(ValueError):
-        router_live.spend("groq", count=0, state=state)
-    with pytest.raises(ValueError):
-        router_live.spend("groq", count=-2, state=state)
-
-
-def test_budget_empty_existing_ledger_is_corrupt(tmp_path):
-    state = tmp_path / "state"
-    state.mkdir()
-    (state / "live-budget.json").write_text("")
-    with pytest.raises(router_live.LiveError):
-        router_live.read_budget(state)
-    with pytest.raises(router_live.LiveError):
-        router_live.spend("groq", state=state)
-
-
 def test_key_patterns_ignore_infix_substrings():
     assert router_live.scan_for_secrets("risk-assessment task-management", []) == []
     assert router_live.redact_text("desk-configuration notes", []) == "desk-configuration notes"
@@ -507,12 +437,3 @@ def test_safe_url_strips_userinfo_and_query():
     assert safe == "https://example.test/v1/models"
     assert "user" not in safe
     assert "key=" not in safe
-
-
-def test_cli_live_budget_corrupt_ledger(isolated_home, capsys):
-    from model_routing.paths import state_dir
-
-    state_dir().mkdir(parents=True)
-    (state_dir() / "live-budget.json").write_text("{corrupt")
-    assert router_cli.main(["live-budget"]) == 1
-    assert "live budgets unavailable" in capsys.readouterr().out

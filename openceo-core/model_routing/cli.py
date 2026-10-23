@@ -1,13 +1,13 @@
 """free-router command line (TASK-2026-00285, TASK-2026-00287, TASK-2026-00291).
 
-``status``, ``validate-config``, ``live-budget``, ``errors``,
-``models``, ``explain``, ``simulate-fallback``, ``sources`` and
-``update``; further subcommands arrive with their tickets. Usage from
+``status``, ``validate-config``, ``errors``, ``models``, ``explain``,
+``simulate-fallback``, ``sources`` and ``update``; further subcommands
+arrive with their tickets. Usage from
 the repo root::
 
     ./.venv/bin/python openceo-core/model_routing/cli.py status [--json]
 
-Config and budget output never includes secret values.
+Config output never includes secret values.
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ if __name__ == "__main__":
 
 from model_routing.availability import AvailabilityStore  # noqa: E402
 from model_routing.config import ConfigError, load_policy, validate_config  # noqa: E402
-from model_routing.live import LiveError, budget_state, live_enabled  # noqa: E402
 from model_routing.models import RouterPolicy, collect_status  # noqa: E402
 from model_routing.paths import (  # noqa: E402
     CATALOG_FILENAME,
@@ -57,8 +56,6 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--json", action="store_true", help="Machine-readable output")
     validate = sub.add_parser("validate-config", help="Check policy, providers and secrets")
     validate.add_argument("--json", action="store_true", help="Machine-readable output")
-    budget = sub.add_parser("live-budget", help="Show today's live-test budgets")
-    budget.add_argument("--json", action="store_true", help="Machine-readable output")
     errors = sub.add_parser("errors", help="Query the persistent error registry")
     errors.add_argument("--since", required=True,
                         help="ISO datetime or relative window (e.g. 24h, 7d, 30m)")
@@ -118,32 +115,6 @@ def _run_validate_config(args: argparse.Namespace) -> int:
         for issue in issues:
             print(f"{issue.name}: {'ok' if issue.ok else 'FAIL'} ({issue.detail})")
     return 0 if all(issue.ok for issue in issues) else 1
-
-
-def _run_live_budget(args: argparse.Namespace) -> int:
-    try:
-        policy = load_policy()
-    except ConfigError:
-        policy = None
-    try:
-        state = budget_state(policy)
-    except LiveError as exc:
-        print(f"live budgets unavailable: {exc}")
-        return 1
-    if args.json:
-        print(json.dumps({
-            "date": state.date,
-            "live_enabled": live_enabled(),
-            "budgets": {
-                name: {"cap": state.caps[name], "used": state.used[name]}
-                for name in state.caps
-            },
-        }, indent=2))
-        return 0
-    print(f"live budgets for {state.date} (live {'enabled' if live_enabled() else 'disabled'})")
-    for name in sorted(state.caps):
-        print(f"{name}: used {state.used[name]}/{state.caps[name]}")
-    return 0
 
 
 def _parse_since(value: str) -> float:
@@ -332,8 +303,6 @@ def main(argv: list[str] | None = None) -> int:
         return _run_status(args)
     if args.command == "validate-config":
         return _run_validate_config(args)
-    if args.command == "live-budget":
-        return _run_live_budget(args)
     if args.command == "errors":
         return _run_errors(args)
     if args.command == "models":

@@ -2,7 +2,7 @@
 
 F0 status report plus the F1 catalog subset: catalog entries with the
 three identity levels (SPEC §6.2, §6.3), policy/providers documents
-(SPEC §18 subset), the live-budget ledger and the published rankings
+(SPEC §18 subset) and the published rankings
 (TASK-2026-00292). Every document is fail-closed (``extra="forbid"``)
 and validated on each read.
 """
@@ -41,7 +41,6 @@ __all__ = [
     "Deployment",
     "DeploymentLimits",
     "ExperimentalEntry",
-    "LiveBudget",
     "PendingTop3",
     "ProfileRanking",
     "ProfileScoring",
@@ -228,7 +227,6 @@ class RouterPolicy(BaseModel):
     allow_unknown_price: bool = False
     use_only_verified_endpoints: bool = True
     confidentiality_default: Confidentiality = Confidentiality.INTERNAL
-    live_budgets: dict[str, int] = Field(default_factory=dict)
     profiles: dict[str, ProfileScoring] = Field(default_factory=dict)
 
 
@@ -249,15 +247,6 @@ class ProvidersDocument(BaseModel):
 
     schema_version: int = PROVIDERS_SCHEMA_VERSION
     providers: list[ProviderEntry] = Field(default_factory=list)
-
-
-class LiveBudget(BaseModel):
-    """Daily live-test call accounting for one calendar day (UTC)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    date: str
-    used: dict[str, int] = Field(default_factory=dict)
 
 
 class StatusReport(BaseModel):
