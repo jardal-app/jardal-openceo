@@ -1,0 +1,7 @@
+{
+  "recorded_at": "2026-10-23T06:20:42.535265+00:00",
+  "provider": "groq",
+  "http_status": 401,
+  "kind": "auth",
+  "note": "synthetic invalid credential; the key itself is never recorded"
+}

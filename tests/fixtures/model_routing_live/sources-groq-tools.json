@@ -1,0 +1,46 @@
+{
+  "id": "chatcmpl-0aedcb64-3490-440f-997b-aac5c2e98e96",
+  "object": "chat.completion",
+  "created": 1792736387,
+  "model": "openai/gpt-oss-20b",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "reasoning": "We need to call the function test_echo with word \"ok\". Use the function.",
+        "tool_calls": [
+          {
+            "id": "fc_f533bff5-7d35-42c1-afdd-0487aff3e701",
+            "type": "function",
+            "function": {
+              "name": "test_echo",
+              "arguments": "{\"word\":\"ok\"}"
+            }
+          }
+        ]
+      },
+      "logprobs": null,
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "queue_time": 0.016953449,
+    "prompt_tokens": 126,
+    "prompt_time": 0.00610192,
+    "completion_tokens": 41,
+    "completion_time": 0.044355261,
+    "total_tokens": 167,
+    "total_time": 0.050457181,
+    "completion_tokens_details": {
+      "reasoning_tokens": 18
+    }
+  },
+  "usage_breakdown": null,
+  "system_fingerprint": "fp_d3e146e1a5",
+  "x_groq": {
+    "id": "req_01m5kpmr0te6dba9ahkhsq5n4q",
+    "seed": 657978083
+  },
+  "service_tier": "on_demand"
+}

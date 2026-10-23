@@ -1,0 +1,116 @@
+{
+  "recorded_at": "2026-10-23T06:43:34.224630+00:00",
+  "model": "opencode/big-pickle",
+  "prompt": "Use a file tool to list the files in the current directory, then reply with exactly: ok",
+  "tool_names": [
+    "read"
+  ],
+  "events": [
+    {
+      "type": "step_start",
+      "timestamp": 1792737800856,
+      "sessionID": "ses_e98804726ffebf6WbigVSUzDIR",
+      "part": {
+        "id": "prt_1677ff298001lZHA1WupJCiA12",
+        "sessionID": "ses_e98804726ffebf6WbigVSUzDIR",
+        "messageID": "msg_1677fc248001kyK0s5pBa4e3pj",
+        "type": "step-start",
+        "snapshot": "40070158f605f8d5d7bed414ca75c1e258d0563c"
+      }
+    },
+    {
+      "type": "tool_use",
+      "timestamp": 1792737801469,
+      "sessionID": "ses_e98804726ffebf6WbigVSUzDIR",
+      "part": {
+        "partID": "prt_1677ff447001DiFS9kXZrXHs0n",
+        "sessionID": "ses_e98804726ffebf6WbigVSUzDIR",
+        "messageID": "msg_1677fc248001kyK0s5pBa4e3pj",
+        "type": "tool",
+        "id": "call_00_cal2svjg5y7h5tb4989nk8pb",
+        "tool": "read",
+        "state": {
+          "status": "completed",
+          "input": {
+            "path": "/home/develop/development/Jardal/jardal-openceo-model-routing"
+          },
+          "output": "Read directory /home/develop/development/Jardal/jardal-openceo-model-routing, entries 1-38\n.codex/\n.pytest_cache/\n.qwen/\n.runtime/\napps-sdk-mcp-test/\ncatalog/\ndeploy/\ndocs/\njardal-horizon/\nopenceo-core/\nopenceo-dashboard/\nopenceo-react/\nopenceo-voice-android/\nopenceo-voice/\nopenceo-worker/\nprojects/\nreviewers_temp/\nscripts/\nskills/\ntests/\nworkflows/\n.dockerignore\n.git\n.gitignore\n.venv\nAGENTS.md\nCLAUDE.md\nCOMANDS_ADMIN_VOICE.md\nDESIGN.md\nERPNEXT.md\nIsotipo.png\nloginMetamask.PNG\nopenwebui-auth.png\nopenwebui-home.png\nPENDINGS.md\nREADME.md\nSTATUS.md\nVOICE_GUIDE.md",
+          "title": "read",
+          "metadata": {
+            "metadata": {
+              "truncated": false
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read directory /home/develop/development/Jardal/jardal-openceo-model-routing, entries 1-38\n.codex/\n.pytest_cache/\n.qwen/\n.runtime/\napps-sdk-mcp-test/\ncatalog/\ndeploy/\ndocs/\njardal-horizon/\nopenceo-core/\nopenceo-dashboard/\nopenceo-react/\nopenceo-voice-android/\nopenceo-voice/\nopenceo-worker/\nprojects/\nreviewers_temp/\nscripts/\nskills/\ntests/\nworkflows/\n.dockerignore\n.git\n.gitignore\n.venv\nAGENTS.md\nCLAUDE.md\nCOMANDS_ADMIN_VOICE.md\nDESIGN.md\nERPNEXT.md\nIsotipo.png\nloginMetamask.PNG\nopenwebui-auth.png\nopenwebui-home.png\nPENDINGS.md\nREADME.md\nSTATUS.md\nVOICE_GUIDE.md"
+              }
+            ],
+            "providerCall": {
+              "executed": false
+            },
+            "providerResult": {
+              "executed": false
+            },
+            "rawInput": "{\"path\": \"/home/develop/development/Jardal/jardal-openceo-model-routing\"}"
+          },
+          "time": {
+            "start": 1792737801287,
+            "end": 1792737801469
+          }
+        }
+      }
+    },
+    {
+      "type": "step_finish",
+      "timestamp": 1792737801526,
+      "sessionID": "ses_e98804726ffebf6WbigVSUzDIR",
+      "part": {
+        "id": "prt_1677ff536001CGRMkj4FzuMKdO",
+        "sessionID": "ses_e98804726ffebf6WbigVSUzDIR",
+        "messageID": "msg_1677fc248001kyK0s5pBa4e3pj",
+        "type": "step-finish",
+        "reason": "tool-calls",
+        "snapshot": "40070158f605f8d5d7bed414ca75c1e258d0563c",
+        "cost": 0,
+        "tokens": {
+          "input": 12379,
+          "output": 54,
+          "reasoning": 71,
+          "cache": {
+            "read": 512,
+            "write": 0
+          }
+        }
+      }
+    },
+    {
+      "type": "step_start",
+      "timestamp": 1792737813544,
+      "sessionID": "ses_e98804726ffebf6WbigVSUzDIR",
+      "part": {
+        "id": "prt_167802428001zJjOTsw9Gpr1mg",
+        "sessionID": "ses_e98804726ffebf6WbigVSUzDIR",
+        "messageID": "msg_1677ff56b001oTeJx97voq08h8",
+        "type": "step-start",
+        "snapshot": "40070158f605f8d5d7bed414ca75c1e258d0563c"
+      }
+    },
+    {
+      "type": "text",
+      "timestamp": 1792737813933,
+      "sessionID": "ses_e98804726ffebf6WbigVSUzDIR",
+      "part": {
+        "id": "prt_16780259d001U5qMI5O5ZJvqee",
+        "sessionID": "ses_e98804726ffebf6WbigVSUzDIR",
+        "messageID": "msg_1677ff56b001oTeJx97voq08h8",
+        "type": "text",
+        "text": "ok",
+        "time": {
+          "start": 1792737813917,
+          "end": 1792737813933
+        }
+      }
+    }
+  ]
+}
