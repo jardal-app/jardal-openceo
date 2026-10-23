@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from model_routing.paths import (
     catalog_path,
     config_dir,
+    history_dir,
     policy_path,
     providers_path,
     rankings_path,
@@ -230,8 +231,21 @@ class StatusReport(BaseModel):
     rankings_present: bool
     policy_present: bool = False
     providers_present: bool = False
-    # Reserved placeholder in F0; the snapshot series arrives with TASK-2026-00291.
+    # Latest published catalog snapshot, if any (wired by TASK-2026-00291).
     snapshot: str | None = None
+
+
+def _latest_snapshot() -> str | None:
+    """Newest history snapshot id; None when nothing was published yet."""
+    history = history_dir()
+    if not history.is_dir():
+        return None
+    names = sorted(
+        path.name for path in history.iterdir()
+        if path.is_file() and path.name.startswith("catalog-") and path.name.endswith(".json"))
+    if not names:
+        return None
+    return names[-1][:-5]
 
 
 def collect_status() -> StatusReport:
@@ -247,6 +261,7 @@ def collect_status() -> StatusReport:
         rankings_present=rankings_path().is_file(),
         policy_present=policy_path().is_file(),
         providers_present=providers_path().is_file(),
+        snapshot=_latest_snapshot(),
     )
 
 

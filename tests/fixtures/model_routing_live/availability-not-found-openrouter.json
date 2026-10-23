@@ -1,0 +1,8 @@
+{
+  "recorded_at": "2026-10-23T08:12:23.973136+00:00",
+  "provider": "openrouter",
+  "model": "free-router-no-such-model-001",
+  "http_status": 400,
+  "kind": "not_found",
+  "note": "synthetic model id; the error precedes any generation"
+}
