@@ -14,6 +14,16 @@ when its primary route (or one backup) runs on the ``opencode``
 provider. Anything else (missing, expired or empty snapshot,
 disabled switch) falls back to today's static model
 (``RESEARCH_OPENCODE_TEST_MODEL``), unchanged.
+
+A managed session (TASK-2026-00307) goes further: it owns one
+OpenCode session on a private local server, starts it on the best
+group A target of the native_first order, and switches its model at
+safe turn boundaries through the verified ``session.switchModel``
+contract (POST ``/api/session/{id}/model`` with
+``{"model": {"providerID", "id"}}``, 204; verified without
+generation on opencode v2.0.22). Every switch re-checks tools,
+context and data policy and lands in the audit; without a fit the
+session blocks resumably.
 """
 
 from __future__ import annotations
@@ -23,11 +33,12 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, Protocol
+from typing import Any, Callable, Container, Literal, Mapping, Protocol
 from uuid import uuid4
 
 from model_routing.availability import (
@@ -53,10 +64,22 @@ from model_routing.errors import (
     classify_response,
     classify_text,
     classify_timeout,
+    sanitize_excerpt,
 )
-from model_routing.models import CatalogDocument, ProfileRanking, RankingsDocument
+from model_routing.external import (
+    ExternalError,
+    build_external_providers_config,
+    credential_env_for,
+)
+from model_routing.models import (
+    CatalogDocument,
+    CatalogEntry,
+    ProfileRanking,
+    RankingsDocument,
+)
 from model_routing.paths import rankings_path, state_dir
-from model_routing.ranking import fallback_chain, load_rankings
+from model_routing.ranking import fallback_chain, load_rankings, profile_requirements
+from model_routing.selector import NoEligibleTarget, select_targets
 
 __all__ = [
     "BLOCKED_NO_ELIGIBLE_MODEL",
@@ -69,12 +92,19 @@ __all__ = [
     "RESEARCH_FALLBACK_MAX",
     "RESEARCH_SAME_RETRY_MAX",
     "RESEARCH_SYNTH_SLOT",
+    "ApiRun",
+    "ApiRunner",
     "AppliedTool",
+    "ManagedResearchSession",
     "ProviderTurn",
     "ResearchCheckpoint",
     "ResearchRoutingError",
     "ResearchSession",
+    "ResearchTarget",
     "SessionBlocked",
+    "SessionClient",
+    "SessionError",
+    "SessionInfo",
     "SessionSnapshot",
     "SynthesisRouting",
     "ToolCall",
@@ -87,10 +117,13 @@ __all__ = [
     "fit_candidate",
     "load_checkpoint",
     "load_session_snapshot",
+    "native_research_targets",
+    "parse_managed_events",
     "plan_synthesis_retry",
     "record_checkpoint",
     "research_candidates",
     "research_router_settings",
+    "run_managed_turn",
 ]
 
 logger = logging.getLogger(__name__)
@@ -1302,3 +1335,738 @@ def close_synthesis_routing(routing: SynthesisRouting) -> None:
                 routing.store.close()
             except Exception:
                 logger.warning("research store close failed", exc_info=True)
+
+
+#: Project-level OpenCode config file carrying group B providers.
+SESSION_CONFIG_FILENAME = "opencode.json"
+
+#: OpenCode config grammar of the installed CLI (v2.0.22, TASK-2026-00305).
+SESSION_CONFIG_SCHEMA = "v2"
+
+
+@dataclass(frozen=True)
+class ResearchTarget(Candidate):
+    """One native_first research candidate (addendum v1.2 §3, §5.2).
+
+    Group A carries the real native ids; group B additionally names
+    its credential env var and embeds the single-provider entries
+    built at assembly time, with ``{env:...}`` references only. The
+    session driver (affinity, reservations, §10.3 walk) only reads
+    the :class:`Candidate` fields.
+    """
+
+    route_type: str = "opencode_native_free"
+    provider_id: str = ""
+    model_id: str = ""
+    opencode_model: str = ""
+    credential_env: str = ""
+    provider_config: dict[str, Any] | None = None
+
+    @property
+    def is_external(self) -> bool:
+        """True for group B targets served through a configured provider."""
+        return self.route_type == "external_free"
+
+    def model_arg(self) -> str:
+        """Explicit ``provider/model`` id the OpenCode session serves."""
+        return self.opencode_model or self.deployment_id
+
+
+def _single_session_provider_config(
+    entry: CatalogEntry,
+    deployment: Deployment,
+) -> dict[str, Any] | None:
+    """v2 OpenCode provider entries for one group B deployment, refs only.
+
+    Reuses the group B builder over a one-entry document so the same
+    fail-closed checks apply; None when the builder refuses it.
+    """
+    try:
+        document = CatalogDocument(entries=[CatalogEntry(
+            family_id=entry.family_id,
+            canonical_model_id=entry.canonical_model_id,
+            display_name=entry.display_name,
+            deployments=[deployment])])
+        built = build_external_providers_config(
+            SESSION_CONFIG_SCHEMA, document)
+    except (ExternalError, ValueError):
+        return None
+    providers = built.get("providers")
+    return dict(providers) if isinstance(providers, dict) else None
+
+
+def native_research_targets(
+    snapshot: SessionSnapshot,
+    catalog: CatalogDocument,
+    store: AvailabilityStore,
+    *,
+    exclusions: Exclusions | None = None,
+    instance_models: Container[tuple[str, str]] | None = None,
+    credentials: Mapping[str, str] | None = None,
+    run_id: str | None = None,
+) -> list[ResearchTarget]:
+    """Ordered group A then group B research targets (addendum v1.2 §3).
+
+    The :mod:`selector` order (zero-cost, health, profile, instance
+    allowlist, store gates) converts to session candidates; group B
+    additionally needs a configured credential and buildable
+    single-provider entries, else it drops with an audit event.
+    """
+    try:
+        selection = select_targets(
+            FREE_RESEARCH_PROFILE, catalog, snapshot.document,
+            store=store, exclusions=exclusions,
+            instance_models=instance_models, run_id=run_id)
+    except NoEligibleTarget as exc:
+        raise ResearchRoutingError(str(exc)) from exc
+    index = {
+        deployment.deployment_id: (entry, deployment)
+        for entry in catalog.entries
+        for deployment in entry.deployments
+    }
+    have = {str(name) for name, value in dict(credentials or {}).items()
+            if str(value)}
+    targets: list[ResearchTarget] = []
+    for target in selection.targets:
+        found = index.get(target.deployment_id)
+        if found is None:
+            continue
+        entry, deployment = found
+        env_var = ""
+        provider_config: dict[str, Any] | None = None
+        if target.group != "A":
+            try:
+                env_var = credential_env_for(deployment.provider)
+            except ExternalError:
+                write_audit_event(
+                    store, run_id or "-", "research_group_b_unmapped",
+                    f"{target.deployment_id}: provider "
+                    f"{deployment.provider} has no OpenCode mapping")
+                continue
+            if env_var not in have:
+                write_audit_event(
+                    store, run_id or "-", "research_group_b_uncredentialed",
+                    f"{target.deployment_id}: {env_var} is unset")
+                continue
+            provider_config = _single_session_provider_config(entry, deployment)
+            if not provider_config:
+                write_audit_event(
+                    store, run_id or "-", "research_group_b_unbuildable",
+                    f"{target.deployment_id}: provider config refused")
+                continue
+        targets.append(ResearchTarget(
+            deployment_id=target.deployment_id,
+            family_id=target.family_id,
+            canonical_model_id=target.canonical_model_id,
+            provider=deployment.provider, quality=target.quality,
+            route_type=target.route_type,
+            provider_id=target.provider_id, model_id=target.model_id,
+            opencode_model=target.opencode_model,
+            credential_env=env_var, provider_config=provider_config))
+    if not targets:
+        raise ResearchRoutingError(
+            f"no servable {FREE_RESEARCH_PROFILE} target after the group B "
+            "credential and config gates")
+    return targets
+
+
+@dataclass(frozen=True)
+class ApiRun:
+    """One finished ``opencode api`` invocation."""
+
+    args: tuple[str, ...]
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+class ApiRunner(Protocol):
+    """One ``opencode api`` call against a private local server."""
+
+    def __call__(self, argv: list[str], cwd: str, timeout: float) -> ApiRun: ...
+
+
+class SessionError(RuntimeError):
+    """Managed OpenCode session call failed; ``kind`` says how."""
+
+    def __init__(self, message: str, *, kind: str = "transport") -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+def _local_api_runner(argv: list[str], cwd: str, timeout: float) -> ApiRun:
+    # Installed OpenCode (v2.0.22) resolves the project from $PWD, not
+    # from the process cwd (TASK-2026-00305): without this a private
+    # server boots in the caller directory and misses the session.
+    env = dict(os.environ)
+    env["PWD"] = cwd
+    try:
+        completed = subprocess.run(
+            argv, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+            check=False, env=env,
+        )
+    except FileNotFoundError as exc:
+        raise SessionError("opencode CLI is not installed", kind="transport") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise SessionError(
+            f"opencode api timed out: {' '.join(argv)}", kind="transport") from exc
+    except OSError as exc:
+        raise SessionError(
+            f"opencode api failed: {type(exc).__name__}",
+            kind="transport") from exc
+    return ApiRun(
+        args=tuple(argv), returncode=completed.returncode,
+        stdout=completed.stdout or "", stderr=completed.stderr or "",
+    )
+
+
+@dataclass(frozen=True)
+class SessionInfo:
+    """What a managed session serves now; ids stay empty until set."""
+
+    session_id: str
+    provider_id: str = ""
+    model_id: str = ""
+    cost: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    @property
+    def opencode_model(self) -> str:
+        """``provider/model`` served now, or empty when unset."""
+        if not self.provider_id or not self.model_id:
+            return ""
+        return f"{self.provider_id}/{self.model_id}"
+
+
+class SessionClient:
+    """OpenCode sessions over ``opencode api --standalone`` (addendum §4).
+
+    The v2.0.22 contract, verified without generation: ``POST
+    /api/session`` creates, ``POST /api/session/{id}/model`` switches
+    with ``{"model": {"providerID", "id"}}`` (204, empty body),
+    ``GET`` reads back the effective model, ``DELETE`` removes. Every
+    call boots a private local server; there is no remote URL knob,
+    so a managed session can never point at an exposed server.
+    """
+
+    def __init__(
+        self,
+        *,
+        cli: str = "opencode",
+        runner: ApiRunner | None = None,
+        timeout: float = 60.0,
+    ) -> None:
+        if not cli:
+            raise SessionError(
+                "a session client needs a CLI path", kind="transport")
+        if not timeout > 0:
+            raise SessionError(
+                "a session client needs a positive timeout", kind="transport")
+        self._cli = cli
+        self._runner = runner or _local_api_runner
+        self._timeout = timeout
+
+    def _api(
+        self,
+        project_dir: Path | str,
+        method: str,
+        path: str,
+        data: Mapping[str, Any] | None = None,
+    ) -> Any:
+        argv = [self._cli, "api", "--standalone", method, path]
+        if data is not None:
+            argv += ["-d", json.dumps(data)]
+        try:
+            finished = self._runner(argv, str(project_dir), self._timeout)
+        except SessionError:
+            raise
+        except Exception as exc:
+            raise SessionError(
+                f"opencode api failed: {exc}", kind="transport") from exc
+        if finished.returncode != 0:
+            raise self._failure(path, finished)
+        text = (finished.stdout or "").strip()
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except ValueError as exc:
+            raise SessionError(
+                f"opencode api {path} returned non-JSON",
+                kind="transport") from exc
+
+    @staticmethod
+    def _failure(path: str, finished: ApiRun) -> SessionError:
+        status = re.search(r"^HTTP (\d{3})", finished.stderr or "", re.MULTILINE)
+        code = status.group(1) if status else ""
+        tag = ""
+        detail = ""
+        try:
+            body = json.loads((finished.stdout or "").strip() or "{}")
+        except ValueError:
+            body = {}
+        if isinstance(body, dict):
+            tag = str(body.get("_tag") or "")
+            detail = str(body.get("message") or "")
+        kind = {"404": "not_found", "400": "invalid_request",
+                "401": "unauthorized"}.get(code, "transport")
+        what = detail or tag or "no detail"
+        return SessionError(f"opencode api {path}: HTTP {code or '?'} {what}", kind=kind)
+
+    @staticmethod
+    def _checked(session_id: str) -> str:
+        if not re.match(r"^ses", session_id or ""):
+            raise SessionError(
+                f"refusing a non-session id: {session_id!r}",
+                kind="invalid_request")
+        return session_id
+
+    def create_session(self, project_dir: Path | str, *, title: str = "") -> str:
+        """Create a session in the project; returns its ``ses_*`` id."""
+        payload: dict[str, Any] = {"title": title} if title else {}
+        raw = self._api(project_dir, "POST", "/api/session", payload)
+        try:
+            session_id = str(raw["data"]["id"])
+        except (TypeError, KeyError) as exc:
+            raise SessionError(
+                "opencode api returned an unreadable session",
+                kind="transport") from exc
+        return self._checked(session_id)
+
+    def switch_model(
+        self,
+        project_dir: Path | str,
+        session_id: str,
+        provider_id: str,
+        model_id: str,
+    ) -> None:
+        """Set the model of subsequent turns; 204 with an empty body."""
+        if not provider_id or not model_id:
+            raise SessionError(
+                "switch needs real provider and model ids",
+                kind="invalid_request")
+        self._api(project_dir, "POST",
+                   f"/api/session/{self._checked(session_id)}/model",
+                   {"model": {"providerID": provider_id, "id": model_id}})
+
+    def get_session(self, project_dir: Path | str, session_id: str) -> SessionInfo:
+        """Read back the effective model, cost and token counters."""
+        raw = self._api(
+            project_dir, "GET", f"/api/session/{self._checked(session_id)}")
+        try:
+            data = raw["data"]
+            model = data.get("model") or {}
+            tokens = data.get("tokens") or {}
+            return SessionInfo(
+                session_id=str(data.get("id") or session_id),
+                provider_id=str(model.get("providerID") or ""),
+                model_id=str(model.get("id") or ""),
+                cost=float(data.get("cost") or 0.0),
+                input_tokens=int(tokens.get("input") or 0),
+                output_tokens=int(tokens.get("output") or 0))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise SessionError(
+                "opencode api returned an unreadable session",
+                kind="transport") from exc
+
+    def delete_session(self, project_dir: Path | str, session_id: str) -> None:
+        """Remove a session; a missing one is already gone."""
+        try:
+            self._api(project_dir, "DELETE",
+                       f"/api/session/{self._checked(session_id)}")
+        except SessionError as exc:
+            if exc.kind == "not_found":
+                return
+            raise
+
+
+class ManagedResearchSession(ResearchSession):
+    """One free-research session owning its OpenCode session (§5.2).
+
+    Starts on the best group A target, switches the OpenCode session
+    model at safe turn boundaries, and resumes from the last
+    confirmed checkpoint when a response stays incomplete. Every
+    switch re-checks tools, context and data policy against the
+    catalog and lands in the audit with session, profile, models,
+    reason, attempt and result; without a fit the session blocks
+    resumably instead of degrading silently. A vanished OpenCode
+    session is recreated once under supervision, never rebound
+    blindly to an unrelated one.
+    """
+
+    def __init__(
+        self,
+        *,
+        session_client: SessionClient,
+        project_dir: Path | str,
+        catalog: CatalogDocument | None = None,
+        requirements: ProfileRequirements | None = None,
+        **kwargs: Any,
+    ) -> None:
+        targets = tuple(kwargs.get("candidates") or ())
+        if not targets:
+            raise ResearchRoutingError("a managed session needs native targets")
+        for target in targets:
+            if (not isinstance(target, ResearchTarget)
+                    or not target.provider_id or not target.model_id):
+                raise ResearchRoutingError(
+                    "a managed session needs targets with real provider "
+                    "and model ids")
+        if kwargs.get("static_model"):
+            raise ResearchRoutingError(
+                "a managed session cannot fall back to a static model "
+                "without real ids")
+        super().__init__(**kwargs)
+        self._client = session_client
+        self._project_dir = Path(project_dir)
+        self._catalog = catalog
+        self._requirements = requirements or profile_requirements(
+            FREE_RESEARCH_PROFILE)
+        self._managed_id: str | None = None
+        self._managed_model = ""
+        self._attempt = 0
+        self._switches = 0
+        self._last_rotation_class: str | None = None
+
+    @property
+    def managed_session_id(self) -> str | None:
+        """OpenCode session id owned now, None before the first turn."""
+        return self._managed_id
+
+    @property
+    def managed_model(self) -> str:
+        """``provider/model`` the owned session was verified to serve."""
+        return self._managed_model
+
+    def start(self, *, title: str = "") -> str:
+        """Create the owned OpenCode session; idempotent."""
+        if self._managed_id is None:
+            if self._effective is None:
+                self._select_initial()
+            if self._effective is None:
+                checkpoint = self._save_with_goal([])
+                raise SessionBlocked(
+                    BLOCKED_NO_ELIGIBLE_MODEL,
+                    "no eligible research model for this session",
+                    checkpoint_path=checkpoint_path(
+                        self._checkpoints, self._research_id))
+            self._managed_id = self._client.create_session(
+                self._project_dir,
+                title=title or f"free-research {self._research_id}")
+        return self._managed_id
+
+    def run_turn(
+        self,
+        prompt: str,
+        invoke: TurnInvoke,
+        *,
+        queries_and_sources: list[tuple[str, str]] | None = None,
+        validated: list[str] | None = None,
+        pending: list[str] | None = None,
+        decisions: list[str] | None = None,
+        artifacts: list[str] | None = None,
+    ) -> TurnOutcome:
+        """Run one turn, keeping the owned session on the aimed model."""
+        self._attempt = 0
+
+        def syncing(request: TurnRequest) -> ProviderTurn:
+            self._attempt += 1
+            self._ensure_model(self._target_for(request.model))
+            return invoke(request)
+
+        return super().run_turn(
+            prompt, syncing, queries_and_sources=queries_and_sources,
+            validated=validated, pending=pending, decisions=decisions,
+            artifacts=artifacts)
+
+    def close(self) -> None:
+        """Delete the owned OpenCode session, then release the routing slot."""
+        managed, self._managed_id = self._managed_id, None
+        if managed is not None:
+            try:
+                self._client.delete_session(self._project_dir, managed)
+            except Exception:  # closing never fails a session
+                logger.warning("managed session delete failed", exc_info=True)
+        super().close()
+
+    def _target_for(self, deployment_id: str) -> ResearchTarget:
+        for candidate in self._candidates:
+            if (candidate.deployment_id == deployment_id
+                    and isinstance(candidate, ResearchTarget)):
+                return candidate
+        raise ResearchRoutingError(
+            f"managed turn aimed at unknown deployment {deployment_id!r}")
+
+    def _ensure_model(self, target: ResearchTarget) -> None:
+        self.start()
+        want = target.model_arg()
+        if self._managed_model == want:
+            return
+        if self._switches == 0:
+            reason = "initial"
+        elif self._last_rotation_class:
+            reason = f"rotation after {self._last_rotation_class}"
+        else:
+            reason = "rotation"
+        self._switch(target, reason=reason)
+
+    def _switch(self, target: ResearchTarget, *, reason: str) -> None:
+        owned = self._managed_id
+        if owned is None:
+            raise ResearchRoutingError("a switch needs a started session")
+        if self._catalog is not None:
+            fits, why = fit_candidate(target, self._catalog, self._requirements)
+            if not fits:
+                checkpoint = self._save(
+                    turn=self._turn, partial_text=self._partial_text)
+                raise SessionBlocked(
+                    BLOCKED_NO_ELIGIBLE_MODEL,
+                    f"refusing the switch to an incompatible model: {why}",
+                    checkpoint_path=checkpoint_path(
+                        self._checkpoints, self._research_id))
+        if target.is_external:
+            self._ensure_provider_config(target)
+        previous = self._managed_model or "-"
+        try:
+            self._client.switch_model(
+                self._project_dir, owned, target.provider_id, target.model_id)
+        except SessionError as exc:
+            if exc.kind != "not_found":
+                raise self._blocked_provider(
+                    f"model switch failed: {exc}") from exc
+            recreated = self._client.create_session(
+                self._project_dir, title=f"free-research {self._research_id}")
+            self._audit(
+                "research_session_recreated",
+                f"{owned} -> {recreated} reason=session_not_found")
+            owned = recreated
+            self._managed_id = recreated
+            try:
+                self._client.switch_model(
+                    self._project_dir, recreated,
+                    target.provider_id, target.model_id)
+            except SessionError as exc2:
+                raise self._blocked_provider(
+                    f"model switch failed after recreate: {exc2}") from exc2
+        info = self._client.get_session(self._project_dir, owned)
+        if info.opencode_model != target.model_arg():
+            raise self._blocked_provider(
+                f"session serves {info.opencode_model or 'an unset model'}, "
+                f"wanted {target.model_arg()}")
+        self._managed_model = info.opencode_model
+        self._switches += 1
+        self._audit(
+            "research_model_switch",
+            f"{owned} {FREE_RESEARCH_PROFILE} {previous} -> "
+            f"{target.provider_id}/{target.model_id} reason={reason} "
+            f"attempt={self._attempt} result=ok")
+
+    def _ensure_provider_config(self, target: ResearchTarget) -> None:
+        entries = target.provider_config or {}
+        if not entries:
+            checkpoint = self._save(
+                turn=self._turn, partial_text=self._partial_text)
+            raise SessionBlocked(
+                BLOCKED_NO_ELIGIBLE_MODEL,
+                f"group B target {target.deployment_id} carries "
+                "no provider config",
+                checkpoint_path=checkpoint_path(
+                    self._checkpoints, self._research_id))
+        path = self._project_dir / SESSION_CONFIG_FILENAME
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise ResearchRoutingError(
+                    f"session project config {path} unreadable: {exc}") from exc
+            if not isinstance(payload, dict):
+                raise ResearchRoutingError(
+                    f"session project config {path} is not an object")
+            providers = payload.get("providers", {})
+            if not isinstance(providers, dict):
+                raise ResearchRoutingError(
+                    f"session project config {path} has no providers object")
+            payload["providers"] = {**providers, **entries}
+        else:
+            payload = {"$schema": "https://opencode.ai/config.json",
+                       "providers": dict(entries)}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+
+    def _blocked_provider(self, message: str) -> SessionBlocked:
+        checkpoint = self._save(turn=self._turn, partial_text=self._partial_text)
+        return SessionBlocked(
+            BLOCKED_PROVIDER, message,
+            checkpoint_path=checkpoint_path(
+                self._checkpoints, self._research_id))
+
+    def _audit(self, event: str, detail: str) -> None:
+        if self._store is not None:
+            write_audit_event(self._store, self._run_id, event, detail)
+
+    def _record_rotation(
+        self, candidate: Candidate, classified: ClassifiedError, excerpt: str,
+    ) -> None:
+        self._last_rotation_class = classified.error_class
+        super()._record_rotation(candidate, classified, excerpt)
+
+
+def _managed_error_text(event: Mapping[str, Any]) -> str:
+    raw = event.get("error") if isinstance(event.get("error"), dict) else {}
+    detail = event.get("message") if isinstance(event.get("message"), str) else ""
+    detail = detail or (raw.get("message")
+                        if isinstance(raw.get("message"), str) else "")
+    status = raw.get("status")
+    code = f"status={status}" if isinstance(status, int) else ""
+    text = " ".join(part for part in
+                    (str(raw.get("type") or ""), detail, code) if part)
+    return sanitize_excerpt(text) or "managed run reported an error"
+
+
+def parse_managed_events(events: list[Mapping[str, Any]]) -> ProviderTurn:
+    """``opencode run --format json`` events as one turn attempt.
+
+    Tolerant to unknown shapes (skipped, never fatal); strict about
+    meaning: tools claimed without a completed result, or text cut
+    mid-stream, come back as failures so the ledger never duplicates
+    an external effect (§11.8).
+    """
+    texts: list[str] = []
+    calls: list[ToolCall] = []
+    results: list[tuple[str, str]] = []
+    errors: list[str] = []
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        kind = event.get("type")
+        part = event.get("part")
+        if kind == "text" and isinstance(part, Mapping):
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                texts.append(text)
+        elif kind == "tool_use" and isinstance(part, Mapping):
+            call_id = part.get("id")
+            name = part.get("tool")
+            if (not isinstance(call_id, str) or not call_id
+                    or not isinstance(name, str) or not name):
+                continue
+            calls.append(ToolCall(id=call_id, name=name))
+            state = part.get("state")
+            output = state.get("output") if isinstance(state, Mapping) else None
+            status = state.get("status") if isinstance(state, Mapping) else None
+            if status == "completed" and output is not None:
+                if isinstance(output, str):
+                    results.append((call_id, output))
+                else:
+                    results.append((call_id, json.dumps(
+                        output, sort_keys=True, default=str)))
+        elif kind == "error":
+            errors.append(_managed_error_text(event))
+    if errors:
+        body = "; ".join(errors)
+        if "".join(texts).strip():
+            return ProviderTurn(
+                text="".join(texts), complete=False,
+                executed_tools=tuple(calls), tool_results=tuple(results),
+                error_text=body, failure_stage="partial_text")
+        return ProviderTurn(
+            text="", complete=False, executed_tools=tuple(calls),
+            tool_results=tuple(results), error_text=body,
+            failure_stage="before_response")
+    if not "".join(texts).strip():
+        return ProviderTurn(
+            text="", complete=False, executed_tools=tuple(calls),
+            tool_results=tuple(results),
+            error_text="managed run carried no text",
+            failure_stage="before_response")
+    return ProviderTurn(
+        text="".join(texts), complete=True, executed_tools=tuple(calls),
+        tool_results=tuple(results))
+
+
+def _managed_cost(events: list[Mapping[str, Any]]) -> float:
+    total = 0.0
+    for event in events:
+        if not isinstance(event, Mapping) or event.get("type") != "step_finish":
+            continue
+        part = event.get("part")
+        if isinstance(part, Mapping) and isinstance(
+                part.get("cost"), (int, float)):
+            total += float(part["cost"])
+    return total
+
+
+def run_managed_turn(
+    *,
+    cli: str = "opencode",
+    session_id: str,
+    project_dir: Path | str,
+    prompt: str,
+    agent: str | None = None,
+    runner: ApiRunner | None = None,
+    timeout: float = 240.0,
+) -> ProviderTurn:
+    """One managed turn through ``opencode run --session``.
+
+    No ``--model`` flag: the session serves the model switchModel
+    set, and passing one would pin this turn instead of proving the
+    session switch. A non-zero billed cost fails the turn as billing,
+    never silently.
+    """
+    if not (prompt or "").strip():
+        raise ResearchRoutingError("a managed turn needs a prompt")
+    argv = [cli, "run", "--standalone", "--session", session_id,
+           "--format", "json"]
+    if agent:
+        argv += ["--agent", agent]
+    argv.append(prompt)
+    run = runner or _local_api_runner
+    try:
+        finished = run(argv, str(project_dir), timeout)
+    except SessionError as exc:
+        return ProviderTurn(
+            text="", complete=False, error_text=str(exc),
+            failure_stage="before_response")
+    if finished.returncode != 0 and not (finished.stdout or "").strip():
+        tail = sanitize_excerpt(" ".join((finished.stderr or "").split()))
+        return ProviderTurn(
+            text="", complete=False,
+            error_text=f"managed run failed: {tail or 'no output'}",
+            failure_stage="before_response")
+    events: list[Mapping[str, Any]] = []
+    for line in (finished.stdout or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            event = json.loads(stripped)
+        except ValueError:
+            return ProviderTurn(
+                text="", complete=False,
+                error_text="managed run emitted a non-JSON line",
+                failure_stage="before_response")
+        if not isinstance(event, dict):
+            return ProviderTurn(
+                text="", complete=False,
+                error_text="managed run emitted a non-object event",
+                failure_stage="before_response")
+        events.append(event)
+    if not events:
+        return ProviderTurn(
+            text="", complete=False,
+            error_text="managed run produced no events",
+            failure_stage="before_response")
+    if _managed_cost(events) != 0:
+        return ProviderTurn(
+            text="", complete=False,
+            error_text="managed run billed a non-zero cost "
+            "(402 payment required)",
+            failure_stage="before_response")
+    return parse_managed_events(events)
