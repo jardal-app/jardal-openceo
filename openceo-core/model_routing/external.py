@@ -29,6 +29,7 @@ from typing import Any, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from model_routing import alerts as router_alerts
 from model_routing.models import (
     CatalogDocument,
     CatalogEntry,
@@ -618,9 +619,19 @@ def apply_security_rollback(
     opencode_config: Mapping[str, Any],
     directory: Path,
     reason: str,
+    *,
+    alerts_dir: Path | None = None,
 ) -> SecurityRollback:
-    """T20: freeze new deployments and roll the config back to native."""
+    """T20: freeze new deployments and roll the config back to native.
+
+    The security alert lands next to the freeze marker unless the
+    caller points ``alerts_dir`` elsewhere (the state dir in
+    production); without a writable directory the freeze still
+    holds and no alert is emitted.
+    """
     freeze = freeze_gateway(directory, reason)
+    router_alerts.emit_alert(alerts_dir or directory, "gateway_security",
+                             "gateway", reason)
     return SecurityRollback(native_config=strip_gateway_provider(opencode_config),
                             freeze=freeze)
 

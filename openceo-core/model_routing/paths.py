@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 
 __all__ = [
+    "ALERTS_FILENAME",
     "AVAILABILITY_DB_FILENAME",
     "CATALOG_FILENAME",
     "CONFIG_DIRNAME",
@@ -40,6 +41,7 @@ __all__ = [
 
 CONFIG_DIRNAME = "free-router"
 STATE_DIRNAME = "free-router"
+ALERTS_FILENAME = "alerts.jsonl"
 POLICY_FILENAME = "policy.yaml"
 PROVIDERS_FILENAME = "providers.yaml"
 CATALOG_FILENAME = "catalog.json"

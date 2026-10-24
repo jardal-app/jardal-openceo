@@ -2,8 +2,8 @@
 
 ``status``, ``validate-config``, ``errors``, ``models``, ``explain``,
 ``simulate-fallback``, ``sources``, ``update``, ``reserve``,
-``release``, ``cooldowns`` and ``reservations``; further subcommands
-arrive with their tickets. Usage from
+``release``, ``cooldowns``, ``reservations``, ``cost-audit`` and
+``sessions``; further subcommands arrive with their tickets. Usage from
 the repo root::
 
     ./.venv/bin/python openceo-core/model_routing/cli.py status [--json]
@@ -26,8 +26,11 @@ if __name__ == "__main__":
     if _CORE not in sys.path:
         sys.path.insert(0, _CORE)
 
+from model_routing.acceptance import active_sessions, cost_audit  # noqa: E402
 from model_routing.availability import AvailabilityStore, ReservationConflict  # noqa: E402
 from model_routing.config import ConfigError, load_policy, validate_config  # noqa: E402
+from model_routing.error_findings import queued_previews  # noqa: E402
+from model_routing.research_wiring import CHECKPOINTS_DIRNAME  # noqa: E402
 from model_routing.models import RouterPolicy, collect_status  # noqa: E402
 from model_routing.paths import (  # noqa: E402
     AVAILABILITY_DB_FILENAME,
@@ -59,8 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
     validate = sub.add_parser("validate-config", help="Check policy, providers and secrets")
     validate.add_argument("--json", action="store_true", help="Machine-readable output")
     errors = sub.add_parser("errors", help="Query the persistent error registry")
-    errors.add_argument("--since", required=True,
+    errors.add_argument("--since", required=False, default=None,
                         help="ISO datetime or relative window (e.g. 24h, 7d, 30m)")
+    errors.add_argument("--summary", action="store_true",
+                        help="Resume the window grouped by class and provider")
+    errors.add_argument("--sync-findings", action="store_true",
+                        help="Report findings queued for the inbox (report only, ignores --since)")
+    errors.add_argument("--state-dir", default=None)
     errors.add_argument("--json", action="store_true", help="Machine-readable output")
     models = sub.add_parser("models", help="Show one profile ranking")
     models.add_argument("--profile", required=True, choices=sorted(RANK_PROFILES))
@@ -114,6 +122,19 @@ def build_parser() -> argparse.ArgumentParser:
     reservations.add_argument("--round", required=True)
     reservations.add_argument("--state-dir", default=None)
     reservations.add_argument("--json", action="store_true", help="Machine-readable output")
+    cost = sub.add_parser("cost-audit", help="Audit zero-cost over one window")
+    cost.add_argument("--since", required=True,
+                      help="ISO datetime or relative window (e.g. 24h, 7d, 30m)")
+    cost.add_argument("--receipts-dir", action="append", default=[],
+                      help="Accepted-report receipts to check (repeatable)")
+    cost.add_argument("--state-dir", default=None)
+    cost.add_argument("--json", action="store_true", help="Machine-readable output")
+    sessions = sub.add_parser("sessions", help="List research sessions by freshness")
+    sessions.add_argument("--active", action="store_true",
+                          help="Only sessions updated within the window")
+    sessions.add_argument("--max-age-h", type=float, default=24.0)
+    sessions.add_argument("--state-dir", default=None)
+    sessions.add_argument("--json", action="store_true", help="Machine-readable output")
     return parser
 
 
@@ -160,14 +181,21 @@ def _parse_since(value: str) -> float:
 
 
 def _run_errors(args: argparse.Namespace) -> int:
+    if args.sync_findings:
+        return _run_errors_sync_findings(args)
+    if not args.since:
+        print("errors: --since is required (ISO datetime or relative window)")
+        return 2
     try:
         since_ts = _parse_since(args.since)
     except ValueError as exc:
         print(f"errors: {exc}")
         return 2
-    store = AvailabilityStore()
+    store = AvailabilityStore(_state_path(args))
     try:
         records = store.errors_since(since_ts)
+        if args.summary:
+            return _print_errors_summary(records, args.json)
     finally:
         store.close()
     if args.json:
@@ -186,6 +214,43 @@ def _run_errors(args: argparse.Namespace) -> int:
         moment = datetime.fromtimestamp(record.ts, timezone.utc).isoformat()
         print(f"{moment} {record.provider} {record.deployment_id}"
               f" {record.error_class} {record.action} run={record.run_id}")
+    return 0
+
+
+def _print_errors_summary(records: list, as_json: bool) -> int:
+    by_class: dict[str, int] = {}
+    by_provider: dict[str, int] = {}
+    for record in records:
+        by_class[record.error_class] = by_class.get(record.error_class, 0) + 1
+        by_provider[record.provider] = by_provider.get(record.provider, 0) + 1
+    if as_json:
+        print(json.dumps({"total": len(records), "by_class": by_class,
+                          "by_provider": by_provider}, indent=2))
+        return 0
+    print(f"{len(records)} errors")
+    for name in sorted(by_class):
+        print(f"  {name}: {by_class[name]}")
+    for name in sorted(by_provider):
+        print(f"  {name}: {by_provider[name]}")
+    return 0
+
+
+def _run_errors_sync_findings(args: argparse.Namespace) -> int:
+    store = AvailabilityStore(_state_path(args))
+    try:
+        queued = queued_previews(store)
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps([{"fingerprint": fingerprint, "payload": payload}
+                          for fingerprint, payload in queued], indent=2))
+        return 0
+    if not queued:
+        print("no findings queued")
+        return 0
+    for fingerprint, payload in queued:
+        title = (payload or {}).get("title", "<unreadable>") if payload else "<unreadable>"
+        print(f"{fingerprint} autorun=false :: {title}")
     return 0
 
 
@@ -413,6 +478,62 @@ def _run_reservations(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_cost_audit(args: argparse.Namespace) -> int:
+    try:
+        since_ts = _parse_since(args.since)
+    except ValueError as exc:
+        print(f"cost-audit: {exc}")
+        return 2
+    store = AvailabilityStore(_state_path(args))
+    try:
+        audit = cost_audit(store, since_ts,
+                           [Path(entry) for entry in args.receipts_dir])
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps({
+            "since_ts": audit.since_ts, "errors_total": audit.errors_total,
+            "by_class": audit.by_class, "by_provider": audit.by_provider,
+            "billing_rows": audit.billing_rows,
+            "receipts_checked": audit.receipts_checked,
+            "receipts_missing_model": audit.receipts_missing_model,
+            "receipts_invalid": audit.receipts_invalid,
+            "clean": audit.clean,
+        }, indent=2))
+        return 0 if audit.clean else 1
+    print(f"{audit.errors_total} errors since window;"
+          f" billing rows: {audit.billing_rows}")
+    print(f"receipts: {audit.receipts_checked} checked,"
+          f" {audit.receipts_missing_model} missing model,"
+          f" {audit.receipts_invalid} invalid")
+    print("cost-audit: clean" if audit.clean else "cost-audit: VIOLATIONS")
+    return 0 if audit.clean else 1
+
+
+def _run_sessions(args: argparse.Namespace) -> int:
+    if args.max_age_h <= 0:
+        print("sessions: --max-age-h must be above zero")
+        return 2
+    base = Path(args.state_dir) if args.state_dir else state_dir()
+    rows = active_sessions(base / CHECKPOINTS_DIRNAME, max_age_hours=args.max_age_h)
+    if args.active:
+        rows = [row for row in rows if row.status == "active"]
+    if args.json:
+        print(json.dumps([{
+            "research_id": row.research_id, "session_id": row.session_id,
+            "turn": row.turn, "effective_deployment": row.effective_deployment,
+            "updated_at": row.updated_at, "status": row.status,
+        } for row in rows], indent=2))
+        return 0
+    if not rows:
+        print("no sessions" if not args.active else "no active sessions")
+        return 0
+    for row in rows:
+        print(f"{row.research_id} turn {row.turn} {row.effective_deployment or '-'}"
+              f" [{row.status}] updated {row.updated_at or 'never'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI; 0 on success (missing F0 artifacts are expected)."""
     parser = build_parser()
@@ -441,6 +562,10 @@ def main(argv: list[str] | None = None) -> int:
         return _run_cooldowns(args)
     if args.command == "reservations":
         return _run_reservations(args)
+    if args.command == "cost-audit":
+        return _run_cost_audit(args)
+    if args.command == "sessions":
+        return _run_sessions(args)
     parser.error(f"unknown command: {args.command}")
     return 2
 

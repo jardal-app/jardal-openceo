@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from model_routing import alerts as router_alerts
 from model_routing import benchmarks as router_benchmarks
 from model_routing import live as router_live
 from model_routing import ranking as router_ranking
@@ -31,7 +32,7 @@ from model_routing.benchmarks import (
     load_aliases,
 )
 from model_routing.config import ConfigError, load_policy, load_providers
-from model_routing.models import BenchmarkScore, CatalogDocument, RouterPolicy
+from model_routing.models import BenchmarkScore, CatalogDocument, RouterPolicy, is_usable
 from model_routing.paths import (
     CATALOG_FILENAME,
     RANKINGS_FILENAME,
@@ -528,8 +529,13 @@ def run_update(
                     router_live.LiveError, SourceError,
                     router_benchmarks.AliasError,
                     router_terms.TermsError) as exc:
+                router_alerts.emit_alert(
+                    state_dir, "refresh_failed", f"update --{kind}", str(exc))
                 return _log_outcome(log_path, kind, False, str(exc))
             except Exception:  # noqa: BLE001 - the log must capture any crash
+                router_alerts.emit_alert(
+                    state_dir, "refresh_failed", f"update --{kind}",
+                    f"unexpected error: {traceback.format_exc(limit=3)}")
                 return _log_outcome(log_path, kind, False,
                                     f"unexpected error: {traceback.format_exc(limit=3)}")
             detail = (f"catalog {report.catalog_snapshot} "
@@ -538,9 +544,33 @@ def run_update(
                 detail += f" STALE ({report.stale_reason})"
             if report.failed:
                 detail += f"; failed: {'; '.join(report.failed)}"
+            _alert_when_no_free_models(config_dir, state_dir)
             return _log_outcome(log_path, kind, True, detail)
         finally:
             fcntl.flock(guard.fileno(), fcntl.LOCK_UN)
+
+
+def _alert_when_no_free_models(config: Path, state_dir: Path) -> None:
+    """Alert when a successful refresh leaves zero usable deployments.
+
+    A missing or unreadable catalog means the runner did not publish
+    (injected test runners): nothing to check, no alert.
+    """
+    catalog_file = Path(config) / CATALOG_FILENAME
+    if not catalog_file.is_file():
+        return
+    try:
+        catalog = load_catalog_doc(catalog_file)
+    except PublishError:
+        return
+    active = _load_policy(Path(config) / "policy.yaml")
+    usable = sum(1 for entry in catalog.entries for route in entry.deployments
+                 if is_usable(route, active))
+    if usable == 0:
+        router_alerts.emit_alert(
+            state_dir, "no_free_models", "update",
+            f"{catalog_file.name} publishes {len(catalog.entries)} entries"
+            " with zero usable deployments")
 
 
 def _log_outcome(log_path: Path, kind: str, ok: bool, detail: str) -> tuple[int, str]:

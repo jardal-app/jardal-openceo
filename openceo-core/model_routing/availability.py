@@ -2,7 +2,8 @@
 
 SQLite at ``availability.sqlite`` (SPEC §9.3): round-atomic reservations
 with family uniqueness, deployment cooldowns, provider blocks, approximate
-per-provider counters, the persistent error registry and audit events.
+per-provider counters, the persistent error registry, audit events and
+the findings outbox (TASK-2026-00297).
 Event-driven: recording an error applies its cooldown or block at once;
 there is no polling or sweeping (expiry is lazy, checked on access).
 External consumers (TASK-2026-00295) share the file without importing
@@ -11,6 +12,7 @@ OpenCEO. No prompts, responses or credentials are ever stored.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -50,7 +52,9 @@ __all__ = [
     "write_audit_event",
 ]
 
-AVAILABILITY_SCHEMA_VERSION = 1
+AVAILABILITY_SCHEMA_VERSION = 2
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS reservations (
@@ -107,6 +111,17 @@ CREATE TABLE IF NOT EXISTS audit (
     run_id TEXT NOT NULL,
     event TEXT NOT NULL,
     detail TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS finding_seen (
+    fingerprint TEXT PRIMARY KEY,
+    error_class TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    last_ts REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS finding_pending (
+    fingerprint TEXT PRIMARY KEY,
+    recorded_at REAL NOT NULL,
+    payload TEXT NOT NULL
 );
 """
 
@@ -442,9 +457,15 @@ class AvailabilityStore:
             )
             error_id = cursor.lastrowid or 0
             self._apply_action(provider, deployment_id, classified, current)
-        return ErrorRecord(error_id, current, provider, deployment_id, model,
-                           classified.error_class, classified.retry_after_s,
-                           classified.action, run_id, stored)
+        record = ErrorRecord(error_id, current, provider, deployment_id, model,
+                             classified.error_class, classified.retry_after_s,
+                             classified.action, run_id, stored)
+        try:
+            from model_routing import error_findings as findings_bridge
+            findings_bridge.offer_record(self, record)
+        except Exception:  # findings never break error recording
+            logger.warning("router finding offer failed", exc_info=True)
+        return record
 
     def _apply_action(self, provider: str, deployment_id: str,
                       classified: ClassifiedError, now: float) -> None:
@@ -497,6 +518,54 @@ class AvailabilityStore:
             " WHERE ts >= ? ORDER BY ts, id",
             (since_ts,)).fetchall()
         return [ErrorRecord(*row) for row in rows]
+
+    def note_finding_seen(self, fingerprint: str, error_class: str,
+                          *, now: float | None = None) -> int:
+        """Count one sighting of a finding fingerprint; returns the total."""
+        current = time.time() if now is None else now
+        with self._db:
+            row = self._db.execute(
+                "SELECT count FROM finding_seen WHERE fingerprint = ?",
+                (fingerprint,)).fetchone()
+            count = (row[0] if row else 0) + 1
+            self._db.execute(
+                "INSERT INTO finding_seen (fingerprint, error_class, count, last_ts)"
+                " VALUES (?, ?, ?, ?)"
+                " ON CONFLICT (fingerprint) DO UPDATE SET error_class = excluded.error_class,"
+                " count = excluded.count, last_ts = excluded.last_ts",
+                (fingerprint, error_class, count, current),
+            )
+        return count
+
+    def finding_seen_count(self, fingerprint: str) -> int:
+        """Sightings so far for one fingerprint; zero when never seen."""
+        row = self._db.execute(
+            "SELECT count FROM finding_seen WHERE fingerprint = ?",
+            (fingerprint,)).fetchone()
+        return row[0] if row else 0
+
+    def queue_finding(self, fingerprint: str, payload: str,
+                      *, now: float | None = None) -> bool:
+        """Queue one fingerprint for the inbox; False when already queued."""
+        current = time.time() if now is None else now
+        with self._db:
+            cursor = self._db.execute(
+                "INSERT INTO finding_pending (fingerprint, recorded_at, payload)"
+                " VALUES (?, ?, ?) ON CONFLICT (fingerprint) DO NOTHING",
+                (fingerprint, current, payload),
+            )
+        return cursor.rowcount > 0
+
+    def pending_findings(self) -> list[tuple[str, str]]:
+        """(fingerprint, payload) pairs awaiting the inbox, oldest first."""
+        return [(fingerprint, payload) for fingerprint, payload in self._db.execute(
+            "SELECT fingerprint, payload FROM finding_pending ORDER BY recorded_at").fetchall()]
+
+    def drop_pending(self, fingerprint: str) -> None:
+        """Forget one queued fingerprint after it reached the inbox."""
+        with self._db:
+            self._db.execute(
+                "DELETE FROM finding_pending WHERE fingerprint = ?", (fingerprint,))
 
     def write_audit(self, run_id: str, event: str, detail: str = "",
                     *, now: float | None = None) -> None:
