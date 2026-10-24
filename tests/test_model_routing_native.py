@@ -109,6 +109,30 @@ def test_native_tool_probe_marks_tools_capability():
     assert result.capabilities.tools is True
 
 
+def test_native_probe_standalone_spawns_a_private_server():
+    seen: list = []
+
+    def _runner(argv, _cwd, _timeout):
+        seen.append(argv)
+        return _run(stdout=_events(_text_event("ok"), _step_finish()))
+
+    router_probes.run_native_probe(
+        "openrouter", "chat", "example/alpha:free",
+        enabled=True, runner=_runner, standalone=True)
+    assert seen == [
+        ["opencode", "run", "--format", "json", "--model",
+         "openrouter/example/alpha:free", "--standalone",
+         router_probes.CHAT_PROMPT]
+    ]
+
+
+def test_default_runner_points_pwd_at_the_project(tmp_path):
+    finished = router_probes._default_native_runner(
+        ["sh", "-c", "printf %s \"$PWD\""], str(tmp_path), 30.0)
+    assert finished.returncode == 0
+    assert finished.stdout == str(tmp_path)
+
+
 def test_native_probe_disabled_by_default_makes_no_call():
     def _runner(argv, _cwd, _timeout):
         raise AssertionError("disabled probe must not run the CLI")

@@ -68,6 +68,7 @@ __all__ = [
     "SecurityRollback",
     "SkippedDeployment",
     "apply_security_rollback",
+    "build_external_providers_config",
     "build_gateway_plan",
     "build_opencode_config",
     "detect_opencode_schema",
@@ -88,7 +89,7 @@ __all__ = [
 ]
 
 #: External snapshot contract version; consumers pin this, not the code.
-EXTERNAL_SNAPSHOT_SCHEMA_VERSION = 1
+EXTERNAL_SNAPSHOT_SCHEMA_VERSION = 2
 
 #: Gateway endpoint OpenCode dials (SPEC §13.2); stubbed in tests, HOLD in prod.
 GATEWAY_BASE_URL = "http://127.0.0.1:4000/v1"
@@ -117,6 +118,22 @@ _LITELLM_PROVIDERS: dict[str, tuple[str, str]] = {
     "gemini": ("gemini", "FREE_ROUTER_GEMINI_API_KEY"),
 }
 _NATIVE_ONLY_PROVIDERS = ("opencode",)
+
+#: OpenAI-compatible chat-completions base URLs for group B providers
+#: configured directly in OpenCode (addendum v1.2 §3.4). Credentials
+#: stay in the ``FREE_ROUTER_*`` variables of :data:`_LITELLM_PROVIDERS`.
+_EXTERNAL_PROVIDER_BASE_URLS = {
+    "openrouter": "https://openrouter.ai/api/v1",
+    "nvidia": "https://integrate.api.nvidia.com/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+}
+_EXTERNAL_PROVIDER_DISPLAY = {
+    "openrouter": "OpenRouter",
+    "nvidia": "NVIDIA",
+    "groq": "Groq",
+    "gemini": "Gemini",
+}
 
 
 class ExternalError(RuntimeError):
@@ -147,13 +164,19 @@ class SkippedDeployment:
 
 @dataclass(frozen=True)
 class NativeRoute:
-    """One native OpenCode route: CLI model plus its provenance."""
+    """One OpenCode CLI route: ``--model`` plus its provenance.
+
+    Group A runs natively; group B runs through the provider
+    configured in OpenCode (addendum v1.2 §3.4), never the gateway.
+    """
 
     deployment_id: str
     canonical_model_id: str
     family_id: str
     rank: int
     command: tuple[str, ...]
+    route_type: str = "opencode_native_free"
+    allowed_client: str = "opencode_only"
 
 
 @dataclass(frozen=True)
@@ -198,6 +221,10 @@ class ConsumerRoute(BaseModel):
     family_id: str
     deployment_id: str
     provider: str
+    route_type: str
+    allowed_client: str
+    provider_id: str
+    model_id: str
     gateway_alias: str | None = None
     native_cli_model: str | None = None
 
@@ -546,6 +573,80 @@ def build_opencode_config(
     }
 
 
+def build_external_providers_config(
+    schema: str,
+    catalog: CatalogDocument,
+    *,
+    policy: RouterPolicy | None = None,
+) -> dict[str, Any]:
+    """Group B provider entries for OpenCode (addendum v1.2 §3.4, §5.1).
+
+    Only usable, healthy, ``free_verified`` external deployments land
+    in the document, under their plain provider id so the catalog
+    ``provider_id`` matches what the instance sees; ``{env:...}``
+    references carry the ``FREE_ROUTER_*`` credential names, never
+    values. Native ``opencode`` deployments need no entry and are
+    skipped. Unmapped external providers, route inconsistencies, an
+    empty eligible set, or an unknown schema refuse generation.
+    """
+    if schema not in OPENCODE_SCHEMAS:
+        raise ExternalError(
+            f"unknown opencode schema: {schema!r} (known: {', '.join(OPENCODE_SCHEMAS)})")
+    active = policy or RouterPolicy()
+    per_provider: dict[str, dict[str, str]] = {}
+    for entry in catalog.entries:
+        for deployment in entry.deployments:
+            if deployment.provider in _NATIVE_ONLY_PROVIDERS:
+                if deployment.route_type != "opencode_native_free":
+                    raise ExternalError(
+                        f"deployment {deployment.deployment_id} mixes the native"
+                        " provider with a non-native route")
+                continue
+            if deployment.route_type != "external_free":
+                raise ExternalError(
+                    f"deployment {deployment.deployment_id} mixes provider"
+                    f" {deployment.provider} with a native route")
+            if deployment.provider not in _EXTERNAL_PROVIDER_BASE_URLS:
+                raise ExternalError(
+                    f"deployment {deployment.deployment_id} has no OpenCode"
+                    f" mapping for provider {deployment.provider!r} (mapped:"
+                    f" {', '.join(sorted(_EXTERNAL_PROVIDER_BASE_URLS))})")
+            if not is_usable(deployment, active) or not deployment.healthy:
+                continue
+            models = per_provider.setdefault(deployment.provider, {})
+            models.setdefault(deployment.model_id,
+                              entry.display_name or deployment.model_id)
+    if not per_provider:
+        raise ExternalError("no eligible external deployment for group B config")
+    providers: dict[str, Any] = {}
+    for provider in sorted(per_provider):
+        base_url = _EXTERNAL_PROVIDER_BASE_URLS[provider]
+        env_var = _LITELLM_PROVIDERS[provider][1]
+        name = f"Free {_EXTERNAL_PROVIDER_DISPLAY[provider]} (model_routing)"
+        models = {model_id: {"name": per_provider[provider][model_id]}
+                  for model_id in sorted(per_provider[provider])}
+        if schema == "v2":
+            providers[provider] = {
+                "name": name,
+                "package": "@opencode/ai/providers/openai-compatible",
+                "env": [env_var],
+                "settings": {"baseURL": base_url, "apiKey": f"{{env:{env_var}}}"},
+                "models": models,
+            }
+        else:
+            providers[provider] = {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": name,
+                "options": {"baseURL": base_url, "apiKey": f"{{env:{env_var}}}"},
+                "models": models,
+            }
+    key = "providers" if schema == "v2" else "provider"
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        key: providers,
+    }
+
+
 def strip_gateway_provider(data: Mapping[str, Any]) -> dict[str, Any]:
     """Copy of the config without the gateway provider: native-only."""
     cleaned = copy.deepcopy(dict(data))
@@ -643,11 +744,13 @@ def plan_consumer_routes(
     gateway_available: bool,
     policy: RouterPolicy | None = None,
 ) -> dict[str, ProfileRoutes]:
-    """Per-profile serving plan; absent gateway falls back to native (T14).
+    """Per-profile serving plan; absent gateway falls back to OpenCode (T14).
 
-    Native mode serves ``opencode`` provider routes only: external
-    consumers hold no provider credentials, and a paid route must fail
-    instead of billing. The notice says so in plain words.
+    Native mode serves ``opencode`` routes plus external routes via
+    the provider configured in OpenCode (addendum v1.2 §3.4): group
+    B needs the generated provider config installed, and a paid
+    route must fail instead of billing. The notice says so in
+    plain words.
     """
     active = policy or RouterPolicy()
     index = _deployment_index(catalog)
@@ -677,8 +780,7 @@ def plan_consumer_routes(
                 if found is None:
                     continue
                 _entry, deployment = found
-                if (route.provider != "opencode"
-                        or deployment.provider != "opencode"
+                if (route.provider != deployment.provider
                         or not is_usable(deployment, active)):
                     continue
                 if route.deployment_id in seen:
@@ -688,18 +790,30 @@ def plan_consumer_routes(
                     deployment_id=route.deployment_id,
                     canonical_model_id=item.canonical_model_id,
                     family_id=item.family_id, rank=item.rank,
-                    command=("opencode", "run", "-m", route.deployment_id)))
+                    command=("opencode", "run", "-m",
+                             f"{deployment.provider_id}/{deployment.model_id}"),
+                    route_type=deployment.route_type,
+                    allowed_client=deployment.allowed_client))
         if native:
+            group_b = sum(1 for route in native
+                          if route.route_type != "opencode_native_free")
+            group_a = len(native) - group_b
+            if group_b:
+                notice = (f"gateway unavailable; {profile} serves {group_a}"
+                          f" native OpenCode {_routes_word(group_a)} and {group_b}"
+                          f" configured-provider {_routes_word(group_b)};"
+                          " group B needs the generated provider config")
+            else:
+                notice = (f"gateway unavailable; {profile} serves {group_a}"
+                          f" native OpenCode {_routes_word(group_a)}")
             plans[profile] = ProfileRoutes(
-                profile=profile, mode="native", native=tuple(native),
-                notice=(f"gateway unavailable; {profile} serves {len(native)}"
-                        f" native OpenCode {_routes_word(len(native))},"
-                        " others need the gateway"))
+                profile=profile, mode="native", native=tuple(native), notice=notice)
         else:
             plans[profile] = ProfileRoutes(
                 profile=profile, mode="blocked",
-                notice=(f"gateway unavailable and {profile} has no native"
-                        " OpenCode route; blocked, nothing paid touched"))
+                notice=(f"gateway unavailable and {profile} has no OpenCode"
+                        " route, native or configured; blocked,"
+                        " nothing paid touched"))
     return plans
 
 
@@ -757,6 +871,10 @@ def export_consumer_snapshot(
                     family_id=item.family_id,
                     deployment_id=route.deployment_id,
                     provider=route.provider,
+                    route_type=deployment.route_type,
+                    allowed_client=deployment.allowed_client,
+                    provider_id=deployment.provider_id,
+                    model_id=deployment.model_id,
                     gateway_alias=alias,
                     native_cli_model=(route.deployment_id
                                       if route.provider == "opencode" else None),
@@ -764,9 +882,13 @@ def export_consumer_snapshot(
         notice = ""
         if not gateway_available:
             native_count = sum(1 for route in routes if route.native_cli_model)
+            external_count = len(routes) - native_count
             notice = (f"gateway unavailable; {native_count}"
-                      f" native {_routes_word(native_count)},"
-                      " others need the gateway")
+                      f" native {_routes_word(native_count)}"
+                      + (f" and {external_count} configured-provider"
+                         f" {_routes_word(external_count)};"
+                         " group B needs the generated provider config"
+                         if external_count else ""))
         profiles[profile] = ConsumerProfile(profile=profile, routes=routes,
                                             native_notice=notice)
     snapshot = ConsumerSnapshot(
@@ -786,14 +908,65 @@ def export_consumer_snapshot(
     return snapshot
 
 
+def _migrate_snapshot_v1_to_v2(data: dict[str, Any]) -> dict[str, Any]:
+    """Fill the v2 route fields on a v1 snapshot; malformed input refuses."""
+    profiles = data.get("profiles")
+    if not isinstance(profiles, dict):
+        raise ExternalError("v1 snapshot has no profiles object")
+    migrated_profiles: dict[str, Any] = {}
+    for name, profile in profiles.items():
+        if not isinstance(profile, dict):
+            raise ExternalError(f"v1 snapshot profile {name!r} is not an object")
+        routes = profile.get("routes")
+        if not isinstance(routes, list):
+            raise ExternalError(f"v1 snapshot profile {name!r} has no routes list")
+        migrated_routes: list[dict[str, Any]] = []
+        for route in routes:
+            if not isinstance(route, dict):
+                raise ExternalError(f"v1 snapshot route in {name!r} is not an object")
+            provider = route.get("provider")
+            deployment_id = route.get("deployment_id")
+            if not isinstance(provider, str) or not provider:
+                raise ExternalError(f"v1 snapshot route in {name!r} misses its provider")
+            if not isinstance(deployment_id, str) or "/" not in deployment_id:
+                raise ExternalError(
+                    f"v1 snapshot route id is not provider/model:"
+                    f" {deployment_id!r}")
+            migrated = dict(route)
+            if provider in _NATIVE_ONLY_PROVIDERS:
+                migrated.setdefault("route_type", "opencode_native_free")
+                migrated.setdefault("allowed_client", "opencode_only")
+            else:
+                migrated.setdefault("route_type", "external_free")
+                migrated.setdefault("allowed_client", "configured_opencode_or_gateway")
+            migrated.setdefault("provider_id", provider)
+            migrated.setdefault("model_id", deployment_id.split("/", 1)[1])
+            migrated_routes.append(migrated)
+        migrated_profile = dict(profile)
+        migrated_profile["routes"] = migrated_routes
+        migrated_profiles[name] = migrated_profile
+    migrated_doc = dict(data)
+    migrated_doc["schema_version"] = EXTERNAL_SNAPSHOT_SCHEMA_VERSION
+    migrated_doc["profiles"] = migrated_profiles
+    return migrated_doc
+
+
 def load_consumer_snapshot(path: Path) -> ConsumerSnapshot:
-    """Read and validate an external snapshot; invalid reads refuse."""
+    """Read and validate an external snapshot; invalid reads refuse.
+
+    v1 snapshots migrate to v2 on read; anything else than v1 or v2
+    refuses.
+    """
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except OSError as exc:
         raise ExternalError(f"snapshot missing or unreadable: {path}") from exc
     except ValueError as exc:
         raise ExternalError(f"snapshot {path} is not valid JSON") from exc
+    if not isinstance(data, dict):
+        raise ExternalError(f"snapshot {path} has no top-level object")
+    if data.get("schema_version") == 1:
+        data = _migrate_snapshot_v1_to_v2(data)
     try:
         snapshot = ConsumerSnapshot.model_validate(data)
     except ValidationError as exc:

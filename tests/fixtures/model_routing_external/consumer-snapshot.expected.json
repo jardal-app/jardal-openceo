@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "generated_at": "GOLDEN",
   "generator": "external-test",
   "rankings_sha256": "sha256:6aeeae4464c64df4f75b396aad151c7423a240c43adc7f67b8cf639c250ab6ec",
@@ -20,6 +20,10 @@
           "family_id": "alpha",
           "deployment_id": "openrouter/example-alpha:free",
           "provider": "openrouter",
+          "route_type": "external_free",
+          "allowed_client": "configured_opencode_or_gateway",
+          "provider_id": "openrouter",
+          "model_id": "example-alpha:free",
           "gateway_alias": "free-research",
           "native_cli_model": null
         },
@@ -29,6 +33,10 @@
           "family_id": "alpha",
           "deployment_id": "groq/gpt-alpha",
           "provider": "groq",
+          "route_type": "external_free",
+          "allowed_client": "configured_opencode_or_gateway",
+          "provider_id": "groq",
+          "model_id": "gpt-alpha",
           "gateway_alias": "free-research",
           "native_cli_model": null
         },
@@ -38,11 +46,15 @@
           "family_id": "beta",
           "deployment_id": "nvidia/org-beta",
           "provider": "nvidia",
+          "route_type": "external_free",
+          "allowed_client": "configured_opencode_or_gateway",
+          "provider_id": "nvidia",
+          "model_id": "org-beta",
           "gateway_alias": "free-research",
           "native_cli_model": null
         }
       ],
-      "native_notice": "gateway unavailable; 0 native routes, others need the gateway"
+      "native_notice": "gateway unavailable; 0 native routes and 3 configured-provider routes; group B needs the generated provider config"
     },
     "free-review": {
       "profile": "free-review",
@@ -53,6 +65,10 @@
           "family_id": "alpha",
           "deployment_id": "groq/gpt-alpha",
           "provider": "groq",
+          "route_type": "external_free",
+          "allowed_client": "configured_opencode_or_gateway",
+          "provider_id": "groq",
+          "model_id": "gpt-alpha",
           "gateway_alias": "review-candidate-001",
           "native_cli_model": null
         },
@@ -62,11 +78,15 @@
           "family_id": "gamma",
           "deployment_id": "gemini/gamma-flash",
           "provider": "gemini",
+          "route_type": "external_free",
+          "allowed_client": "configured_opencode_or_gateway",
+          "provider_id": "gemini",
+          "model_id": "gamma-flash",
           "gateway_alias": "review-candidate-002",
           "native_cli_model": null
         }
       ],
-      "native_notice": "gateway unavailable; 0 native routes, others need the gateway"
+      "native_notice": "gateway unavailable; 0 native routes and 2 configured-provider routes; group B needs the generated provider config"
     },
     "free-general": {
       "profile": "free-general",
@@ -77,11 +97,15 @@
           "family_id": "beta",
           "deployment_id": "opencode/example-beta-free",
           "provider": "opencode",
+          "route_type": "opencode_native_free",
+          "allowed_client": "opencode_only",
+          "provider_id": "opencode",
+          "model_id": "example-beta-free",
           "gateway_alias": null,
           "native_cli_model": "opencode/example-beta-free"
         }
       ],
-      "native_notice": "gateway unavailable; 1 native route, others need the gateway"
+      "native_notice": "gateway unavailable; 1 native route"
     }
   }
 }

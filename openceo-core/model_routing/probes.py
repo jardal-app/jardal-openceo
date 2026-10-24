@@ -17,6 +17,7 @@ reads the instance catalog without generating.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -503,9 +504,15 @@ _INSTANCE_ID = re.compile(r"^([A-Za-z0-9_][A-Za-z0-9_.-]*)/(\S+)$")
 
 
 def _default_native_runner(argv: list[str], cwd: str, timeout: float) -> NativeRun:
+    # Installed OpenCode (v2.0.22) resolves the project from $PWD, not
+    # from the process cwd: without this a private server boots in the
+    # caller directory and never sees the project config (TASK-2026-00305).
+    env = dict(os.environ)
+    env["PWD"] = cwd
     try:
         completed = subprocess.run(
-            argv, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
+            argv, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False,
+            env=env,
         )
     except FileNotFoundError as exc:
         raise ProbeError("opencode", "native", "opencode CLI is not installed") from exc
@@ -602,6 +609,7 @@ def run_native_probe(
     runner: NativeRunner | None = None,
     workdir: str | None = None,
     timeout: float = 110.0,
+    standalone: bool = False,
 ) -> tuple[ProbeResult, dict]:
     """Probe one native route through the installed OpenCode CLI.
 
@@ -609,7 +617,10 @@ def run_native_probe(
     ``tool_calls`` run ``opencode run --model provider/model`` with a
     synthetic prompt in a fresh directory; ``streaming`` and
     ``second_turn`` have no native form. Quota errors raise
-    ``LiveRateLimited`` like their HTTP counterparts.
+    ``LiveRateLimited`` like their HTTP counterparts. ``standalone``
+    spawns a private server, which reads the project config from
+    ``workdir`` and inherits the caller environment: group B probes
+    need it so ``{env:FREE_ROUTER_*}`` resolves per invocation.
     """
     if not enabled:
         raise ProbeError(provider, kind, "probes are disabled by default")
@@ -620,7 +631,10 @@ def run_native_probe(
     else:
         raise ProbeError(provider, kind, f"{kind} probe has no native form")
     target = f"{provider}/{model}"
-    argv = ["opencode", "run", "--format", "json", "--model", target, prompt]
+    argv = ["opencode", "run", "--format", "json", "--model", target]
+    if standalone:
+        argv.append("--standalone")
+    argv.append(prompt)
     run = runner or _default_native_runner
     owned = workdir is None
     directory = tempfile.TemporaryDirectory(prefix="free-router-probe-") if owned else None

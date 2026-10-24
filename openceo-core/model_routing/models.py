@@ -56,6 +56,7 @@ __all__ = [
     "RankingsDocument",
     "RouteType",
     "RouterPolicy",
+    "SelectionPolicy",
     "StatusReport",
     "Usability",
     "collect_status",
@@ -125,6 +126,7 @@ class DeploymentLimits(BaseModel):
 
 RouteType = Literal["opencode_native_free", "external_free"]
 AllowedClient = Literal["opencode_only", "configured_opencode_or_gateway"]
+SelectionPolicy = Literal["native_first", "best_global"]
 
 
 class Deployment(BaseModel):
@@ -295,6 +297,7 @@ class RouterPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     policy_version: int = POLICY_SCHEMA_VERSION
+    selection_policy: SelectionPolicy = "native_first"
     strict_zero_cost: bool = True
     allow_paid_fallback: bool = False
     allow_unknown_price: bool = False

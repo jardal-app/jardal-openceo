@@ -319,6 +319,58 @@ def test_opencode_v2_golden():
     assert "provider" not in config
 
 
+def test_group_b_classic_golden():
+    config = router_external.build_external_providers_config(
+        "classic", _sample_catalog())
+    expected = json.loads((GOLDENS / "group-b-classic.expected.json").read_text())
+    assert config == expected
+    assert set(config["provider"]) == {"gemini", "groq", "nvidia", "openrouter"}
+    entry = config["provider"]["openrouter"]
+    assert entry["npm"] == "@ai-sdk/openai-compatible"
+    assert entry["options"]["baseURL"] == "https://openrouter.ai/api/v1"
+    assert entry["options"]["apiKey"] == "{env:FREE_ROUTER_OPENROUTER_API_KEY}"
+    assert set(entry["models"]) == {"example-alpha:free"}
+
+
+def test_group_b_v2_golden():
+    config = router_external.build_external_providers_config("v2", _sample_catalog())
+    expected = json.loads((GOLDENS / "group-b-v2.expected.json").read_text())
+    assert config == expected
+    assert set(config["providers"]) == {"gemini", "groq", "nvidia", "openrouter"}
+    entry = config["providers"]["groq"]
+    assert entry["package"] == "@opencode/ai/providers/openai-compatible"
+    assert entry["env"] == ["FREE_ROUTER_GROQ_API_KEY"]
+    assert entry["settings"]["baseURL"] == "https://api.groq.com/openai/v1"
+    assert entry["settings"]["apiKey"] == "{env:FREE_ROUTER_GROQ_API_KEY}"
+    assert set(entry["models"]) == {"gpt-alpha"}
+    assert "provider" not in config
+
+
+def test_group_b_config_skips_native_unusable_and_unhealthy():
+    catalog = _sample_catalog()
+    catalog.entries[0].deployments[0].free_verified = False
+    catalog.entries[0].deployments[1].healthy = False
+    config = router_external.build_external_providers_config("v2", catalog)
+    assert set(config["providers"]) == {"gemini", "nvidia"}
+    catalog.entries[1].deployments[1].input_price_usd = 0.02
+    catalog.entries[2].deployments[0].free_verified = False
+    with pytest.raises(router_external.ExternalError, match="no eligible external"):
+        router_external.build_external_providers_config("v2", catalog)
+
+
+def test_group_b_config_refuses_unknown_schema_unmapped_and_mixed_routes():
+    with pytest.raises(router_external.ExternalError, match="unknown opencode schema"):
+        router_external.build_external_providers_config("v3", _sample_catalog())
+    catalog = _sample_catalog()
+    catalog.entries[0].deployments[0].provider = "cerebras"
+    with pytest.raises(router_external.ExternalError, match="no OpenCode mapping"):
+        router_external.build_external_providers_config("v2", catalog)
+    catalog = _sample_catalog()
+    catalog.entries[0].deployments[0].route_type = "opencode_native_free"
+    with pytest.raises(router_external.ExternalError, match="mixes provider"):
+        router_external.build_external_providers_config("v2", catalog)
+
+
 def test_detect_opencode_schema():
     assert router_external.detect_opencode_schema({"provider": {}}) == "classic"
     assert router_external.detect_opencode_schema({"providers": {}}) == "v2"
@@ -430,10 +482,30 @@ def test_plan_consumer_routes_native_mode_t14():
         "opencode/example-beta-free"]
     assert general.native[0].command == (
         "opencode", "run", "-m", "opencode/example-beta-free")
+    assert general.native[0].route_type == "opencode_native_free"
     assert "gateway unavailable" in general.notice
     research = plans["free-research"]
+    assert research.mode == "native"
+    assert [route.deployment_id for route in research.native] == [
+        "openrouter/example-alpha:free", "groq/gpt-alpha", "nvidia/org-beta"]
+    assert research.native[0].command == (
+        "opencode", "run", "-m", "openrouter/example-alpha:free")
+    assert research.native[0].route_type == "external_free"
+    assert research.native[0].allowed_client == "configured_opencode_or_gateway"
+    assert "configured-provider" in research.notice
+    assert "generated provider config" in research.notice
+
+
+def test_plan_consumer_routes_blocked_without_any_opencode_route():
+    catalog = _sample_catalog()
+    for entry in catalog.entries:
+        for deployment in entry.deployments:
+            deployment.free_verified = False
+    plans = router_external.plan_consumer_routes(
+        catalog, _sample_rankings(), gateway_available=False)
+    research = plans["free-research"]
     assert research.mode == "blocked"
-    assert "no native" in research.notice
+    assert "no OpenCode route" in research.notice
     assert "nothing paid touched" in research.notice
 
 
@@ -490,7 +562,7 @@ def test_export_snapshot_golden(tmp_path):
     expected = json.loads(
         (GOLDENS / "consumer-snapshot.expected.json").read_text(encoding="utf-8"))
     assert actual == {**expected, "generated_at": actual["generated_at"]}
-    assert actual["schema_version"] == 1
+    assert actual["schema_version"] == 2
 
 
 def test_export_snapshot_refuses_unusable():
@@ -509,7 +581,7 @@ def test_load_snapshot_rejects_invalid(tmp_path):
     with pytest.raises(router_external.ExternalError, match="not valid JSON"):
         router_external.load_consumer_snapshot(target)
     target.write_text('{"schema_version": 1}', encoding="utf-8")
-    with pytest.raises(router_external.ExternalError, match="schema validation"):
+    with pytest.raises(router_external.ExternalError, match="no profiles object"):
         router_external.load_consumer_snapshot(target)
     snapshot = router_external.export_consumer_snapshot(
         _sample_catalog(), _sample_rankings(), target)
@@ -518,7 +590,50 @@ def test_load_snapshot_rejects_invalid(tmp_path):
     target.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(router_external.ExternalError, match="unsupported snapshot"):
         router_external.load_consumer_snapshot(target)
-    assert snapshot.schema_version == 1
+    assert snapshot.schema_version == 2
+
+
+def test_load_snapshot_migrates_v1_to_v2(tmp_path):
+    target = tmp_path / "snap-v1.json"
+    payload = {
+        "schema_version": 1,
+        "generated_at": "2026-10-23T00:00:00+00:00",
+        "generator": "external-test",
+        "rankings_sha256": "sha256:0",
+        "catalog_snapshot": "catalog-test",
+        "gateway": {"base_url": "http://127.0.0.1:4000/v1",
+                    "backend": "litellm", "eligible_sha256": "0" * 64},
+        "profiles": {
+            "free-general": {
+                "profile": "free-general",
+                "routes": [
+                    {"rank": 1, "canonical_model_id": "example/beta",
+                     "family_id": "beta",
+                     "deployment_id": "opencode/example-beta-free",
+                     "provider": "opencode", "gateway_alias": None,
+                     "native_cli_model": "opencode/example-beta-free"},
+                    {"rank": 2, "canonical_model_id": "example/alpha",
+                     "family_id": "alpha",
+                     "deployment_id": "openrouter/example-alpha:free",
+                     "provider": "openrouter", "gateway_alias": "free-general",
+                     "native_cli_model": None},
+                ],
+                "native_notice": "gateway unavailable; 1 native route,"
+                                 " others need the gateway",
+            },
+        },
+    }
+    target.write_text(json.dumps(payload), encoding="utf-8")
+    snapshot = router_external.load_consumer_snapshot(target)
+    assert snapshot.schema_version == 2
+    native, external = snapshot.profiles["free-general"].routes
+    assert (native.route_type, native.allowed_client,
+            native.provider_id, native.model_id) == (
+        "opencode_native_free", "opencode_only", "opencode", "example-beta-free")
+    assert (external.route_type, external.allowed_client,
+            external.provider_id, external.model_id) == (
+        "external_free", "configured_opencode_or_gateway",
+        "openrouter", "example-alpha:free")
 
 
 def test_load_consumer_inputs(tmp_path):

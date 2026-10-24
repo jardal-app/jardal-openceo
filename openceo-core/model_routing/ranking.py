@@ -53,6 +53,7 @@ __all__ = [
     "ResolvedScoring",
     "fallback_chain",
     "load_rankings",
+    "profile_requirements",
     "publish_rankings",
     "rank_catalog",
     "resolve_scoring",
@@ -133,6 +134,15 @@ class ExplainedModel:
     rank: int | None = None
     quality: float | None = None
     reasons: tuple[str, ...] = ()
+
+
+def profile_requirements(profile: str) -> ProfileRequirements:
+    """Hard gates one profile applies; unknown profiles refuse (addendum §3)."""
+    try:
+        return _RANK_REQUIREMENTS[profile]
+    except KeyError:
+        raise ValueError(
+            f"unknown profile: {profile!r} (known: {sorted(RANK_PROFILES)})") from None
 
 
 def resolve_scoring(profile: str, policy: RouterPolicy | None = None) -> ResolvedScoring:
