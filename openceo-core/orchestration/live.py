@@ -31,6 +31,7 @@ from model_routing.reviewer_isolation import (
     opencode_argv_extras as reviewer_agent_extras,
 )
 from model_routing.reviewer_isolation import plan_reviewer
+from model_routing.secrets import SecretsError, load_router_secrets
 from orchestration.agent_sandbox import cleanup_sandbox_scratch, plan_agent
 from orchestration.role_claude import (
     CLAUDE_MCP_OVERLAY_RELPATH,
@@ -380,6 +381,40 @@ class ProcessExecutor:
             overlay["GIT_OPTIONAL_LOCKS"] = "0"
         model = str(spec.get("model") or "")
         slot = str(spec.get("account") or spec.get("label") or role)
+        review_providers: Mapping[str, Any] | None = None
+        review_secrets: dict[str, str] | None = None
+        if hardened and isinstance(spec.get("review_target"), Mapping):
+            review_target = dict(spec["review_target"])
+            env_var = str(review_target.get("env_var") or "")
+            providers = review_target.get("providers")
+            misconfigured: str | None = None
+            if not env_var or not isinstance(providers, Mapping) or not providers:
+                misconfigured = (
+                    "reviewer misconfigured: group B target misses "
+                    "its credential name or providers")
+            else:
+                try:
+                    loaded = load_router_secrets()
+                except SecretsError as exc:
+                    misconfigured = (
+                        "reviewer misconfigured: group B credential "
+                        f"unavailable: {exc}")
+                else:
+                    value = getattr(loaded, env_var, "")
+                    if not isinstance(value, str) or not value:
+                        misconfigured = (
+                            "reviewer misconfigured: group B credential "
+                            f"{env_var} is unset")
+                    else:
+                        review_providers = providers
+                        review_secrets = {env_var: value}
+            if misconfigured is not None:
+                if badge is not None and self._badge_provider is not None:
+                    await self._badge_provider.revoke(badge)
+                return ExecResult(
+                    returncode=1, elapsed_s=0.0,
+                    output_tail=misconfigured,
+                    model=model, slot=slot)
         try:
             if hardened:
                 plan = plan_reviewer(
@@ -387,7 +422,9 @@ class ProcessExecutor:
                     report=None, project=workdir, overlay=overlay,
                     config_args=config_argv,
                     extra_read_roots=spec.get("extra_read_roots") or (),
-                    extra_write_roots=spec.get("extra_write_roots") or ())
+                    extra_write_roots=spec.get("extra_write_roots") or (),
+                    providers=review_providers,
+                    provider_secrets=review_secrets)
             else:
                 plan = plan_agent(argv=full_argv, workspace=workdir,
                                   base=os.environ, overlay=overlay,

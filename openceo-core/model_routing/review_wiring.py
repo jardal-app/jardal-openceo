@@ -15,10 +15,24 @@ provider. Anything else (missing, expired or pair-less snapshot,
 disabled switch) falls back to today's static pool: ``mimo``,
 ``nemotron`` and the ``reviewer_models.yaml`` reserves, unchanged.
 Non-free slots (dsh, claudep, gemini, muse-review) never change.
+
+Addendum v1.2 (TASK-2026-00306): when a v2 catalog is published next
+to the rankings, the fed slots take the ``native_first`` list of the
+``free-review`` profile instead: group A OpenCode Free targets first,
+then group B external targets configured directly in OpenCode, every
+reviewer launched with an explicit ``--model`` and restarted alone
+from the same snapshot and prompt on the next eligible target when
+it fails recoverably. Group B credentials reach the fenced run
+through the audited handoff of ``reviewer_isolation`` (references in
+the config, values only in the process env, ``/proc`` denied to the
+review tools). Without a catalog the legacy OpenCode-only path above
+still serves; the manual list and ``reviewer_models.yaml`` stay as
+the respaldo.
 """
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -26,7 +40,7 @@ import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Container, Mapping, Sequence
 
 from model_routing.availability import (
     AvailabilityStore,
@@ -41,9 +55,24 @@ from model_routing.availability import (
     write_audit_event,
 )
 from model_routing.errors import ClassifiedError, classify_text, classify_timeout
-from model_routing.models import ProfileRanking, RankingsDocument
-from model_routing.paths import rankings_path
+from model_routing.external import (
+    ExternalError,
+    build_external_providers_config,
+    credential_env_for,
+)
+from model_routing.models import (
+    CatalogDocument,
+    CatalogEntry,
+    Deployment,
+    ProfileRanking,
+    RankingsDocument,
+)
+from model_routing.paths import catalog_path, rankings_path
+from model_routing.probes import read_instance_models
+from model_routing.publish import PublishError, load_catalog_doc
 from model_routing.ranking import fallback_chain, load_rankings
+from model_routing.secrets import SecretsError, load_router_secrets
+from model_routing.selector import NoEligibleTarget, select_targets
 from orchestration.review import ReviewSlot
 
 __all__ = [
@@ -58,11 +87,14 @@ __all__ = [
     "ROUND2_POLICIES",
     "UNVERIFIED_FAMILIES",
     "Assembly",
+    "GROUP_B_CONFIG_SCHEMA",
     "LabelState",
     "NoReviewPair",
     "R1Result",
+    "REVIEW_TARGET_SPEC",
     "ReviewReceipt",
     "ReviewRoutingError",
+    "ReviewTarget",
     "RoundBlocked",
     "RoundRouting",
     "RoundSnapshot",
@@ -73,6 +105,7 @@ __all__ = [
     "free_router_settings",
     "load_round_snapshot",
     "load_valid_receipt",
+    "native_review_targets",
     "pick_pair",
     "plan_fallback",
     "receipt_filenames",
@@ -132,6 +165,65 @@ class NoReviewPair(ReviewRoutingError):
 
 class RoundBlocked(ReviewRoutingError):
     """``four_distinct`` cannot plan four families across both rounds."""
+
+
+#: Spec key carrying one group B handoff (names and config, no values).
+REVIEW_TARGET_SPEC = "review_target"
+
+#: OpenCode config grammar of the installed CLI (v2.0.22, TASK-2026-00305).
+GROUP_B_CONFIG_SCHEMA = "v2"
+
+
+@dataclass(frozen=True)
+class ReviewTarget(Candidate):
+    """One native_first review candidate (addendum v1.2 §3, §5.1).
+
+    Group A carries the real native ids; group B additionally names
+    its credential env var and embeds the single-provider OpenCode
+    config built at assembly time, with ``{env:...}`` references only.
+    The availability flow (pair pick, reservations, §11.6 walk) only
+    reads the :class:`Candidate` fields.
+    """
+
+    route_type: str = "opencode_native_free"
+    provider_id: str = ""
+    model_id: str = ""
+    opencode_model: str = ""
+    credential_env: str = ""
+    provider_config: dict[str, Any] | None = None
+
+    @property
+    def is_external(self) -> bool:
+        """True for group B targets served through a configured provider."""
+        return self.route_type == "external_free"
+
+    def model_arg(self) -> str:
+        """Explicit ``opencode run --model`` value (never an alias)."""
+        return self.opencode_model or self.deployment_id
+
+
+def _model_arg(candidate: Candidate) -> str:
+    if isinstance(candidate, ReviewTarget):
+        return candidate.model_arg()
+    return candidate.deployment_id
+
+
+def _target_group(candidate: Candidate) -> str:
+    if isinstance(candidate, ReviewTarget) and candidate.is_external:
+        return "B"
+    return "A"
+
+
+def _target_route(candidate: Candidate) -> str:
+    if isinstance(candidate, ReviewTarget) and candidate.route_type:
+        return candidate.route_type
+    return "opencode_native_free"
+
+
+def _target_ids(candidate: Candidate) -> tuple[str, str]:
+    if isinstance(candidate, ReviewTarget) and candidate.provider_id:
+        return candidate.provider_id, candidate.model_id
+    return candidate.provider, candidate.deployment_id
 
 
 def free_router_settings(review_cfg: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -246,6 +338,188 @@ def review_candidates(
     return candidates
 
 
+def _catalog_deployments(
+    catalog: CatalogDocument,
+) -> dict[str, tuple[CatalogEntry, Deployment]]:
+    return {
+        deployment.deployment_id: (entry, deployment)
+        for entry in catalog.entries
+        for deployment in entry.deployments
+    }
+
+
+def _single_provider_config(
+    entry: CatalogEntry,
+    deployment: Deployment,
+) -> dict[str, Any] | None:
+    """v2 OpenCode entries for one group B deployment, refs only.
+
+    Reuses the group B builder over a one-entry document so the same
+    fail-closed checks apply; None when the builder refuses it.
+    """
+    try:
+        document = CatalogDocument(entries=[CatalogEntry(
+            family_id=entry.family_id,
+            canonical_model_id=entry.canonical_model_id,
+            display_name=entry.display_name,
+            deployments=[deployment])])
+        built = build_external_providers_config(
+            GROUP_B_CONFIG_SCHEMA, document)
+    except (ExternalError, ValueError):
+        return None
+    providers = built.get("providers")
+    return dict(providers) if isinstance(providers, dict) else None
+
+
+def native_review_targets(
+    snapshot: RoundSnapshot,
+    catalog: CatalogDocument,
+    store: AvailabilityStore,
+    *,
+    exclusions: Exclusions | None = None,
+    instance_models: Container[tuple[str, str]] | None = None,
+    credentials: Mapping[str, str] | None = None,
+    run_id: str | None = None,
+) -> list[ReviewTarget]:
+    """Ordered group A then group B review targets (addendum v1.2 §3).
+
+    The :mod:`selector` order (zero-cost, health, profile, instance
+    allowlist, store gates) converts to review candidates; group B
+    additionally needs a configured credential and a buildable
+    single-provider config, else it drops with an audit event. Empty
+    raises :class:`NoReviewPair` like the legacy path.
+    """
+    try:
+        selection = select_targets(
+            FREE_REVIEW_PROFILE, catalog, snapshot.document,
+            store=store, exclusions=exclusions,
+            instance_models=instance_models, run_id=run_id)
+    except NoEligibleTarget as exc:
+        raise NoReviewPair(str(exc)) from exc
+    index = _catalog_deployments(catalog)
+    have = {str(name) for name, value in dict(credentials or {}).items()
+            if str(value)}
+    targets: list[ReviewTarget] = []
+    for target in selection.targets:
+        found = index.get(target.deployment_id)
+        if found is None:
+            continue
+        entry, deployment = found
+        external = target.group != "A"
+        env_var = ""
+        provider_config: dict[str, Any] | None = None
+        if external:
+            try:
+                env_var = credential_env_for(deployment.provider)
+            except ExternalError:
+                write_audit_event(
+                    store, run_id or "-", "review_group_b_unmapped",
+                    f"{target.deployment_id}: provider "
+                    f"{deployment.provider} has no OpenCode mapping")
+                continue
+            if env_var not in have:
+                write_audit_event(
+                    store, run_id or "-", "review_group_b_uncredentialed",
+                    f"{target.deployment_id}: {env_var} is unset")
+                continue
+            provider_config = _single_provider_config(entry, deployment)
+            if not provider_config:
+                write_audit_event(
+                    store, run_id or "-", "review_group_b_unbuildable",
+                    f"{target.deployment_id}: provider config refused")
+                continue
+        targets.append(ReviewTarget(
+            deployment_id=target.deployment_id,
+            family_id=target.family_id,
+            canonical_model_id=target.canonical_model_id,
+            provider=deployment.provider, quality=target.quality,
+            route_type=target.route_type,
+            provider_id=target.provider_id, model_id=target.model_id,
+            opencode_model=target.opencode_model,
+            credential_env=env_var, provider_config=provider_config))
+    if not targets:
+        raise NoReviewPair(
+            f"no servable {FREE_REVIEW_PROFILE} target after the group B "
+            "credential and config gates")
+    return targets
+
+
+def _resolve_round_credentials(
+    router_secrets: Mapping[str, str] | None,
+) -> dict[str, str]:
+    """Credential presence for one round; names only, never values."""
+    if router_secrets is not None:
+        return {str(name): str(value)
+                for name, value in dict(router_secrets).items()
+                if str(value)}
+    try:
+        loaded = load_router_secrets()
+    except SecretsError as exc:
+        logger.warning("free-router group B unavailable: %s", exc)
+        return {}
+    return {name: value for name, value in vars(loaded).items()
+            if isinstance(value, str) and value}
+
+
+def _resolve_instance_models(
+    store: AvailabilityStore,
+    run_id: str,
+    instance_models: Container[tuple[str, str]] | None,
+    auto_instance: bool,
+) -> Container[tuple[str, str]] | None:
+    """Instance allowlist for group A; best-effort when automatic.
+
+    An unavailable or empty instance listing skips the gate with an
+    audit event instead of failing the round: the target still faces
+    every other gate, and a stale id fails fast at ``opencode run``.
+    """
+    if instance_models is not None:
+        return instance_models
+    if not auto_instance:
+        return None
+    try:
+        found = read_instance_models()
+    except Exception as exc:
+        write_audit_event(
+            store, run_id, "review_instance_unlisted", str(exc)[:200])
+        logger.warning("free-router instance listing unavailable: %s", exc)
+        return None
+    if not found.models:
+        write_audit_event(store, run_id, "review_instance_unlisted",
+                          "instance listed no models")
+        return None
+    return found.models
+
+
+def _round_candidates(
+    snapshot: RoundSnapshot,
+    store: AvailabilityStore,
+    run_id: str,
+    *,
+    base_exclusions: frozenset[str],
+    catalog_file: Path | None,
+    router_secrets: Mapping[str, str] | None,
+    instance_models: Container[tuple[str, str]] | None,
+    auto_instance: bool,
+) -> list[Candidate]:
+    """Native-first candidates with a catalog, else the legacy order."""
+    target = Path(catalog_file) if catalog_file is not None else catalog_path()
+    if not target.exists():
+        return review_candidates(snapshot.profile)
+    try:
+        catalog = load_catalog_doc(target)
+    except PublishError as exc:
+        raise ReviewRoutingError(
+            f"catalog {target} invalid: {exc}") from exc
+    return native_review_targets(
+        snapshot, catalog, store,
+        exclusions=Exclusions(families=base_exclusions),
+        instance_models=_resolve_instance_models(
+            store, run_id, instance_models, auto_instance),
+        credentials=_resolve_round_credentials(router_secrets),
+        run_id=run_id)
+
+
 def static_exclusions(
     raw_pool: Sequence[Mapping[str, Any]],
     *,
@@ -284,6 +558,7 @@ class LabelState:
     tried_canonicals: set[str] = field(default_factory=set)
     tried_families: set[str] = field(default_factory=set)
     fallback_count: int = 0
+    last_change_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -310,6 +585,10 @@ class ReviewReceipt:
     fallback_count: int
     started_at: str
     finished_at: str
+    route_type: str = "opencode_native_free"
+    provider_id: str = ""
+    model_id: str = ""
+    change_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -327,6 +606,9 @@ class ReviewReceipt:
             "report_path": self.report_path, "sha256": self.sha256,
             "result": self.result, "fallback_count": self.fallback_count,
             "started_at": self.started_at, "finished_at": self.finished_at,
+            "route_type": self.route_type,
+            "provider_id": self.provider_id, "model_id": self.model_id,
+            "change_reason": self.change_reason,
         }
 
     @classmethod
@@ -352,7 +634,12 @@ class ReviewReceipt:
             sha256=str(data["sha256"]), result=str(data["result"]),
             fallback_count=int(data.get("fallback_count") or 0),
             started_at=str(data.get("started_at") or ""),
-            finished_at=str(data.get("finished_at") or ""))
+            finished_at=str(data.get("finished_at") or ""),
+            route_type=str(
+                data.get("route_type") or "opencode_native_free"),
+            provider_id=str(data.get("provider_id") or ""),
+            model_id=str(data.get("model_id") or ""),
+            change_reason=str(data.get("change_reason") or ""))
 
 
 @dataclass
@@ -605,9 +892,10 @@ def _select_reuse_top_two(
 
 def derive_slot(slot: ReviewSlot, candidate: Candidate) -> ReviewSlot:
     """Same label and priority, new ranking-fed model identity."""
+    model = _model_arg(candidate)
     return replace(
-        slot, model=candidate.deployment_id, family=candidate.family_id,
-        command=("opencode", "run", "-m", candidate.deployment_id))
+        slot, model=model, family=candidate.family_id,
+        command=("opencode", "run", "-m", model))
 
 
 def _safe_name(value: str) -> str:
@@ -643,10 +931,11 @@ def build_receipt(
             break
     _, report_path = receipt_filenames(
         routing.receipts_dir, routing.run_id, routing.round, label)
+    provider_id, model_id = _target_ids(effective)
     return ReviewReceipt(
         run_id=routing.run_id, round=routing.round, slot=label,
-        requested_model=state.requested.deployment_id,
-        effective_model=effective.deployment_id,
+        requested_model=_model_arg(state.requested),
+        effective_model=_model_arg(effective),
         family_id=effective.family_id,
         canonical_model_id=effective.canonical_model_id,
         provider=effective.provider,
@@ -656,7 +945,10 @@ def build_receipt(
         reviewed_commit=reviewed_commit, report_path=str(report_path),
         sha256=hashlib.sha256(report_text.encode("utf-8")).hexdigest(),
         result="validated", fallback_count=state.fallback_count,
-        started_at=started_at, finished_at=finished_at)
+        started_at=started_at, finished_at=finished_at,
+        route_type=_target_route(effective),
+        provider_id=provider_id, model_id=model_id,
+        change_reason=state.last_change_reason)
 
 
 def record_receipt(
@@ -790,6 +1082,11 @@ def plan_fallback(
         state.tried_canonicals.add(nxt.canonical_model_id)
         state.tried_families.add(nxt.family_id)
         state.fallback_count += 1
+        before, after = _target_group(effective), _target_group(nxt)
+        crossed = f" (group {before}->{after})" if before != after else ""
+        state.last_change_reason = (
+            f"{classified.error_class}: {effective.deployment_id} -> "
+            f"{nxt.deployment_id}{crossed}")
         write_audit_event(
             routing.store, routing.run_id, "review_fallback",
             f"{label}: {effective.deployment_id} -> {nxt.deployment_id} "
@@ -803,14 +1100,24 @@ def plan_fallback(
 
 def dynamic_entry(label: str, priority: int, candidate: Candidate) -> dict[str, Any]:
     """Raw pool entry of one ranking-fed label (hardened §14.3)."""
-    return {
+    model = _model_arg(candidate)
+    entry: dict[str, Any] = {
         "label": label, "provider": "opencode",
-        "model": candidate.deployment_id, "family": candidate.family_id,
+        "model": model, "family": candidate.family_id,
         "priority": priority, "active": True,
         "quota": "reactive", "prompt_via": "argv",
-        "command": ["opencode", "run", "-m", candidate.deployment_id],
+        "command": ["opencode", "run", "-m", model],
         HARDENED_MARK: True,
     }
+    if isinstance(candidate, ReviewTarget) and candidate.is_external:
+        entry[REVIEW_TARGET_SPEC] = {
+            "provider_id": candidate.provider_id,
+            "model_id": candidate.model_id,
+            "route_type": candidate.route_type,
+            "env_var": candidate.credential_env,
+            "providers": copy.deepcopy(candidate.provider_config or {}),
+        }
+    return entry
 
 
 _dynamic_entry = dynamic_entry
@@ -839,6 +1146,10 @@ def assemble_review_pool(
     receipts_dir: Path | str,
     rankings_path: Path | None = None,
     r1: R1Result | None = None,
+    catalog_file: Path | None = None,
+    router_secrets: Mapping[str, str] | None = None,
+    instance_models: Container[tuple[str, str]] | None = None,
+    auto_instance: bool = True,
 ) -> Assembly:
     """Pool plus routing for one dev-review round.
 
@@ -847,7 +1158,10 @@ def assemble_review_pool(
     Every other shape (switch off, no snapshot, expired snapshot,
     no pair) keeps the static pool; degraded shapes audit why.
     Round 2 takes ``r1`` and the configured §11.3 policy; only
-    ``four_distinct`` without a four-family plan raises.
+    ``four_distinct`` without a four-family plan raises. With a
+    catalog next to the rankings the pair comes from the native_first
+    list (group A then group B); without one the legacy
+    OpenCode-only order still serves.
     """
     settings = free_router_settings(review_cfg)
     static = _marked_static(raw_pool)
@@ -865,8 +1179,23 @@ def assemble_review_pool(
     if snapshot is None:
         return Assembly(raw_pool=static, routing=None)
     store = AvailabilityStore()
-    candidates = review_candidates(snapshot.profile)
     static_fams = static_exclusions(raw_pool, builder_family=builder_family)
+    base_exclusions = (static_fams if r1 is None
+                       else frozenset({builder_family.strip().lower()}))
+    try:
+        candidates = _round_candidates(
+            snapshot, store, run_id, base_exclusions=base_exclusions,
+            catalog_file=catalog_file, router_secrets=router_secrets,
+            instance_models=instance_models, auto_instance=auto_instance)
+    except NoReviewPair as exc:
+        write_audit_event(store, run_id, "review_pair_unavailable", str(exc)[:200])
+        logger.warning("free-router static fallback: %s", exc)
+        store.close()
+        return Assembly(raw_pool=static, routing=None)
+    except ReviewRoutingError as exc:
+        logger.warning("free-router static fallback: %s", exc)
+        store.close()
+        return Assembly(raw_pool=static, routing=None)
     try:
         if r1 is None:
             first_pick, second_pick = pick_pair(

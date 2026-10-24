@@ -75,5 +75,5 @@ each ticket.
 ## Provenance
 
 - catalog schema 2, rankings schema 1
-- recorded fixtures digest e9a1df60fa5c582a
+- recorded fixtures digest 06e84a1c6fea5b95
 - battery GREEN

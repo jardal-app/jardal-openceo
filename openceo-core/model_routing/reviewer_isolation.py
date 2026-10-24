@@ -6,7 +6,10 @@ OpenCode ``review`` configuration (deny-all tool policy plus read-only
 agent entry), per-run replacement of the Owner's OpenCode config files
 (the global file embeds a real API key, so ``OPENCODE_CONFIG_CONTENT``
 alone cannot hide it), tmpfs masks over the router config/state
-directories, and refusal of any reviewer env carrying provider keys.
+directories, refusal of any reviewer overlay env carrying provider
+keys, and one audited group B handoff (``providers`` plus
+``provider_secrets``) whose values reach only the process env while
+``/proc`` stays denied to the review tools (TASK-2026-00306).
 
 The tool frontier lives in ``experimental.policies`` only: any ``deny``
 in the agent entry makes the free OpenCode tier answer
@@ -24,10 +27,12 @@ no live budget.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
+import re
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from agents.dev.tier_s_contract import (
     _looks_like_secret as _secret_like_key,
@@ -40,6 +45,7 @@ __all__ = [
     "OPENCODE_CONFIG_RELPATH",
     "OPENCODE_SERVICE_RELPATH",
     "REVIEW_AGENT_NAME",
+    "check_group_b_handoff",
     "check_reviewer_overlay",
     "opencode_argv_extras",
     "agy_argv_extras",
@@ -82,6 +88,7 @@ _READ_SECRET_DENY = (
     "*oauth-token*",
     "*opencode.jsonc*",
     "/etc/*",
+    "/proc/*",
 )
 
 _AGENT_ALLOW = (*_READ_ALLOW, "edit", "write")
@@ -98,6 +105,9 @@ def reviewer_policies(report: Path | None, project: Path) -> list[dict[str, str]
     inherited allows (verified against opencode v2.0.22). Secret
     denies replicate over ``read``/``grep``/``glob``: ``grep`` returns
     file content, so a ``read``-only deny would leave it a bypass.
+    ``/proc`` stays denied so ``read``/``grep`` cannot reach the
+    process env through ``/proc/*/environ`` (group B credentials,
+    TASK-2026-00306); the agent entry itself carries no exec tool.
     """
     policies = [
         {"action": "permission", "resource": "*", "effect": "deny"}
@@ -169,9 +179,19 @@ def review_agent_entry() -> dict[str, object]:
     }
 
 
-def reviewer_config(report: Path | None, project: Path) -> dict[str, object]:
-    """Full OpenCode config replacing the Owner's for one reviewer run."""
-    return {
+def reviewer_config(
+    report: Path | None,
+    project: Path,
+    *,
+    providers: Mapping[str, Any] | None = None,
+) -> dict[str, object]:
+    """Full OpenCode config replacing the Owner's for one reviewer run.
+
+    ``providers`` carries group B entries (v2 ``providers`` grammar)
+    with ``{env:...}`` credential references only, never values
+    (validated by :func:`plan_reviewer` before the merge).
+    """
+    config: dict[str, object] = {
         "$schema": "https://opencode.ai/config.json",
         "snapshots": False,
         "formatter": False,
@@ -183,15 +203,31 @@ def reviewer_config(report: Path | None, project: Path) -> dict[str, object]:
         "agent": {REVIEW_AGENT_NAME: review_agent_entry()},
         "experimental": {"policies": reviewer_policies(report, project)},
     }
+    if providers is not None:
+        config["providers"] = {
+            str(name): copy.deepcopy(dict(entry))
+            for name, entry in dict(providers).items()
+        }
+    return config
 
 
-def reviewer_config_bytes(report: Path | None, project: Path) -> bytes:
+def reviewer_config_bytes(
+    report: Path | None,
+    project: Path,
+    *,
+    providers: Mapping[str, Any] | None = None,
+) -> bytes:
     """Serialized :func:`reviewer_config` for env and file overlays."""
-    return (json.dumps(reviewer_config(report, project), indent=2,
-                       ensure_ascii=False) + "\n").encode("utf-8")
+    return (json.dumps(reviewer_config(report, project, providers=providers),
+                       indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
 
-def reviewer_overlays(report: Path | None, project: Path) -> dict[str, bytes]:
+def reviewer_overlays(
+    report: Path | None,
+    project: Path,
+    *,
+    providers: Mapping[str, Any] | None = None,
+) -> dict[str, bytes]:
     """Home-relative config files replaced for one reviewer run.
 
     The Owner's global config embeds a real API key and ``service.json``
@@ -199,18 +235,25 @@ def reviewer_overlays(report: Path | None, project: Path) -> dict[str, bytes]:
     and need neither, so both are replaced instead of inherited.
     """
     return {
-        OPENCODE_CONFIG_RELPATH: reviewer_config_bytes(report, project),
+        OPENCODE_CONFIG_RELPATH: reviewer_config_bytes(
+            report, project, providers=providers),
         OPENCODE_SERVICE_RELPATH: b"{}\n",
     }
 
 
-def reviewer_content_env(report: Path | None, project: Path) -> dict[str, str]:
+def reviewer_content_env(
+    report: Path | None,
+    project: Path,
+    *,
+    providers: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
     """Reviewer env additions for OpenCode slots (defence in depth).
 
     Mirrors the file overlay: if the overlay ever failed to apply, the
     content variable still enforces the same tool policy.
     """
-    content = reviewer_config_bytes(report, project).decode("utf-8")
+    content = reviewer_config_bytes(
+        report, project, providers=providers).decode("utf-8")
     return {
         _CONFIG_CONTENT_ENV: content,
         _DISABLE_AUTOUPDATE_ENV: "true",
@@ -232,6 +275,8 @@ def check_reviewer_overlay(overlay: Mapping[str, str] | None) -> None:
 
     Every ``FREE_ROUTER_*`` name is refused: the gateway and master
     keys end in ``_KEY``, which the shared secret heuristic misses.
+    Group B credentials never travel the overlay; they use the
+    audited ``provider_secrets`` handoff of :func:`plan_reviewer`.
     """
     for key in dict(overlay or {}):
         name = str(key)
@@ -242,6 +287,96 @@ def check_reviewer_overlay(overlay: Mapping[str, str] | None) -> None:
                 or _secret_like_key(name)):
             raise ValueError(
                 f"reviewer overlay refuses secret-bearing key: {name}")
+
+
+#: Group B credential names a reviewer run may carry (mirrors the
+#: values of ``external._LITELLM_PROVIDERS``; fixed by TASK-2026-00305).
+_GROUP_B_CREDENTIAL_ENVS = frozenset({
+    "FREE_ROUTER_OPENROUTER_API_KEY",
+    "FREE_ROUTER_NVIDIA_NIM_API_KEY",
+    "FREE_ROUTER_GROQ_API_KEY",
+    "FREE_ROUTER_GEMINI_API_KEY",
+})
+
+_ENV_REF_RE = re.compile(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _walk_leaves(node: Any) -> list[str]:
+    found: list[str] = []
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, Mapping):
+        for value in node.values():
+            found.extend(_walk_leaves(value))
+    elif isinstance(node, (list, tuple)):
+        for value in node:
+            found.extend(_walk_leaves(value))
+    return found
+
+
+def check_group_b_handoff(
+    providers: Mapping[str, Any] | None,
+    provider_secrets: Mapping[str, str] | None,
+) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+    """Validate one group B credential handoff; fail closed (00306).
+
+    Secrets pair with providers or neither travels: the names must be
+    known group B credential names with non-empty values, every
+    ``apiKey`` leaf must be an ``{env:NAME}`` reference to a handed
+    secret, and no secret value may appear anywhere in the providers
+    document. Returns normalized copies; ``(None, None)`` is the
+    credential-free group A shape.
+    """
+    if providers is None and provider_secrets is None:
+        return None, None
+    if providers is None or provider_secrets is None:
+        raise ValueError(
+            "group B handoff needs both providers and provider_secrets")
+    secrets = {str(name): str(value)
+               for name, value in dict(provider_secrets).items()}
+    if not secrets:
+        raise ValueError("group B handoff carries no secret")
+    for name, value in secrets.items():
+        if name not in _GROUP_B_CREDENTIAL_ENVS:
+            raise ValueError(
+                f"group B handoff refuses credential name: {name}")
+        if not value:
+            raise ValueError(f"group B handoff refuses empty secret: {name}")
+    if not isinstance(providers, Mapping) or not dict(providers):
+        raise ValueError("group B handoff carries no provider entry")
+    normalized = {str(name): copy.deepcopy(dict(entry))
+                  for name, entry in dict(providers).items()}
+    for name, entry in normalized.items():
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"group B provider {name!r} is not an object")
+    leaves = _walk_leaves(normalized)
+    for value in secrets.values():
+        if any(value in leaf for leaf in leaves):
+            raise ValueError(
+                "group B handoff refuses a secret value inside providers")
+    seen_refs: set[str] = set()
+    for leaf in leaves:
+        seen_refs.update(_ENV_REF_RE.findall(leaf))
+    if not seen_refs:
+        raise ValueError(
+            "group B providers carry no {env:...} credential reference")
+    unknown = seen_refs - set(secrets)
+    if unknown:
+        raise ValueError(
+            "group B providers reference credentials outside the handoff: "
+            + ", ".join(sorted(unknown)))
+    for name, entry in normalized.items():
+        for section in ("settings", "options"):
+            section_node = entry.get(section)
+            if isinstance(section_node, dict) and "apiKey" in section_node:
+                ref = str(section_node["apiKey"]).strip()
+                match = _ENV_REF_RE.fullmatch(ref)
+                if match is None or match.group(1) not in secrets:
+                    raise ValueError(
+                        f"group B provider {name!r} apiKey is not an "
+                        "audited {env:...} reference")
+    return normalized, secrets
 
 
 def _covered(path: Path, roots: Sequence[Path]) -> bool:
@@ -353,6 +488,8 @@ def plan_reviewer(
     extra_read_roots: Sequence[str | Path] = (),
     extra_write_roots: Sequence[str | Path] = (),
     opencode_state_rw: bool = False,
+    providers: Mapping[str, Any] | None = None,
+    provider_secrets: Mapping[str, str] | None = None,
 ) -> IsolationPlan:
     """Fenced reviewer run: agent fence plus §14.3 hardening.
 
@@ -361,6 +498,10 @@ def plan_reviewer(
     account tool is inherited. The workspace is the only writable root
     (callers mount the reviewed code via ``extra_read_roots``);
     ``extra_write_roots`` and ``opencode_state_rw`` are refused.
+    Group B runs additionally merge ``providers`` entries into the
+    reviewer config and hand ``provider_secrets`` to the process env
+    through the audited :func:`check_group_b_handoff` path; the plain
+    overlay still refuses every secret-bearing name.
     """
     full_argv = [str(token) for token in argv]
     if not full_argv:
@@ -370,7 +511,11 @@ def plan_reviewer(
     if list(extra_write_roots):
         raise ValueError("reviewers write only the report inside the workspace")
     check_reviewer_overlay(overlay)
+    group_b_providers, group_b_secrets = check_group_b_handoff(
+        providers, provider_secrets)
     command = Path(full_argv[0]).name
+    if group_b_providers is not None and command != "opencode":
+        raise ValueError("group B providers need an opencode reviewer run")
     host_home = Path(home) if home is not None else Path(
         os.path.expanduser("~"))
     merged = dict(overlay or {})
@@ -381,9 +526,13 @@ def plan_reviewer(
         file_overlays = {
             key: value
             for key, value in reviewer_overlays(
-                report_path, project_path).items()
+                report_path, project_path,
+                providers=group_b_providers).items()
         }
-        merged.update(reviewer_content_env(report_path, project_path))
+        merged.update(reviewer_content_env(
+            report_path, project_path, providers=group_b_providers))
+        if group_b_secrets:
+            merged.update(group_b_secrets)
         profile: str | None = "opencode"
     elif command in {"agy", "agyd", "agyj", "agy2"}:
         profile = "agy"

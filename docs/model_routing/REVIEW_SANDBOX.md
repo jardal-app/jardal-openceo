@@ -131,6 +131,24 @@ efectivo y cita literal de errores:
   `settings.json` de AGY no declara servidores, y valorar un validador
   de `reviewer_config` al estilo `assert_worker_config_is_closed`.
 
+## Reserva externa (TASK-2026-00306, 2026-10-24)
+
+Con el grupo A agotado, los slots gratuitos se alimentan de la lista
+`native_first` del perfil `free-review` (`review_wiring.py`): cada
+revisor arranca con `opencode run --model` explícito y, ante un fallo
+recuperable, solo ese revisor se reinicia desde cero sobre el mismo
+snapshot y prompt con el siguiente modelo elegible, cruzando al grupo
+B cuando el A no tiene elegibles. La credencial del grupo B viaja por
+un handoff auditado (`plan_reviewer(providers=...,
+provider_secrets=...)`): la config por run lleva solo referencias
+`{env:FREE_ROUTER_*}`, el valor llega únicamente al entorno del
+proceso y las herramientas del revisor no pueden leerlo (sin `exec`,
+`/proc/*` denegado en `read`/`grep`/`glob` junto a `*.env*`,
+`*auth.json` y `service.json`, `.env.free-router.local` enmascarado
+en el fence). El overlay de entorno sigue rechazando todo
+`FREE_ROUTER_*`; el recibo §11.7 suma `route_type`,
+`provider_id`/`model_id` efectivos y el motivo del cambio.
+
 ## Cableado (TASK-2026-00293, 2026-10-23)
 
 - Canal confirmado: stdout (`report=None`). El canal fichero cambiaría

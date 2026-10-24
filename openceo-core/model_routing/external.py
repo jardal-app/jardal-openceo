@@ -71,6 +71,7 @@ __all__ = [
     "build_external_providers_config",
     "build_gateway_plan",
     "build_opencode_config",
+    "credential_env_for",
     "detect_opencode_schema",
     "eligible_set_hash",
     "export_consumer_snapshot",
@@ -284,6 +285,21 @@ def litellm_model(provider: str, gateway_model_id: str | None,
             f"deployment {deployment_id} carries no provider model id")
     prefix, _env = _LITELLM_PROVIDERS[provider]
     return f"{prefix}/{gateway_model_id}"
+
+
+def credential_env_for(provider: str) -> str:
+    """``FREE_ROUTER_*`` credential name of one group B provider.
+
+    Names only, never values. Native ``opencode`` needs no
+    credential and is refused, like any unmapped provider.
+    """
+    try:
+        _prefix, env_var = _LITELLM_PROVIDERS[provider]
+    except KeyError:
+        raise ExternalError(
+            f"provider {provider!r} has no group B credential mapping"
+            f" (mapped: {', '.join(sorted(_LITELLM_PROVIDERS))})") from None
+    return env_var
 
 
 def _deployment_index(catalog: CatalogDocument) -> dict[str, tuple[CatalogEntry, Deployment]]:
