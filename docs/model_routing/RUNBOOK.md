@@ -72,6 +72,35 @@ non-blocking, so a backup never stalls a refresh):
    --sync-findings` (report only; the inbox write happens where a
    store exists, `error_findings.drain_pending`).
 
+## Interactive launcher (opencode-free-research)
+
+Start an interactive TUI on the profile's best target instead of a
+hand-opened session (`tui.prepare_tui_session`, TASK-2026-00308):
+
+1. Publish first (`update --providers`, then `update --benchmarks`),
+   and export the `FREE_ROUTER_*` variables the group B reserve
+   needs: the TUI child inherits the launcher environment, so an
+   unexported variable keeps its providers out of the order
+   (`cli._tui_env_credentials`, names gate eligibility, values are
+   never printed).
+2. `free-router tui-launch --project-dir <dir>` creates the session,
+   switches it to the best `free-research` target and replaces
+   itself with `opencode --session <id> <dir>`. With `--print-only`
+   (or `--json`) it prints the attach command instead of attaching.
+3. After quitting the TUI, or between turns,
+   `free-router tui-check --session <id> --project-dir <dir>`
+   observes the session through the standalone API and routes the
+   next turn to the next eligible target when it sees an explicit
+   failure marker (`tui.observe_tui_session`,
+   `tui.apply_next_turn_fallback`); `--after <message-id>` resumes
+   from the reported watermark. A manual switch newer than the
+   failure is kept, never overridden.
+
+Limitation (addendum §5.3, §11.9): managed launcher sessions
+only — a hand-opened TUI is not covered, and the fallback applies
+to the next turn, never mid-turn. Audit events `tui_session_prepared`
+and `tui_next_turn_fallback` keep ids, models and outcomes only.
+
 ## Key rotation
 
 1. Edit `openceo-core/.env.free-router.local` in place, keep 0600,

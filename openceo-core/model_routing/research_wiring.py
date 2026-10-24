@@ -117,6 +117,7 @@ __all__ = [
     "fit_candidate",
     "load_checkpoint",
     "load_session_snapshot",
+    "merge_session_provider_config",
     "native_research_targets",
     "parse_managed_events",
     "plan_synthesis_retry",
@@ -1372,6 +1373,45 @@ class ResearchTarget(Candidate):
         return self.opencode_model or self.deployment_id
 
 
+def merge_session_provider_config(
+    project_dir: Path | str,
+    entries: Mapping[str, Any],
+) -> Path:
+    """Merge group B provider entries into the session project config.
+
+    Creates ``opencode.json`` when absent, preserves foreign keys,
+    and writes atomically. Entries carry ``{env:...}`` references
+    only; callers never pass secret values.
+    """
+    path = Path(project_dir) / SESSION_CONFIG_FILENAME
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ResearchRoutingError(
+                f"session project config {path} unreadable: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ResearchRoutingError(
+                f"session project config {path} is not an object")
+        providers = payload.get("providers", {})
+        if not isinstance(providers, dict):
+            raise ResearchRoutingError(
+                f"session project config {path} has no providers object")
+        payload["providers"] = {**providers, **dict(entries)}
+    else:
+        payload = {"$schema": "https://opencode.ai/config.json",
+                   "providers": dict(entries)}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+    return path
+
+
 def _single_session_provider_config(
     entry: CatalogEntry,
     deployment: Deployment,
@@ -1670,6 +1710,28 @@ class SessionClient:
                 "opencode api returned an unreadable session",
                 kind="transport") from exc
 
+    def list_messages(
+        self, project_dir: Path | str, session_id: str,
+    ) -> list[dict[str, Any]]:
+        """Session messages newest-first; structure only, never text.
+
+        The v2.0.22 contract, verified without generation: ``GET
+        /api/session/{id}/message`` answers ``{"data": [...]}`` with
+        the newest message first, including ``idle`` outcome markers
+        and ``model-switched`` records. Callers keep ids, types and
+        outcomes; message text never feeds routing or audits.
+        """
+        raw = self._api(
+            project_dir, "GET",
+            f"/api/session/{self._checked(session_id)}/message")
+        data = raw.get("data") if isinstance(raw, dict) else None
+        if not isinstance(data, list) or any(
+                not isinstance(item, dict) for item in data):
+            raise SessionError(
+                "opencode api returned unreadable messages",
+                kind="transport")
+        return [dict(item) for item in data]
+
     def delete_session(self, project_dir: Path | str, session_id: str) -> None:
         """Remove a session; a missing one is already gone."""
         try:
@@ -1873,32 +1935,7 @@ class ManagedResearchSession(ResearchSession):
                 "no provider config",
                 checkpoint_path=checkpoint_path(
                     self._checkpoints, self._research_id))
-        path = self._project_dir / SESSION_CONFIG_FILENAME
-        if path.exists():
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                raise ResearchRoutingError(
-                    f"session project config {path} unreadable: {exc}") from exc
-            if not isinstance(payload, dict):
-                raise ResearchRoutingError(
-                    f"session project config {path} is not an object")
-            providers = payload.get("providers", {})
-            if not isinstance(providers, dict):
-                raise ResearchRoutingError(
-                    f"session project config {path} has no providers object")
-            payload["providers"] = {**providers, **entries}
-        else:
-            payload = {"$schema": "https://opencode.ai/config.json",
-                       "providers": dict(entries)}
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
+        merge_session_provider_config(self._project_dir, entries)
 
     def _blocked_provider(self, message: str) -> SessionBlocked:
         checkpoint = self._save(turn=self._turn, partial_text=self._partial_text)

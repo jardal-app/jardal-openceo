@@ -2,9 +2,9 @@
 
 ``status``, ``validate-config``, ``errors``, ``models``, ``explain``,
 ``simulate-fallback``, ``sources``, ``update``, ``reserve``,
-``release``, ``cooldowns``, ``reservations``, ``cost-audit`` and
-``sessions``; further subcommands arrive with their tickets. Usage from
-the repo root::
+``release``, ``cooldowns``, ``reservations``, ``cost-audit``,
+``sessions``, ``tui-launch`` and ``tui-check``; further subcommands
+arrive with their tickets. Usage from the repo root::
 
     ./.venv/bin/python openceo-core/model_routing/cli.py status [--json]
 
@@ -16,6 +16,8 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
+import shlex
 import sys
 import time
 from datetime import datetime, timezone
@@ -30,7 +32,15 @@ from model_routing.acceptance import active_sessions, cost_audit  # noqa: E402
 from model_routing.availability import AvailabilityStore, ReservationConflict  # noqa: E402
 from model_routing.config import ConfigError, load_policy, validate_config  # noqa: E402
 from model_routing.error_findings import queued_previews  # noqa: E402
+from model_routing import tui as tui_launcher  # noqa: E402
 from model_routing.research_wiring import CHECKPOINTS_DIRNAME  # noqa: E402
+from model_routing.research_wiring import (  # noqa: E402
+    ResearchRoutingError,
+    SessionClient,
+    SessionError,
+    load_session_snapshot,
+    native_research_targets,
+)
 from model_routing.models import RouterPolicy, collect_status  # noqa: E402
 from model_routing.paths import (  # noqa: E402
     AVAILABILITY_DB_FILENAME,
@@ -135,6 +145,30 @@ def build_parser() -> argparse.ArgumentParser:
     sessions.add_argument("--max-age-h", type=float, default=24.0)
     sessions.add_argument("--state-dir", default=None)
     sessions.add_argument("--json", action="store_true", help="Machine-readable output")
+    launch = sub.add_parser(
+        "tui-launch", help="Prepare a managed session and attach the TUI",
+        description=f"opencode-free-research (TASK-2026-00308): {tui_launcher.TUI_LIMITATION}.")
+    launch.add_argument("--project-dir", required=True)
+    launch.add_argument("--title", default="",
+                        help="Session title (default: launcher name + profile)")
+    launch.add_argument("--run-id", default="-")
+    launch.add_argument("--print-only", action="store_true",
+                        help="Print the attach command instead of attaching")
+    launch.add_argument("--config-dir", default=None)
+    launch.add_argument("--state-dir", default=None)
+    launch.add_argument("--json", action="store_true",
+                        help="Print the plan as JSON instead of attaching")
+    check = sub.add_parser(
+        "tui-check", help="Observe a launcher session; route its next turn",
+        description=f"TASK-2026-00308: {tui_launcher.TUI_LIMITATION}.")
+    check.add_argument("--session", required=True)
+    check.add_argument("--project-dir", required=True)
+    check.add_argument("--after", default=None,
+                       help="Message id watermark; only newer messages count")
+    check.add_argument("--run-id", default="-")
+    check.add_argument("--config-dir", default=None)
+    check.add_argument("--state-dir", default=None)
+    check.add_argument("--json", action="store_true", help="Machine-readable output")
     return parser
 
 
@@ -534,6 +568,145 @@ def _run_sessions(args: argparse.Namespace) -> int:
     return 0
 
 
+def _tui_env_credentials() -> dict[str, str]:
+    """Group B credential presence from the launcher environment.
+
+    The TUI child inherits this same environment, so a group B
+    target is only eligible when its ``FREE_ROUTER_*`` variable is
+    already exported here. Names gate eligibility; values are never
+    printed.
+    """
+    return {name: value for name, value in os.environ.items()
+            if name.startswith("FREE_ROUTER_") and value}
+
+
+def _run_tui_launch(args: argparse.Namespace) -> int:
+    project = Path(args.project_dir)
+    if not project.is_dir():
+        print(f"tui-launch: project dir is not a directory: {project}")
+        return 2
+    config = _config_path(args)
+    try:
+        snapshot = load_session_snapshot(config / RANKINGS_FILENAME)
+    except ResearchRoutingError as exc:
+        print(f"tui-launch: {exc}")
+        return 1
+    if snapshot is None:
+        print("tui-launch: no published ranking; run update first")
+        return 1
+    try:
+        catalog = load_catalog_doc(config / CATALOG_FILENAME)
+    except PublishError as exc:
+        print(f"tui-launch: {exc}")
+        return 1
+    store = AvailabilityStore(_state_path(args))
+    try:
+        try:
+            targets = native_research_targets(
+                snapshot, catalog, store,
+                credentials=_tui_env_credentials(), run_id=args.run_id)
+        except ResearchRoutingError as exc:
+            print(f"tui-launch: {exc}")
+            return 1
+        try:
+            plan = tui_launcher.prepare_tui_session(
+                client=SessionClient(), project_dir=project,
+                targets=targets, title=args.title, store=store,
+                run_id=args.run_id)
+        except (ResearchRoutingError, SessionError) as exc:
+            print(f"tui-launch: {exc}")
+            return 1
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps({
+            "session_id": plan.session_id, "profile": plan.profile,
+            "target": plan.target.model_arg(),
+            "project_dir": str(plan.project_dir),
+            "argv": list(plan.argv), "audit": plan.audit,
+            "limitation": tui_launcher.TUI_LIMITATION,
+        }, indent=2))
+        return 0
+    print(f"session: {plan.session_id} ({plan.profile}, "
+          f"{plan.target.model_arg()})")
+    print(f"attach: {shlex.join(plan.argv)}")
+    print(f"limitation: {tui_launcher.TUI_LIMITATION}")
+    if args.print_only:
+        return 0
+    os.execvp(plan.argv[0], list(plan.argv))
+    return 0
+
+
+def _run_tui_check(args: argparse.Namespace) -> int:
+    project = Path(args.project_dir)
+    if not project.is_dir():
+        print(f"tui-check: project dir is not a directory: {project}")
+        return 2
+    client = SessionClient()
+    try:
+        seen = tui_launcher.observe_tui_session(
+            client=client, project_dir=project,
+            session_id=args.session, after=args.after)
+    except SessionError as exc:
+        print(f"tui-check: {exc}")
+        return 1
+    store = AvailabilityStore(_state_path(args))
+    try:
+        targets = None
+        targets_error = None
+        config = _config_path(args)
+        try:
+            snapshot = load_session_snapshot(config / RANKINGS_FILENAME)
+            if snapshot is None:
+                raise ResearchRoutingError("no published ranking")
+            catalog = load_catalog_doc(config / CATALOG_FILENAME)
+            targets = native_research_targets(
+                snapshot, catalog, store,
+                credentials=_tui_env_credentials(), run_id=args.run_id)
+        except (ResearchRoutingError, PublishError) as exc:
+            targets_error = str(exc)
+        moved = None
+        if targets is not None:
+            try:
+                moved = tui_launcher.apply_next_turn_fallback(
+                    client=client, project_dir=project, observation=seen,
+                    targets=targets, store=store, run_id=args.run_id)
+            except (ResearchRoutingError, SessionError) as exc:
+                print(f"tui-check: {exc}")
+                return 1
+    finally:
+        store.close()
+    failure_id = seen.failure.message_id if seen.failure else None
+    if args.json:
+        print(json.dumps({
+            "session_id": seen.session_id, "model": seen.model,
+            "cost": seen.cost, "failure": failure_id,
+            "drift": [{"message_id": item[0], "model": item[1]}
+                      for item in seen.drift],
+            "fallback": None if moved is None else {
+                "applied": moved.applied, "new_model": moved.new_model,
+                "reason": moved.reason},
+            "targets_error": targets_error,
+            "watermark": seen.watermark,
+            "limitation": tui_launcher.TUI_LIMITATION,
+        }, indent=2))
+        return 0
+    print(f"session: {seen.session_id} serves {seen.model or 'unset'} "
+          f"(cost {seen.cost})")
+    print(f"failure: {failure_id or 'none'}")
+    for message_id, model in seen.drift:
+        print(f"drift: {message_id} switched to {model}")
+    if moved is None:
+        print(f"fallback: observation only ({targets_error})")
+    elif moved.applied:
+        print(f"fallback: next turn serves {moved.new_model}")
+    else:
+        print(f"fallback: stood down ({moved.reason})")
+    print(f"watermark: {seen.watermark or 'none'}")
+    print(f"limitation: {tui_launcher.TUI_LIMITATION}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI; 0 on success (missing F0 artifacts are expected)."""
     parser = build_parser()
@@ -566,6 +739,10 @@ def main(argv: list[str] | None = None) -> int:
         return _run_cost_audit(args)
     if args.command == "sessions":
         return _run_sessions(args)
+    if args.command == "tui-launch":
+        return _run_tui_launch(args)
+    if args.command == "tui-check":
+        return _run_tui_check(args)
     parser.error(f"unknown command: {args.command}")
     return 2
 
