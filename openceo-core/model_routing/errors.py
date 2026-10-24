@@ -40,6 +40,7 @@ ErrorClass = Literal[
     "server_error",
     "auth",
     "forbidden",
+    "route_not_authorized",
     "billing",
     "not_found",
     "tools_unsupported",
@@ -103,9 +104,20 @@ def _parse_retry_after(value: str | None) -> int | None:
 
 
 def classify_http(
-    status: int, *, retry_after: str | None = None, detail: str = ""
+    status: int,
+    *,
+    retry_after: str | None = None,
+    detail: str = "",
+    provider: str | None = None,
+    client: str | None = None,
 ) -> ClassifiedError:
-    """Map an HTTP failure to its §9.2 class; unknown codes stay unclassified."""
+    """Map an HTTP failure to its §9.2 class; unknown codes stay unclassified.
+
+    A 403 on OpenCode Free from an external client is ``route_not_authorized``
+    (addendum v1.2 §7): the route is blocked, never retried nor counted as
+    quota. Without explicit ``provider``/``client`` context a 403 keeps the
+    v1.1 ``forbidden`` meaning.
+    """
     excerpt = sanitize_excerpt(detail)
     retry_after_s = _parse_retry_after(retry_after)
     if status == 429:
@@ -113,6 +125,8 @@ def classify_http(
     if status == 401:
         return ClassifiedError("auth", "disable_credential", False, None, excerpt)
     if status == 403:
+        if provider == "opencode" and client == "external":
+            return ClassifiedError("route_not_authorized", "block_route", False, None, excerpt)
         return ClassifiedError("forbidden", "inspect", False, None, excerpt)
     if status == 402:
         return ClassifiedError("billing", "block_route", False, None, excerpt)

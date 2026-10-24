@@ -1,5 +1,5 @@
 {
-  "recorded_at": "2026-10-23T06:43:04.816388+00:00",
+  "recorded_at": "2026-10-24T14:34:08.440218+00:00",
   "note": "free tier serves only from within the OpenCode CLI; direct HTTPS is policy-blocked",
   "blocked": {
     "chat": {

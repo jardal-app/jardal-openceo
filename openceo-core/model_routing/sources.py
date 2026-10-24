@@ -309,6 +309,7 @@ def _base_entry(
     tools: bool = False,
 ) -> CatalogEntry:
     deployment_id = f"{provider}/{model_id}"
+    native = provider == "opencode"
     return CatalogEntry(
         family_id=UNKNOWN_FAMILY,
         canonical_model_id=deployment_id,
@@ -318,6 +319,10 @@ def _base_entry(
             Deployment(
                 deployment_id=deployment_id,
                 provider=provider,
+                route_type="opencode_native_free" if native else "external_free",
+                allowed_client="opencode_only" if native else "configured_opencode_or_gateway",
+                provider_id=provider,
+                model_id=model_id,
                 gateway_model_id=model_id,
                 free_offered=offered,
                 free_verified=verified,

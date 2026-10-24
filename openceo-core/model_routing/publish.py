@@ -19,7 +19,11 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from model_routing.models import CatalogDocument
+from model_routing.models import (
+    CATALOG_SCHEMA_VERSION,
+    CatalogDocument,
+    migrate_catalog_v1_to_v2,
+)
 from model_routing.paths import CATALOG_FILENAME, HISTORY_DIRNAME
 
 __all__ = [
@@ -71,13 +75,20 @@ def atomic_write_json(path: Path, payload: str) -> None:
 
 
 def load_catalog_doc(path: Path) -> CatalogDocument:
-    """Read and validate a published catalog."""
+    """Read and validate a published catalog; v1 snapshots migrate to v2."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise PublishError(f"catalog missing or unreadable: {path}") from exc
     except ValueError as exc:
         raise PublishError(f"catalog {path} is not valid JSON") from exc
+    if isinstance(data, dict) and data.get("schema_version") == 1:
+        try:
+            data = migrate_catalog_v1_to_v2(data)
+        except ValueError as exc:
+            raise PublishError(f"catalog {path} failed v1 migration") from exc
+    elif not isinstance(data, dict) or data.get("schema_version") != CATALOG_SCHEMA_VERSION:
+        raise PublishError(f"catalog {path} has an unsupported schema_version")
     try:
         return CatalogDocument.model_validate(data)
     except ValidationError as exc:

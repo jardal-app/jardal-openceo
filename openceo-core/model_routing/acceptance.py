@@ -220,8 +220,13 @@ class _Ledger:
 def _deployment(deployment_id: str, provider: str, gateway: str, *,
                 tpm: int | None = None, free_verified: bool = True,
                 price: float | None = 0.0) -> Deployment:
+    native = provider == "opencode"
     return Deployment(
-        deployment_id=deployment_id, provider=provider, gateway_model_id=gateway,
+        deployment_id=deployment_id, provider=provider,
+        route_type="opencode_native_free" if native else "external_free",
+        allowed_client="opencode_only" if native else "configured_opencode_or_gateway",
+        provider_id=provider, model_id=deployment_id.split("/", 1)[1],
+        gateway_model_id=gateway,
         free_offered=True, free_verified=free_verified, healthy=True,
         input_price_usd=price, output_price_usd=price,
         limits=DeploymentLimits(tpm=tpm))

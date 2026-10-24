@@ -7,11 +7,19 @@ probes only selected candidates. Kinds follow SPEC §7.4: ``chat``,
 constants, answers stay short, and paid features (caching, search,
 grounding, reasoning extras) are never requested. Errors carry codes,
 never prompts, responses or credentials.
+
+OpenCode Free serves only from the native client (addendum v1.2 §1):
+``opencode`` has no HTTP inference URL here. Native probes shell out to
+the installed CLI (``opencode run --model``), and ``read_instance_models``
+reads the instance catalog without generating.
 """
 
 from __future__ import annotations
 
 import json
+import re
+import subprocess
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -21,13 +29,19 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from model_routing import live as router_live
+from model_routing.errors import classify_text
 from model_routing.models import Capabilities
 
 __all__ = [
     "CHAT_MAX_TOKENS",
     "CHAT_PROMPT",
+    "NATIVE_TOOL_PROMPT",
     "TOOL_MAX_TOKENS",
     "TOOL_PROMPT",
+    "InstanceCatalog",
+    "InstanceError",
+    "NativeRun",
+    "NativeRunner",
     "PostJson",
     "PostStream",
     "ProbeError",
@@ -36,6 +50,7 @@ __all__ = [
     "ToolCall",
     "build_openai_second_turn",
     "gemini_tool_payload",
+    "is_instance_target",
     "openai_chat_payload",
     "openai_tool_payload",
     "parse_gemini_function_calls",
@@ -43,6 +58,8 @@ __all__ = [
     "parse_openai_chat",
     "parse_openai_tool_calls",
     "parse_stream_events",
+    "read_instance_models",
+    "run_native_probe",
     "run_probe",
 ]
 
@@ -51,8 +68,25 @@ ProbeKind = Literal["chat", "streaming", "tool_calls", "second_turn"]
 PostJson = Callable[[str, Mapping[str, str], dict], dict]
 PostStream = Callable[[str, Mapping[str, str], dict], list]
 
+
+@dataclass(frozen=True)
+class NativeRun:
+    """One finished CLI invocation; stdout carries the JSONL events."""
+
+    args: tuple[str, ...]
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+NativeRunner = Callable[[list[str], str, float], NativeRun]
+
 CHAT_PROMPT = "Reply with exactly this word: ok"
 TOOL_PROMPT = "Call test_echo with the word ok."
+NATIVE_TOOL_PROMPT = (
+    "Use a file tool to list the files in the current directory,"
+    " then reply with exactly: ok"
+)
 # Reasoning models spend their first tokens thinking: 16 truncates them to an
 # empty answer (verified live 2026-10-23). 256 stays short yet clears that floor.
 CHAT_MAX_TOKENS = 256
@@ -60,9 +94,10 @@ TOOL_MAX_TOKENS = 256
 
 _USER_AGENT = "free-router-live/1"
 
+#: OpenCode Free has no entry: external HTTP inference is policy-blocked
+#: (addendum v1.2 §1) and ``run_probe("opencode", ...)`` goes native.
 _CHAT_URLS = {
     "openrouter": "https://openrouter.ai/api/v1/chat/completions",
-    "opencode": "https://opencode.ai/inference/openai/v1/chat/completions",
     "groq": "https://api.groq.com/openai/v1/chat/completions",
     "nvidia": "https://integrate.api.nvidia.com/v1/chat/completions",
 }
@@ -106,6 +141,7 @@ class ProbeError(RuntimeError):
         retryable: bool = False,
         retry_after: str | None = None,
         detail: str = "",
+        error_class: str | None = None,
     ) -> None:
         self.provider = provider
         self.kind = kind
@@ -113,6 +149,7 @@ class ProbeError(RuntimeError):
         self.retryable = retryable
         self.retry_after = retry_after
         self.detail = detail
+        self.error_class = error_class
         text = f"{provider} probe {kind}: {message}"
         if detail:
             text += f" :: {detail}"
@@ -132,7 +169,11 @@ class ProbeError(RuntimeError):
         if status == 401:
             return cls(provider, kind, f"POST {safe_url} -> HTTP 401", http_status=401, detail=detail)
         if status == 403:
-            return cls(provider, kind, f"POST {safe_url} -> HTTP 403", http_status=403, detail=detail)
+            marker = "route_not_authorized" if provider == "opencode" else None
+            return cls(
+                provider, kind, f"POST {safe_url} -> HTTP 403", http_status=403,
+                detail=detail, error_class=marker,
+            )
         if status == 429:
             return cls(
                 provider, kind, f"POST {safe_url} -> HTTP 429", http_status=429,
@@ -433,6 +474,216 @@ def _endpoint(provider: str, model: str) -> tuple[str, str]:
         raise ProbeError(provider, "chat", f"unknown provider: {provider}") from exc
 
 
+class InstanceError(RuntimeError):
+    """The installed OpenCode instance exposed no usable model list."""
+
+
+@dataclass(frozen=True)
+class InstanceCatalog:
+    """Non-generative snapshot of the instance model list."""
+
+    models: frozenset[tuple[str, str]]
+    source: str
+    observed_at: str
+
+
+def is_instance_target(provider_id: str, model_id: str, catalog: InstanceCatalog) -> bool:
+    """A deployment is a target only if the instance lists its real ids."""
+    return (provider_id, model_id) in catalog.models
+
+
+_INSTANCE_COMMANDS: tuple[tuple[str, ...], ...] = (
+    ("opencode", "models"),
+    ("opencode", "models", "--log-level", "debug"),
+    ("opencode", "models", "--standalone"),
+    ("opencode", "models", "--standalone", "--log-level", "debug"),
+)
+
+_INSTANCE_ID = re.compile(r"^([A-Za-z0-9_][A-Za-z0-9_.-]*)/(\S+)$")
+
+
+def _default_native_runner(argv: list[str], cwd: str, timeout: float) -> NativeRun:
+    try:
+        completed = subprocess.run(
+            argv, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except FileNotFoundError as exc:
+        raise ProbeError("opencode", "native", "opencode CLI is not installed") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"native run timed out: {' '.join(argv)}") from exc
+    except OSError as exc:
+        raise ProbeError("opencode", "native", f"native run failed: {type(exc).__name__}") from exc
+    return NativeRun(
+        args=tuple(argv), returncode=completed.returncode,
+        stdout=completed.stdout or "", stderr=completed.stderr or "",
+    )
+
+
+def _instance_models_from_text(text: str) -> frozenset[tuple[str, str]]:
+    found: set[tuple[str, str]] = set()
+    for line in text.splitlines():
+        match = _INSTANCE_ID.match(line.strip())
+        if match:
+            found.add((match.group(1), match.group(2)))
+    return frozenset(found)
+
+
+def read_instance_models(
+    *,
+    runner: NativeRunner | None = None,
+    timeout: float = 60.0,
+) -> InstanceCatalog:
+    """List ``provider/model`` ids from the installed instance, no generation.
+
+    ``opencode models`` may print nothing depending on the service state
+    (verified on v2.0.22); each fallback runs only until one lists ids.
+    An empty list everywhere fails closed instead of serving no targets.
+    """
+    run = runner or _default_native_runner
+    with tempfile.TemporaryDirectory(prefix="free-router-instance-") as workdir:
+        for command in _INSTANCE_COMMANDS:
+            try:
+                finished = run(list(command), workdir, timeout)
+            except (ProbeError, TimeoutError):
+                continue
+            if finished.returncode != 0:
+                continue
+            models = _instance_models_from_text(finished.stdout)
+            if models:
+                return InstanceCatalog(
+                    models=models,
+                    source=" ".join(command),
+                    observed_at=datetime.now(timezone.utc).isoformat(),
+                )
+    raise InstanceError(
+        "opencode models listed no provider/model ids in any form; "
+        "check the service state and retry"
+    )
+
+
+def _native_events(provider: str, kind: str, stdout: str) -> list[dict]:
+    events: list[dict] = []
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            event = json.loads(stripped)
+        except ValueError as exc:
+            raise ProbeError(provider, kind, "native run emitted a non-JSON line") from exc
+        if not isinstance(event, dict):
+            raise ProbeError(provider, kind, "native run emitted a non-object event")
+        events.append(event)
+    if not events:
+        raise ProbeError(provider, kind, "native run produced no events")
+    return events
+
+
+def _native_failure(provider: str, kind: str, target: str, event: Mapping) -> ProbeError | None:
+    raw_error = event.get("error") if isinstance(event.get("error"), dict) else {}
+    detail = event.get("message") if isinstance(event.get("message"), str) else ""
+    detail = detail or (raw_error.get("message") if isinstance(raw_error.get("message"), str) else "")
+    status = raw_error.get("status")
+    text = f"{raw_error.get('type', '')} {detail}"
+    classified = classify_text(text)
+    if classified.error_class in ("daily_quota", "rate_limited") or str(status) == "429":
+        raise router_live.LiveRateLimited(provider, f"opencode run --model {target}", None)
+    safe = router_live.redact_text(text, ())
+    code = f" (status {status})" if isinstance(status, int) else ""
+    return ProbeError(provider, kind, f"native run failed{code}: {safe[:200]}")
+
+
+def run_native_probe(
+    provider: str,
+    kind: ProbeKind,
+    model: str,
+    *,
+    enabled: bool = False,
+    runner: NativeRunner | None = None,
+    workdir: str | None = None,
+    timeout: float = 110.0,
+) -> tuple[ProbeResult, dict]:
+    """Probe one native route through the installed OpenCode CLI.
+
+    Disabled unless the caller passes ``enabled=True``. ``chat`` and
+    ``tool_calls`` run ``opencode run --model provider/model`` with a
+    synthetic prompt in a fresh directory; ``streaming`` and
+    ``second_turn`` have no native form. Quota errors raise
+    ``LiveRateLimited`` like their HTTP counterparts.
+    """
+    if not enabled:
+        raise ProbeError(provider, kind, "probes are disabled by default")
+    if kind == "chat":
+        prompt: str = CHAT_PROMPT
+    elif kind == "tool_calls":
+        prompt = NATIVE_TOOL_PROMPT
+    else:
+        raise ProbeError(provider, kind, f"{kind} probe has no native form")
+    target = f"{provider}/{model}"
+    argv = ["opencode", "run", "--format", "json", "--model", target, prompt]
+    run = runner or _default_native_runner
+    owned = workdir is None
+    directory = tempfile.TemporaryDirectory(prefix="free-router-probe-") if owned else None
+    try:
+        cwd = directory.name if directory is not None else str(workdir)
+        try:
+            finished = run(argv, cwd, timeout)
+        except TimeoutError as exc:
+            raise ProbeError(provider, kind, "native run timed out") from exc
+    finally:
+        if directory is not None:
+            directory.cleanup()
+    if finished.returncode != 0 and not finished.stdout.strip():
+        tail = router_live.redact_text(" ".join(finished.stderr.split()), ())[:200]
+        raise ProbeError(provider, kind, f"native run failed: {tail or 'no output'}")
+    events = _native_events(provider, kind, finished.stdout)
+    for event in events:
+        if event.get("type") == "error":
+            failure = _native_failure(provider, kind, target, event)
+            if failure is not None:
+                raise failure
+    texts = [
+        str(event["part"]["text"])
+        for event in events
+        if event.get("type") == "text"
+        and isinstance(event.get("part"), dict)
+        and isinstance(event["part"].get("text"), str)
+    ]
+    calls = [
+        ToolCall(
+            call_id=str(event["part"]["id"]),
+            name=str(event["part"]["tool"]),
+            arguments=dict(event["part"].get("input", {}))
+            if isinstance(event["part"].get("input", {}), dict) else {},
+        )
+        for event in events
+        if event.get("type") == "tool_use"
+        and isinstance(event.get("part"), dict)
+        and event["part"].get("id")
+        and event["part"].get("tool")
+    ]
+    costs = [
+        event["part"]["cost"]
+        for event in events
+        if event.get("type") == "step_finish" and isinstance(event.get("part"), dict)
+        and isinstance(event["part"].get("cost"), (int, float))
+    ]
+    if any(cost != 0 for cost in costs):
+        raise ProbeError(provider, kind, "native run billed a non-zero cost")
+    if kind == "tool_calls" and not calls:
+        raise ProbeError(provider, kind, "native run produced no tool_use event")
+    if not "".join(texts).strip():
+        raise ProbeError(provider, kind, "native run carried no text")
+    result = ProbeResult(
+        provider=provider,
+        deployment_id=target,
+        kind=kind,
+        capabilities=Capabilities(tools=bool(calls)),
+        observed_at=datetime.now(timezone.utc).isoformat(),
+    )
+    return result, {"events": events}
+
+
 def run_probe(
     provider: str,
     kind: ProbeKind,
@@ -443,12 +694,15 @@ def run_probe(
     messages: list[dict] | None = None,
     post: PostJson | None = None,
     post_stream: PostStream | None = None,
+    runner: NativeRunner | None = None,
+    timeout: float = 110.0,
 ) -> tuple[ProbeResult, dict]:
     """Run one probe; disabled unless the caller passes ``enabled=True``."""
     if not enabled:
         raise ProbeError(provider, kind, "probes are disabled by default")
     if provider == "opencode":
         router_live.assert_no_auth(headers)
+        return run_native_probe(provider, kind, model, enabled=True, runner=runner, timeout=timeout)
     url, family = _endpoint(provider, model)
     if kind == "chat":
         payload = gemini_chat_payload() if family == "gemini" else openai_chat_payload(model)

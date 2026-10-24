@@ -506,6 +506,10 @@ def test_apply_families_fills_known_and_keeps_unknown(tiny_aliases):
                     Deployment(
                         deployment_id="openrouter/example/alpha:free",
                         provider="openrouter",
+                        route_type="external_free",
+                        allowed_client="configured_opencode_or_gateway",
+                        provider_id="openrouter",
+                        model_id="example/alpha:free",
                         gateway_model_id="example/alpha:free",
                     )
                 ],
@@ -517,6 +521,10 @@ def test_apply_families_fills_known_and_keeps_unknown(tiny_aliases):
                     Deployment(
                         deployment_id="openrouter/ghost",
                         provider="openrouter",
+                        route_type="external_free",
+                        allowed_client="configured_opencode_or_gateway",
+                        provider_id="openrouter",
+                        model_id="ghost",
                         gateway_model_id="ghost/model:free",
                     )
                 ],
@@ -542,11 +550,19 @@ def test_apply_families_tries_each_deployment(tiny_aliases):
                     Deployment(
                         deployment_id="openrouter/ghost",
                         provider="openrouter",
+                        route_type="external_free",
+                        allowed_client="configured_opencode_or_gateway",
+                        provider_id="openrouter",
+                        model_id="ghost",
                         gateway_model_id=None,
                     ),
                     Deployment(
                         deployment_id="openrouter/alpha",
                         provider="openrouter",
+                        route_type="external_free",
+                        allowed_client="configured_opencode_or_gateway",
+                        provider_id="openrouter",
+                        model_id="alpha",
                         gateway_model_id="example/alpha:free",
                     ),
                 ],

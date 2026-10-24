@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from model_routing import errors as router_errors
 from model_routing import live as router_live
 from model_routing import probes as router_probes
 from model_routing import secrets as router_secrets
@@ -315,11 +316,10 @@ def test_openrouter_tool_probe_live():
 
 
 def test_opencode_direct_api_blocked_live():
-    # The docs say free chat models serve without auth, but the live API
-    # answers 403 FreeTierError: the free tier only serves from within the
-    # OpenCode CLI (verified 2026-10-23). This pins that behavior: if the
-    # provider ever opens direct calls, the failure tells us to re-enable
-    # HTTPS probes.
+    # The free tier only serves from within the OpenCode CLI; the live API
+    # answers 403 FreeTierError to external calls (verified 2026-10-23).
+    # This pins that block as route_not_authorized (addendum v1.2 §7):
+    # even if the provider ever opened direct calls, policy forbids them.
     secret_values = _redaction_secrets()
     router_live.assert_no_auth({})
     url = "https://opencode.ai/inference/openai/v1/chat/completions"
@@ -333,9 +333,16 @@ def test_opencode_direct_api_blocked_live():
         except router_probes.ProbeError as exc:
             assert exc.http_status == 403, f"expected the documented 403 block, got {exc.http_status}"
             assert "FreeTierError" in exc.detail, "expected FreeTierError, provider behavior changed"
+            assert exc.error_class == "route_not_authorized"
+            classified = router_errors.classify_http(
+                403, detail=exc.detail, provider="opencode", client="external"
+            )
+            assert (classified.error_class, classified.action) == (
+                "route_not_authorized", "block_route")
+            assert classified.retryable is False
             blocked[kind] = {"http_status": 403, "error_type": "FreeTierError", "detail": exc.detail}
         else:
-            raise AssertionError(f"direct OpenCode {kind} unexpectedly served; re-enable HTTPS probes")
+            raise AssertionError(f"direct OpenCode {kind} unexpectedly served; provider behavior changed")
     _record(
         "sources-opencode-blocked.json",
         {

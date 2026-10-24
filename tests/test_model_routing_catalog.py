@@ -45,6 +45,10 @@ def _deployment(**overrides):
     base = {
         "deployment_id": "openrouter/example/model:free",
         "provider": "openrouter",
+        "route_type": "external_free",
+        "allowed_client": "configured_opencode_or_gateway",
+        "provider_id": "openrouter",
+        "model_id": "example/model:free",
         "free_verified": True,
         "input_price_usd": 0,
         "output_price_usd": 0,
@@ -84,7 +88,11 @@ def test_catalog_rejects_bad_types():
 
 
 def test_free_verified_never_defaults_true():
-    assert router_models.Deployment(deployment_id="x", provider="y").free_verified is False
+    assert router_models.Deployment(
+        deployment_id="x", provider="y",
+        route_type="external_free", allowed_client="configured_opencode_or_gateway",
+        provider_id="y", model_id="x",
+    ).free_verified is False
 
 
 

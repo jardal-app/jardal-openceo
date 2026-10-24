@@ -222,7 +222,11 @@ def _catalog_with(entries):
             family_id=family, canonical_model_id=canonical,
             capabilities=Capabilities(tools=tools, context_tokens=context),
             deployments=[Deployment(deployment_id=deployment,
-                                    provider="opencode")]))
+                                    provider="opencode",
+                                    route_type="opencode_native_free",
+                                    allowed_client="opencode_only",
+                                    provider_id="opencode",
+                                    model_id=deployment.split("/", 1)[1])]))
     return CatalogDocument(entries=docs)
 
 

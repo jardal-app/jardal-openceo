@@ -60,9 +60,14 @@ def store(tmp_path):
 
 
 def _deployment(deployment_id: str, provider: str, **overrides):
+    native = provider == "opencode"
     base: dict = {
         "deployment_id": deployment_id,
         "provider": provider,
+        "route_type": "opencode_native_free" if native else "external_free",
+        "allowed_client": "opencode_only" if native else "configured_opencode_or_gateway",
+        "provider_id": provider,
+        "model_id": deployment_id.split("/", 1)[1] if "/" in deployment_id else deployment_id,
         "free_offered": True,
         "free_verified": True,
         "healthy": True,
