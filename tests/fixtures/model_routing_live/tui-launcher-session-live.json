@@ -1,0 +1,14 @@
+{
+  "recorded_at": "2026-10-25T11:49:27.018810+00:00",
+  "session_served": "opencode/big-pickle",
+  "plan_target": "opencode/big-pickle",
+  "attach_argv_head": [
+    "opencode",
+    "--session"
+  ],
+  "cost": 0.0,
+  "input_tokens": 9119,
+  "output_tokens": 2,
+  "watermark_seen": true,
+  "note": "receipts only: no prompts, answers or tool payloads recorded"
+}
