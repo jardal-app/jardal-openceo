@@ -441,6 +441,7 @@ CASCADE_DEFAULTS = {
     "paid_estimate_usd": "0.05",
     "dsh_estimate_usd": "0.00",
     "paid_whitelist": [],
+    "paid_dynamic": True,
 }
 
 
@@ -501,9 +502,14 @@ class CascadeGuard:
     """Deterministic paid-tier gate; free/own tiers pass untouched."""
 
     def __init__(self, cascade: Mapping[str, Any] | None,
-                 threshold_usd: Decimal | None = None) -> None:
+                 threshold_usd: Decimal | None = None,
+                 paid_loader: Callable[[], list[str] | None] | None = None,
+                 ) -> None:
         raw = dict(cascade or {})
-        self.whitelist = [str(item) for item in raw.get("paid_whitelist") or []]
+        self.static_whitelist = [str(item) for item in raw.get("paid_whitelist") or []]
+        self.paid_dynamic = bool(raw.get(
+            "paid_dynamic", CASCADE_DEFAULTS["paid_dynamic"]))
+        self._paid_loader = paid_loader
         self.cap = _money(raw.get("paid_cap_usd",
                                   CASCADE_DEFAULTS["paid_cap_usd"]))
         self.paid_estimate = _money(raw.get(
@@ -512,6 +518,31 @@ class CascadeGuard:
             "dsh_estimate_usd", CASCADE_DEFAULTS["dsh_estimate_usd"]))
         self.threshold = (threshold_usd if threshold_usd is not None
                           else cascade_mandate_threshold())
+
+    @property
+    def whitelist(self) -> list[str]:
+        """Auto-ranked paid ids when fresh, else the static config list."""
+        if self.paid_dynamic:
+            dynamic = self._dynamic_paid_models()
+            if dynamic:
+                return dynamic
+        return self.static_whitelist
+
+    def _dynamic_paid_models(self) -> list[str] | None:
+        if self._paid_loader is not None:
+            try:
+                return self._paid_loader()
+            except Exception:
+                return None
+        try:
+            from model_routing import paid as paid_mod
+            from model_routing.paths import paid_path
+            ranking = paid_mod.load_paid_ranking(paid_path())
+        except Exception:
+            return None
+        if ranking is None:
+            return None
+        return [item.model_id for item in ranking.models] or None
 
     def check(self, slot: ReviewSlot, state: CascadeSpendState,
               ) -> SpendDecision:

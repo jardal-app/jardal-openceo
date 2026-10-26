@@ -266,6 +266,16 @@ class ProcessExecutor:
         config_argv = [str(token) for token in spec.get("command", [])]
         config_argv += [str(token) for token in spec.get("headless_args", [])]
         config_argv += [str(token) for token in spec.get("model_args", [])]
+        paid_target: Mapping[str, Any] | None = None
+        if role.startswith("review:") and spec.get("paid_dynamic"):
+            try:
+                from model_routing import paid as paid_mod
+                paid_target, config_argv, paid_model = (
+                    paid_mod.resolve_paid_review(config_argv))
+            except Exception:
+                paid_target, paid_model = None, None
+            if paid_model is not None:
+                spec = {**spec, "model": paid_model}
         if not config_argv:
             return ExecResult(
                 returncode=1, elapsed_s=0.0,
@@ -383,8 +393,10 @@ class ProcessExecutor:
         slot = str(spec.get("account") or spec.get("label") or role)
         review_providers: Mapping[str, Any] | None = None
         review_secrets: dict[str, str] | None = None
-        if hardened and isinstance(spec.get("review_target"), Mapping):
-            review_target = dict(spec["review_target"])
+        review_target_raw = (paid_target if paid_target is not None
+                             else spec.get("review_target"))
+        if hardened and isinstance(review_target_raw, Mapping):
+            review_target = dict(review_target_raw)
             env_var = str(review_target.get("env_var") or "")
             providers = review_target.get("providers")
             misconfigured: str | None = None

@@ -21,6 +21,7 @@ from typing import Callable
 from model_routing import alerts as router_alerts
 from model_routing import benchmarks as router_benchmarks
 from model_routing import live as router_live
+from model_routing import paid as router_paid
 from model_routing import ranking as router_ranking
 from model_routing import sources as router_sources
 from model_routing import terms as router_terms
@@ -348,6 +349,12 @@ def _republish_rankings(
         snapshot = router_ranking.publish_rankings(document, config_dir, generator=generator)
     except (router_ranking.RankingError, PublishError) as exc:
         raise RefreshError(f"rankings publication failed: {exc}") from exc
+    try:
+        router_paid.publish_paid_ranking(
+            config_dir, catalog, generator=generator,
+            catalog_snapshot=record.snapshot_id)
+    except (OSError, ValueError) as exc:
+        raise RefreshError(f"paid ranking publication failed: {exc}") from exc
     return RefreshReport(
         kind=kind,
         catalog_snapshot=record.snapshot_id,

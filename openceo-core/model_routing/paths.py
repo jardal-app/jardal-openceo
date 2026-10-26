@@ -22,6 +22,7 @@ __all__ = [
     "GATEWAY_FROZEN_FILENAME",
     "GATEWAY_GENERATED_FILENAME",
     "HISTORY_DIRNAME",
+    "PAID_FILENAME",
     "POLICY_FILENAME",
     "PROVIDERS_FILENAME",
     "RANKINGS_FILENAME",
@@ -33,6 +34,7 @@ __all__ = [
     "config_dir",
     "gateway_config_path",
     "history_dir",
+    "paid_path",
     "policy_path",
     "providers_path",
     "rankings_path",
@@ -46,6 +48,7 @@ POLICY_FILENAME = "policy.yaml"
 PROVIDERS_FILENAME = "providers.yaml"
 CATALOG_FILENAME = "catalog.json"
 RANKINGS_FILENAME = "rankings.json"
+PAID_FILENAME = "paid.json"
 HISTORY_DIRNAME = "history"
 GATEWAY_GENERATED_FILENAME = "gateway.generated.yaml"
 GATEWAY_FROZEN_FILENAME = "gateway.frozen"
@@ -90,6 +93,11 @@ def catalog_path() -> Path:
 def rankings_path() -> Path:
     """Per-profile order with provenance."""
     return config_dir() / RANKINGS_FILENAME
+
+
+def paid_path() -> Path:
+    """Current paid-model ranking (auto-refreshed, guard falls back)."""
+    return config_dir() / PAID_FILENAME
 
 
 def gateway_config_path() -> Path:
