@@ -391,10 +391,10 @@ class Settings(BaseSettings):
     RESEARCH_OPENCODE_PROD_MODEL: str = "meta/muse-spark-1.3-contributor"
     RESEARCH_OPENCODE_TIMEOUT_SECONDS: int = 300
 
-    # Router de modelos gratuitos del investigador (TASK-2026-00294). Activo por
-    # defecto; sin snapshot free-research valido se usa el modelo estatico de
-    # arriba, sin cambios. Apagarlo revierte a la lista manual por completo.
-    RESEARCH_FREE_ROUTER_ENABLED: bool = True
+    # Router de modelos gratuitos del investigador (TASK-2026-00294). Apagado
+    # hasta el piloto de validacion (TASK-2026-00301); encenderlo con snapshot
+    # free-research valido activa el ranking, sin snapshot usa el estatico.
+    RESEARCH_FREE_ROUTER_ENABLED: bool = False
     RESEARCH_FREE_ROUTER_SNAPSHOT_MAX_AGE_HOURS: float = 30.0
 
     # Fachada MCP de research. Nace **apagada**: montarla expone un endpoint nuevo cuyo
