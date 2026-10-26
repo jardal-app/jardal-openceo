@@ -198,7 +198,7 @@ class RealPoolTests(unittest.TestCase):
                           "opencode/mimo-v2.6-flash-free"])
         self.assertTrue(by_label["nemotron"]["active"])
         self.assertEqual(by_label["nemotron"]["model"],
-                         "opencode/nemotron-3-ultra-free")
+                         "opencode/nemotron-3.5-super-vl-free")
         families = {by_label["mimo"]["family"],
                     by_label["nemotron"]["family"]}
         self.assertEqual(families, {"mimo", "nemotron"})

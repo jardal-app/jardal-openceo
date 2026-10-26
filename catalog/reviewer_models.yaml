@@ -1,4 +1,4 @@
-updated_on: 2026-10-19
+updated_on: 2026-10-26
 source: Owner supplied reviewer ranking
 models:
   - {model: opencode/deepseek-v4.1-flash-free, family: deepseek}
@@ -8,6 +8,5 @@ models:
   - {model: opencode/beam-free, family: anonymous}
   - {model: opencode/longcat-2.5-preview-free, family: longcat}
   - {model: opencode/nemotron-3.5-super-vl-free, family: nemotron}
-  - {model: opencode/nemotron-3-ultra-free, family: nemotron}
   - {model: opencode/big-pickle, family: anonymous}
   - {model: opencode/nemotron-3.5-lightning-free, family: nemotron}
