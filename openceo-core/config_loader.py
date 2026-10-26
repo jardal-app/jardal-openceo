@@ -544,11 +544,11 @@ class ConfigLoader:
                     },
                     # Free-model router feeding (epic TASK-2026-00283,
                     # TASK-2026-00293): the two best free-review models
-                    # feed the free OpenCode slots. ON for the validation
-                    # pilot (TASK-2026-00301); the manual list stays as
-                    # fallback and `enabled: False` reverts entirely.
+                    # feed the free OpenCode slots. Back to manual after
+                    # the validation pilot (TASK-2026-00301); `enabled:
+                    # True` reactivates it when data ranks a review pair.
                     "free_router": {
-                        "enabled": True,
+                        "enabled": False,
                         "round2_policy": "reuse_best_plus_novel",
                         "snapshot_max_age_hours": 30,
                     },
