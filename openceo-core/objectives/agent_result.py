@@ -90,7 +90,8 @@ AGENT_RESULT_JSON_SCHEMA: dict[str, Any] = {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "title": "AgentResult",
     "type": "object",
-    "required": ["resultado", "motivo"],
+    "required": ["resultado", "motivo", "necesidad", "entregables",
+                 "evidencia", "resume_at"],
     "additionalProperties": False,
     "properties": {
         "resultado": {
@@ -112,7 +113,7 @@ SCHEMA_PATH = Path(__file__).with_name("agent_result.schema.json")
 AGENT_RESULT_PROMPT = """RESULTADO DEL AGENTE (obligatorio)
 Cierra tu respuesta con exactamente un bloque agent-result con tu veredicto en JSON:
 ```agent-result
-{"resultado": "hecho", "motivo": "qué quedó terminado", "necesidad": "", "entregables": ["..."], "evidencia": "..."}
+{"resultado": "hecho", "motivo": "qué quedó terminado", "necesidad": "", "entregables": ["..."], "evidencia": "...", "resume_at": null}
 ```
 Reglas:
 - resultado es hecho (terminaste lo pedido), bloqueado (un impedimento externo te frena) o no_aplica (este trabajo no es para tu rol).

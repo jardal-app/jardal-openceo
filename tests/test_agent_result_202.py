@@ -91,8 +91,11 @@ class AgentResultSchemaTests(unittest.TestCase):
         dumped = json.dumps(schema)
         self.assertNotIn("$defs", dumped)
         self.assertNotIn("$ref", dumped)
+        # Muse 1.4.13+ rejects --output-schema unless required lists
+        # every property (API 400; pilot TASK-2026-00313).
         self.assertEqual(set(schema.get("required", [])),
-                         {"resultado", "motivo"})
+                         {"resultado", "motivo", "necesidad",
+                          "entregables", "evidencia", "resume_at"})
         props = schema.get("properties", {})
         self.assertEqual(set(props["resultado"].get("enum", [])),
                          {"hecho", "bloqueado", "no_aplica"})

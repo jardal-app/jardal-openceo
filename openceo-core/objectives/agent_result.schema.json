@@ -4,7 +4,11 @@
   "type": "object",
   "required": [
     "resultado",
-    "motivo"
+    "motivo",
+    "necesidad",
+    "entregables",
+    "evidencia",
+    "resume_at"
   ],
   "additionalProperties": false,
   "properties": {
