@@ -190,8 +190,8 @@ class SpendGuardTests(unittest.TestCase):
         slot = next(item for item in pool if item.label == "dsh")
         self.assertFalse(guard.check(slot, review_mod.CascadeSpendState()).allowed)
 
-    def test_mandate_threshold_reads_zero_today(self) -> None:
-        self.assertEqual(review_mod.cascade_mandate_threshold(), Decimal("0.00"))
+    def test_mandate_threshold_matches_prepaid_credit(self) -> None:
+        self.assertEqual(review_mod.cascade_mandate_threshold(), Decimal("10.00"))
 
 
 class CascadeRoundTests(unittest.TestCase):
@@ -285,6 +285,7 @@ class CascadeConfigTests(unittest.TestCase):
         self.assertEqual(paid.cost_tier, "metered")
         cascade = review_cfg["cascade"]
         self.assertIn("openai/gpt-oss-20b", cascade["paid_whitelist"])
+        self.assertEqual(cascade["paid_cap_usd"], "0.50")
 
     def test_paid_slot_handoff_shape(self) -> None:
         from model_routing import reviewer_isolation as iso_mod  # noqa: E402

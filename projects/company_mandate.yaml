@@ -8,7 +8,7 @@ principios:
 - nunca elegir el tier ni el modelo por precio
 presupuesto:
   moneda: USD
-  gasto_nuevo_sin_preguntar: '0.00'
+  gasto_nuevo_sin_preguntar: '10.00'
   cuota: suscripciones_ya_pagadas
 limites:
   objetivos_activos: 3

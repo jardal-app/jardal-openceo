@@ -122,7 +122,7 @@ class ShippedMandateTests(unittest.TestCase):
             ]),
         )
         self.assertEqual(
-            str(mandate.presupuesto.gasto_nuevo_sin_preguntar), "0.00"
+            str(mandate.presupuesto.gasto_nuevo_sin_preguntar), "10.00"
         )
 
 

@@ -551,12 +551,13 @@ class ConfigLoader:
                     # metered waves with a deterministic spend guard,
                     # then relaxed quorum (extras count), else block
                     # with reasons. Off by default: classic quorum.
-                    # paid_cap_usd 0.00 keeps the paid tier dormant;
-                    # raising it past the mandate threshold is an Owner
-                    # money decision, and the guard refuses it.
+                    # Paid tier (Owner pre-authorized 2026-10-26): cap
+                    # 0.50/review under the 10.00 mandate bar (the
+                    # prepaid credit size; never new money). The guard
+                    # still refuses any cap above the threshold.
                     "cascade": {
                         "enabled": True,
-                        "paid_cap_usd": "0.00",
+                        "paid_cap_usd": "0.50",
                         "paid_estimate_usd": "0.05",
                         "dsh_estimate_usd": "0.00",
                         "paid_whitelist": [

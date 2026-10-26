@@ -98,7 +98,7 @@ class MandateLoadTest(unittest.TestCase):
     def test_versioned_yaml_loads(self) -> None:
         mandate = load_mandate_file(REPO / "projects" / "company_mandate.yaml")
         self.assertEqual(mandate.ejes, [])
-        self.assertEqual(str(mandate.presupuesto.gasto_nuevo_sin_preguntar), "0.00")
+        self.assertEqual(str(mandate.presupuesto.gasto_nuevo_sin_preguntar), "10.00")
 
     def test_empty_axes_is_valid(self) -> None:
         data = _valid_mandate_dict()
