@@ -1259,7 +1259,9 @@ class TierSCycle:
         plan1 = await review_mod.select_round(
             pool1, self._slots,
             int(ctx.review_cfg.get("round1_parallel", 3)),
-            builder_family=builder_family)
+            builder_family=builder_family,
+            cascade_enabled=review_mod.cascade_enabled(
+                ctx.review_cfg.get("cascade")))
         try:
             round1 = await self._run_round(
                 ctx, 1, plan1, "", quorum, builder_family,
@@ -1297,7 +1299,9 @@ class TierSCycle:
             pool2, self._slots,
             int(ctx.review_cfg.get("round2_parallel", 2)),
             builder_family=builder_family,
-            prefer_families=[*assembly2.prefer_families, *prefer])
+            prefer_families=[*assembly2.prefer_families, *prefer],
+            cascade_enabled=review_mod.cascade_enabled(
+                ctx.review_cfg.get("cascade")))
         extra = self._round2_context(ctx, round1, fix1)
         try:
             round2 = await self._run_round(
@@ -1487,7 +1491,8 @@ class TierSCycle:
         result = await review_mod.run_quorum_round(
             pool if pool is not None else ctx.pool, self._slots, plan,
             run_one, builder_family=builder_family, quorum=quorum,
-            recovery=ctx.review_cfg.get("recovery"))
+            recovery=ctx.review_cfg.get("recovery"),
+            cascade=ctx.review_cfg.get("cascade"))
         slots_run = sorted(result.valid)
         valid_reports = sum(1 for label in slots_run if result.valid.get(label))
         verdicts = result.verdicts
@@ -1631,9 +1636,12 @@ class TierSCycle:
                 "elapsed_s": float(outcome.get("elapsed_s") or 0.0),
                 "exit_code": outcome.get("exit_code"),
                 "account": slot.account, "model": slot.model,
+                "tier": slot.cost_tier,
                 "project": ctx.ticket.get("project")}
             if isinstance(outcome.get("receipt"), dict):
                 meta["receipt"] = outcome["receipt"]
+            if outcome.get("spend"):
+                meta["spend"] = outcome["spend"]
             await self._reviews.create_review(findings_mod.review_document(
                 review_id=f"rev-{uuid.uuid4().hex[:12]}",
                 task_id=str(ctx.ticket.get("task_id", "")),

@@ -547,6 +547,24 @@ class ConfigLoader:
                     # feed the free OpenCode slots. Back to manual after
                     # the validation pilot (TASK-2026-00301); `enabled:
                     # True` reactivates it when data ranks a review pair.
+                    # Anti-cut cascade (TASK-2026-00310): free → own →
+                    # metered waves with a deterministic spend guard,
+                    # then relaxed quorum (extras count), else block
+                    # with reasons. Off by default: classic quorum.
+                    # paid_cap_usd 0.00 keeps the paid tier dormant;
+                    # raising it past the mandate threshold is an Owner
+                    # money decision, and the guard refuses it.
+                    "cascade": {
+                        "enabled": True,
+                        "paid_cap_usd": "0.00",
+                        "paid_estimate_usd": "0.05",
+                        "dsh_estimate_usd": "0.00",
+                        "paid_whitelist": [
+                            "openai/gpt-oss-20b",
+                            "deepseek/deepseek-v4.1-flash",
+                            "qwen/qwen3.7-flash",
+                        ],
+                    },
                     "free_router": {
                         "enabled": False,
                         "round2_policy": "reuse_best_plus_novel",
@@ -556,12 +574,13 @@ class ConfigLoader:
                 "reviewers": [
                     {"label": "qwen-max", "provider": "qwen", "model": "qwen3.8-max", "family": "qwen", "priority": 1, "active": False, "quota": "reactive", "expires_on": "2026-10-19", "prompt_via": "argv", "command": ["qwen", "-m", "qwen3.8-max", "--approval-mode", "plan"], "limit_patterns": [], "expired_patterns": []},
                     {"label": "qwen-glm", "provider": "qwen", "model": "glm-5.3", "family": "glm", "priority": 2, "active": False, "quota": "reactive", "expires_on": "2026-10-19", "prompt_via": "argv", "command": ["qwen", "-m", "glm-5.3", "--approval-mode", "plan"], "limit_patterns": [], "expired_patterns": []},
-                    {"label": "dsh", "provider": "dsh", "model": "deepseek-v4.1-flash", "family": "deepseek", "priority": 3, "active": True, "quota": "reactive", "prompt_via": "stdin", "command": ["node", "/home/develop/development/Jardal/jardal-deepseek-harness/apps/cli/lib/bin.js", "--profile", "headless", "-"], "env": {"DSH_HOME": "/home/develop/.dsh"}, "limit_patterns": [], "expired_patterns": []},
+                    {"label": "dsh", "provider": "dsh", "model": "deepseek-v4.1-flash", "family": "deepseek", "priority": 3, "active": True, "cost_tier": "metered", "quota": "reactive", "prompt_via": "stdin", "command": ["node", "/home/develop/development/Jardal/jardal-deepseek-harness/apps/cli/lib/bin.js", "--profile", "headless", "-"], "env": {"DSH_HOME": "/home/develop/.dsh"}, "limit_patterns": [], "expired_patterns": []},
                     {"label": "claudep", "provider": "claude", "model": "deepseek-flash", "family": "deepseek", "priority": 9, "active": False, "quota": "reactive", "prompt_via": "argv", "command": ["claudep"], "headless_args": ["--print"]},  # deepseek reserve while dsh serves
-                    {"label": "muse-review", "provider": "muse", "model": "muse-spark-1.3-contributor", "family": "muse", "priority": 99, "active": True, "extra": True, "quota": "reactive", "prompt_via": "argv", "command": ["muse", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max"]},  # extra: never counts for quorum (§7.3). Plain muse on purpose: isolated reviewer (sandbox+approvals ON, no --trust-workspace); musej appends its flags last so they cannot be overridden.
-                    {"label": "gemini", "provider": "gemini", "model": "gemini", "family": "gemini", "account": "agyd", "priority": 60, "active": True, "quota": "reactive", "prompt_via": "argv", "headless_args": ["--print"]},  # single logical Gemini slot (00250): the account IS the command, selectable by config among agyd/agyj/agy2 (no static command; resolved + validated by review.with_resolved_command, fail-closed on unknown account or command mismatch). Model is the generic account default: versions are never pinned here (verified agy 1.3.5 --help/--version/models 2026-10-14, 0 tokens). --print takes the prompt as its value (bare agyd would hang waiting for input).
-                    {"label": "mimo", "provider": "opencode", "model": "opencode/mimo-v2.6-flash-free", "family": "mimo", "priority": 4, "active": True, "quota": "reactive", "prompt_via": "argv", "command": ["opencode", "run", "-m", "opencode/mimo-v2.6-flash-free"]},  # script candidate (00250): runs today in the automatico.py live flow. opencode has no effort flag (verified v2.0.22 run --help 2026-10-14, 0 tokens). Availability stays reactive: a dead model ID fails explicit (generic model-not-found disables the slot), never silently.
-                    {"label": "nemotron", "provider": "opencode", "model": "opencode/nemotron-3-ultra-free", "family": "nemotron", "priority": 5, "active": True, "quota": "reactive", "prompt_via": "argv", "command": ["opencode", "run", "-m", "opencode/nemotron-3-ultra-free"]},
+                    {"label": "muse-review", "provider": "muse", "model": "muse-spark-1.3-contributor", "family": "muse", "priority": 99, "active": True, "extra": True, "cost_tier": "own", "quota": "reactive", "prompt_via": "argv", "command": ["muse", "exec", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "max"]},  # extra: never counts for quorum (§7.3), except cascade final degradation (00310, audited). Plain muse on purpose: isolated reviewer (sandbox+approvals ON, no --trust-workspace); musej appends its flags last so they cannot be overridden.
+                    {"label": "gemini", "provider": "gemini", "model": "gemini", "family": "gemini", "account": "agyd", "priority": 60, "active": True, "cost_tier": "own", "quota": "reactive", "prompt_via": "argv", "headless_args": ["--print"]},  # single logical Gemini slot (00250): the account IS the command, selectable by config among agyd/agyj/agy2 (no static command; resolved + validated by review.with_resolved_command, fail-closed on unknown account or command mismatch). Model is the generic account default: versions are never pinned here (verified agy 1.3.5 --help/--version/models 2026-10-14, 0 tokens). --print takes the prompt as its value (bare agyd would hang waiting for input). Own flat-rate plan, never a free tier (00310).
+                    {"label": "mimo", "provider": "opencode", "model": "opencode/mimo-v2.6-flash-free", "family": "mimo", "priority": 4, "active": True, "cost_tier": "free", "quota": "reactive", "prompt_via": "argv", "command": ["opencode", "run", "-m", "opencode/mimo-v2.6-flash-free"]},  # script candidate (00250): runs today in the automatico.py live flow. opencode has no effort flag (verified v2.0.22 run --help 2026-10-14, 0 tokens). Availability stays reactive: a dead model ID fails explicit (generic model-not-found disables the slot), never silently.
+                    {"label": "nemotron", "provider": "opencode", "model": "opencode/nemotron-3-ultra-free", "family": "nemotron", "priority": 5, "active": True, "cost_tier": "free", "quota": "reactive", "prompt_via": "argv", "command": ["opencode", "run", "-m", "opencode/nemotron-3-ultra-free"]},
+                    {"label": "openrouter-paid", "provider": "opencode", "model": "openrouter/openai/gpt-oss-20b", "family": "openrouter", "priority": 70, "active": True, "cascade_only": True, "cost_tier": "metered", "quota": "reactive", "prompt_via": "argv", "command": ["opencode", "run", "-m", "openrouter/openai/gpt-oss-20b"], "review_hardened": True, "review_target": {"env_var": "FREE_ROUTER_OPENROUTER_API_KEY", "providers": {"openrouter": {"name": "Paid OpenRouter (cascade 00310)", "package": "@opencode/ai/providers/openai-compatible", "env": ["FREE_ROUTER_OPENROUTER_API_KEY"], "settings": {"baseURL": "https://openrouter.ai/api/v1", "apiKey": "{env:FREE_ROUTER_OPENROUTER_API_KEY}"}, "models": {"openai/gpt-oss-20b": {"name": "openai/gpt-oss-20b"}, "deepseek/deepseek-v4.1-flash": {"name": "deepseek/deepseek-v4.1-flash"}, "qwen/qwen3.7-flash": {"name": "qwen/qwen3.7-flash"}}}}}},  # paid last resort (00310): whitelist + hard cap, dormant while paid_cap_usd is 0.00; credential loads at runtime, never versioned.
                 ],
                 # Findings inbox promotion (design §8.3, F4) and fixed
                 # fix-ticket tiers (design §3.3).

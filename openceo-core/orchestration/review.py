@@ -24,6 +24,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
@@ -72,6 +73,26 @@ class ReviewSlot:
     # (``review.reviewer_timeout_minutes``). TASK-2026-00162.
     timeout_minutes: int = 0
     reserve_only: bool = False
+    # Cascade cost tier (TASK-2026-00310): "free" | "own" | "metered".
+    cost_tier: str = "metered"
+    # Cascade-only slots (paid last resort) never join classic rounds.
+    cascade_only: bool = False
+
+
+#: Cascade wave order (TASK-2026-00310): free routes first, own flat-rate
+#: plans next, metered routes last. Relaxed quorum and blocking follow.
+TIER_ORDER = {"free": 0, "own": 1, "metered": 2}
+
+#: Default tier per provider; explicit ``cost_tier`` on the slot wins.
+#: Unknown providers land metered (guarded) rather than free.
+TIER_BY_PROVIDER = {
+    "opencode": "free",
+    "gemini": "own",
+    "agy": "own",
+    "muse": "own",
+    "dsh": "metered",
+    "openrouter": "metered",
+}
 
 
 #: Providers whose review slots resolve the command from ``account``.
@@ -136,6 +157,14 @@ def parse_pool(raw: Sequence[Mapping[str, Any]] | None) -> list[ReviewSlot]:
             timeout_minutes = max(0, int(entry.get("timeout_minutes") or 0))
         except (TypeError, ValueError):
             timeout_minutes = 0
+        provider = str(entry.get("provider") or "").strip().lower()
+        tier = str(entry.get("cost_tier") or "").strip().lower()
+        if not tier:
+            tier = TIER_BY_PROVIDER.get(provider, "metered")
+        if tier not in TIER_ORDER:
+            raise ReviewerConfigError(
+                f"review slot {label!r}: unknown cost_tier {tier!r} "
+                f"(known: {', '.join(sorted(TIER_ORDER))})")
         slots.append(ReviewSlot(
             label=label, family=family,
             model=str(entry.get("model") or ""),
@@ -154,6 +183,8 @@ def parse_pool(raw: Sequence[Mapping[str, Any]] | None) -> list[ReviewSlot]:
             active=entry.get("active", True) is not False,
             timeout_minutes=timeout_minutes,
             reserve_only=bool(entry.get("reserve_only", False)),
+            cost_tier=tier,
+            cascade_only=bool(entry.get("cascade_only", False)),
         ))
     slots.sort(key=lambda slot: (slot.priority, slot.label))
     return slots
@@ -303,6 +334,7 @@ async def select_round(
     prefer_families: Sequence[str] = (),
     include_extras: bool = True,
     exclude: Sequence[str] = (),
+    cascade_enabled: bool = False,
 ) -> RoundPlan:
     """Pick ``count`` slots of distinct families by priority (§7.2).
 
@@ -310,7 +342,8 @@ async def select_round(
     the queue but still respect one-slot-per-family. Slots of the builder's
     own family and ``extra`` slots never count: they ride along as
     information only (§7.3). ``exclude`` skips labels already tried (quorum
-    replacement wave).
+    replacement wave). Cascade rounds (00310) order free → own → metered
+    and admit ``cascade_only`` slots; classic rounds skip those slots.
     """
     preferred = {name.lower() for name in prefer_families}
     excluded = set(exclude)
@@ -319,6 +352,8 @@ async def select_round(
     for slot in pool:
         if slot.label in excluded or slot.reserve_only:
             continue
+        if slot.cascade_only and not cascade_enabled:
+            continue
         ok, _reason = slot_available(slot, await store.get_slot(slot.label))
         if not ok:
             continue
@@ -326,8 +361,13 @@ async def select_round(
             extras.append(slot)
         else:
             eligible.append(slot)
-    eligible.sort(key=lambda slot: (
-        0 if slot.family in preferred else 1, slot.priority, slot.label))
+    if cascade_enabled:
+        eligible.sort(key=lambda slot: (
+            TIER_ORDER.get(slot.cost_tier, 2),
+            0 if slot.family in preferred else 1, slot.priority, slot.label))
+    else:
+        eligible.sort(key=lambda slot: (
+            0 if slot.family in preferred else 1, slot.priority, slot.label))
     picked: list[ReviewSlot] = []
     seen: set[str] = set()
     for slot in eligible:
@@ -346,10 +386,13 @@ async def available_families(
     store: SlotStore,
     builder_family: str = "muse",
 ) -> set[str]:
-    """Eligible quorum-counting families (preflight needs ≥3, §6.1)."""
+    """Eligible quorum-counting families (preflight needs ≥3, §6.1).
+
+    Cascade-only last-resort slots never feed preflight capacity.
+    """
     families: set[str] = set()
     for slot in pool:
-        if slot.extra or slot.family == builder_family:
+        if slot.extra or slot.family == builder_family or slot.cascade_only:
             continue
         ok, _reason = slot_available(slot, await store.get_slot(slot.label))
         if ok:
@@ -362,15 +405,22 @@ def quorum_met(
     slots: Sequence[ReviewSlot],
     builder_family: str = "muse",
     quorum: int = 2,
+    relaxed: bool = False,
 ) -> bool:
-    """≥``quorum`` valid reports of distinct families (fail-closed, §7.2)."""
+    """≥``quorum`` valid reports of distinct families (fail-closed, §7.2).
+
+    Relaxed (cascade final degradation, 00310) counts ``extra`` and
+    builder-family reports too; classic callers keep ``relaxed=False``.
+    """
     seen: set[str] = set()
     by_label = {slot.label: slot for slot in slots}
     for label, ok in valid.items():
         if not ok:
             continue
         slot = by_label.get(label)
-        if slot is None or slot.extra or slot.family == builder_family:
+        if slot is None:
+            continue
+        if not relaxed and (slot.extra or slot.family == builder_family):
             continue
         if not slot.family:
             continue
@@ -378,6 +428,128 @@ def quorum_met(
         if len(seen) >= quorum:
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Cascade spend guard (TASK-2026-00310)
+# ---------------------------------------------------------------------------
+
+#: Cascade config keys under ``review.review.cascade``.
+CASCADE_DEFAULTS = {
+    "enabled": False,
+    "paid_cap_usd": "0.00",
+    "paid_estimate_usd": "0.05",
+    "dsh_estimate_usd": "0.00",
+    "paid_whitelist": [],
+}
+
+
+def _money(value: Any) -> Decimal | None:
+    """Decimal money or None; floats are rejected, never rounded."""
+    if isinstance(value, bool) or isinstance(value, float):
+        return None
+    try:
+        parsed = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError, AttributeError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def cascade_mandate_threshold() -> Decimal:
+    """No-questions new-spend bar; unreadable mandate fails to zero."""
+    try:
+        from company_mandate import MandatoEmpresa, load_mandate_file
+        path = (Path(__file__).resolve().parents[2]
+                / "projects" / "company_mandate.yaml")
+        mandate = load_mandate_file(path)
+    except Exception:
+        return Decimal("0.00")
+    if not isinstance(mandate, MandatoEmpresa):
+        return Decimal("0.00")
+    threshold = _money(mandate.presupuesto.gasto_nuevo_sin_preguntar)
+    return threshold if threshold is not None else Decimal("0.00")
+
+
+@dataclass
+class CascadeSpendState:
+    """Worst-case paid spend assumed so far in one round."""
+
+    spent_usd: Decimal = field(default_factory=lambda: Decimal("0.00"))
+
+
+@dataclass(frozen=True)
+class SpendDecision:
+    """Guard verdict for one metered attempt (stored on the outcome)."""
+
+    allowed: bool
+    reason: str
+    estimate_usd: str
+    cap_usd: str
+    threshold_usd: str
+    spent_after_usd: str
+
+    def as_dict(self) -> dict[str, str | bool]:
+        return {
+            "allowed": self.allowed, "reason": self.reason,
+            "estimate_usd": self.estimate_usd, "cap_usd": self.cap_usd,
+            "threshold_usd": self.threshold_usd,
+            "spent_after_usd": self.spent_after_usd,
+        }
+
+
+class CascadeGuard:
+    """Deterministic paid-tier gate; free/own tiers pass untouched."""
+
+    def __init__(self, cascade: Mapping[str, Any] | None,
+                 threshold_usd: Decimal | None = None) -> None:
+        raw = dict(cascade or {})
+        self.whitelist = [str(item) for item in raw.get("paid_whitelist") or []]
+        self.cap = _money(raw.get("paid_cap_usd",
+                                  CASCADE_DEFAULTS["paid_cap_usd"]))
+        self.paid_estimate = _money(raw.get(
+            "paid_estimate_usd", CASCADE_DEFAULTS["paid_estimate_usd"]))
+        self.dsh_estimate = _money(raw.get(
+            "dsh_estimate_usd", CASCADE_DEFAULTS["dsh_estimate_usd"]))
+        self.threshold = (threshold_usd if threshold_usd is not None
+                          else cascade_mandate_threshold())
+
+    def check(self, slot: ReviewSlot, state: CascadeSpendState,
+              ) -> SpendDecision:
+        """Allow or deny one metered attempt; allowed spend accrues."""
+        if slot.cost_tier != "metered":
+            return SpendDecision(True, f"{slot.cost_tier} tier needs no guard",
+                                 "0.00", str(self.cap or 0),
+                                 str(self.threshold), str(state.spent_usd))
+        if self.cap is None or self.threshold is None:
+            return SpendDecision(False, "unreadable cap or mandate threshold",
+                                 "?", "?", "?", str(state.spent_usd))
+        estimate = self.dsh_estimate
+        if slot.model.startswith("openrouter/") or slot.cascade_only:
+            model = slot.model.split("/", 1)[1] if "/" in slot.model else slot.model
+            if model not in self.whitelist:
+                return SpendDecision(
+                    False, f"{model} is outside the paid whitelist",
+                    "?", str(self.cap), str(self.threshold),
+                    str(state.spent_usd))
+            estimate = self.paid_estimate
+        if estimate is None:
+            return SpendDecision(False, "unreadable spend estimate",
+                                 "?", str(self.cap), str(self.threshold),
+                                 str(state.spent_usd))
+        if self.cap > self.threshold:
+            return SpendDecision(
+                False, f"cap {self.cap} exceeds mandate threshold {self.threshold}",
+                str(estimate), str(self.cap), str(self.threshold),
+                str(state.spent_usd))
+        if estimate > self.cap or state.spent_usd + estimate > self.cap:
+            return SpendDecision(
+                False, f"estimate {estimate} over cap {self.cap}",
+                str(estimate), str(self.cap), str(self.threshold),
+                str(state.spent_usd))
+        state.spent_usd += estimate
+        return SpendDecision(True, "within cap and mandate threshold",
+                             str(estimate), str(self.cap), str(self.threshold),
+                             str(state.spent_usd))
 
 
 # ---------------------------------------------------------------------------
@@ -403,14 +575,16 @@ def new_outcome(slot: ReviewSlot, attempt: int = 1) -> dict[str, Any]:
     """Blank outcome of one reviewer attempt; both engines fill it.
 
     ``kind``: ``valid``, ``timeout``, ``malformed``, ``slot_error``,
-    ``cooling_down``, ``disabled``, ``write_attempt`` or ``worktree``.
-    ``account``/``model`` keep the per-attempt identity (00250).
+    ``cooling_down``, ``disabled``, ``write_attempt``, ``worktree`` or
+    ``denied`` (cascade spend guard, 00310). ``account``/``model`` keep
+    the per-attempt identity (00250); ``tier``/``spend`` its receipt.
     """
     return {"slot": slot.label, "family": slot.family,
             "account": slot.account, "model": slot.model,
             "attempt": attempt,
             "valid": False, "kind": "", "reason": "", "verdicts": [],
-            "elapsed_s": 0.0, "exit_code": None}
+            "elapsed_s": 0.0, "exit_code": None,
+            "tier": slot.cost_tier, "spend": {}, "relaxed": False}
 
 
 def slot_timeout_s(
@@ -475,14 +649,17 @@ def _counted_families(
     valid: Mapping[str, bool],
     slots: Sequence[ReviewSlot],
     builder_family: str,
+    relaxed: bool = False,
 ) -> set[str]:
     by_label = {slot.label: slot for slot in slots}
     families: set[str] = set()
     for label, ok in valid.items():
         slot = by_label.get(label)
-        if (ok and slot is not None and slot.family and not slot.extra
-                and slot.family != builder_family):
-            families.add(slot.family)
+        if not ok or slot is None or not slot.family:
+            continue
+        if not relaxed and (slot.extra or slot.family == builder_family):
+            continue
+        families.add(slot.family)
     return families
 
 
@@ -494,6 +671,8 @@ class QuorumRound:
     outcomes: list[dict[str, Any]]  # every attempt, in run order
     reviewers: list[ReviewSlot]  # counting slots that ran
     valid: dict[str, bool]  # label → any attempt valid
+    relaxed: bool = False  # cascade final degradation counted extras (00310)
+    note: str = ""  # cascade tiers/denials, appended to the summary
 
     @property
     def verdicts(self) -> list[Any]:
@@ -501,7 +680,32 @@ class QuorumRound:
                 for item in outcome.get("verdicts") or []]
 
     def summary(self) -> str:
-        return quorum_summary(self.outcomes)
+        text = quorum_summary(self.outcomes)
+        return f"{text} [{self.note}]" if self.note else text
+
+
+def cascade_enabled(cascade: Mapping[str, Any] | None) -> bool:
+    """Rollback switch: anything but an enabled mapping is classic."""
+    return bool(isinstance(cascade, Mapping) and cascade.get("enabled"))
+
+
+def _cascade_note(result: QuorumRound) -> str:
+    """Tiers tried, guard denials and the final verdict for the ticket."""
+    tiers = sorted({str(outcome.get("tier") or "?") for outcome in result.outcomes},
+                   key=lambda name: TIER_ORDER.get(name, 9))
+    parts = [f"tiers: {','.join(tiers) or 'none'}"]
+    denials = [f"{outcome.get('slot')} ({outcome.get('reason')})"
+               for outcome in result.outcomes
+               if outcome.get("kind") == "denied"]
+    if denials:
+        parts.append("denied: " + "; ".join(denials))
+    if result.relaxed:
+        parts.append("relaxed quorum: extra/builder-family reports count")
+    elif result.met:
+        parts.append("quorum")
+    else:
+        parts.append("blocked: no tier left")
+    return "; ".join(parts)
 
 
 async def run_quorum_round(
@@ -512,15 +716,103 @@ async def run_quorum_round(
     builder_family: str = "muse",
     quorum: int = 2,
     recovery: Mapping[str, Any] | None = None,
+    cascade: Mapping[str, Any] | None = None,
 ) -> QuorumRound:
     """Run independent reviewers, preserving valid reports across failures.
 
     Recovery adds delayed retries and ranked reserves until its deadline;
     without recovery, use two bounded waves and one retry per slot.
+    A cascade mapping (00310) guards metered attempts, orders recovery
+    free → own → metered and, only as final degradation, lets extra
+    and builder-family reports count toward quorum, audited.
     """
+    enabled = cascade_enabled(cascade)
+    if enabled:
+        guard = CascadeGuard(cascade)
+        spend = CascadeSpendState()
+        inner = run_one
+
+        async def guarded(slot: ReviewSlot, attempt: int,
+                          previous: Mapping[str, Any] | None) -> dict[str, Any]:
+            decision = guard.check(slot, spend)
+            if not decision.allowed:
+                denied = new_outcome(slot, attempt)
+                denied.update(kind="denied", reason=decision.reason,
+                              spend=decision.as_dict())
+                return denied
+            outcome = await inner(slot, attempt, previous)
+            if slot.cost_tier == "metered":
+                outcome["spend"] = decision.as_dict()
+            return outcome
+
+        run_one = guarded
     if recovery:
-        return await _recover_quorum(
-            pool, store, plan, run_one, builder_family, quorum, recovery)
+        result = await _recover_quorum(
+            pool, store, plan, run_one, builder_family, quorum, recovery,
+            cascade_tiers=enabled)
+    else:
+        result = await _plain_quorum_waves(
+            pool, store, plan, run_one, builder_family, quorum, enabled)
+    if enabled:
+        result = await _cascade_finish(
+            pool, store, result, run_one, builder_family, quorum)
+    return result
+
+
+async def _cascade_finish(
+    pool: Sequence[ReviewSlot],
+    store: SlotStore,
+    result: QuorumRound,
+    run_one: RunOne,
+    builder_family: str,
+    quorum: int,
+) -> QuorumRound:
+    """Final degradation: run untried extras, then count them if needed."""
+    if not result.met:
+        tried = {str(outcome.get("slot")) for outcome in result.outcomes}
+        pool_by_label = {slot.label: slot for slot in pool}
+        for slot in pool:
+            if slot.label in tried:
+                continue
+            if not (slot.extra or slot.family == builder_family):
+                continue
+            if slot.reserve_only:
+                continue  # reserves belong to recovery, not to relaxation
+            ok, _reason = slot_available(slot, await store.get_slot(slot.label))
+            if not ok:
+                continue
+            result.outcomes.append(await run_one(slot, 1, None))
+        ran = {str(outcome.get("slot")) for outcome in result.outcomes}
+        listed = {slot.label for slot in result.reviewers}
+        for label in sorted(ran - listed):
+            slot = pool_by_label.get(label)
+            if slot is not None:
+                result.reviewers.append(slot)
+        by_label = {slot.label: slot for slot in result.reviewers}
+        result.valid = _valid_by_label(result.outcomes)
+        if quorum_met(result.valid, result.reviewers, builder_family,
+                      quorum, relaxed=True):
+            for outcome in result.outcomes:
+                slot = by_label.get(str(outcome.get("slot")))
+                if (outcome.get("valid") and slot is not None
+                        and (slot.extra or slot.family == builder_family)):
+                    outcome["relaxed"] = True
+            result.met = True
+            result.relaxed = True
+    result.note = _cascade_note(result)
+    return result
+
+
+async def _plain_quorum_waves(
+    pool: Sequence[ReviewSlot],
+    store: SlotStore,
+    plan: RoundPlan,
+    run_one: RunOne,
+    builder_family: str,
+    quorum: int,
+    cascade_enabled: bool,
+) -> QuorumRound:
+    """Two bounded waves with one retry per slot (no recovery config)."""
     first = [*plan.reviewers, *plan.extras]
     outcomes: list[dict[str, Any]] = list(await asyncio.gather(
         *[run_one(slot, 1, None) for slot in first]))
@@ -533,7 +825,8 @@ async def run_quorum_round(
     relief = await select_round(
         pool, store, target, builder_family=builder_family,
         include_extras=False,
-        exclude=[str(outcome.get("slot")) for outcome in outcomes])
+        exclude=[str(outcome.get("slot")) for outcome in outcomes],
+        cascade_enabled=cascade_enabled)
     wave: list[tuple[ReviewSlot, int, Mapping[str, Any] | None]] = [
         (slot, 1, None) for slot in relief.reviewers]
     covered = counted | {slot.family for slot in relief.reviewers}
@@ -568,8 +861,14 @@ async def run_quorum_round(
 async def _recover_quorum(
     pool: Sequence[ReviewSlot], store: SlotStore, plan: RoundPlan,
     run_one: RunOne, builder_family: str, quorum: int,
-    recovery: Mapping[str, Any],
+    recovery: Mapping[str, Any], cascade_tiers: bool = False,
 ) -> QuorumRound:
+    def _tier_key(slot: ReviewSlot) -> tuple:
+        base = (not slot.reserve_only, slot.priority, slot.label)
+        if not cascade_tiers:
+            return base
+        return (TIER_ORDER.get(slot.cost_tier, 2), *base)
+
     attempts_per_slot = max(1, int(recovery.get("attempts_per_slot", 3)))
     delay = max(1, float(recovery.get("retry_delay_seconds", 300)))
     deadline = time.monotonic() + max(1, float(recovery.get("max_wait_seconds", 43200)))
@@ -652,8 +951,7 @@ async def _recover_quorum(
             return QuorumRound(True, outcomes, reviewers, valid)
         counted = _counted_families(valid, reviewers, builder_family)
         candidates: list[ReviewSlot] = []
-        for slot in sorted(pool, key=lambda item: (
-                not item.reserve_only, item.priority, item.label)):
+        for slot in sorted(pool, key=_tier_key):
             if (slot.extra or slot.family == builder_family or slot.family in counted
                     or slot.label in latest or (slot.model and slot.model in tried_models)):
                 continue
@@ -679,8 +977,7 @@ async def _recover_quorum(
             logger.warning("Review quorum unavailable; keeping valid reports and waiting %.0fs", delay)
             if not await pause(delay):
                 break
-            for slot in sorted(waiting, key=lambda item: (
-                    not item.reserve_only, item.priority, item.label)):
+            for slot in sorted(waiting, key=_tier_key):
                 ok, _reason = slot_available(slot, await store.get_slot(slot.label))
                 if ok:
                     candidates.append(slot)

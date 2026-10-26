@@ -1021,9 +1021,12 @@ class DevSessionManager:
                         "exit_code": outcome.get("exit_code"),
                         "project": project,
                         "account": slot.account,
-                        "model": slot.model}
+                        "model": slot.model,
+                        "tier": slot.cost_tier}
                     if isinstance(outcome.get("receipt"), dict):
                         meta["receipt"] = outcome["receipt"]
+                    if outcome.get("spend"):
+                        meta["spend"] = outcome["spend"]
                     await reviews.create_review(
                         findings_mod.review_document(
                             review_id=str(outcome.get("review_id") or ""),
@@ -1138,7 +1141,9 @@ class DevSessionManager:
             pool, slots, SIMPLE_REVIEW_COUNT,
             builder_family=builder_family,
             prefer_families=prefer_families,
-            include_extras=False)
+            include_extras=False,
+            cascade_enabled=review_mod.cascade_enabled(
+                review_cfg.get("cascade")))
         acceptance = [str(item) for item in
                       (task.get("acceptance") or [])]
         handoff_path = repo / ".openceo" / "HANDOFF.md"
@@ -1232,7 +1237,8 @@ class DevSessionManager:
             result = await review_mod.run_quorum_round(
                 pool, slots, plan, run_one, builder_family=builder_family,
                 quorum=SIMPLE_REVIEW_QUORUM,
-                recovery=review_cfg.get("recovery"))
+                recovery=review_cfg.get("recovery"),
+                cascade=review_cfg.get("cascade"))
         finally:
             if routing is not None:
                 routing.close()

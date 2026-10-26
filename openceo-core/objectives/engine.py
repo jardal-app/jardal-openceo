@@ -3377,7 +3377,9 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
           "regressions across the set? Same report format as ticket rounds."
     )
     plan = await review_mod.select_round(
-        env.pool, env.slots, 3, builder_family="muse")
+        env.pool, env.slots, 3, builder_family="muse",
+        cascade_enabled=review_mod.cascade_enabled(
+            env.review_cfg.get("cascade")))
 
     async def run_one(
         slot: review_mod.ReviewSlot,
@@ -3391,7 +3393,8 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
     result = await review_mod.run_quorum_round(
         env.pool, env.slots, plan, run_one, builder_family="muse",
         quorum=int(env.review_cfg.get("quorum", 2)),
-        recovery=env.review_cfg.get("recovery"))
+        recovery=env.review_cfg.get("recovery"),
+        cascade=env.review_cfg.get("cascade"))
     if not result.met:
         return await _objective_park(
             env, objective, "no_quorum",
@@ -3549,6 +3552,8 @@ async def _persist_final_review(
                   "final_review": review_no,
                   "account": str(outcome.get("account") or ""),
                   "model": str(outcome.get("model") or ""),
+                  "tier": str(outcome.get("tier") or ""),
+                  "spend": outcome.get("spend") or {},
                   "project": objective.get("project")}))
     except Exception:
         pass  # telemetry persistence never fails a review
