@@ -1050,12 +1050,17 @@ def round_telemetry(
     }
     if attempts:
         entry["quorum"] = met
-        entry["attempts"] = [
-            {"slot": str(item.get("slot")),
-             "attempt": int(item.get("attempt") or 1),
-             "kind": "valid" if item.get("valid") else str(item.get("kind") or ""),
-             "reason": "" if item.get("valid") else str(item.get("reason") or "")[:200],
-             "elapsed_s": round(float(item.get("elapsed_s") or 0.0), 1)}
-            for item in attempts
-        ]
+        rows = []
+        for item in attempts:
+            row = {
+                "slot": str(item.get("slot")),
+                "attempt": int(item.get("attempt") or 1),
+                "kind": "valid" if item.get("valid") else str(item.get("kind") or ""),
+                "reason": "" if item.get("valid") else str(item.get("reason") or "")[:200],
+                "elapsed_s": round(float(item.get("elapsed_s") or 0.0), 1),
+            }
+            if isinstance(item.get("receipt"), dict):
+                row["receipt"] = dict(item["receipt"])
+            rows.append(row)
+        entry["attempts"] = rows
     return entry

@@ -1,0 +1,86 @@
+# Free-tier records verified by hand, never inferred (TASK-2026-00289).
+# Each entry attests what a human checked on verified_at and where.
+# Loaders fail closed: a missing, expired or incomplete record means the
+# provider's deployments cannot be free_verified. Re-verify at refresh
+# (TASK-2026-00292); probes only prove serving, never terms.
+schema_version: 1
+default_ttl_days: 7
+terms:
+  - provider: openrouter
+    free_tier: true
+    requires_payment_method: false
+    one_time_credit_only: false
+    data_policy: unknown
+    retention: unknown
+    confidentiality_allowed: [public]
+    paid_addons: [image, audio, web_search, internal_reasoning, request_fee]
+    source: https://openrouter.ai/settings/keys
+    source_note: ":free serves without purchase (base daily quota; 1000/day after USD 10 credit). Free quota read live from GET /api/v1/key; :free calls must not move credit usage (usage-unchanged guard)."
+    verified_at: "2026-10-23"
+    basis: "Models API prompt+completion price zero plus :free suffix, account quota from /api/v1/key, key works (live 2026-10-23)."
+  - provider: opencode
+    free_tier: true
+    requires_payment_method: false
+    one_time_credit_only: false
+    data_policy: unknown
+    retention: unknown
+    confidentiality_allowed: [public]
+    paid_addons: []
+    source: https://opencode.ai/v2/docs/console/models/
+    source_note: "Pay-as-you-go pricing table per 1M tokens transcribed 2026-10-23; Free in every price column counts as zero. No machine pricing API exists. Auth rule from /v2/docs/console/api/inference/: paid models require the header, free chat models serve without it."
+    verified_at: "2026-10-23"
+    basis: "Published price zero (docs table) plus serving from the CLI at cost 0 (CLI auth state not checked); paid-without-auth fails instead of billing."
+  - provider: groq
+    free_tier: true
+    requires_payment_method: false
+    one_time_credit_only: false
+    data_policy: unknown
+    retention: unknown
+    confidentiality_allowed: [public]
+    paid_addons: []
+    source: https://console.groq.com/keys
+    source_note: "Free-tier account premise (.env.free-router.local.example: cuenta gratuita, distinct from the voice key); key validity and free serving verified live 2026-10-23. Card presence on the account is not API-verifiable; probes use minimal tokens."
+    verified_at: "2026-10-23"
+    basis: "Rate-limited free tier without card; over-quota fails, never bills. List prices in the models API are paid-tier prices, not this deployment's effective price."
+  - provider: gemini
+    free_tier: true
+    requires_payment_method: false
+    one_time_credit_only: false
+    data_policy: trains
+    retention: unknown
+    confidentiality_allowed: [public]
+    paid_addons: [grounding, web_search]
+    source: https://aistudio.google.com/apikey
+    source_note: "Gemini API (AI Studio) free tier, not Vertex. The free tier uses content to improve products, so data_policy is trains and only public confidentiality is allowed. Paid add-ons exist and probes never enable them."
+    verified_at: "2026-10-23"
+    basis: "AI Studio key on the free generateContent endpoint; key works (live 2026-10-23)."
+  - provider: nvidia
+    free_tier: true
+    requires_payment_method: false
+    one_time_credit_only: false
+    data_policy: unknown
+    retention: unknown
+    confidentiality_allowed: [public]
+    paid_addons: []
+    source: https://build.nvidia.com
+    source_note: "Build API trial without card; the trial forbids confidential data. Trial-expiry versus recurring access is not API-verifiable; re-verify at refresh. Key validity and free serving verified live 2026-10-23."
+    verified_at: "2026-10-23"
+    basis: "Rate-limited trial API; over-quota fails, never bills."
+opencode_free_models:
+  source: https://opencode.ai/v2/docs/console/models/
+  verified_at: "2026-10-23"
+  basis: "Docs pricing table transcribed by hand; a model is offered only when it is both listed live and Free here. Suffixes never decide: big-pickle is free without -free."
+  model_ids:
+    - beam-free
+    - big-pickle
+    - deepseek-v4.1-flash-free
+    - exo-free
+    - flint-40b-free
+    - glm-5.3-flash-free
+    - jev-1.13-free
+    - longcat-2.5-preview-free
+    - mimo-v2.5-free
+    - mimo-v2.6-flash-free
+    - nemotron-3-ultra-free
+    - nemotron-3.5-lightning-free
+    - nemotron-3.5-super-vl-free

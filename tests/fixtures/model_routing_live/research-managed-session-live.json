@@ -1,0 +1,18 @@
+{
+  "recorded_at": "2026-10-24T17:55:34.693518+00:00",
+  "turns": 3,
+  "rotations_first_turn": 1,
+  "effective_model": "opencode/beam-free",
+  "session_model": "opencode/beam-free",
+  "cost": 0.0,
+  "input_tokens": 8216,
+  "output_tokens": 15,
+  "switches": 2,
+  "errors": [
+    {
+      "class": "rate_limited",
+      "deployment": "opencode/big-pickle"
+    }
+  ],
+  "note": "receipts only: no prompts, answers or tool payloads recorded"
+}

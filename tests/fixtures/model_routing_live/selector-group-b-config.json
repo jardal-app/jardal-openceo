@@ -1,0 +1,8 @@
+{
+  "recorded_at": "2026-10-24T15:37:05.739327+00:00",
+  "resolved_provider": "openrouter",
+  "resolved_models": [
+    "vendor/probe:free"
+  ],
+  "api_key_masked": true
+}

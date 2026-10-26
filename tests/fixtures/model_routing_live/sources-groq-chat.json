@@ -1,0 +1,37 @@
+{
+  "id": "chatcmpl-62dab303-1ebb-488b-a528-3939e5e620af",
+  "object": "chat.completion",
+  "created": 1792737655,
+  "model": "openai/gpt-oss-20b",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "ok",
+        "reasoning": "The user says: \"Reply with exactly this word: ok\". So we must reply with exactly \"ok\". No other text."
+      },
+      "logprobs": null,
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "queue_time": 0.046844077,
+    "prompt_tokens": 78,
+    "prompt_time": 0.004341256,
+    "completion_tokens": 37,
+    "completion_time": 0.041490621,
+    "total_tokens": 115,
+    "total_time": 0.045831877,
+    "completion_tokens_details": {
+      "reasoning_tokens": 27
+    }
+  },
+  "usage_breakdown": null,
+  "system_fingerprint": "fp_feb9b278f1",
+  "x_groq": {
+    "id": "req_01m5kqveeaeva8v3ck1mptdjkw",
+    "seed": 1857180484
+  },
+  "service_tier": "on_demand"
+}

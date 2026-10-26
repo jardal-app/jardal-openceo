@@ -1,0 +1,42 @@
+{
+  "recorded_at": "2026-10-24T15:37:24.951978+00:00",
+  "model": "openrouter/recursive/flint-v1.0:free",
+  "deployment_id": "openrouter/recursive/flint-v1.0:free",
+  "observed_at": "2026-10-24T15:37:21.092591+00:00",
+  "credit_usage_before": 0.0,
+  "credit_usage_after": 0.0,
+  "event_types": [
+    "step_start",
+    "text"
+  ],
+  "events": [
+    {
+      "type": "step_start",
+      "timestamp": 1792856240393,
+      "sessionID": "ses_e9170dad8ffenMfvPTnqSpAfAF",
+      "part": {
+        "id": "prt_16e8f3109001hUvdmUIGJJok2A",
+        "sessionID": "ses_e9170dad8ffenMfvPTnqSpAfAF",
+        "messageID": "msg_16e8f2c30001dKcSfXvDGo9u5T",
+        "type": "step-start",
+        "snapshot": "fabc37ee802b6597153f83a953444b730e1b6f49"
+      }
+    },
+    {
+      "type": "text",
+      "timestamp": 1792856240513,
+      "sessionID": "ses_e9170dad8ffenMfvPTnqSpAfAF",
+      "part": {
+        "id": "prt_16e8f316e0011ObHuzC8CfV64t",
+        "sessionID": "ses_e9170dad8ffenMfvPTnqSpAfAF",
+        "messageID": "msg_16e8f2c30001dKcSfXvDGo9u5T",
+        "type": "text",
+        "text": "ok",
+        "time": {
+          "start": 1792856240494,
+          "end": 1792856240513
+        }
+      }
+    }
+  ]
+}

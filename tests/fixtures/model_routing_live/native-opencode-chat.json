@@ -1,0 +1,40 @@
+{
+  "recorded_at": "2026-10-24T14:33:45.854901+00:00",
+  "model": "opencode/big-pickle",
+  "deployment_id": "opencode/big-pickle",
+  "observed_at": "2026-10-24T14:33:45.854845+00:00",
+  "event_types": [
+    "step_start",
+    "text"
+  ],
+  "events": [
+    {
+      "type": "step_start",
+      "timestamp": 1792852425725,
+      "sessionID": "ses_e91ab10e3ffekCVxLxF3Xygr4m",
+      "part": {
+        "id": "prt_16e54fbfd001gXPv3AMs6lKjTP",
+        "sessionID": "ses_e91ab10e3ffekCVxLxF3Xygr4m",
+        "messageID": "msg_16e54f0bf001oS7CcElOvrYToY",
+        "type": "step-start",
+        "snapshot": "143fe66653dd40cf653985b6637eeaf0f20d45b1"
+      }
+    },
+    {
+      "type": "text",
+      "timestamp": 1792852425749,
+      "sessionID": "ses_e91ab10e3ffekCVxLxF3Xygr4m",
+      "part": {
+        "id": "prt_16e54fc09001KSb4ct2m2V921V",
+        "sessionID": "ses_e91ab10e3ffekCVxLxF3Xygr4m",
+        "messageID": "msg_16e54f0bf001oS7CcElOvrYToY",
+        "type": "text",
+        "text": "ok",
+        "time": {
+          "start": 1792852425737,
+          "end": 1792852425749
+        }
+      }
+    }
+  ]
+}

@@ -541,6 +541,9 @@ class ResearchService:
         budget: StepBudget,
         evidence_rows: dict[str, dict[str, Any]],
         coverage: list[ResearchCoverageGap],
+        *,
+        router_store: Any | None = None,
+        router_rankings_file: Any | None = None,
     ) -> ResearchJobResult | None:
         if self._deps.runtime is None:
             coverage.append(
@@ -572,34 +575,55 @@ class ResearchService:
 
         capability = self._issue_broker_capability(job, scope, budget)
         prompt = self._build_prompt(job, evidence_rows, capability=capability)
+        free_router = None
+        routing = None
         await self._deps.slots.acquire_call()
         try:
             from research.runtimes.base import RuntimeRequest
 
-            outcome = await self._deps.runtime.run(
-                RuntimeRequest(
-                    research_id=job["research_id"],
-                    project_key=job["project_key"],
-                    owner_id=job["owner_id"],
-                    prompt=prompt,
-                    workspace=self._workspace_for(job),
-                    model=str(getattr(self._settings, "RESEARCH_OPENCODE_TEST_MODEL", "")),
-                    timeout_seconds=int(budget.remaining_seconds) or 1,
-                    allow_session_resume=False,
-                    tool_credential=capability.token if capability is not None else "",
-                )
+            from model_routing import research_wiring as _wiring
+
+            free_router = _wiring
+            routing = free_router.assemble_research_model(
+                self._settings,
+                research_id=job["research_id"],
+                store=router_store,
+                rankings_file=router_rankings_file,
             )
-        except Exception as exc:  # noqa: BLE001 - el runtime es sustituible y puede fallar
-            coverage.append(
-                ResearchCoverageGap(
-                    source="runtime",
-                    reason=CoverageReason.SOURCE_UNAVAILABLE,
-                    detail=f"Runtime no disponible: {exc.__class__.__name__}",
-                )
-            )
-            return None
+            model = routing.model
+            while True:
+                try:
+                    outcome = await self._deps.runtime.run(
+                        RuntimeRequest(
+                            research_id=job["research_id"],
+                            project_key=job["project_key"],
+                            owner_id=job["owner_id"],
+                            prompt=prompt,
+                            workspace=self._workspace_for(job),
+                            model=model,
+                            timeout_seconds=int(budget.remaining_seconds) or 1,
+                            allow_session_resume=False,
+                            tool_credential=capability.token if capability is not None else "",
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - el runtime es sustituible y puede fallar
+                    nxt = free_router.plan_synthesis_retry(routing, exc)
+                    if nxt is None:
+                        coverage.append(
+                            ResearchCoverageGap(
+                                source="runtime",
+                                reason=CoverageReason.SOURCE_UNAVAILABLE,
+                                detail=f"Runtime no disponible: {exc.__class__.__name__}",
+                            )
+                        )
+                        return None
+                    model = nxt
+                    continue
+                break
         finally:
             await self._deps.slots.release_call()
+            if free_router is not None and routing is not None:
+                free_router.close_synthesis_routing(routing)
 
         # Lo que el modelo abrio por el broker entra en la evidencia del job antes de
         # validar el informe: si no, su propia cita se leeria como ajena.

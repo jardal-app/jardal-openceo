@@ -1,0 +1,26 @@
+{
+  "recorded_at": "2026-10-24T17:21:32.838504+00:00",
+  "model": "groq/openai/gpt-oss-120b",
+  "provider": "groq",
+  "route_type": "external_free",
+  "credit_usage_before": 0.0007699,
+  "credit_usage_after": 0.0007699,
+  "receipt": {
+    "slot": "free-review-1",
+    "requested_model": "groq/openai/gpt-oss-120b",
+    "effective_model": "groq/openai/gpt-oss-120b",
+    "family_id": "live-b1",
+    "canonical_model_id": "live/openai/gpt-oss-120b",
+    "provider": "groq",
+    "deployment_id": "groq/openai/gpt-oss-120b",
+    "route_type": "external_free",
+    "provider_id": "groq",
+    "model_id": "openai/gpt-oss-120b",
+    "rank": 1,
+    "quality": 0.85,
+    "rankings_snapshot": "sha256:90359dd55b331bcec53a3b71b27a6876315fd835e336bc6bff5d219f76cad28f",
+    "catalog_snapshot": "catalog-test",
+    "result": "validated",
+    "fallback_count": 0
+  }
+}

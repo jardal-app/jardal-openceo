@@ -1,0 +1,639 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-23T12:09:07.570750Z",
+  "generator": "model_routing.refresh",
+  "catalog_snapshot": "catalog-20261023T120907Z-7bcdd9c4af5d",
+  "catalog_sha256": "7bcdd9c4af5dc70e7dbfc4693ea51d5d8ada9180118d8292103669f91ea53c8c",
+  "profiles": {
+    "free-research": {
+      "profile": "free-research",
+      "order": [
+        {
+          "rank": 1,
+          "canonical_model_id": "thinking-machines/inkling",
+          "family_id": "thinking-machines",
+          "primary": {
+            "deployment_id": "openrouter/thinkingmachines/inkling:free",
+            "provider": "openrouter"
+          },
+          "backups": [],
+          "quality": 0.6007270767596967,
+          "coverage": 1.0,
+          "dimensions": {
+            "coding": 0.5891472868217055,
+            "agentic": 0.48502994011976047,
+            "intelligence": 0.7560975609756098
+          },
+          "quality_sources": [
+            "artificial-analysis:index4.3@2026-10-23T12:09:07.217995+00:00"
+          ]
+        }
+      ],
+      "experimental": [
+        {
+          "canonical_model_id": "dots-studio/dots-3-note-preview",
+          "family_id": "dots-studio",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "google/gemma-4-26b-a4b-it",
+          "family_id": "google",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "google/gemma-4-31b-it",
+          "family_id": "google",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+          "family_id": "nvidia",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "nvidia/nemotron-3-super-120b-a12b",
+          "family_id": "nvidia",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "nvidia/nemotron-3-ultra-550b-a55b",
+          "family_id": "nvidia",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "nvidia/nemotron-3.5-super-vl",
+          "family_id": "nvidia",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "poolside/laguna-s-2.1",
+          "family_id": "poolside",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "poolside/laguna-xs-2.1",
+          "family_id": "poolside",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "recursive/flint-v1.0",
+          "family_id": "recursive",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "thinking-machines/inkling-small",
+          "family_id": "thinking-machines",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "xingchen-agi/xing4.0-29b-a4b",
+          "family_id": "xingchen-agi",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        }
+      ],
+      "pending_top3": null,
+      "provenance": {
+        "catalog_snapshot": "catalog-20261023T120907Z-7bcdd9c4af5d",
+        "catalog_sha256": "7bcdd9c4af5dc70e7dbfc4693ea51d5d8ada9180118d8292103669f91ea53c8c",
+        "sources": [
+          "gemini",
+          "groq",
+          "nvidia",
+          "opencode",
+          "openrouter",
+          "artificial-analysis:index4.3@2026-10-23T12:09:07.217995+00:00",
+          "lmarena:agent/latest@2026-10-23T12:09:07.217995+00:00"
+        ],
+        "observed_at": "2026-10-23T12:09:07.570750+00:00",
+        "weights": {
+          "coding": 0.2,
+          "agentic": 0.45,
+          "intelligence": 0.35
+        },
+        "quality_floor": 0.6,
+        "context_floor": 131072,
+        "aa_index_version": 4.3,
+        "lmarena_target": "agent/latest"
+      }
+    },
+    "free-review": {
+      "profile": "free-review",
+      "order": [],
+      "experimental": [
+        {
+          "canonical_model_id": "dots-studio/dots-3-note-preview",
+          "family_id": "dots-studio",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "google/gemma-4-26b-a4b-it",
+          "family_id": "google",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "google/gemma-4-31b-it",
+          "family_id": "google",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "liquid/lfm-2.5-2.6b",
+          "family_id": "liquid",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+          "family_id": "nvidia",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "nvidia/nemotron-3-super-120b-a12b",
+          "family_id": "nvidia",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "nvidia/nemotron-3-ultra-550b-a55b",
+          "family_id": "nvidia",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "nvidia/nemotron-3.5-super-vl",
+          "family_id": "nvidia",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "poolside/laguna-s-2.1",
+          "family_id": "poolside",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "poolside/laguna-xs-2.1",
+          "family_id": "poolside",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "recursive/flint-v1.0",
+          "family_id": "recursive",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "thinking-machines/inkling-small",
+          "family_id": "thinking-machines",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "xingchen-agi/xing4.0-29b-a4b",
+          "family_id": "xingchen-agi",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        }
+      ],
+      "pending_top3": null,
+      "provenance": {
+        "catalog_snapshot": "catalog-20261023T120907Z-7bcdd9c4af5d",
+        "catalog_sha256": "7bcdd9c4af5dc70e7dbfc4693ea51d5d8ada9180118d8292103669f91ea53c8c",
+        "sources": [
+          "gemini",
+          "groq",
+          "nvidia",
+          "opencode",
+          "openrouter",
+          "artificial-analysis:index4.3@2026-10-23T12:09:07.217995+00:00",
+          "lmarena:agent/latest@2026-10-23T12:09:07.217995+00:00"
+        ],
+        "observed_at": "2026-10-23T12:09:07.570750+00:00",
+        "weights": {
+          "coding": 0.6,
+          "agentic": 0.3,
+          "intelligence": 0.1
+        },
+        "quality_floor": 0.65,
+        "context_floor": 65536,
+        "aa_index_version": 4.3,
+        "lmarena_target": "agent/latest"
+      }
+    },
+    "free-general": {
+      "profile": "free-general",
+      "order": [
+        {
+          "rank": 1,
+          "canonical_model_id": "thinking-machines/inkling",
+          "family_id": "thinking-machines",
+          "primary": {
+            "deployment_id": "openrouter/thinkingmachines/inkling:free",
+            "provider": "openrouter"
+          },
+          "backups": [],
+          "quality": 0.6465930872231713,
+          "coverage": 1.0,
+          "dimensions": {
+            "coding": 0.5891472868217055,
+            "agentic": 0.48502994011976047,
+            "intelligence": 0.7560975609756098
+          },
+          "quality_sources": [
+            "artificial-analysis:index4.3@2026-10-23T12:09:07.217995+00:00"
+          ]
+        }
+      ],
+      "experimental": [
+        {
+          "canonical_model_id": "alibaba/qwen3.6-27b",
+          "family_id": "alibaba",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "alibaba/qwen3.8-27b",
+          "family_id": "alibaba",
+          "reason": "only 1 benchmark observation(s); 1 more needed out of experimental",
+          "observations": 1
+        },
+        {
+          "canonical_model_id": "dots-studio/dots-3-note-preview",
+          "family_id": "dots-studio",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/antigravity-preview-05-2026",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/antigravity-preview-09-2026",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/antigravity-preview-latest",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/deep-research-max-preview-04-2026",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/deep-research-preview-04-2026",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/deep-research-pro-preview-12-2025",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-2.5-computer-use-preview-10-2025",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-2.5-flash",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-2.5-flash-image",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-2.5-flash-lite",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-2.5-pro",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-3-flash-preview",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-3-pro-image",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-3-pro-image-preview",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-3.1-flash-image",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-3.1-flash-image-preview",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-3.1-flash-lite",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-3.1-flash-lite-image",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-3.1-flash-lite-preview",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-3.1-pro-preview",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-3.1-pro-preview-customtools",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-3.5-flash",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-3.5-flash-lite",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-3.5-transcribe",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-3.6-flash",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-3.7-flash",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-4-argon",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-flash-latest",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-flash-lite-latest",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-nano-banana-2.1",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-omni-1.1-flash",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-omni-flash-preview",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-pro-latest",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemini-robotics-er-2-preview",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/gemma-4-26b-a4b-it",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/lyria-3-clip-preview",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/lyria-3-pro-preview",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/lyria-3.5",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "gemini/nano-banana-pro-preview",
+          "family_id": "unknown-family",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "google/gemini-3.8-flash",
+          "family_id": "google",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "google/gemma-4-26b-a4b-it",
+          "family_id": "google",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "google/gemma-4-31b-it",
+          "family_id": "google",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "liquid/lfm-2.5-2.6b",
+          "family_id": "liquid",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+          "family_id": "nvidia",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "nvidia/nemotron-3-super-120b-a12b",
+          "family_id": "nvidia",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "nvidia/nemotron-3-ultra-550b-a55b",
+          "family_id": "nvidia",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "nvidia/nemotron-3.5-content-safety",
+          "family_id": "nvidia",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "nvidia/nemotron-3.5-super-vl",
+          "family_id": "nvidia",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "openai/gpt-oss-120b",
+          "family_id": "openai",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "openai/gpt-oss-safeguard-20b",
+          "family_id": "openai",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "poolside/laguna-s-2.1",
+          "family_id": "poolside",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "poolside/laguna-xs-2.1",
+          "family_id": "poolside",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "recursive/flint-v1.0",
+          "family_id": "recursive",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "thinking-machines/inkling-small",
+          "family_id": "thinking-machines",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        },
+        {
+          "canonical_model_id": "xingchen-agi/xing4.0-29b-a4b",
+          "family_id": "xingchen-agi",
+          "reason": "no benchmark observations from any source",
+          "observations": 0
+        }
+      ],
+      "pending_top3": null,
+      "provenance": {
+        "catalog_snapshot": "catalog-20261023T120907Z-7bcdd9c4af5d",
+        "catalog_sha256": "7bcdd9c4af5dc70e7dbfc4693ea51d5d8ada9180118d8292103669f91ea53c8c",
+        "sources": [
+          "gemini",
+          "groq",
+          "nvidia",
+          "opencode",
+          "openrouter",
+          "artificial-analysis:index4.3@2026-10-23T12:09:07.217995+00:00",
+          "lmarena:agent/latest@2026-10-23T12:09:07.217995+00:00"
+        ],
+        "observed_at": "2026-10-23T12:09:07.570750+00:00",
+        "weights": {
+          "coding": 0.25,
+          "agentic": 0.25,
+          "intelligence": 0.5
+        },
+        "quality_floor": 0.45,
+        "context_floor": 16384,
+        "aa_index_version": 4.3,
+        "lmarena_target": "agent/latest"
+      }
+    }
+  }
+}

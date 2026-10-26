@@ -1,0 +1,175 @@
+# Maker-to-model aliases across providers, Artificial Analysis and LMArena (TASK-2026-00290).
+# Exact match only: resolvers never guess, so near-misses stay unresolved with a reason.
+# Scope: chat-capable models free on 2026-10-23 (fixtures sources-*-catalog.json,
+# artificial-analysis-metadata.json). Omitted on purpose: opencode ids without a
+# verifiable maker (beam-free, big-pickle, exo-free, flint-40b-free, jev-1.13-free,
+# longcat-2.5-preview-free) and non-chat models (whisper, orpheus, guards, TTS).
+# Also omitted on purpose: lmarena_names for inkling/inkling-small (arena org "thinky" unverified).
+# Re-verify at refresh (TASK-2026-00292): the free set rotates.
+schema_version: 1
+verified_at: "2026-10-23"
+aliases:
+  - canonical_id: recursive/flint-v1.0
+    family_id: recursive
+    source: "OpenRouter vendor prefix, :free catalog 2026-10-23"
+    providers:
+      openrouter: [recursive/flint-v1.0:free]
+  - canonical_id: xingchen-agi/xing4.0-29b-a4b
+    family_id: xingchen-agi
+    source: "OpenRouter vendor prefix, :free catalog 2026-10-23"
+    providers:
+      openrouter: [xingchen-agi/xing4.0-29b-a4b:free]
+  - canonical_id: nvidia/nemotron-3.5-super-vl
+    family_id: nvidia
+    source: "OpenRouter vendor prefix + opencode free list 2026-10-23"
+    providers:
+      openrouter: [nvidia/nemotron-3.5-super-vl:free]
+      opencode: [nemotron-3.5-super-vl-free]
+  - canonical_id: dots-studio/dots-3-note-preview
+    family_id: dots-studio
+    source: "OpenRouter vendor prefix, :free catalog 2026-10-23"
+    providers:
+      openrouter: [dots-studio/dots-3-note-preview:free]
+  - canonical_id: liquid/lfm-2.5-2.6b
+    family_id: liquid
+    source: "OpenRouter vendor prefix, :free catalog 2026-10-23"
+    providers:
+      openrouter: [liquid/lfm-2.5-2.6b:free]
+  - canonical_id: nvidia/nemotron-3.5-lightning
+    family_id: nvidia
+    source: "OpenRouter vendor prefix + opencode free list + AA creator NVIDIA 2026-10-23"
+    providers:
+      openrouter: [nvidia/nemotron-3.5-lightning:free]
+      opencode: [nemotron-3.5-lightning-free]
+    aa_slugs: [nemotron-3-5-lightning]
+  - canonical_id: thinking-machines/inkling-small
+    family_id: thinking-machines
+    source: "OpenRouter vendor prefix, :free catalog 2026-10-23"
+    providers:
+      openrouter: [thinkingmachines/inkling-small:free]
+  - canonical_id: poolside/laguna-s-2.1
+    family_id: poolside
+    source: "OpenRouter vendor prefix, :free catalog 2026-10-23"
+    providers:
+      openrouter: [poolside/laguna-s-2.1:free]
+  - canonical_id: thinking-machines/inkling
+    family_id: thinking-machines
+    source: "OpenRouter vendor prefix + AA creator Thinking Machines 2026-10-23"
+    providers:
+      openrouter: [thinkingmachines/inkling:free]
+    aa_slugs: [inkling]
+  - canonical_id: poolside/laguna-xs-2.1
+    family_id: poolside
+    source: "OpenRouter vendor prefix + same id in the NVIDIA trial list 2026-10-23"
+    providers:
+      openrouter: [poolside/laguna-xs-2.1:free]
+      nvidia: [poolside/laguna-xs-2.1]
+  - canonical_id: cohere/north-mini-code
+    family_id: cohere
+    source: "OpenRouter vendor prefix + AA creator Cohere 2026-10-23"
+    providers:
+      openrouter: [cohere/north-mini-code:free]
+    aa_slugs: [north-mini-code]
+  - canonical_id: nvidia/nemotron-3.5-content-safety
+    family_id: nvidia
+    source: "OpenRouter vendor prefix, :free catalog 2026-10-23"
+    providers:
+      openrouter: [nvidia/nemotron-3.5-content-safety:free]
+  - canonical_id: nvidia/nemotron-3-ultra-550b-a55b
+    family_id: nvidia
+    source: "OpenRouter vendor prefix + same id in the NVIDIA trial list 2026-10-23"
+    providers:
+      openrouter: [nvidia/nemotron-3-ultra-550b-a55b:free]
+      nvidia: [nvidia/nemotron-3-ultra-550b-a55b]
+  - canonical_id: nvidia/nemotron-3-nano-omni-30b-a3b-reasoning
+    family_id: nvidia
+    source: "OpenRouter vendor prefix + same id in the NVIDIA trial list 2026-10-23"
+    providers:
+      openrouter: [nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free]
+      nvidia: [nvidia/nemotron-3-nano-omni-30b-a3b-reasoning]
+  - canonical_id: google/gemma-4-26b-a4b-it
+    family_id: google
+    source: "OpenRouter vendor prefix, :free catalog 2026-10-23"
+    providers:
+      openrouter: [google/gemma-4-26b-a4b-it:free]
+  - canonical_id: google/gemma-4-31b-it
+    family_id: google
+    source: "OpenRouter vendor prefix + NVIDIA trial list + Gemini list 2026-10-23"
+    providers:
+      openrouter: [google/gemma-4-31b-it:free]
+      nvidia: [google/gemma-4-31b-it]
+      gemini: [gemma-4-31b-it]
+  - canonical_id: nvidia/nemotron-3-super-120b-a12b
+    family_id: nvidia
+    source: "OpenRouter vendor prefix + same id in the NVIDIA trial list 2026-10-23"
+    providers:
+      openrouter: [nvidia/nemotron-3-super-120b-a12b:free]
+      nvidia: [nvidia/nemotron-3-super-120b-a12b]
+  - canonical_id: xiaomi/mimo-v2.6-flash
+    family_id: xiaomi
+    source: "Opencode free list + AA creator Xiaomi + LMArena agent/latest org xiaomi 2026-10-23"
+    providers:
+      opencode: [mimo-v2.6-flash-free]
+    aa_slugs: [mimo-v2-6-flash]
+    lmarena_names: [MiMo-V2.6-Flash]
+  - canonical_id: z-ai/glm-5.3-flash
+    family_id: z-ai
+    source: "Opencode free list + AA creator Z AI + NVIDIA trial list + LMArena agent/latest org zai 2026-10-23"
+    providers:
+      opencode: [glm-5.3-flash-free]
+      nvidia: [z-ai/glm-5.3-flash]
+    aa_slugs: [glm-5-3-flash]
+    lmarena_names: [GLM-5.3-Flash]
+  - canonical_id: deepseek/deepseek-v4.1-flash
+    family_id: deepseek
+    source: "Opencode free list + NVIDIA vendor deepseek-ai 2026-10-23"
+    providers:
+      opencode: [deepseek-v4.1-flash-free]
+      nvidia: [deepseek-ai/deepseek-v4.1-flash]
+  - canonical_id: nvidia/nemotron-3-ultra
+    family_id: nvidia
+    source: "Opencode free list, nemotron line + LMArena agent/latest org nvidia 2026-10-23"
+    providers:
+      opencode: [nemotron-3-ultra-free]
+    lmarena_names: [Nemotron 3 Ultra]
+  - canonical_id: xiaomi/mimo-v2.5
+    family_id: xiaomi
+    source: "Opencode free list, mimo line 2026-10-23"
+    providers:
+      opencode: [mimo-v2.5-free]
+  - canonical_id: openai/gpt-oss-20b
+    family_id: openai
+    source: "Groq + NVIDIA trial lists + AA creator OpenAI, served live 2026-10-23"
+    providers:
+      groq: [openai/gpt-oss-20b]
+      nvidia: [openai/gpt-oss-20b]
+    aa_slugs: [gpt-oss-20b]
+  - canonical_id: openai/gpt-oss-120b
+    family_id: openai
+    source: "Groq vendor prefix, account free tier 2026-10-23"
+    providers:
+      groq: [openai/gpt-oss-120b]
+  - canonical_id: openai/gpt-oss-safeguard-20b
+    family_id: openai
+    source: "Groq vendor prefix, account free tier 2026-10-23"
+    providers:
+      groq: [openai/gpt-oss-safeguard-20b]
+  - canonical_id: alibaba/qwen3.8-27b
+    family_id: alibaba
+    source: "Groq qwen prefix, Qwen line + LMArena agent/latest org alibaba 2026-10-23"
+    providers:
+      groq: [qwen/qwen3.8-27b]
+    lmarena_names: [Qwen3.8-27B]
+  - canonical_id: alibaba/qwen3.6-27b
+    family_id: alibaba
+    source: "Groq qwen prefix, Qwen line 2026-10-23"
+    providers:
+      groq: [qwen/qwen3.6-27b]
+  - canonical_id: google/gemini-3.8-flash
+    family_id: google
+    source: "Gemini list, served live 2026-10-23"
+    providers:
+      gemini: [gemini-3.8-flash]
+# Manual overrides, checked before the maps above. Empty: no verified case
+# today where a structural vendor id resolves to another canonical model.
+exceptions: []

@@ -1,0 +1,69 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    "gemini": {
+      "name": "Free Gemini (model_routing)",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "env": [
+        "FREE_ROUTER_GEMINI_API_KEY"
+      ],
+      "settings": {
+        "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "apiKey": "{env:FREE_ROUTER_GEMINI_API_KEY}"
+      },
+      "models": {
+        "gamma-flash": {
+          "name": "example/gamma"
+        }
+      }
+    },
+    "groq": {
+      "name": "Free Groq (model_routing)",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "env": [
+        "FREE_ROUTER_GROQ_API_KEY"
+      ],
+      "settings": {
+        "baseURL": "https://api.groq.com/openai/v1",
+        "apiKey": "{env:FREE_ROUTER_GROQ_API_KEY}"
+      },
+      "models": {
+        "gpt-alpha": {
+          "name": "example/alpha"
+        }
+      }
+    },
+    "nvidia": {
+      "name": "Free NVIDIA (model_routing)",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "env": [
+        "FREE_ROUTER_NVIDIA_NIM_API_KEY"
+      ],
+      "settings": {
+        "baseURL": "https://integrate.api.nvidia.com/v1",
+        "apiKey": "{env:FREE_ROUTER_NVIDIA_NIM_API_KEY}"
+      },
+      "models": {
+        "org-beta": {
+          "name": "example/beta"
+        }
+      }
+    },
+    "openrouter": {
+      "name": "Free OpenRouter (model_routing)",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "env": [
+        "FREE_ROUTER_OPENROUTER_API_KEY"
+      ],
+      "settings": {
+        "baseURL": "https://openrouter.ai/api/v1",
+        "apiKey": "{env:FREE_ROUTER_OPENROUTER_API_KEY}"
+      },
+      "models": {
+        "example-alpha:free": {
+          "name": "example/alpha"
+        }
+      }
+    }
+  }
+}

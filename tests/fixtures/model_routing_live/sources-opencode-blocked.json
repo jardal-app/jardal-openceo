@@ -1,0 +1,16 @@
+{
+  "recorded_at": "2026-10-24T14:34:08.440218+00:00",
+  "note": "free tier serves only from within the OpenCode CLI; direct HTTPS is policy-blocked",
+  "blocked": {
+    "chat": {
+      "http_status": 403,
+      "error_type": "FreeTierError",
+      "detail": "{\"type\":\"error\",\"error\":{\"type\":\"FreeTierError\",\"message\":\"OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building.\"}}"
+    },
+    "tool_calls": {
+      "http_status": 403,
+      "error_type": "FreeTierError",
+      "detail": "{\"type\":\"error\",\"error\":{\"type\":\"FreeTierError\",\"message\":\"OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building.\"}}"
+    }
+  }
+}

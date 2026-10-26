@@ -1,0 +1,37 @@
+{
+  "id": "chatcmpl-b648872825ff6a3d",
+  "object": "chat.completion",
+  "created": 1792737313,
+  "model": "openai/gpt-oss-20b",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "ok",
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [],
+        "reasoning": "The user says: \"Reply with exactly this word: ok\". So I must reply with exactly \"ok\". No extra punctuation, no quotes. Just ok.",
+        "reasoning_content": "The user says: \"Reply with exactly this word: ok\". So I must reply with exactly \"ok\". No extra punctuation, no quotes. Just ok."
+      },
+      "logprobs": null,
+      "finish_reason": "stop",
+      "stop_reason": null,
+      "token_ids": null
+    }
+  ],
+  "service_tier": null,
+  "system_fingerprint": null,
+  "usage": {
+    "prompt_tokens": 72,
+    "total_tokens": 115,
+    "completion_tokens": 43,
+    "prompt_tokens_details": null
+  },
+  "prompt_logprobs": null,
+  "prompt_token_ids": null,
+  "kv_transfer_params": null
+}

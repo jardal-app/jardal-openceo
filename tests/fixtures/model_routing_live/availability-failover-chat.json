@@ -1,0 +1,8 @@
+{
+  "recorded_at": "2026-10-23T08:13:17.790756+00:00",
+  "provider": "openrouter",
+  "deployment_id": "openrouter/recursive/flint-v1.0:free",
+  "input_tokens": 9,
+  "output_tokens": 28,
+  "note": "minimal synthetic chat after an injected 429; no content recorded"
+}
