@@ -9,9 +9,13 @@
 
 > **Advertencia crítica de seguridad, 22/10/2026:** el proyecto LiteLLM divulgó **ayer, 21/10/2026**, una nueva intrusión en su cadena de distribución. La versión `1.107.0` de PyPI y distintas etiquetas de contenedor estuvieron comprometidas. **NO usar `latest`, `main-latest`, `main-stable`, `1.107.0` ni instalación sin versión fijada.** El fabricante recomienda provisionalmente `1.106.2` o alguna versión explícita anterior, pero también informó de una vulnerabilidad pendiente de divulgación. Por ello **la implantación de LiteLLM queda sujeta a una aprobación de seguridad expresa** y a validar el artefacto concreto; la arquitectura debe poder cambiar a otro gateway sin modificar el coordinador. Fuente primaria: https://docs.litellm.ai/blog/security-incident-oct-21-2026. Esta advertencia tiene prioridad sobre los ejemplos de despliegue del resto del documento.
 
+> **Addendum v1.2 (24/10/2026):** `docs/FREE_MODEL_ROUTING_SPEC_ADDENDUM_v1.2.md` corrige esta especificación donde su §9 lo indica (OpenCode Free solo por su cliente nativo; `native_first`; sin alias HTTP único). Cada sección reemplazada lleva una nota `v1.2`; lo no citado sigue vigente.
+
 ---
 
 ## 1. Resumen ejecutivo
+
+> **v1.2:** el gateway **nunca** incluye los modelos Free oficiales de OpenCode mediante endpoint externo; prioridad nativa desde OpenCode (addendum §1–§3, mapa §9). La frase de «Arquitectura evolutiva» sobre activar OpenCode Console vía gateway queda anulada.
 
 Se quiere un sistema único para acceder a **tantos tiers gratuitos de inferencia como sea razonablemente posible** desde OpenCode, que:
 
@@ -105,6 +109,8 @@ El código de referencia aporta una base útil, que **no debe reescribirse** sin
 
 ## 4. Arquitectura objetivo
 
+> **v1.2:** no hay «gateway único para todos»: el cruce nativo→externo es un **cambio de modelo de la sesión** OpenCode (grupo A nativo, grupo B externo), con gateway externo opcional (addendum §2, mapa §9).
+
 ```text
                            ┌──────────────────────────┐
                            │ Cron: descubrimiento     │
@@ -168,6 +174,8 @@ No son métodos de LiteLLM: **son contratos internos propuestos**. La primera im
 ---
 
 ## 5. Proveedores y condiciones de inclusión
+
+> **v1.2:** la fila OpenCode Console/Free queda sustituida por `allowed_client=opencode_only`: sus modelos gratuitos solo responden al cliente OpenCode; un cliente externo recibe HTTP 403 (addendum §1, mapa §9).
 
 | Proveedor | Inclusión objetivo | Requisitos previos / cautelas |
 |---|---|---|
@@ -297,6 +305,8 @@ Usar datasets `agent`, `webdev` y, si están disponibles y pertinentes, `agent_t
 
 ### 7.3 Catálogos de proveedores
 
+> **v1.2:** la API/documentación de OpenCode vale como **metadatos**; el tier Free no se invoca desde un backend externo (addendum §1, mapa §9). La mención a modelos «invocables fuera del cliente nativo» queda anulada.
+
 - OpenRouter: https://openrouter.ai/docs/api/api-reference/models/get-models y https://openrouter.ai/collections/free-models.
 - NVIDIA: catálogo/API de NIM del modelo con la clave del usuario.
 - Groq, Gemini, Cerebras: listados de modelos y condiciones de cuota de sus APIs oficiales.
@@ -321,6 +331,8 @@ Los probes **también pueden consumir la cuota de inferencia**. No probar todos 
 ---
 
 ## 8. Rankings por perfil
+
+> **v1.2:** los perfiles son **lógicos en OpenCEO**; `free-research` no tiene por qué ser un ID único servido por LiteLLM (addendum §2, mapa §9).
 
 ### 8.1 Nombres expuestos al usuario
 
@@ -380,6 +392,8 @@ Política sugerida:
 
 ## 9. Fallback y escalado progresivo
 
+> **v1.2:** se añade el nivel `switchModel`/relanzamiento de trabajo en OpenCode para cruzar la frontera nativo→externo; LiteLLM solo cubre external-free, con un único presupuesto global de intentos (addendum §3–§4, §7, mapa §9).
+
 ### 9.1 Dos niveles distintos y autoridad única por ruta
 
 **Modo inicial SIN gateway:** OpenCode accede a proveedores de forma nativa, y el coordinador decide reintentos y cambio de modelo de un reviewer **completo**. No delegar la selección de dos reviewers a un alias opaco.
@@ -428,6 +442,8 @@ Si dos procesos compiten por el último modelo de una familia, solo uno debe con
 
 ## 10. DeepResearch / investigador élite
 
+> **v1.2:** el gateway no gestiona nativo+externo por sí solo; el investigador usa una sesión OpenCode bajo control del router con `switchModel` y checkpoints (addendum §4–§5, mapa §9).
+
 ### 10.1 Inicio
 
 El usuario elige `free-research` dentro de OpenCode. El gateway utiliza el primer deployment elegible de la lista ordenada, con fallback seguro ante errores recuperables. **Esto no requiere un coordinador de reviewers para cada consulta.**
@@ -456,6 +472,8 @@ En una prueba controlada de ≥50 turnos con MCP (y fallos 429/503 inyectados), 
 ---
 
 ## 11. Reviewers: primera y segunda ronda
+
+> **v1.2:** el fallback es al siguiente **modelo real** de la lista `native_first` (grupo A, luego reserva externa B), con modelo explícito por revisor y reinicio íntegro; no a dos alias dinámicos sin diversidad garantizada (addendum §5.1, §10.5, mapa §9).
 
 ### 11.1 Política general
 
@@ -562,6 +580,8 @@ Nombres y datos ficticios. No incluir tokens, claves ni código sensible inneces
 
 ## 12. Crons: descubrimiento, rankings y publicación
 
+> **v1.2:** `gateway.generated.yaml` nunca publica deployments nativos OpenCode Free (addendum §10.8, §12, mapa §9); el pipeline y los snapshots congelados no cambian.
+
 ### 12.1 Dos tareas programadas
 
 **Cron A — benchmarks (cada 24 h):** pedir Artificial Analysis + snapshot LMArena y guardar datos, fecha y procedencia.  
@@ -606,7 +626,7 @@ Fetch → validate → normalize → canonicalize → score → policy filter
 
 ### 13.1 LiteLLM: contrato lógico de ejemplo
 
-El ejemplo de abajo **ilustra la gramática de `model_name`, `litellm_params.model`, `order` y claves por entorno**. **NO es un fichero listo para ejecutar**: reemplazar IDs falsos por modelos **actuales, verificados gratuitos** y validar los campos contra la versión específica. No inferir que NVIDIA o OpenRouter ofrecen esos nombres ficticios.
+El ejemplo de abajo **ilustra la gramática de `model_name`, `litellm_params.model`, `order` y claves por entorno**. **NO es un fichero listo para ejecutar**: reemplazar IDs falsos por modelos **actuales, verificados gratuitos** y validar los campos contra la versión específica. No inferir que NVIDIA o OpenRouter ofrecen esos nombres ficticios. **v1.2:** solo deployments externos; ningún deployment `opencode` nativo entra en esta lista (addendum §12).
 
 ```yaml
 # gateway.generated.yaml — EJEMPLO, NO desplegable
@@ -740,6 +760,8 @@ La autenticación del gateway debe validarse contra `/v1/models` y `/v1/chat/com
 
 ### 13.3 La excepción OpenCode Free
 
+> **v1.2 — sección reemplazada íntegramente por el addendum:** los modelos Free solo están disponibles desde el cliente OpenCode; un cliente externo (LiteLLM, Python u otro) recibe HTTP 403 aunque presente una clave válida. Ninguna inferencia a `opencode.ai/inference` fuera de OpenCode; su endpoint de modelos queda solo como metadatos (addendum §1, mapa §9). Lo que sigue se conserva solo como registro histórico.
+
 **Corrección v1.1: OpenCode Console ya no es una excepción por ausencia de API.** La documentación oficial publica:
 
 - API base: `https://opencode.ai/inference/openai/v1`.
@@ -811,6 +833,8 @@ No enviar secretos reales a pruebas. Conservar informes SHA, quórum y estado ac
 - Revisar explícitamente si el usuario realmente despliega en Hetzner, Docker y Traefik: **esos componentes aparecen en la crítica externa pero NO constan en el script entregado**; aplicar hardening específico solo si corresponde.
 
 ## 15. Plan de implementación recomendado
+
+> **v1.2:** primero consolidar `native_first` en OpenCode (selector, revisores, DeepResearch gestionado); el gateway externo después, solo si se aprueba (addendum §10, mapa §9).
 
 ### Fase 0 — Inventario y baseline (sin romper producción)
 
@@ -945,6 +969,8 @@ Funcionalidad prioritaria: `status`, `models`, `validate-config`, `simulate-fall
 
 ## 18. Riesgos y decisiones abiertas antes de tocar el equipo
 
+> **v1.2:** la restricción de OpenCode Free a su cliente nativo (403 a externos) es una **restricción confirmada**, no una «compatibilidad pendiente de prueba»: la fila «OpenCode Console/Free fuera de gateway» queda cerrada (addendum §1, mapa §9).
+
 | Riesgo/decisión | Política recomendada |
 |---|---|
 | Incidente de seguridad LiteLLM del 21/10/2026 | **Bloqueo de despliegue** hasta aprobación; no usar tags móviles |
@@ -1045,7 +1071,7 @@ La implementación solo se considera completada cuando existan:
 - [ ] Métricas: proveedor/modelo efectivos, calidad, cuotas, fallback, errores y resultados.
 - [ ] Crons existentes integrados, sin duplicados, con logs y recuperación.
 - [ ] Manual de rollback al flujo OpenCode original.
-- [ ] Pruebas T01–T20, con evidencia y revisión de criterios de aceptación.
+- [ ] Pruebas T01–T20 + batería §11 del addendum (A01–A12), con evidencia y revisión de criterios de aceptación.
 
 ---
 
@@ -1067,6 +1093,8 @@ La implementación solo se considera completada cuando existan:
 ---
 
 ## 21. Fuentes primarias verificadas (consulta: 22/10/2026)
+
+> **v1.2:** priorizar la documentación oficial V2 de Inference API, Models y `session.switchModel` (addendum §13, mapa §9).
 
 1. **LiteLLM — incidente del 21 de octubre de 2026**: https://docs.litellm.ai/blog/security-incident-oct-21-2026
 2. **LiteLLM — incidente de marzo de 2026**: https://docs.litellm.ai/blog/security-update-march-2026

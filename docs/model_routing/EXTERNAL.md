@@ -5,13 +5,16 @@ and interactive OpenCode. Everything here works without importing
 OpenCEO code: a versioned JSON snapshot plus four CLI commands over the
 shared store (TASK-2026-00291). The gateway stays in security HOLD
 (SPEC §14.1): the generator emits a logical LiteLLM contract for review
-only, never a deployment. While the gateway is on HOLD, OpenCode routes
-stay native (SPEC §13.3).
+only, never a deployment, and only for external providers — native
+`opencode` routes are never gateway deployments (addendum v1.2 §12,
+TASK-2026-00304). While the gateway is on HOLD, group A serves natively
+and group B serves through its provider configured in OpenCode
+(addendum v1.2 §3.4, TASK-2026-00305).
 
 ## Consumer snapshot
 
 `export_consumer_snapshot` publishes the contract (default readers use
-their own copy; the file is plain JSON, `schema_version: 1`):
+their own copy; the file is plain JSON, `schema_version: 2`):
 
 - `generated_at`, `generator`, `rankings_sha256`, `catalog_snapshot`:
   provenance of the frozen ranking this snapshot describes.
@@ -22,9 +25,11 @@ their own copy; the file is plain JSON, `schema_version: 1`):
   (T20: no new gateway deployments, serve native).
 - `profiles.<name>.routes`: ranking order flattened to one row per
   route: `rank`, `canonical_model_id`, `family_id`, `deployment_id`,
-  `provider`, `gateway_alias` (profile alias, or `review-candidate-NNN`
-  inside `free-review`; null for native-only routes), `native_cli_model`
-  (the `opencode run -m` id, set for `opencode` provider routes only).
+  `provider`, `route_type`, `allowed_client`, `provider_id`, `model_id`
+  (v2, addendum §6), `gateway_alias` (profile alias, or
+  `review-candidate-NNN` inside `free-review`; null for native-only
+  routes), `native_cli_model` (the `opencode run -m` id, set for
+  `opencode` provider routes only).
 - `profiles.<name>.native_notice`: what serves natively while the
   gateway is unavailable.
 
@@ -65,11 +70,12 @@ it (`strip_gateway_provider`). The generated entry references
 ## Gateway absent (T14) and security freeze (T20)
 
 T14: when the gateway is unavailable, sessions report the failure in
-plain words and keep serving native OpenCode routes per policy; paid
-routes are never touched as a fallback. `plan_consumer_routes` encodes
-this: `gateway_available=False` yields native `opencode run -m`
-commands for `opencode` provider routes only, with a notice naming what
-stays blocked.
+plain words and keep serving per policy without it: native group A
+routes plus group B routes through their provider configured in
+OpenCode; paid routes are never touched as a fallback.
+`plan_consumer_routes` encodes this: `gateway_available=False` yields
+native `opencode run -m` commands with a notice naming what stays
+blocked and what group B needs installed.
 
 T20: on a gateway security advisory, `apply_security_rollback` freezes
 new deployments (`gateway.frozen` in the config dir, with reason and

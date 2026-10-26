@@ -117,6 +117,9 @@ and `tui_next_turn_fallback` keep ids, models and outcomes only.
 ## Rollback to native OpenCode
 
 Ordered from least to most disruptive; every step is reversible.
+This is addendum §11.11: back to a native free model in OpenCode,
+with projects, prompts and verified sessions preserved (A11 replays
+it offline).
 
 1. Reviews: set `review.free_router.enabled: False`
    (`config_loader.py`): the manual
@@ -124,14 +127,20 @@ Ordered from least to most disruptive; every step is reversible.
    entirely (`review_wiring.free_router_settings`).
 2. Research: set `RESEARCH_FREE_ROUTER_ENABLED=false`
    (`settings.py`): synthesis falls back to the static model
-   (`research_wiring.research_router_settings`).
+   (`research_wiring.research_router_settings`); verified
+   checkpoints under `research_checkpoints/` stay on disk for
+   inspection.
 3. OpenCode configs generated for the gateway roll back with
    `external.strip_gateway_provider` (what T20 applies after
-   freezing); the native CLI needs no credential, so a paid route
-   fails instead of billing (SPEC §13.3).
+   freezing); native OpenCode Free needs no credential, and a paid
+   route fails instead of billing (addendum v1.2 §1). Group B
+   provider entries merged into a project `opencode.json` are just
+   config: delete the entries or restore the file from backup.
 4. Security alert: `external.apply_security_rollback` freezes new
    gateway generations (`gateway.frozen`, `GatewayFrozenError`
    until `unfreeze_gateway`) and emits a `gateway_security` alert.
 5. Scheduled refresh: `--uninstall` (above). The gateway itself
-   stays in HOLD (SPEC §14.1, TASK-2026-00298): nothing installs
-   or runs LiteLLM from this module.
+   stays in HOLD and is externals-only (SPEC §14.1,
+   TASK-2026-00298): nothing installs or runs LiteLLM from this
+   module, and no native `opencode` deployment ever enters
+   `gateway.generated.yaml`.

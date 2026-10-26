@@ -70,8 +70,11 @@ Checkout: main, after TASK-2026-00286 and TASK-2026-00299.
    shows catalog and rankings present).
 2. Run one small secret-free tier C ticket: the two OpenCode
    reviewers are the top two eligible `free-review` models of
-   distinct families (`review_wiring.pick_pair`), each with a
-   §11.7 receipt pinning effective model, family and sha256.
+   distinct families in `native_first` order, with an explicit
+   `--model` each (`review_wiring.pick_pair`); when group A is
+   spent the failed reviewer restarts whole on the group B reserve.
+   Each receipt pins effective model, family, route fields and
+   sha256 (SPEC §11.7, addendum §11.7).
 3. `free-router cost-audit --since 24h` exits 0 (no billing rows,
    receipts complete); `free-router errors --since 24h --summary`
    shows the fallbacks, if any.
@@ -88,7 +91,8 @@ Checkout: main, after TASK-2026-00295.
    `gateway.generated.yaml` deployed anywhere
    (`external.build_gateway_plan` emits a logical contract for
    review only; field names need re-validation against the
-   selected LiteLLM version).
+   selected LiteLLM version). Native `opencode` routes never enter
+   the plan (`native_routes` only, addendum §12).
 2. Evaluate the pinned version+digest and the consolidated
    alternatives against SPEC §14.1, then write
    `security-approval.md` with the checklist from the ticket:
@@ -113,7 +117,9 @@ cancel this ticket citing the Owner order.
    Traefik and from automatic updaters.
 2. Connect one real free-inference provider first
    (`external.build_gateway_plan` order follows the ranking;
-   review aliases carry `num_retries: 0`).
+   review aliases carry `num_retries: 0`). Externals only: no
+   `opencode` native deployment enters the gateway (addendum §12,
+   A01).
 3. Verify `/v1/models`, tools and the effective endpoint, then a
    no-paid-calls E2E failover and the rollback to native OpenCode
    (T14 plan, `strip_gateway_provider`).
@@ -126,9 +132,11 @@ Checkout: main, after TASK-2026-00286 and TASK-2026-00299.
 
 1. Run one short real investigation (~5 turns) with MCP on a
    non-confidential topic, with one injected fault (never a real
-   quota error): sources and checkpoints survive, the fallback
-   picks a compatible free model, no answer or MCP command runs
-   twice (`research_wiring.ResearchSession`, T13).
+   quota error): sources and checkpoints survive, the managed
+   session switches to a compatible free model with `switchModel`
+   and resumes from the last checkpoint, no answer or MCP command
+   runs twice (`research_wiring.ManagedResearchSession`, T13,
+   addendum §11.8).
 2. `free-router sessions --active` lists the session while fresh;
    afterwards `free-router errors --since 24h` shows the injected
    fault classified and recorded.

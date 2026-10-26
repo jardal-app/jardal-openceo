@@ -1,4 +1,4 @@
-# Router acceptance T01–T20 (TASK-2026-00297)
+# Router acceptance T01–T20 + addendum §11 (TASK-2026-00297, TASK-2026-00309)
 
 Battery over simulated providers, injected faults and the live
 fixtures the epic recorded. No network leaves loopback; no model
@@ -8,7 +8,7 @@ is called. Regenerate with the battery:
 PYTHONPATH=openceo-core ./.venv/bin/python -c "from pathlib import Path; from model_routing.acceptance import ACCEPTANCE_REPORT_PATH, generate_report_text; import tempfile; text = generate_report_text(Path(tempfile.mkdtemp())); ACCEPTANCE_REPORT_PATH.write_text(text)"
 ```
 
-## Scenarios
+## Scenarios T01–T20
 
 | ID | Expected | Observed | Result |
 |---|---|---|---|
@@ -33,6 +33,23 @@ PYTHONPATH=openceo-core ./.venv/bin/python -c "from pathlib import Path; from mo
 | T19 | sources, date, snapshot and motive recorded | snapshot valid with aa 4.3 + agent/latest | pass |
 | T20 | freeze new deployments, roll back to native | freeze holds; generation refuses; alert recorded | pass |
 
+## Addendum §11 scenarios
+
+| ID | Expected | Observed | Result |
+|---|---|---|---|
+| A01 | no native route in the gateway; external 403 never retries | gateway serves 4 external rows, 0 native; 403→route_not_authorized no-retry | pass |
+| A02 | free-research opens on the best native model | free-research serves opencode/alpha-free (group A rank 1) | pass |
+| A03 | spent native falls to the next native alone | 429 on opencode/alpha-free cooled; served opencode/beta-free | pass |
+| A04 | no native left crosses to a configured external | opencode blocked by the recorded quota; crossed to openrouter/acme/gamma:free via its configured provider | pass |
+| A05 | incompatible context, tools or privacy never serve | good served; small context, no-tools and private dropped with reasons | pass |
+| A06 | simultaneous failure keeps distinct families | both labels failed together; gamma+delta serve, a third label refused the held family | pass |
+| A07 | failed reviewer restarts whole on the same snapshot | label2 rotates to gamma on the same snapshot; label1 receipt sha intact | pass |
+| A08 | history survives switches; tools run once | 3 turns, 1 rotation, checkpoint turn=3, cut stream re-claims call_sky without re-execution | pass |
+| A09 | launcher failure observed and routed next turn | launcher session failure observed; next turn routed alpha→beta | pass |
+| A10 | paid or unverified routes never serve | paid + unverified dropped; served opencode/good-free | pass |
+| A11 | router off returns to native with files intact | router off in both pools; gateway stripped and frozen; 3 files intact; native alpha servable | pass |
+| A12 | audit keeps model data; prompts stay out | switch+receipt audit keeps model/family/provider/reason/result; canary, secrets and key-like absent | pass |
+
 ## SPEC §16 criteria
 
 | Criterion | Observed | Threshold | Result |
@@ -41,8 +58,8 @@ PYTHONPATH=openceo-core ./.venv/bin/python -c "from pathlib import Path; from mo
 | receipts without effective model | 0 | 0 | pass |
 | family collisions in strict rounds | 0 | 0 | pass |
 | valid published snapshots | 2/2 | 100% | pass |
-| quota errors classified | 2/2 | 100% | pass |
-| pre-response recovery with a healthy alternative | 5/5 (100%) | ≥95% | pass |
+| quota errors classified | 4/4 | 100% | pass |
+| pre-response recovery with a healthy alternative | 7/7 (100%) | ≥95% | pass |
 | tool repeats without a check | 0 | 0 | pass |
 
 ## Replay of recorded live responses
@@ -50,8 +67,14 @@ PYTHONPATH=openceo-core ./.venv/bin/python -c "from pathlib import Path; from mo
 - sources-401-groq replays as auth
 - availability-not-found-openrouter replays as not_found
 - research-session-live replays 5 turns with one rotation
+- opencode-free-quota-429 replays as daily_quota
+- native-instance-catalog replays 81/82 models overlapping
+- selector-openrouter-chat replays with credits 0.0 → 0.0
+- review-group-b-live replays an external receipt, credits unchanged
+- research-managed-session-live replays 3 turns, effective == session model, cost 0
+- tui-launcher-session-live replays cost 0 with a watermark
 
-## Real provider calls spent by the epic (2026-10-23)
+## Real provider calls spent by the epic (2026-10-23–2026-10-25)
 
 Every call free, minimal and synthetic; generation only where the
 ticket acceptance required it. Sources: the builder comments on
@@ -70,7 +93,13 @@ each ticket.
 | TASK-2026-00294 | 7 | 5 session turns + 2 key reads |
 | TASK-2026-00295 | 6 | minimal native OpenCode calls |
 | TASK-2026-00297 | 2 | key before/after the battery, no generation |
-| **total** | **95** | |
+| TASK-2026-00304 | 3 | 1 native probe + 2x 403 pin, no quota spent |
+| TASK-2026-00305 | 3 | 1 external chat + 2 key reads, credits unchanged |
+| TASK-2026-00306 | 7 | 1 review + 4 diagnosis reviews + 2 key reads |
+| TASK-2026-00307 | 3 | 3 managed turns with one injected 429 |
+| TASK-2026-00308 | 3 | 1 unplanned + 1 quota-hit + 1 rerun turn |
+| TASK-2026-00309 | 2 | key before/after the battery, no generation |
+| **total** | **116** | |
 
 ## Provenance
 

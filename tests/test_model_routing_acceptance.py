@@ -1,4 +1,4 @@
-"""F6 acceptance: T01–T20 battery, §16 metrics, findings, ops CLI (TASK-2026-00297).
+"""F6 acceptance: T01–T20 + addendum A01–A12 battery, §16 metrics, findings, ops CLI (TASK-2026-00297, TASK-2026-00309).
 
 Offline only: simulated providers, injected faults and the recorded
 live fixtures already in the repo. No network leaves loopback and no
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -49,11 +50,63 @@ def _store(tmp_path: Path) -> AvailabilityStore:
 
 def test_battery_is_green_and_complete(tmp_path):
     report = router_acceptance.run_battery(tmp_path / "battery")
-    assert [item.id for item in report.scenarios] == [f"T{i:02d}" for i in range(1, 21)]
+    assert [item.id for item in report.scenarios] == [
+        *[f"T{i:02d}" for i in range(1, 21)],
+        *[f"A{i:02d}" for i in range(1, 13)],
+    ]
     failed = [item for item in report.scenarios if not item.passed]
     assert failed == []
     assert report.passed
-    assert len(report.replay_notes) == 3
+    assert len(report.replay_notes) == 9
+
+
+def test_addendum_scenarios_cover_section_11(tmp_path):
+    report = router_acceptance.run_battery(tmp_path / "battery")
+    addendum = [item for item in report.scenarios
+                if item.id.startswith("A")]
+    assert [item.id for item in addendum] == [f"A{i:02d}" for i in range(1, 13)]
+    assert all(item.passed and item.evidence for item in addendum)
+    text = router_acceptance.render_report(report)
+    assert "## Addendum §11 scenarios" in text
+
+
+def test_a01_gateway_check_rejects_native_routes():
+    plan = router_external.build_gateway_plan(
+        router_acceptance.battery_catalog(),
+        router_acceptance.battery_rankings())
+    served = router_acceptance._gateway_served_models(plan)
+    assert served
+    assert not [model for model in served if "opencode/" in model]
+    poisoned = router_external.GatewayPlan(
+        backend=plan.backend,
+        model_list=(*plan.model_list,
+                    {"model_name": "evil",
+                     "litellm_params": {"model": "opencode/evil-free"}}),
+        review_aliases=plan.review_aliases,
+        review_routes=plan.review_routes,
+        skipped=plan.skipped,
+        native_routes=plan.native_routes,
+        eligible_sha256=plan.eligible_sha256)
+    bad = [model for model in router_acceptance._gateway_served_models(poisoned)
+           if "opencode/" in model]
+    assert bad == ["opencode/evil-free"]
+    assert "opencode/" in json.dumps(poisoned.model_list)
+
+
+def test_a04_reads_quota_fixture_from_passed_dir(tmp_path):
+    fixtures = tmp_path / "fixtures"
+    shutil.copytree(
+        Path(__file__).resolve().parent / "fixtures" / "model_routing_live",
+        fixtures)
+    report = router_acceptance.run_battery(tmp_path / "ok", fixtures_dir=fixtures)
+    assert report.passed
+    payload_path = fixtures / "opencode-free-quota-429.json"
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    payload["event"]["error"]["response"]["body"] = "synthetic 200 ok"
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+    broken = router_acceptance.run_battery(tmp_path / "broken", fixtures_dir=fixtures)
+    failed = {item.id for item in broken.scenarios if not item.passed}
+    assert "A04" in failed
 
 
 def test_battery_metrics_meet_section_16(tmp_path):
@@ -63,8 +116,8 @@ def test_battery_metrics_meet_section_16(tmp_path):
     assert metrics.receipts_without_effective == 0
     assert metrics.family_collisions == 0
     assert (metrics.snapshots_valid, metrics.snapshots_published) == (2, 2)
-    assert (metrics.quota_classified, metrics.quota_errors) == (2, 2)
-    assert (metrics.pre_response_recovered, metrics.pre_response_attempts) == (5, 5)
+    assert (metrics.quota_classified, metrics.quota_errors) == (4, 4)
+    assert (metrics.pre_response_recovered, metrics.pre_response_attempts) == (7, 7)
     assert metrics.pre_response_recovery_rate >= 0.95
     assert metrics.tool_repeats_without_check == 0
     assert metrics.failures() == []
@@ -72,11 +125,12 @@ def test_battery_metrics_meet_section_16(tmp_path):
 
 def test_real_calls_table_sums_to_total():
     rows = router_acceptance.REAL_CALLS_BY_TICKET
-    assert len(rows) == 11
+    assert len(rows) == 17
     assert sum(count for _ticket, count, _note in rows) == router_acceptance.total_real_calls()
-    assert router_acceptance.total_real_calls() == 95
+    assert router_acceptance.total_real_calls() == 116
     by_ticket = {ticket: count for ticket, count, _note in rows}
     assert by_ticket["TASK-2026-00297"] == 2
+    assert by_ticket["TASK-2026-00309"] == 2
 
 
 def test_committed_report_matches_regenerated_battery(tmp_path):
