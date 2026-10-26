@@ -6,7 +6,7 @@ badge. The overlay is bind-mounted over the motor's settings by the
 fence (``agent_sandbox.plan_agent``), so the Owner's global config is
 never touched and concurrent runs never race on a shared file.
 
-Control surface verified against Muse 1.4.7 (``MUSE_PINNED_VERSION``):
+Control surface verified against Muse 1.4.13 (``MUSE_PINNED_VERSION``):
 ``-c`` accepts ``run.*`` overrides but refuses every ``skills.*`` key and
 every ``mcpServers.<name>`` override (reserved names); the settings file
 carries skill activation (``skills.activation.<scope>``) and the badged
@@ -60,7 +60,7 @@ __all__ = [
 
 #: Pinned Muse build for role runs. Upgrading is deliberate: update the
 #: pin, run the echo smoke test, then restart the service.
-MUSE_PINNED_VERSION = "1.4.7-R6101.1"
+MUSE_PINNED_VERSION = "1.4.13-R6996.1"
 
 #: Home-relative settings path the fence overlays per role run.
 SETTINGS_OVERLAY_RELPATH = ".config/muse/settings.json"
