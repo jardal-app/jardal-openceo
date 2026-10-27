@@ -57,7 +57,7 @@ The shared integration identifier is **`project_key`**. A project spans Jardal E
 
 ### Read and Write Boundaries
 
-- Agents read the vault as files, run `qmd search`, and inspect repositories directly. OpenCEO is not a mandatory proxy for every read.
+- Agents read the vault as files within their project scope (see Engineering Knowledge and Code Context) and inspect repositories directly. OpenCEO is not a mandatory proxy for every read.
 - Knowledge writes go directly to the vault under the `obsidian-vault-links` skill and pass its checker. They do not require a ticket mutation or an Obsidian MCP.
 - Agent-originated operational writes, including ticket creation, status transitions, workflow execution, and approvals, pass through OpenCEO capabilities. The Jardal ERP adapter applies business changes in Jardal ERP; runtime changes remain in MongoDB.
 - Human business activity in Jardal ERP reaches OpenCEO through explicit integration events or requests. Reads and knowledge edits must not silently start execution or change business status.
@@ -80,7 +80,7 @@ The integration must preserve `TaskDocument`, task/source idempotency, explicit 
 | Runtime database | MongoDB | Execution tasks, dev sessions, user context, queues, workflow state, and agent metadata |
 | Business system of record | Jardal ERP | Business projects, tickets, priorities, users, approvals, workflows, and financial records, connected through scoped adapters |
 | Engineering memory | Obsidian-format Markdown vault | Durable engineering knowledge, read and written directly as files |
-| Knowledge retrieval | qmd keyword search | Find vault notes with `qmd search`; rebuildable index, not a source of truth |
+| Knowledge retrieval | Project-scoped vault reads | Find vault notes within the project folder as described in Engineering Knowledge and Code Context; the keyword index is rebuildable, not a source of truth |
 | Code intelligence | Repository search + LSP where supported | Read code relationships on demand, without a stored code graph |
 | Automation | n8n (self-hosted, Docker) | External triggers (Jardal ERP and existing Jira, Notion, GitHub sources), webhook normalization, and integration flows |
 | Chat/Multimedia | OpenWebUI (self-hosted) | Text chat, file/image/video uploads, basic voice. Connects via OpenAI-compatible API |
@@ -162,23 +162,18 @@ Not every external integration goes through n8n. Each tool is evaluated case by 
 
 ## Engineering Knowledge and Code Context
 
-The engineering vault lives at `/home/develop/development/Jardal/jardal-knowledge/vault/`. Its [setup guide](../../jardal-knowledge/README.md) and the [obsidian-vault-links skill](../../jardal-knowledge/.agents/skills/obsidian-vault-links/SKILL.md) define placement, links, note shape, and validation. Agents access Markdown files directly; Obsidian is an optional viewer, not a runtime dependency.
+The engineering vault lives outside this repo. Placement, links, note shape, and validation are defined by the obsidian-vault-links skill and the "Vault y mantenimiento del conocimiento" section of the jardal-knowledge README. This section does not duplicate them; follow those sources. Agents access Markdown files directly; Obsidian is an optional viewer, not a runtime dependency.
 
 Retrieve context in this order:
 
 1. Resolve the authorized work and execution state through OpenCEO, with the business reference in Jardal ERP when integrated.
-2. Find the project hub using the vault mapping and read the relevant linked notes. Search with `qmd search "<words>" -c vault` when needed.
+2. Find the project hub using the vault mapping and read the relevant linked notes. Keep every vault read inside that project's folder; when the hub does not link the note directly, search within the project folder only.
 3. Read current code relationships with targeted repository search (`rg`) and LSP where the agent supports it.
 4. Inspect implementation state with Git and targeted diffs.
 
-Use qmd's keyword mode. Semantic search (`qmd query`, `qmd vsearch`, `qmd embed`) is disabled by the shared-server setup; qmd is a command, not an MCP service.
+Project sessions never run vault-wide searches, the checker without `--project`, or index rebuilds: those belong to vault maintenance, not to project work. The skill forbids them.
 
-Write settled architecture, decisions, incident causes/fixes, research conclusions, and lessons to the vault. Update an existing note on the same subject, connect it to its project hub, cite repository evidence, and validate links. After changing notes:
-
-```bash
-python3 /home/develop/development/Jardal/jardal-knowledge/.agents/skills/obsidian-vault-links/scripts/vault_check.py check
-qmd update
-```
+Write settled architecture, decisions, incident causes/fixes, research conclusions, and lessons to the vault. Update an existing note on the same subject, connect it to its project hub, cite repository evidence, and validate links. After changing notes, check only the touched notes with the project-scoped checker form documented in the README section above.
 
 The checker must report zero errors and no warnings on touched notes. Task plans, progress logs, transcripts, secrets, build output, copies of code, and copies of existing repository documentation do not belong in the vault. Link to repository contracts such as this README instead of duplicating them.
 
