@@ -51,10 +51,10 @@ La columna «Origen» indica la sección o el ticket de la documentación de ref
 
 | Capacidad | Hoy (según la documentación) | Falta | Origen |
 |---|---|---|---|
-| Vault por proyecto, skill y checker con `--project` | Existe | Tipo `practice` (D3) | `jardal-knowledge/README.md` (§ Vault y mantenimiento), skill `obsidian-vault-links` |
+| Vault por proyecto, skill y checker con `--project` | Existe | Tipo `practice` (D3) | `jardal-knowledge/README.md` (§ Vault y mantenimiento del conocimiento), skill `obsidian-vault-links` |
 | Lectura del vault por agentes autónomos | No: el sandbox no monta el vault | Montaje de solo lectura del proyecto activo e índice de prácticas (D6) | Agent isolation (00192, 00214) |
 | Escritura del vault por agentes autónomos | No | Propuestas y publicador (D7, D8) | — |
-| Respaldo nocturno | Existe: systemd, bloqueo, trabaja en `main`, no hace pull ni force-push | Exclusión mutua con el publicador (D8) | `jardal-knowledge/README.md` (§ Vault y mantenimiento), `jardal-knowledge/scripts/nightly-git-backup.sh` |
+| Respaldo nocturno | Existe: systemd, bloqueo, trabaja en `main`, no hace pull ni force-push | Exclusión mutua con el publicador (D8) | `jardal-knowledge/README.md` (§ Vault y mantenimiento del conocimiento), `jardal-knowledge/scripts/nightly-git-backup.sh` |
 | Cristalización de skills | Existe: corre tras cierres completados o fallidos y promueve por reutilización en otro ticket | Promoción por resultado verificado, métricas por versión, reversión y retiro (D9) | 00210 |
 | Canal del Owner y locks | Existe: preguntas al Owner y locks de correo, DNS y Elfec; lo aprobado se ejecuta una sola vez | Enlazar la respuesta con su resultado (D10) y locks para Teams, Jira y Autotask (D12) | 00206, 00208 |
 | Envío a Teams, Jira y Autotask | No existe; solo hay correo | Herramientas sobre los locks existentes (D12) | 00199 |
@@ -62,7 +62,7 @@ La columna «Origen» indica la sección o el ticket de la documentación de ref
 | Telemetría del planner | Existe solo como información (`tier_mix`, `executor_link`, coste) | Precedentes de tickets cerrados (D10) | 00148, 00178, 00212 |
 | Handoff entre tickets | Solo desde los predecesores directos | Cubierto por los precedentes | 00211 |
 | Memoria automática de Claude Code | Activada por defecto en sesiones locales; estado real desconocido | Comprobar, migrar y desactivar (D5) | Documentación de Claude Code |
-| Sección «Engineering Knowledge and Code Context» | Desactualizada: búsqueda global con qmd, checker sin `--project`, `qmd update` | Alinearla con el skill (paso 1.3) | `docs/ARCHITECTURE_REFERENCE_2026.md` |
+| Sección «Engineering Knowledge and Code Context» | Alineada con el skill (paso 1.3, TASK-2026-00324) | — | `docs/ARCHITECTURE_REFERENCE_2026.md` |
 | Insignias de agente | Se atan al nombre del ticket en ERPNext | Aceptar referencias externas si se ejecutan tickets de Jira o Autotask en autónomo (D13) | 00214 |
 
 ## 5. Decisiones

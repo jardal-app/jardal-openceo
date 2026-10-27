@@ -91,8 +91,8 @@ Obsidian stores:
 -   Lessons learned
 
 Agents read and write the vault directly as files, with no MCP, following
-the `obsidian-vault-links` skill, and find notes with `qmd search`. The
-setup is described in
+the `obsidian-vault-links` skill, keeping every vault read inside the
+project folder. The setup is described in
 `/home/develop/development/Jardal/jardal-knowledge/README.md`.
 
 ## Code Intelligence

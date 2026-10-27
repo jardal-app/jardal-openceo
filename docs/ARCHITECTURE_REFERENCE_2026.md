@@ -80,7 +80,7 @@ The integration must preserve `TaskDocument`, task/source idempotency, explicit 
 | Runtime database | MongoDB | Execution tasks, dev sessions, user context, queues, workflow state, and agent metadata |
 | Business system of record | Jardal ERP | Business projects, tickets, priorities, users, approvals, workflows, and financial records, connected through scoped adapters |
 | Engineering memory | Obsidian-format Markdown vault | Durable engineering knowledge, read and written directly as files |
-| Knowledge retrieval | Project-scoped vault reads | Find vault notes within the project folder as described in Engineering Knowledge and Code Context; the index is rebuildable, not a source of truth |
+| Knowledge retrieval | Project-scoped vault reads | Find vault notes within the project folder as described in Engineering Knowledge and Code Context; the keyword index is rebuildable, not a source of truth |
 | Code intelligence | Repository search + LSP where supported | Read code relationships on demand, without a stored code graph |
 | Automation | n8n (self-hosted, Docker) | External triggers (Jardal ERP and existing Jira, Notion, GitHub sources), webhook normalization, and integration flows |
 | Chat/Multimedia | OpenWebUI (self-hosted) | Text chat, file/image/video uploads, basic voice. Connects via OpenAI-compatible API |
