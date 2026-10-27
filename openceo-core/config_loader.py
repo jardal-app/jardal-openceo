@@ -543,10 +543,11 @@ class ConfigLoader:
                         "max_wait_seconds": 43200,
                     },
                     # Free-model router feeding (epic TASK-2026-00283,
-                    # TASK-2026-00293): the two best free-review models
-                    # feed the free OpenCode slots. Back to manual after
-                    # the validation pilot (TASK-2026-00301); `enabled:
-                    # True` reactivates it when data ranks a review pair.
+                    # TASK-2026-00293; activated TASK-2026-00317 under the
+                    # rank-no-discard design TASK-2026-00319): the live
+                    # free-review ranking feeds the free slots in full
+                    # ranking order (nothing numeric discards). `enabled:
+                    # False` falls back to the manual list entirely.
                     # Anti-cut cascade (TASK-2026-00310): free → own →
                     # metered waves with a deterministic spend guard,
                     # then relaxed quorum (extras count), else block
@@ -572,7 +573,7 @@ class ConfigLoader:
                         "premium_whitelist": [],
                     },
                     "free_router": {
-                        "enabled": False,
+                        "enabled": True,
                         "round2_policy": "reuse_best_plus_novel",
                         "snapshot_max_age_hours": 30,
                     },
