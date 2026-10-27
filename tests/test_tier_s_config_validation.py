@@ -242,7 +242,7 @@ class InteractiveTriggerCleanupTests(unittest.TestCase):
 class WaitErpCommentTests(unittest.IsolatedAsyncioTestCase):
     def _service(self, adapter=None):
         service = TaskService.__new__(TaskService)
-        service._erpnext = adapter
+        service._business = adapter
         service._repo = MagicMock()
         service._repo.patch_task = AsyncMock()
         return service

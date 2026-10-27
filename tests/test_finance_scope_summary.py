@@ -1,7 +1,7 @@
 """Tests del resumen de saldos/gasto por Scope (TASK-2026-00044).
 
 Sin red: detector, agregacion Decimal y solo-lectura se prueban con un
-cliente falso. La prueba viva contra ERPNext se corre a mano una vez
+cliente falso. La prueba viva contra Jardal ERP se corre a mano una vez
 (lectura, sin documentos que limpiar).
 """
 

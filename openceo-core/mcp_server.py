@@ -18,13 +18,13 @@ from settings import Settings
 from tools.cloudflare import CloudflareDNSManager
 from tools.email_sender import SMTPEmailSender
 from workflow_service import WorkflowToolRegistry
-from tools.erpnext_client import (
-    ERPNextDuplicateError,
-    ERPNextPermissionError,
-    ERPNextUnavailable,
-    ERPNextValidationError,
+from tools.jardal_erp_client import (
+    JardalERPDuplicateError,
+    JardalERPPermissionError,
+    JardalERPUnavailable,
+    JardalERPValidationError,
 )
-from tools.erpnext_tickets import AttachmentRejected
+from tools.jardal_erp_tickets import AttachmentRejected
 from state import CodingTool, ReviewMode, TaskCreateRequest, TaskPriority, TaskSource
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ class MountedMCPServer:
 def build_internal_mcp_mount(
     settings: Settings,
     task_service: "TaskService",
-    erpnext: Any | None = None,
+    business: Any | None = None,
     issuer: Any | None = None,
     audit: Any | None = None,
     research_bridge: Any | None = None,
@@ -90,7 +90,7 @@ def build_internal_mcp_mount(
         settings=settings,
         path=_normalize_path(settings.MCP_SERVER_PATH),
         name="OpenCEO Internal MCP",
-        register_fn=lambda s, st: _register_all_tools(s, st, task_service, erpnext,
+        register_fn=lambda s, st: _register_all_tools(s, st, task_service, business,
                                                       research_bridge),
         stateless_http=True,
         json_response=True,
@@ -273,12 +273,12 @@ def _register_openceo_tools(
     server: FastMCP,
     settings: Settings,
     task_service: "TaskService",
-    erpnext: Any | None = None,
+    business: Any | None = None,
     research_bridge: Any | None = None,
 ) -> tuple[str, ...]:
 
     async def _enrich_with_execution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Añade el estado de EJECUCION de Mongo a los tickets de negocio de ERPNext.
+        """Añade el estado de EJECUCION de Mongo a los tickets de negocio de Jardal ERP.
 
         El ticket de negocio puede no tener tarea de ejecucion todavia (backlog
         registrado y aun no arrancado), y al reves, la ejecucion puede ir por detras del
@@ -298,19 +298,19 @@ def _register_openceo_tools(
         return rows
 
     def _not_configured() -> dict[str, Any]:
-        return {"ok": False, "status": "not_configured", "message": "ERPNext no esta configurado."}
+        return {"ok": False, "status": "not_configured", "message": "Jardal ERP no esta configurado."}
 
     def _classify(exc: Exception) -> dict[str, Any]:
         """Fallo -> estado clasificado: permiso, datos, tamano, disponibilidad."""
         if isinstance(exc, AttachmentRejected):
             return {"ok": False, "status": exc.status, "message": str(exc)}
-        if isinstance(exc, ERPNextUnavailable):
+        if isinstance(exc, JardalERPUnavailable):
             return {"ok": False, "status": "unavailable", "message": str(exc)}
-        if isinstance(exc, ERPNextPermissionError):
+        if isinstance(exc, JardalERPPermissionError):
             return {"ok": False, "status": "forbidden", "message": str(exc)}
-        if isinstance(exc, ERPNextDuplicateError):
+        if isinstance(exc, JardalERPDuplicateError):
             return {"ok": False, "status": "duplicate", "message": str(exc)}
-        if isinstance(exc, ERPNextValidationError):
+        if isinstance(exc, JardalERPValidationError):
             status = {404: "not_found", 413: "too_large", 400: "invalid_input"}.get(
                 exc.status_code, "invalid_input"
             )
@@ -318,11 +318,11 @@ def _register_openceo_tools(
         return {"ok": False, "status": "error", "message": str(exc)}
 
     async def _guard(operation: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        """Resuelve el metodo **despues** de comprobar el adapter: `erpnext` puede ser None."""
-        if erpnext is None or not erpnext.is_enabled:
+        """Resuelve el metodo **despues** de comprobar el adapter: `business` puede ser None."""
+        if business is None or not business.is_enabled:
             return _not_configured()
         try:
-            return await getattr(erpnext, operation)(*args, **kwargs)
+            return await getattr(business, operation)(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001 - se clasifica y se devuelve, no se propaga
             return _classify(exc)
 
@@ -332,10 +332,10 @@ def _register_openceo_tools(
         status: str | None = None,
         limit: int = 20,
     ) -> dict[str, Any]:
-        if erpnext is None or not erpnext.is_enabled:
-            return {"ok": False, "status": "not_configured", "message": "ERPNext no esta configurado."}
+        if business is None or not business.is_enabled:
+            return {"ok": False, "status": "not_configured", "message": "Jardal ERP no esta configurado."}
         try:
-            rows = await erpnext.search_tickets(
+            rows = await business.search_tickets(
                 query=query, project_key=project, status=status, limit=limit
             )
         except Exception as exc:  # noqa: BLE001 - se devuelve el error, no se propaga
@@ -349,14 +349,14 @@ def _register_openceo_tools(
         y se unio aqui (decision del dueño, 2026-10-01): dos tools para entender un ticket
         obligan al agente a un paso extra en cada turno.
         """
-        if erpnext is None or not erpnext.is_enabled:
+        if business is None or not business.is_enabled:
             return _not_configured()
         try:
-            row = await erpnext.get_ticket(identifier)
+            row = await business.get_ticket(identifier)
             if row is None:
                 return {"ok": False, "status": "not_found", "message": f"No existe el ticket {identifier}."}
             enriched = (await _enrich_with_execution([row]))[0]
-            thread = await erpnext.thread_of(str(row.get("name") or ""), limit=limit)
+            thread = await business.thread_of(str(row.get("name") or ""), limit=limit)
         except Exception as exc:  # noqa: BLE001 - se clasifica y se devuelve, no se propaga
             return _classify(exc)
         return {"ok": True, "ticket": enriched, **thread}
@@ -689,7 +689,7 @@ def _register_openceo_tools(
     server.tool(
         openceo_create_ticket,
         name="openceo_create_ticket",
-        description="Create a ticket in OpenCEO. It is registered in ERPNext (the business record) and in MongoDB (the execution record). Required: title. Optional: description, project, priority (low/medium/high/critical), status (queued/in_progress/completed/failed/escalated/interrupted/waiting), ticket_type, source, source_id, tags, due_date, external_url, coding_tool, review (dev only: on/off, omit = on; tier_s rejects off), autorun (default false), parent_task (TASK-... group), depends_on (list of TASK-...). Set autorun=true ONLY when the ticket must start executing now; by default it is only registered. Before creating, consider openceo_search_tickets to avoid duplicating existing work. Boundary (c): writes the business record.",
+        description="Create a ticket in OpenCEO. It is registered in Jardal ERP (the business record) and in MongoDB (the execution record). Required: title. Optional: description, project, priority (low/medium/high/critical), status (queued/in_progress/completed/failed/escalated/interrupted/waiting), ticket_type, source, source_id, tags, due_date, external_url, coding_tool, review (dev only: on/off, omit = on; tier_s rejects off), autorun (default false), parent_task (TASK-... group), depends_on (list of TASK-...). Set autorun=true ONLY when the ticket must start executing now; by default it is only registered. Before creating, consider openceo_search_tickets to avoid duplicating existing work. Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_create_tickets_batch,
@@ -704,22 +704,22 @@ def _register_openceo_tools(
     server.tool(
         openceo_search_tickets,
         name="openceo_search_tickets",
-        description="Search business tickets in ERPNext before creating new ones. Returns ERPNext tickets (name, subject, status, priority, project, openceo_ref, is_group, parent_task) plus execution_status from the runtime when the ticket has been started. Optional filters: query (substring of the subject), project (project_key, e.g. 'jardal-openceo'), status (Open/Working/Pending Review/Completed/Cancelled), limit (default 20). Boundary (a): reads through the ERPNext credential.",
+        description="Search business tickets in Jardal ERP before creating new ones. Returns Jardal ERP tickets (name, subject, status, priority, project, openceo_ref, is_group, parent_task) plus execution_status from the runtime when the ticket has been started. Optional filters: query (substring of the subject), project (project_key, e.g. 'jardal-openceo'), status (Open/Working/Pending Review/Completed/Cancelled), limit (default 20). Boundary (a): reads through the Jardal ERP credential.",
     )
     server.tool(
         openceo_get_ticket,
         name="openceo_get_ticket",
-        description="Read one ticket in full: fields, execution status, comments (newest first) and attachments with download URLs. Accepts the ERPNext name (e.g. 'TASK-2026-00025') or the OpenCEO ref. Boundary (a): reads through the ERPNext credential.",
+        description="Read one ticket in full: fields, execution status, comments (newest first) and attachments with download URLs. Accepts the Jardal ERP name (e.g. 'TASK-2026-00025') or the OpenCEO ref. Boundary (a): reads through the Jardal ERP credential.",
     )
     server.tool(
         openceo_create_objective,
         name="openceo_create_objective",
-        description="Create a top-down company objective: one ERPNext group Task (business identity) whose children the planner creates. Required: project, goal. Optional: acceptance (delivery criteria), source_id. Refuses duplicates and admission limits deterministically. Boundary (c): writes the business record.",
+        description="Create a top-down company objective: one Jardal ERP group Task (business identity) whose children the planner creates. Required: project, goal. Optional: acceptance (delivery criteria), source_id. Refuses duplicates and admission limits deterministically. Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_create_mission,
         name="openceo_create_mission",
-        description="Create a top-down company mission: one ERPNext group Task (business identity) whose children are objective groups the CEO strategy chains. Required: project, goal. Optional: acceptance (mission criteria; without them the CEO proposes and asks), source_id. Refuses duplicates deterministically. Boundary (c): writes the business record.",
+        description="Create a top-down company mission: one Jardal ERP group Task (business identity) whose children are objective groups the CEO strategy chains. Required: project, goal. Optional: acceptance (mission criteria; without them the CEO proposes and asks), source_id. Refuses duplicates deterministically. Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_transition_ticket,
@@ -806,7 +806,7 @@ def _register_openceo_tools(
     server.tool(
         openceo_add_ticket_comment,
         name="openceo_add_ticket_comment",
-        description="Comment on a ticket; it appears in the ERPNext timeline. Idempotent: identical text from this agent is not posted twice. Boundary (c): writes the business record.",
+        description="Comment on a ticket; it appears in the Jardal ERP timeline. Idempotent: identical text from this agent is not posted twice. Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_update_ticket_comment,
@@ -826,7 +826,7 @@ def _register_openceo_tools(
     server.tool(
         openceo_get_ticket_attachment,
         name="openceo_get_ticket_attachment",
-        description="Read one attachment by its id: metadata and authenticated download_url. include_content=true also returns text or base64 when it fits in 256 KiB. Boundary (a): reads through the ERPNext credential.",
+        description="Read one attachment by its id: metadata and authenticated download_url. include_content=true also returns text or base64 when it fits in 256 KiB. Boundary (a): reads through the Jardal ERP credential.",
     )
     server.tool(
         openceo_update_ticket_attachment,
@@ -886,16 +886,16 @@ def _register_openceo_tools(
         except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
             return _classify(exc)
 
-    async def openceo_ensure_erpnext_project(
+    async def openceo_ensure_business_project(
         project_key: str, display_name: str = "",
     ) -> dict[str, Any]:
-        if erpnext is None or not erpnext.is_enabled:
+        if business is None or not business.is_enabled:
             return _not_configured()
         try:
             from ops.create_project import normalize_key
             key = normalize_key(project_key)
-            existing = await erpnext.find_project(key)
-            name = await erpnext.ensure_project(
+            existing = await business.find_project(key)
+            name = await business.ensure_project(
                 key, (display_name or "").strip() or None)
             return {"name": name, "created": not existing}
         except Exception as exc:  # noqa: BLE001 - classified and returned, never raised
@@ -1040,22 +1040,22 @@ def _register_openceo_tools(
         "Boundary (a): SMTP. Boundary (b): recipient lock.",
     )
     server.tool(
-        openceo_ensure_erpnext_project,
-        name="openceo_ensure_erpnext_project",
-        description="Ensure the ERPNext Project identity (idempotent by project_key). "
+        openceo_ensure_business_project,
+        name="openceo_ensure_business_project",
+        description="Ensure the Jardal ERP Project identity (idempotent by project_key). "
         "Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_register_expense,
         name="openceo_register_expense",
-        description="Register an occasional expense in ERPNext from free text "
+        description="Register an occasional expense in Jardal ERP from free text "
         "(Journal Entry; openceo_ref is required and makes retries idempotent). "
         "Boundary (c): writes the business record.",
     )
     server.tool(
         openceo_register_income,
         name="openceo_register_income",
-        description="Register collected income in ERPNext from free text "
+        description="Register collected income in Jardal ERP from free text "
         "(Journal Entry; openceo_ref is required and makes retries idempotent). "
         "Boundary (c): writes the business record.",
     )
@@ -1063,13 +1063,13 @@ def _register_openceo_tools(
         openceo_scope_summary,
         name="openceo_scope_summary",
         description="Balance/expense summary by scope from the ledger (read-only). "
-        "Boundary (a): reads through the ERPNext credential.",
+        "Boundary (a): reads through the Jardal ERP credential.",
     )
     server.tool(
         openceo_contribution_10_status,
         name="openceo_contribution_10_status",
         description="10% contribution rule status from the ledger (read-only). "
-        "Boundary (a): reads through the ERPNext credential.",
+        "Boundary (a): reads through the Jardal ERP credential.",
     )
     server.tool(
         openceo_elfec_house_payment,
@@ -1113,7 +1113,7 @@ def _register_openceo_tools(
         "openceo_update_ticket_attachment",
         "openceo_delete_ticket_attachment",
         "openceo_send_email",
-        "openceo_ensure_erpnext_project",
+        "openceo_ensure_business_project",
         "openceo_register_expense",
         "openceo_register_income",
         "openceo_scope_summary",
@@ -1128,12 +1128,12 @@ def _register_all_tools(
     server: FastMCP,
     settings: Settings,
     task_service: "TaskService",
-    erpnext: Any | None = None,
+    business: Any | None = None,
     research_bridge: Any | None = None,
 ) -> tuple[str, ...]:
     """Internal MCP: infra + OpenCEO-specific tools."""
     infra = _register_infra_tools(server, settings, task_service)
-    openceo = _register_openceo_tools(server, settings, task_service, erpnext,
+    openceo = _register_openceo_tools(server, settings, task_service, business,
                                       research_bridge)
     return infra + openceo
 

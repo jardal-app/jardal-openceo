@@ -1,14 +1,14 @@
-# Contrato de integración — OpenCEO Finance ↔ ERPNext
+# Contrato de integración — OpenCEO Finance ↔ Jardal ERP
 
 **Fecha:** 2026-09-21  
 **Estado:** FINAL para implementación — **con una sección superada** (véase §14)  
 **Repositorio dueño:** `jardal-openceo`  
 **Decisión financiera canónica:** `jardal-erpnext/decision-2026-09-21-arquitectura-financiera-final.md`
 
-> Este archivo no redefine contabilidad. Define **cómo OpenCEO consume ERPNext sin duplicarlo y cómo debe implementarse el adapter del agente Finance**.
+> Este archivo no redefine contabilidad. Define **cómo OpenCEO consume Jardal ERP sin duplicarlo y cómo debe implementarse el adapter del agente Finance**.
 >
 > **Nota del 2026-09-24:** la frontera de *proyectos y tickets* cambió. `OPENCEO_DIRECTION.md`
-> v1.1 asigna el trabajo empresarial a ERPNext, así que **§14 queda superada en esa frontera**
+> v1.1 asigna el trabajo empresarial a Jardal ERP, así que **§14 queda superada en esa frontera**
 > (el detalle está en la propia sección). Todo lo demás —contabilidad, idempotencia,
 > `OpenCEO Scope`, pagos— sigue vigente sin cambios.
 
@@ -17,13 +17,13 @@
 Al trabajar desde `/home/develop/development/Jardal/jardal-openceo/`:
 
 1. Leer el README/arquitectura principal de OpenCEO y este contrato.
-2. Respetar la decisión financiera canónica del repo ERPNext.
+2. Respetar la decisión financiera canónica del repo Jardal ERP.
 3. Implementar la integración dentro del agente Finance; no crear un microservicio financiero separado.
 4. No crear un ledger paralelo en MongoDB.
-5. No usar n8n para llamadas REST normales a ERPNext.
+5. No usar n8n para llamadas REST normales a Jardal ERP.
 6. Mantener `execute_money_movements=false`.
 7. Implementar primero lectura y registro seguro; ejecución monetaria real queda fuera de esta fase.
-8. Añadir campos custom en ERPNext únicamente cuando un workflow real demuestre que son necesarios.
+8. Añadir campos custom en Jardal ERP únicamente cuando un workflow real demuestre que son necesarios.
 
 ---
 
@@ -36,11 +36,11 @@ OpenCEO Finance:
 - clasifica hacia Company / OpenCEO Scope / Account / Party;
 - prepara operaciones;
 - gestiona aprobaciones según política;
-- consulta y escribe ERPNext mediante tools semánticos;
+- consulta y escribe Jardal ERP mediante tools semánticos;
 - invoca proveedores externos cuando una fase futura autorice movimientos reales;
 - explica resultados al usuario.
 
-ERPNext:
+Jardal ERP:
 
 - guarda documentos financieros;
 - valida contabilidad;
@@ -70,12 +70,12 @@ openceo-core/
     └── finance/
         ├── prompt.md
         ├── tools.py
-        ├── erpnext_client.py
+        ├── jardal_erp_client.py
         ├── requirements.txt
         └── .env.example
 ```
 
-### `erpnext_client.py`
+### `jardal_erp_client.py`
 
 Cliente HTTP determinista de bajo nivel:
 
@@ -105,7 +105,7 @@ run_method(arbitrary_python_path, arbitrary_args)
 
 **No se decide por adelantado qué DocTypes necesitan `openceo_ref`.**
 
-Cada tool se diseña primero en términos de negocio. Luego se determina qué documentos ERPNext crea realmente. Solo esos DocTypes reciben el mecanismo de idempotencia que necesiten.
+Cada tool se diseña primero en términos de negocio. Luego se determina qué documentos Jardal ERP crea realmente. Solo esos DocTypes reciben el mecanismo de idempotencia que necesiten.
 
 Ejemplo:
 
@@ -265,7 +265,7 @@ Una respuesta HTTP exitosa de OpenCEO/adapter **no equivale** a dinero movido.
 
 Solo evidencia verificable del proveedor permite pasar a `externally_confirmed`.
 
-ERPNext registra el movimiento y la conciliación en los pasos posteriores apropiados.
+Jardal ERP registra el movimiento y la conciliación en los pasos posteriores apropiados.
 
 ---
 
@@ -323,7 +323,7 @@ Entrada:
 
 - período;
 - política explícita de ingresos elegibles;
-- datos confirmados desde ERPNext.
+- datos confirmados desde Jardal ERP.
 
 Salida conceptual:
 
@@ -381,7 +381,7 @@ Los permisos se amplían solo cuando un nuevo tool necesita un DocType adicional
 
 ## 13. No usar n8n para el adapter base
 
-Las llamadas REST a ERPNext son integración directa usada por Finance y pertenecen al Local Tool.
+Las llamadas REST a Jardal ERP son integración directa usada por Finance y pertenecen al Local Tool.
 
 n8n solo entra si aparece un webhook externo o una orquestación compleja que realmente lo justifique.
 
@@ -392,11 +392,11 @@ n8n solo entra si aparece un webhook externo o una orquestación compleja que re
 > **⚠️ SUPERADO EN LA FRONTERA DE PROYECTOS Y TICKETS (2026-09-24).**
 > La asignación de *proyectos, tareas y tickets* a OpenCEO que hace esta sección queda
 > **superada** por [`OPENCEO_DIRECTION.md`](OPENCEO_DIRECTION.md) v1.1 (2026-09-23), que
-> asigna el trabajo empresarial a ERPNext, y por
+> asigna el trabajo empresarial a Jardal ERP, y por
 > [`ARCHITECTURE_REFERENCE_2026.md`](ARCHITECTURE_REFERENCE_2026.md) §System Boundaries.
-> Desde el 2026-09-24 los tickets viven en ERPNext (`Task`) y la identidad de proyecto en
+> Desde el 2026-09-24 los tickets viven en Jardal ERP (`Task`) y la identidad de proyecto en
 > `Project`; MongoDB conserva el estado de **ejecución**. Decisión operativa y plan en
-> `PENDINGS.md` → ERPNext.
+> `PENDINGS.md` → Jardal ERP.
 >
 > **Lo que sigue vigente de esta sección:** OpenCEO conserva objetivos, conversación y
 > workflows empresariales generales; `OpenCEO Scope` sigue siendo la dimensión
@@ -413,7 +413,7 @@ OpenCEO sigue siendo dueño de:
 - conversación;
 - workflows empresariales generales.
 
-No adoptar ERPNext Project, CRM, Helpdesk o equivalentes como segunda fuente canónica.
+No adoptar Jardal ERP Project, CRM, Helpdesk o equivalentes como segunda fuente canónica.
 
 `OpenCEO Scope` es una dimensión financiera, no un segundo gestor de proyectos.
 
@@ -421,7 +421,7 @@ No adoptar ERPNext Project, CRM, Helpdesk o equivalentes como segunda fuente can
 
 ## 15. Contrato de lectura
 
-Toda respuesta financiera que dependa de ERPNext debe poder asociarse internamente con:
+Toda respuesta financiera que dependa de Jardal ERP debe poder asociarse internamente con:
 
 - fecha/hora de corte;
 - Company;
@@ -431,7 +431,7 @@ Toda respuesta financiera que dependa de ERPNext debe poder asociarse internamen
 
 No guardar en MongoDB una copia viva de saldos como nueva fuente de verdad.
 
-Cachés/resúmenes deben tener fecha de corte y poder reconstruirse desde ERPNext.
+Cachés/resúmenes deben tener fecha de corte y poder reconstruirse desde Jardal ERP.
 
 ---
 
@@ -439,7 +439,7 @@ Cachés/resúmenes deben tener fecha de corte y poder reconstruirse desde ERPNex
 
 ### Fase A — conexión y lectura
 
-1. `ERPNextClient` + auth/timeouts/errores.
+1. `JardalERPClient` + auth/timeouts/errores.
 2. health/read mínimo.
 3. `get_cash_position` / `get_scope_summary` sobre datos de prueba.
 4. verificar Decimal, moneda y fechas.
@@ -448,7 +448,7 @@ Cachés/resúmenes deben tener fecha de corte y poder reconstruirse desde ERPNex
 
 Elegir **un solo flujo real**, preferentemente `register_expense` o `register_income`.
 
-1. definir exactamente qué DocTypes ERPNext crea;
+1. definir exactamente qué DocTypes Jardal ERP crea;
 2. añadir idempotencia solo donde ese flujo la necesite;
 3. probar create/retry/timeout/colisión;
 4. comprobar GL/P&L/Scope resultante.
@@ -514,7 +514,7 @@ Antes de permitir ejecución real:
 - conciliación;
 - recuperación de fallos.
 
-### Regresión ERPNext
+### Regresión Jardal ERP
 
 - scheduler activo;
 - timezone `America/La_Paz`;
@@ -528,12 +528,12 @@ Antes de permitir ejecución real:
 
 La primera integración se considera utilizable cuando:
 
-1. existe un cliente ERPNext determinista y probado;
+1. existe un cliente Jardal ERP determinista y probado;
 2. no hay tool genérico de escritura arbitraria;
 3. `OpenCEO Scope` funciona end-to-end;
 4. existe al menos un flujo real de ingreso o gasto idempotente;
 5. el retry de ese flujo no duplica documentos;
-6. lectura de saldos/gasto por Scope coincide con ERPNext;
+6. lectura de saldos/gasto por Scope coincide con Jardal ERP;
 7. multimoneda conserva moneda y tasa de transacción;
 8. budget por Scope está probado si forma parte del primer release;
 9. los tests pasan con movimientos monetarios externos deshabilitados.
@@ -544,4 +544,4 @@ No es requisito de la primera integración implementar todos los tools del mapa 
 
 ## 19. Regla final del adapter
 
-> **Finance interpreta intención y política; tools deterministas convierten esa intención en operaciones permitidas; ERPNext valida y registra; el proveedor externo confirma el dinero real. La integración crece por flujos demostrados, no por campos y endpoints creados preventivamente.**
+> **Finance interpreta intención y política; tools deterministas convierten esa intención en operaciones permitidas; Jardal ERP valida y registra; el proveedor externo confirma el dinero real. La integración crece por flujos demostrados, no por campos y endpoints creados preventivamente.**

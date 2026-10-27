@@ -1,7 +1,7 @@
-"""Escritura idempotente de un `Journal Entry` en ERPNext. Cero logica LLM.
+"""Escritura idempotente de un `Journal Entry` en Jardal ERP. Cero logica LLM.
 
-El mecanismo de identidad del contrato (`docs/finance-erpnext-integration-contract.md`
-§6.1) vive aqui, una sola vez: `openceo_ref` es unico en ERPNext, asi que un
+El mecanismo de identidad del contrato (`docs/finance-jardal-erp-integration-contract.md`
+§6.1) vive aqui, una sola vez: `openceo_ref` es unico en Jardal ERP, asi que un
 reintento choca con el indice (HTTP 417) y se resuelve **releyendo** el
 documento existente en vez de duplicarlo. Si quedo en borrador, se envia.
 

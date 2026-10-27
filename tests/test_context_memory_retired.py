@@ -40,7 +40,7 @@ class ContextMemoryRetiredTests(unittest.TestCase):
         template = _presets_yaml()
         self.assertNotIn("CONTEXT.md", template)
         self.assertIn("STATUS.md", template)
-        self.assertIn("ticket ERPNext", template)
+        self.assertIn("ticket Jardal ERP", template)
 
     def test_live_presets_do_not_reference_context_file(self) -> None:
         yamls = sorted((REPO / "projects").glob("*/project.yaml"))

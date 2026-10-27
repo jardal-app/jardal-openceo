@@ -1874,7 +1874,7 @@ class DevSessionManager:
         # outcome/comment only, never a replan (TASK-2026-00177).
         cancelled = await self._task_cancelled(task_id)
         if cancelled:
-            evidence += " Ticket cancelled in ERPNext; replan skipped."
+            evidence += " Ticket cancelled in Jardal ERP; replan skipped."
         # Terminal first: the planner then sees a failed ticket rather than
         # an open duplicate, while the same-tier rule still blocks an
         # unchanged retry (record_material_failure feeds it).
@@ -2238,7 +2238,7 @@ class DevSessionManager:
     ) -> dict[str, Any] | None:
         """Create inbox/objective tickets through the internal API (F4/F6).
 
-        Single implementation in :mod:`objectives.service` (ERPNext first,
+        Single implementation in :mod:`objectives.service` (Jardal ERP first,
         idempotent per ``source_id``): dev and company-level flows share
         it, including the business hierarchy (``parent_task``/``depends_on``).
         None when unbound: promotions defer to telemetry instead of

@@ -23,7 +23,7 @@ if str(CORE_DIR) not in sys.path:
 
 from state import TaskSource  # noqa: E402
 from task_service import TaskService  # noqa: E402
-from tools.erpnext_client import ERPNextValidationError  # noqa: E402
+from tools.jardal_erp_client import JardalERPValidationError  # noqa: E402
 
 
 class FakeRepo:
@@ -76,7 +76,7 @@ class FakeHub:
 
 
 class FakeBusinessAdapter:
-    """ERPNext en memoria: resuelve, transiciona y relee."""
+    """Jardal ERP en memoria: resuelve, transiciona y relee."""
 
     is_enabled = True
 
@@ -87,7 +87,7 @@ class FakeBusinessAdapter:
         key = str(identifier or "").strip()
         if key in self.docs:
             return dict(self.docs[key])
-        raise ERPNextValidationError(
+        raise JardalERPValidationError(
             f"No existe el ticket {identifier}.", status_code=404
         )
 
@@ -134,7 +134,7 @@ def _service(repo: FakeRepo, adapter: Any = None) -> TaskService:
     service._repo = repo  # type: ignore[attr-defined]
     service._hub = FakeHub()  # type: ignore[attr-defined]
     service._horizon_terminal = None  # type: ignore[attr-defined]
-    service._erpnext = adapter if adapter is not None else SimpleNamespace()
+    service._business = adapter if adapter is not None else SimpleNamespace()
     service._qa_service = None  # type: ignore[attr-defined]
     service._rate_monitor = None  # type: ignore[attr-defined]
     return service
@@ -238,7 +238,7 @@ class CancelRequeueTests(unittest.IsolatedAsyncioTestCase):
             _exec("dep-open", "waiting", blocked_by=["open-x"],
                   waiting_reason="blocked_by: open-x"),
             _exec("dead-x", "cancelled",
-                  error="El ticket fue cancelado en ERPNext."),
+                  error="El ticket fue cancelado en Jardal ERP."),
             _exec("dep-dead", "waiting", blocked_by=["dead-x"],
                   waiting_reason="blocked_by: dead-x"),
         ])

@@ -3,7 +3,7 @@
 Lo importante que se fija aqui:
 
 * la identidad del job vive en ``research_jobs`` y **nunca** toca ``tasks`` ni el
-  observador de ERPNext;
+  observador de Jardal ERP;
 * la idempotencia es un indice **parcial** scoped por proyecto/owner/proposito;
 * un terminal es estable y no existe el estado ``interrupted``;
 * el dinero se serializa como cadena decimal y lo desconocido es ``None``.
@@ -318,7 +318,7 @@ class ResearchJobPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(spec.get("unique"))
         self.assertIn("partialFilterExpression", spec)
 
-    async def test_research_never_writes_tasks_or_notifies_erpnext(self) -> None:
+    async def test_research_never_writes_tasks_or_notifies_business(self) -> None:
         doc, _ = await self.repo.create_research_job(support.job_doc())
         await self.repo.transition_research_job(doc["research_id"], ResearchJobStatus.RUNNING)
         await self.repo.transition_research_job(

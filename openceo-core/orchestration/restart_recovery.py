@@ -3,7 +3,7 @@
 Boot marks live executions interrupted, but the dispatcher only launches
 queued tickets, so interrupted work stranded until a manual relaunch. One
 bounded pass after ``mark_interrupted_tasks`` requeues it: silent writes
-(no ERPNext echo, the business stays Working), human waits preserved as
+(no Jardal ERP echo, the business stays Working), human waits preserved as
 waiting, Tier S stays manual, and quotas/limits/repos/blockers are left to
 the dispatcher's admission on launch.
 """

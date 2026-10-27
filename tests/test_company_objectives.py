@@ -1,7 +1,7 @@
 """Company-level objectives (TASK-2026-00117, F2).
 
 Acceptance with simulated planner/reviewers (zero tokens): a top-down
-objective and a conversion reach the same engine, are born in ERPNext as a
+objective and a conversion reach the same engine, are born in Jardal ERP as a
 group Task with real children (the linking uses no LLM) and close through
 final review; legacy objectives (ORION pilot shape) keep working. No
 network, no CLI, no LLM.
@@ -763,7 +763,7 @@ class GroupDecisionTests(unittest.IsolatedAsyncioTestCase):
                          ["kid-i", "kid-p", "kid-q", "kid-w"])
         for kid in ("kid-q", "kid-p", "kid-w", "kid-i"):
             self.assertEqual(patches[kid]["status"], "cancelled")
-            self.assertIn("cancelled in ERPNext", patches[kid]["error"])
+            self.assertIn("cancelled in Jardal ERP", patches[kid]["error"])
         self.assertNotIn("kid-done", patches)
         self.assertNotIn("kid-fail", patches)
         self.assertNotIn("task-parent", patches)
@@ -1019,7 +1019,7 @@ class WebhookPropagationTests(unittest.TestCase):
         service = TaskService.__new__(TaskService)
         service._settings = SimpleNamespace(
             TASK_AUTORUN=False, HORIZON_PERSONAL_MIRROR_ENABLED=False)
-        service._erpnext = adapter
+        service._business = adapter
         service._repo = repo
         service._hub = SimpleNamespace(broadcast=AsyncMock())
         service._horizon_terminal = None
@@ -1319,7 +1319,7 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
         service = TaskService.__new__(TaskService)
         service._settings = SimpleNamespace(
             TASK_AUTORUN=False, HORIZON_PERSONAL_MIRROR_ENABLED=False)
-        service._erpnext = _Adapter()
+        service._business = _Adapter()
         service._repo = SimpleNamespace()
         doc = make_task_document(TaskCreateRequest(
             source=TaskSource.API, title="t", description="d", project="p"))

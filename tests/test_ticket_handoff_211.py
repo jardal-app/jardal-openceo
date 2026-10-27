@@ -3,11 +3,11 @@
 TASK-2026-00211. The planner freezes INPUTS as text before the previous
 ticket ran, so every stage but dev (which reads the repo) guesses. Each
 skill declares its inputs/outputs; on close the ticket's files land as
-private ERPNext attachments and its data in the execution record; on
+private Jardal ERP attachments and its data in the execution record; on
 launch the executor delivers the predecessors' real outputs.
 
 No network, no LLM: dict-backed repos, scripted executors and a fake
-ERPNext attach.
+Jardal ERP attach.
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ class CollectOutputsTests(unittest.TestCase):
             (ticket_dir / "brief.md").write_text("hello", encoding="utf-8")
             verdict = {"resultado": "hecho", "motivo": "done",
                        "entregables": ["brief.md", "journal entry JE-1"],
-                       "evidencia": "ERPNext JE-1"}
+                       "evidencia": "Jardal ERP JE-1"}
             record = handoff.collect_ticket_outputs(verdict, ticket_dir)
         self.assertEqual(len(record["files"]), 1)
         entry = record["files"][0]
@@ -120,7 +120,7 @@ class CollectOutputsTests(unittest.TestCase):
         self.assertTrue(entry["sha256"])
         self.assertIsNone(entry["skipped"])
         self.assertEqual(record["texts"], ["journal entry JE-1"])
-        self.assertEqual(record["evidence"], "ERPNext JE-1")
+        self.assertEqual(record["evidence"], "Jardal ERP JE-1")
 
     def test_path_escape_stays_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

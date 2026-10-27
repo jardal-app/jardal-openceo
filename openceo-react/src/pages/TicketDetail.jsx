@@ -65,6 +65,7 @@ const waitReasonLabels = {
   repo_busy: 'Repo ocupado',
   blocked_by: 'Bloqueado por dependencia',
   routing_missing: 'Sin tier asignado',
+  jardal_erp_pending: 'Sin enlace con negocio',
   erpnext_pending: 'Sin enlace con negocio',
 }
 

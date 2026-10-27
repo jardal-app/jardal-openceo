@@ -31,7 +31,7 @@ class FakeDuplicate(Exception):
         self.status_code = 417
 
 
-class FakeERPNextClient:
+class FakeJardalERPClient:
     """Imita create/list/update del cliente real sobre Journal Entry."""
 
     def __init__(self) -> None:
@@ -67,12 +67,12 @@ class FakeERPNextClient:
 
 class FinanceToolIdempotencyTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.client = FakeERPNextClient()
+        self.client = FakeJardalERPClient()
         self.registry = WorkflowToolRegistry(settings=mock.Mock())
         self.context = {"task": {"task_id": "TASK-2026-00053"}, "params": {}}
 
     def _call(self, tool: str, text: str, **kwargs):
-        with mock.patch("tools.erpnext_client.ERPNextClient", lambda _settings: self.client):
+        with mock.patch("tools.jardal_erp_client.JardalERPClient", lambda _settings: self.client):
             return asyncio.run(
                 getattr(self.registry, tool)(
                     text=text, context=self.context, **kwargs
@@ -112,7 +112,7 @@ class FinanceToolIdempotencyTests(unittest.TestCase):
     def test_different_tasks_are_different_operations(self) -> None:
         other = {"task": {"task_id": "TASK-2026-00099"}, "params": {}}
         self._call("_finance_register_income", "registra ingreso sueldo 6200 bolivianos")
-        with mock.patch("tools.erpnext_client.ERPNextClient", lambda _settings: self.client):
+        with mock.patch("tools.jardal_erp_client.JardalERPClient", lambda _settings: self.client):
             second = asyncio.run(
                 self.registry._finance_register_income(
                     text="registra ingreso sueldo 6200 bolivianos", context=other

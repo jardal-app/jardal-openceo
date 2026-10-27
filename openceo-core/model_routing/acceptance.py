@@ -110,7 +110,7 @@ _FIXTURES_DIR = _REPO_ROOT / "tests" / "fixtures" / "model_routing_live"
 _BATTERY_GENERATOR = "model_routing.acceptance"
 
 #: Real provider calls spent by the epic, per code ticket, as recorded
-#: in each ticket's builder comment (ERPNext): ledger deltas before
+#: in each ticket's builder comment (Jardal ERP): ledger deltas before
 #: the Owner removed the live budgets (00283), plus the metadata-only
 #: updates of 00292 and the single fed calls of 00293–00295. 00297
 #: contributes only the OpenRouter usage-unchanged check (no

@@ -3,7 +3,7 @@
 Acceptance with zero tokens: the versioned YAML loads validated and fails
 closed; requires_owner escalates exactly the five contract categories and
 automates everything else; the CEO cannot edit its own mandate; an
-escalation persists ERPNext-first and parks in waiting/Pending Review with
+escalation persists Jardal ERP-first and parks in waiting/Pending Review with
 the exact human action; a missing secret (TASK-2026-00142) parks in Working
 naming the secret, never as a decision. No network, no CLI, no LLM.
 """
@@ -44,11 +44,11 @@ from config_loader import ConfigLoader  # noqa: E402
 from settings import Settings  # noqa: E402
 from state import TaskPriority  # noqa: E402
 from task_service import TaskService  # noqa: E402
-from tools.erpnext_client import (  # noqa: E402
-    ERPNextUnavailable,
-    ERPNextValidationError,
+from tools.jardal_erp_client import (  # noqa: E402
+    JardalERPUnavailable,
+    JardalERPValidationError,
 )
-from tools.erpnext_tickets import resolve_erpnext_status  # noqa: E402
+from tools.jardal_erp_tickets import resolve_jardal_erp_status  # noqa: E402
 
 FIVE = [
     "gasto_nuevo",
@@ -504,7 +504,7 @@ class CreateOwnerEscalationTest(unittest.IsolatedAsyncioTestCase):
             graph=self.graph,
             realtime_hub=_FakeHub(),  # type: ignore[arg-type]
         )
-        self.service._erpnext = self.erp  # noqa: SLF001
+        self.service._business = self.erp  # noqa: SLF001
 
     def _spend(self) -> tuple[OwnerAction, EscalationDecision]:
         action = OwnerAction(
@@ -533,7 +533,7 @@ class CreateOwnerEscalationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mirror.get("name"), "TASK-2026-09999")
         self.graph.execute.assert_not_called()
 
-    async def test_erpnext_first_then_park(self) -> None:
+    async def test_business_first_then_park(self) -> None:
         action, decision = self._spend()
         await self.service.create_owner_escalation(
             action=action, decision=decision, source_id="esc-2")
@@ -547,11 +547,11 @@ class CreateOwnerEscalationTest(unittest.IsolatedAsyncioTestCase):
         ticket = await self.service.create_owner_escalation(
             action=action, decision=decision, source_id="esc-3")
         await self.service.observe_task_status(ticket)
-        item = self.service._erpnext_queue.get_nowait()  # noqa: SLF001
+        item = self.service._jardal_erp_queue.get_nowait()  # noqa: SLF001
         self.assertEqual(item["status"], "waiting")
         self.assertEqual(item["name"], "TASK-2026-09999")
         self.assertEqual(
-            resolve_erpnext_status({"status": item["status"]}), "Pending Review")
+            resolve_jardal_erp_status({"status": item["status"]}), "Pending Review")
 
     async def test_same_source_id_is_idempotent(self) -> None:
         action, decision = self._spend()
@@ -650,7 +650,7 @@ class _FakeBusiness:
         key = str(identifier or "").strip()
         if key in self.docs:
             return dict(self.docs[key])
-        raise ERPNextValidationError(f"No existe {identifier}", status_code=404)
+        raise JardalERPValidationError(f"No existe {identifier}", status_code=404)
 
     async def transition_status(
         self, identifier: str, to_status: str, *, work_dates: Any = None
@@ -701,7 +701,7 @@ class ReportMissingSecretTest(unittest.IsolatedAsyncioTestCase):
             graph=MagicMock(),
             realtime_hub=_FakeHub(),  # type: ignore[arg-type]
         )
-        service._erpnext = business  # noqa: SLF001
+        service._business = business  # noqa: SLF001
         return service, repo, business
 
     async def test_parks_working_with_marker(self) -> None:
@@ -768,9 +768,9 @@ class ReportMissingSecretTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             business.docs["TASK-2026-09999"]["status"], "Open")
 
-    async def test_erpnext_failure_writes_no_marker(self) -> None:
+    async def test_business_failure_writes_no_marker(self) -> None:
         service, repo, business = self._service(
-            failures=[ERPNextUnavailable("caido", status_code=503)] * 3)
+            failures=[JardalERPUnavailable("caido", status_code=503)] * 3)
         result = await service.report_missing_secret(
             "TASK-2026-09999", "K", ["env"])
         self.assertFalse(result["ok"])

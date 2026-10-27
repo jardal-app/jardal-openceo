@@ -316,7 +316,7 @@ def promotion_ticket(
 ) -> dict[str, Any]:
     """Build the deterministic fix-ticket payload (§8.3).
 
-    The caller creates it through the internal ticket API (ERPNext first);
+    The caller creates it through the internal ticket API (Jardal ERP first);
     the fingerprint travels on the ticket so re-sightings converge. A
     successful §31 attribution travels on ``params`` plus a description
     block; unknown origins leave the payload unchanged.

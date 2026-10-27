@@ -118,19 +118,19 @@ from tool_locks import (
     lock_waiting_reason,
     pending_lock_result,
 )
-from tools.erpnext_client import (
-    ERPNextDateBoundError,
-    ERPNextDependencyBlockedError,
-    ERPNextDuplicateError,
-    ERPNextError,
-    ERPNextPermissionError,
-    ERPNextUnavailable,
-    ERPNextValidationError,
+from tools.jardal_erp_client import (
+    JardalERPDateBoundError,
+    JardalERPDependencyBlockedError,
+    JardalERPDuplicateError,
+    JardalERPError,
+    JardalERPPermissionError,
+    JardalERPUnavailable,
+    JardalERPValidationError,
 )
-from tools.erpnext_tickets import (
+from tools.jardal_erp_tickets import (
     depends_on_names,
     normalize_transition_status,
-    resolve_erpnext_status,
+    resolve_jardal_erp_status,
     task_needs_human_review,
 )
 import visibility
@@ -144,7 +144,12 @@ logger = logging.getLogger(__name__)
 
 _NOTION_MIRROR_EVENT_KEY = "notion_mirror_created"
 
-#: Marca en `params._mirrors.erpnext` de un ticket cuyo enlace de negocio quedo pendiente.
+#: `waiting_reason` de un ticket cuyo enlace de negocio quedo pendiente.
+#: Migracion (TASK-2026-00318): el valor canonico es `jardal_erp_pending`; los
+#: documentos viejos con `erpnext_pending` sanan por espejo en el reconcile de
+#: arranque (el dispatcher y el reconcile deciden por `_mirrors`, no por este campo).
+JARDAL_ERP_PENDING_REASON = "jardal_erp_pending"
+#: Alias depreciado (una version): no escribir codigo nuevo con este nombre.
 ERPNEXT_PENDING_REASON = "erpnext_pending"
 
 
@@ -180,18 +185,18 @@ def _workflow_target_of(task: dict[str, Any]) -> str:
             return name
     return "?"
 
-#: Estados de ERPNext que son una decision de NEGOCIO y por tanto se propagan de vuelta
+#: Estados de Jardal ERP que son una decision de NEGOCIO y por tanto se propagan de vuelta
 #: al runtime. El resto (Open, Working, Pending Review, Overdue, Template) son eco de lo
 #: que OpenCEO ya empujo: propagarlos seria un bucle.
-_ERPNEXT_BUSINESS_TO_TASK_STATUS: dict[str, str] = {
+_JARDAL_ERP_BUSINESS_TO_TASK_STATUS: dict[str, str] = {
     "Completed": TaskStatus.COMPLETED.value,
     "Cancelled": TaskStatus.CANCELLED.value,
 }
 
-#: Destino de transicion explicita (vocabulario ERPNext) -> estado de ejecucion
+#: Destino de transicion explicita (vocabulario Jardal ERP) -> estado de ejecucion
 #: (vocabulario OpenCEO). Es el espejo el que se alinea: `status_pushed` guarda
-#: SIEMPRE este lado, nunca el de ERPNext (TASK-2026-00132).
-_ERPNEXT_TO_TASK_STATUS: dict[str, str] = {
+#: SIEMPRE este lado, nunca el de Jardal ERP (TASK-2026-00132).
+_JARDAL_ERP_TO_TASK_STATUS: dict[str, str] = {
     "Open": TaskStatus.QUEUED.value,
     "Working": TaskStatus.IN_PROGRESS.value,
     "Pending Review": TaskStatus.WAITING.value,
@@ -244,13 +249,13 @@ def wait_comment_text(task: dict[str, Any], reason: str) -> str:
 
 def _classify_transition_error(exc: Exception) -> dict[str, Any]:
     """Fallo del adapter -> resultado clasificado (mismo vocabulario que el MCP)."""
-    if isinstance(exc, ERPNextPermissionError):
+    if isinstance(exc, JardalERPPermissionError):
         status = "forbidden"
-    elif isinstance(exc, ERPNextUnavailable):
+    elif isinstance(exc, JardalERPUnavailable):
         status = "unavailable"
-    elif isinstance(exc, ERPNextDuplicateError):
+    elif isinstance(exc, JardalERPDuplicateError):
         status = "duplicate"
-    elif isinstance(exc, ERPNextValidationError):
+    elif isinstance(exc, JardalERPValidationError):
         status = {404: "not_found", 413: "too_large", 400: "invalid_input"}.get(
             exc.status_code, "invalid_input"
         )
@@ -306,8 +311,9 @@ class TaskService:
         rate_monitor: RateMonitor | None = None,
         qa_service: QAReviewService | None = None,
         workflow_service: WorkflowService | None = None,
-        erpnext: "BusinessWork | None" = None,
+        business: "BusinessWork | None" = None,
         config_loader: Any | None = None,
+        erpnext: "BusinessWork | None" = None,
     ) -> None:
         self._settings = settings
         self._repo = repo
@@ -317,8 +323,9 @@ class TaskService:
         self._rate_monitor = rate_monitor
         self._qa_service = qa_service
         self._workflow_service = workflow_service
-        self._business = erpnext
-        self._erpnext = erpnext
+        # `erpnext` es alias depreciado (TASK-2026-00318, una version).
+        self._business = business if business is not None else erpnext
+        self._erpnext = self._business
         # Optional project.yaml reader (autonomy F4 TASK-2026-00118): the
         # default phase template skips human QA unless the project policy
         # demands it. Tests build TaskService without it; every use
@@ -328,8 +335,8 @@ class TaskService:
         self._project_locks: dict[str, asyncio.Lock] = {}
         self._notion_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._notion_worker: asyncio.Task[None] | None = None
-        self._erpnext_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        self._erpnext_worker: asyncio.Task[None] | None = None
+        self._jardal_erp_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._jardal_erp_worker: asyncio.Task[None] | None = None
         # Visibilidad derivada (00146 + 00147): cola y worker propios para que
         # un rollup lento nunca retrase los pushes de estado.
         self._visibility_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -510,21 +517,21 @@ class TaskService:
         """Put a task into the Notion mirror queue (non-blocking)."""
         self._notion_queue.put_nowait(task)
 
-    # --- ERPNext: registro de negocio -------------------------------------
+    # --- Jardal ERP: registro de negocio -------------------------------------
     #
-    # ERPNext es dueno del ticket de NEGOCIO; Mongo conserva la EJECUCION. La direccion
+    # Jardal ERP es dueno del ticket de NEGOCIO; Mongo conserva la EJECUCION. La direccion
     # esta en docs/OPENCEO_DIRECTION.md v1.1 y el contrato en
     # docs/ARCHITECTURE_REFERENCE_2026.md §Read and Write Boundaries.
     #
     # Solo la creacion es sincrona: "escribir una tarea en Mongo no acredita un registro
-    # exitoso en ERPNext". Las transiciones de estado (Fase 3) van por cola y nunca
+    # exitoso en Jardal ERP". Las transiciones de estado (Fase 3) van por cola y nunca
     # bloquean el camino del request.
 
-    def _erpnext_ref(self, doc: Any) -> str:
+    def _jardal_erp_ref(self, doc: Any) -> str:
         """Clave de idempotencia determinista del ticket de negocio.
 
         Con `source_id` se deriva de el, asi que un reintento y una llamada concurrente
-        producen el MISMO valor, y ERPNext deduplica aunque Mongo todavia no tenga el
+        producen el MISMO valor, y Jardal ERP deduplica aunque Mongo todavia no tenga el
         documento. Sin `source_id` queda el `task_id`, que es un identificador generado y
         por tanto NO protege ante un reintento del llamador: para ese caso `POST /api/tasks`
         acepta la cabecera `Idempotency-Key`, que se convierte en `source_id` sintetico.
@@ -536,13 +543,13 @@ class TaskService:
             return f"{source_value}:{source_id}"
         return str(getattr(doc, "task_id", "") or "")
 
-    def _merge_erpnext_mirror_params(
+    def _merge_jardal_erp_mirror_params(
         self, params: dict[str, Any] | None, mirror: dict[str, Any]
     ) -> dict[str, Any]:
         merged = dict(params or {})
         raw_mirrors = merged.get("_mirrors")
         mirrors = dict(raw_mirrors) if isinstance(raw_mirrors, dict) else {}
-        provider = getattr(getattr(self, "_erpnext", None), "provider", "erpnext")
+        provider = getattr(getattr(self, "_business", None), "provider", "erpnext")
         current = business_mirror(mirrors)
         current.update(mirror)
         current["provider"] = provider
@@ -555,10 +562,10 @@ class TaskService:
     async def _blocked_by_business_names(self, blocked_by: Any) -> list[str]:
         """Resuelve `blocked_by` (task_ids de ejecucion) a nombres `TASK-...`.
 
-        Es la mitad OpenCEO -> ERPNext del mapeo `blocked_by` <-> `depends_on`
+        Es la mitad OpenCEO -> Jardal ERP del mapeo `blocked_by` <-> `depends_on`
         (TASK-2026-00013): cada bloqueador aporta el `name` de su espejo de negocio.
         Una entrada que ya es un nombre de negocio pasa tal cual; un bloqueador sin
-        espejo (sin contraparte en ERPNext) no puede referenciarse y se omite.
+        espejo (sin contraparte en Jardal ERP) no puede referenciarse y se omite.
         """
         names: list[str] = []
         repo = getattr(self, "_repo", None)
@@ -593,21 +600,21 @@ class TaskService:
         depends_on: list[str] | None = None,
         is_group: bool = False,
     ) -> tuple[dict[str, Any] | None, bool]:
-        """Crea el ticket de negocio en ERPNext ANTES de persistir en Mongo.
+        """Crea el ticket de negocio en Jardal ERP ANTES de persistir en Mongo.
 
         Devuelve `(mirror, pending)`:
 
         - `(None, False)` — la integracion esta apagada, o el ticket es de alcance personal
           y el espejo externo personal esta deshabilitado.
         - `(mirror, False)` — el ticket quedo registrado en el sistema de negocio.
-        - `(mirror, True)` — ERPNext no respondio. El enlace queda pendiente y el llamador
+        - `(mirror, True)` — Jardal ERP no respondio. El enlace queda pendiente y el llamador
           debe impedir que arranque ejecucion sobre trabajo que no existe en negocio.
 
-        Lanza si ERPNext **rechaza** los datos: ahi no se persiste nada en Mongo, porque un
+        Lanza si Jardal ERP **rechaza** los datos: ahi no se persiste nada en Mongo, porque un
         ticket de ejecucion sin contraparte de negocio es exactamente el "competing business
         record" que el contrato prohibe.
         """
-        adapter = getattr(self, "_erpnext", None)
+        adapter = getattr(self, "_business", None)
         if adapter is None:
             # Solo ocurre en tests, que inyectan el adapter explicitamente. En runtime
             # `main.py` siempre lo construye.
@@ -615,8 +622,8 @@ class TaskService:
         if not adapter.is_enabled:
             # No configurado NO es "apagado": es un error de despliegue. Se falla fuerte
             # en vez de crear un ticket que el sistema de negocio nunca vera.
-            raise ERPNextValidationError(
-                adapter.client.config_error() or "ERPNext no esta configurado."
+            raise JardalERPValidationError(
+                adapter.client.config_error() or "Jardal ERP no esta configurado."
             )
 
         snapshot = doc.model_dump(mode="python")
@@ -625,7 +632,7 @@ class TaskService:
         ):
             return None, False
 
-        ref = self._erpnext_ref(doc)
+        ref = self._jardal_erp_ref(doc)
         params = snapshot.get("params") if isinstance(snapshot.get("params"), dict) else {}
         priority = getattr(doc.priority, "value", None) or str(doc.priority or "")
         now = datetime.now(timezone.utc).isoformat()
@@ -661,16 +668,16 @@ class TaskService:
         )
         try:
             result = await adapter.create_ticket(**registration)
-        except ERPNextUnavailable as exc:
-            logger.warning("ERPNext no respondio al registrar el ticket %s: %s", ref, exc)
+        except JardalERPUnavailable as exc:
+            logger.warning("Jardal ERP no respondio al registrar el ticket %s: %s", ref, exc)
             # Misma forma que la rama de exito, con `name` vacio: quien lea el espejo no
             # tiene que distinguir dos esquemas.
             pending_mirror = {"name": None, "ref": ref, "pending": True, "linked_at": now}
             if getattr(adapter, "provider", "erpnext") == "jardal_erp":
                 pending_mirror["registration"] = registration
             return pending_mirror, True
-        except ERPNextError:
-            logger.exception("ERPNext rechazo el registro del ticket %s", ref)
+        except JardalERPError:
+            logger.exception("Jardal ERP rechazo el registro del ticket %s", ref)
             raise
 
         task = result.get("task") or {}
@@ -683,7 +690,7 @@ class TaskService:
             "name": task.get("name"),
             "ref": ref,
             # `status_pushed` guarda SIEMPRE el vocabulario de OpenCEO, no el de
-            # ERPNext: el observador compara contra el, y comparar `in_progress`
+            # Jardal ERP: el observador compara contra el, y comparar `in_progress`
             # contra `Working` haria que cada parche pareciera una transicion nueva.
             "status_pushed": str(status_value or ""),
             "pending": False,
@@ -695,7 +702,7 @@ class TaskService:
             mirror["execution_ticket_number"] = task.get("openceo_ticket_number")
             mirror["business_status"] = task.get("status")
         # Lo que se empujo de jerarquia queda en el espejo (retiene la referencia
-        # de negocio, ARCH §Parent Task Tracking); la autoridad sigue en ERPNext.
+        # de negocio, ARCH §Parent Task Tracking); la autoridad sigue en Jardal ERP.
         if business_parent:
             mirror["parent_task"] = business_parent
         if business_deps:
@@ -704,14 +711,14 @@ class TaskService:
             mirror["is_group"] = True
         return mirror, False
 
-    async def _enqueue_erpnext_registration(self, task: dict[str, Any]) -> None:
+    async def _enqueue_jardal_erp_registration(self, task: dict[str, Any]) -> None:
         """Reintenta el enlace de negocio de un ticket que quedo pendiente.
 
         Se llama en el camino de idempotencia: si el ticket ya existe en Mongo pero su
-        espejo de ERPNext esta pendiente o ausente, hay que repararlo en vez de devolverlo
+        espejo de Jardal ERP esta pendiente o ausente, hay que repararlo en vez de devolverlo
         como si estuviera completo. Fire-and-forget: nunca puede romper la creacion.
         """
-        adapter = getattr(self, "_erpnext", None)
+        adapter = getattr(self, "_business", None)
         if adapter is None or not adapter.is_enabled:
             return
 
@@ -734,14 +741,14 @@ class TaskService:
                 result = await adapter.create_ticket(**existing["registration"])
                 task_doc = result.get("task")
             if task_doc is not None and getattr(adapter, "provider", "erpnext") == "jardal_erp" and task_doc.get("openceo_task_id") != task["task_id"]:
-                raise ERPNextValidationError("La identidad de ejecución recuperada no coincide.", status_code=409)
+                raise JardalERPValidationError("La identidad de ejecución recuperada no coincide.", status_code=409)
             if task_doc is not None:
                 mirror = {
                     "name": task_doc.get("name"),
                     "ref": ref,
                     "registration": None,
                     "business_ticket_id": task_doc.get("business_ticket_id"),
-                    # Vocabulario de OpenCEO, no el de ERPNext (ver _register_business_ticket).
+                    # Vocabulario de OpenCEO, no el de Jardal ERP (ver _register_business_ticket).
                     "status_pushed": str(getattr(task.get("status"), "value", task.get("status")) or ""),
                     "pending": False,
                     "linked_at": datetime.now(timezone.utc).isoformat(),
@@ -749,40 +756,40 @@ class TaskService:
                 await self._repo.patch_task(
                     task["task_id"],
                     {
-                        "params": self._merge_erpnext_mirror_params(params, mirror),
+                        "params": self._merge_jardal_erp_mirror_params(params, mirror),
                         "waiting_reason": None,
                     },
                 )
                 # The business link healed: a held ticket may be dispatchable.
                 self._wake_dispatcher()
-                logger.info("Enlace ERPNext reparado para el ticket %s -> %s", task["task_id"], mirror["name"])
+                logger.info("Enlace Jardal ERP reparado para el ticket %s -> %s", task["task_id"], mirror["name"])
         except Exception:
-            logger.warning("No se pudo reparar el enlace ERPNext del ticket %s", task.get("task_id"), exc_info=True)
+            logger.warning("No se pudo reparar el enlace Jardal ERP del ticket %s", task.get("task_id"), exc_info=True)
 
-    # --- ERPNext: transiciones de estado ----------------------------------
+    # --- Jardal ERP: transiciones de estado ----------------------------------
     #
     # `MongoRepository.patch_task` llama a `observe_task_status` en CADA transicion, asi
     # que aqui no hay que conocer los sitios que escriben estado. La comparacion es contra
     # el ultimo estado EMPUJADO (no contra el anterior en la base), lo que hace el envio
     # idempotente y lo vuelve independiente del orden entre parches concurrentes.
 
-    def start_erpnext_worker(self) -> None:
-        if self._erpnext_worker is not None and not self._erpnext_worker.done():
+    def start_jardal_erp_worker(self) -> None:
+        if self._jardal_erp_worker is not None and not self._jardal_erp_worker.done():
             return
-        self._erpnext_worker = asyncio.create_task(self._erpnext_queue_loop())
+        self._jardal_erp_worker = asyncio.create_task(self._jardal_erp_queue_loop())
 
-    async def stop_erpnext_worker(self) -> None:
-        if self._erpnext_worker is not None:
-            self._erpnext_worker.cancel()
+    async def stop_jardal_erp_worker(self) -> None:
+        if self._jardal_erp_worker is not None:
+            self._jardal_erp_worker.cancel()
             try:
-                await self._erpnext_worker
+                await self._jardal_erp_worker
             except asyncio.CancelledError:
                 pass
-            self._erpnext_worker = None
+            self._jardal_erp_worker = None
 
     async def observe_task_status(self, task: dict[str, Any]) -> None:
         """Recibe cada transicion de estado. Nunca hace I/O: solo encola."""
-        adapter = getattr(self, "_erpnext", None)
+        adapter = getattr(self, "_business", None)
         if adapter is None or not adapter.is_enabled or not task:
             return
         if is_personal_scope(task) and not getattr(
@@ -807,31 +814,31 @@ class TaskService:
             and isinstance(tier_s_progress, dict)
             and tier_s_progress.get("status") in {"waiting", "cancelled", "failed"}
         ):
-            # Operational pause (quota/question) is not ERPNext's business review.
+            # Operational pause (quota/question) is not Jardal ERP's business review.
             # The existing Task stays Working; description shows Tier S progress.
             return
         if status == str(mirror.get("status_pushed") or ""):
             return
-        if resolve_erpnext_status(task) is None:
+        if resolve_jardal_erp_status(task) is None:
             # Estado que no se empuja (failed, escalated, interrupted,
             # converted: el padre se completa al cerrar el objetivo, §9.7;
             # esperas operativas sin accion humana, TASK-2026-00118: el
             # negocio conserva Open/Working).
             return
 
-        queue = getattr(self, "_erpnext_queue", None)
+        queue = getattr(self, "_jardal_erp_queue", None)
         if queue is not None:
             queue.put_nowait({"task_id": task.get("task_id"), "name": name, "status": status})
 
-    async def _erpnext_queue_loop(self) -> None:
+    async def _jardal_erp_queue_loop(self) -> None:
         while True:
-            item = await self._erpnext_queue.get()
+            item = await self._jardal_erp_queue.get()
             try:
                 await self._push_status(item)
             except Exception:
-                logger.warning("Fallo empujando un estado a ERPNext", exc_info=True)
+                logger.warning("Fallo empujando un estado a Jardal ERP", exc_info=True)
             finally:
-                self._erpnext_queue.task_done()
+                self._jardal_erp_queue.task_done()
 
     def start_visibility_worker(self) -> None:
         if self._visibility_worker is not None and not self._visibility_worker.done():
@@ -881,7 +888,7 @@ class TaskService:
 
     async def _push_status(self, item: dict[str, Any]) -> None:
         """Empuja una transicion con reintento real, no un sleep fijo."""
-        adapter = getattr(self, "_erpnext", None)
+        adapter = getattr(self, "_business", None)
         if adapter is None or not adapter.is_enabled:
             return
 
@@ -899,7 +906,7 @@ class TaskService:
         except Exception:
             logger.warning("No se pudo leer el ticket para validar la transición", exc_info=True)
         if task is None and getattr(adapter, "provider", "erpnext") == "jardal_erp":
-            raise ERPNextUnavailable("No se pudo verificar la identidad de ejecución antes de escribir negocio.")
+            raise JardalERPUnavailable("No se pudo verificar la identidad de ejecución antes de escribir negocio.")
         assert_link_provider(task, getattr(adapter, "provider", "erpnext"))
         work_dates = self._work_dates_for_push(item.get("status"), task)
         span_extended = False
@@ -911,11 +918,11 @@ class TaskService:
                         item["name"], item["status"], task=task,
                         work_dates=work_dates,
                     )
-                except ERPNextDateBoundError:
+                except JardalERPDateBoundError:
                     # El hijo pasa el fin del padre: se extienden los ancestros
                     # y se reintenta UNA vez (el padre corto sí entra, así que
                     # extender no rebota). Si vuelve a fallar, cae al `except
-                    # ERPNextError` exterior como error duro.
+                    # JardalERPError` exterior como error duro.
                     if span_extended or not work_dates:
                         raise
                     await self._ensure_span_for_child(
@@ -929,22 +936,22 @@ class TaskService:
                         item["name"], item["status"], task=task,
                         work_dates=work_dates,
                     )
-            except ERPNextUnavailable as exc:
+            except JardalERPUnavailable as exc:
                 if attempt == 2:
                     logger.warning(
-                        "ERPNext no respondio al empujar %s -> %s: %s", item["name"], item["status"], exc
+                        "Jardal ERP no respondio al empujar %s -> %s: %s", item["name"], item["status"], exc
                     )
                     await self._record_status_outcome(item, pushed=False)
                     return
                 await asyncio.sleep(delay)
                 delay *= 2
-            except ERPNextDependencyBlockedError as exc:
-                # Orden topologico (TASK-2026-00013): ERPNext no deja completar con
+            except JardalERPDependencyBlockedError as exc:
+                # Orden topologico (TASK-2026-00013): Jardal ERP no deja completar con
                 # hijos o dependencias abiertos. No es un error de datos: queda como
                 # `pending_status` y la reconciliacion lo reintenta cuando cierren.
                 # Sin reintento inmediato: lo que desbloquea es otro cierre, no el tiempo.
                 logger.warning(
-                    "ERPNext difiere %s -> %s por dependientes abiertos: %s",
+                    "Jardal ERP difiere %s -> %s por dependientes abiertos: %s",
                     item["name"],
                     item["status"],
                     exc,
@@ -954,9 +961,9 @@ class TaskService:
             except BusinessVersionConflict:
                 await self._record_status_outcome(item, pushed=False)
                 return
-            except ERPNextError:
+            except JardalERPError:
                 logger.exception(
-                    "ERPNext rechazo la transicion %s -> %s", item["name"], item["status"]
+                    "Jardal ERP rechazo la transicion %s -> %s", item["name"], item["status"]
                 )
                 return
             else:
@@ -1016,7 +1023,7 @@ class TaskService:
             mirror = {"pending_status": item["status"]}
         # Escribir solo `params` no dispara al observador (no hay cambio de `status`).
         await self._repo.patch_task(
-            task_id, {"params": self._merge_erpnext_mirror_params(params, mirror)}
+            task_id, {"params": self._merge_jardal_erp_mirror_params(params, mirror)}
         )
 
     async def create_task(self, payload: TaskCreateRequest) -> dict[str, Any]:
@@ -1028,8 +1035,8 @@ class TaskService:
                             existing["task_id"], payload.source.value, payload.source_id)
                 self._enqueue_notion_mirror(existing)
                 # El ticket puede existir en Mongo con el enlace de negocio pendiente:
-                # devolverlo sin repararlo lo dejaria invisible en ERPNext para siempre.
-                await self._enqueue_erpnext_registration(existing)
+                # devolverlo sin repararlo lo dejaria invisible en Jardal ERP para siempre.
+                await self._enqueue_jardal_erp_registration(existing)
                 reheld = await self._rehold_loose_spend(existing)
                 return reheld or existing
 
@@ -1052,22 +1059,22 @@ class TaskService:
         # below reuses this same decision (no mandate re-read).
         spend_hold = self._prepark_spend_hold(doc, declared_spend, payload)
 
-        # El ticket de negocio se crea ANTES de persistir la ejecucion. Si ERPNext rechaza
+        # El ticket de negocio se crea ANTES de persistir la ejecucion. Si Jardal ERP rechaza
         # los datos, esto lanza y no queda nada en Mongo: un ticket de ejecucion sin
         # contraparte de negocio es el "competing business record" que el contrato prohibe.
-        erpnext_mirror, erpnext_pending = await self._register_business_ticket(
+        jardal_erp_mirror, jardal_erp_pending = await self._register_business_ticket(
             doc,
             parent_task=payload.parent_task,
             depends_on=payload.depends_on,
             is_group=payload.is_group,
         )
-        if erpnext_mirror is not None:
-            if erpnext_mirror.get("execution_task_id"):
-                doc.task_id = erpnext_mirror["execution_task_id"]
-                doc.ticket_number = erpnext_mirror.get("execution_ticket_number") or doc.ticket_number
-            if erpnext_mirror.get("business_status") in {"Completed", "Cancelled"}:
+        if jardal_erp_mirror is not None:
+            if jardal_erp_mirror.get("execution_task_id"):
+                doc.task_id = jardal_erp_mirror["execution_task_id"]
+                doc.ticket_number = jardal_erp_mirror.get("execution_ticket_number") or doc.ticket_number
+            if jardal_erp_mirror.get("business_status") in {"Completed", "Cancelled"}:
                 doc.autorun = False
-            doc.params = self._merge_erpnext_mirror_params(doc.params, erpnext_mirror)
+            doc.params = self._merge_jardal_erp_mirror_params(doc.params, jardal_erp_mirror)
 
         try:
             created = await self._repo.create_task(doc.model_dump(mode="python"))
@@ -1081,19 +1088,19 @@ class TaskService:
         await self._hub.broadcast("task_created", created)
         self._enqueue_notion_mirror(created)
 
-        # ERPNext no respondio: el ticket queda registrado pero sin enlace de negocio.
+        # Jardal ERP no respondio: el ticket queda registrado pero sin enlace de negocio.
         # No se arranca ejecucion sobre trabajo que todavia no existe en el sistema de
-        # negocio; el reencolado repara el enlace cuando ERPNext vuelva.
-        if erpnext_pending:
+        # negocio; el reencolado repara el enlace cuando Jardal ERP vuelva.
+        if jardal_erp_pending:
             logger.warning(
-                "Ticket %s queda pendiente de enlace ERPNext; no se lanza ejecucion.",
+                "Ticket %s queda pendiente de enlace Jardal ERP; no se lanza ejecucion.",
                 created["task_id"],
             )
             await self._repo.patch_task(
                 created["task_id"],
                 {
                     "status": TaskStatus.QUEUED.value,
-                    "waiting_reason": ERPNEXT_PENDING_REASON,
+                    "waiting_reason": JARDAL_ERP_PENDING_REASON,
                 },
             )
             if spend_hold is None:
@@ -1104,13 +1111,13 @@ class TaskService:
 
         # Spend lock (TASK-2026-00207): a loose ticket declaring new
         # spend parks for Owner approval before the dispatcher can see
-        # it. Like erpnext_pending above, this is a creation-time hold,
+        # it. Like jardal_erp_pending above, this is a creation-time hold,
         # not admission: the F3 single path below is untouched.
         held = await self._hold_loose_spend(
             created, declared_spend, spend=spend_hold)
         if held is not None:
             return held
-        if erpnext_pending:
+        if jardal_erp_pending:
             return created
 
         # The dispatcher (F3) owns admission: creation persists queued and
@@ -1724,9 +1731,9 @@ class TaskService:
         logger.info("Startup reconcile: mirrored %d/%d", mirrored, len(pending))
         return mirrored
 
-    # --- ERPNext: camino inverso (decisiones de negocio hacia el runtime) ---
+    # --- Jardal ERP: camino inverso (decisiones de negocio hacia el runtime) ---
     #
-    # El contrato exige que la actividad humana en ERPNext llegue a OpenCEO por eventos
+    # El contrato exige que la actividad humana en Jardal ERP llegue a OpenCEO por eventos
     # explicitos (ARCHITECTURE_REFERENCE_2026.md §Read and Write Boundaries). Lo hace un
     # webhook de Frappe, no un sondeo: las reglas permanentes de AGENTS.md prohiben
     # los barridos periodicos.
@@ -1734,7 +1741,7 @@ class TaskService:
     async def find_task_for_business_ref(
         self, *, task_id: str | None = None, ref: str | None = None
     ) -> dict[str, Any] | None:
-        """Resuelve la tarea de Mongo a partir de una referencia de ERPNext.
+        """Resuelve la tarea de Mongo a partir de una referencia de Jardal ERP.
 
         Se prefiere `openceo_task_id` (identidad directa); el `ref` es el respaldo, y se
         descompone con `partition` porque `TaskSource` es un enum cerrado sin `:`.
@@ -1762,7 +1769,7 @@ class TaskService:
         business_name: str | None = None,
         source_provider: str = "erpnext",
     ) -> dict[str, Any]:
-        """Aplica al runtime una decision tomada por un humano en ERPNext.
+        """Aplica al runtime una decision tomada por un humano en Jardal ERP.
 
         Solo se propagan las decisiones de NEGOCIO (`Completed`, `Cancelled` y el borrado).
         Los demas estados de `Task` son eco de lo que OpenCEO ya empujo, y propagarlos
@@ -1770,14 +1777,14 @@ class TaskService:
 
         El guardia anti-eco es estructural, no casual: el parche escribe `status_pushed`
         con el mismo valor que el estado nuevo, asi que aunque el observador vea el
-        cambio, no lo reenvia a ERPNext.
+        cambio, no lo reenvia a Jardal ERP.
 
         Visibilidad (00146 + 00147): el webhook también trae trabajo manual
         (inicio/cierre/reapertura/relink en desk). Lo derivado se recalcula
         con un job `kind=visibility`; el eco de nuestros propios PUTs no
         encola nada (se decide con ejecución + espejo, sin lecturas extra).
         """
-        adapter = getattr(self, "_erpnext", None)
+        adapter = getattr(self, "_business", None)
         if adapter is None:
             return {"ok": False, "status": "no_adapter"}
 
@@ -1792,7 +1799,7 @@ class TaskService:
             return {"ok": False, "status": "not_found"}
 
         assert_link_provider(task, source_provider)
-        target = _ERPNEXT_BUSINESS_TO_TASK_STATUS.get(str(business_status or "").strip())
+        target = _JARDAL_ERP_BUSINESS_TO_TASK_STATUS.get(str(business_status or "").strip())
         if deleted:
             target = TaskStatus.CANCELLED.value
         exec_id = str(task.get("task_id") or "")
@@ -1825,13 +1832,13 @@ class TaskService:
                 mirror["parent_task"] = live_parent
         updates: dict[str, Any] = {
             "status": target,
-            "params": self._merge_erpnext_mirror_params(params, mirror),
+            "params": self._merge_jardal_erp_mirror_params(params, mirror),
         }
         if target == TaskStatus.CANCELLED.value:
             # Una cancelacion del negocio no se reanuda nunca: se limpia el despertador.
             updates["resume_at"] = None
             updates["waiting_reason"] = None
-            origin_label = "Jardal ERP" if source_provider == "jardal_erp" else "ERPNext"
+            origin_label = "Jardal ERP"
             updates["error"] = (
                 f"El ticket fue eliminado en {origin_label}."
                 if deleted
@@ -1911,7 +1918,7 @@ class TaskService:
         live_parent = str(parent_task or "").strip() or None
         if live_parent == self._visibility_mirror(task).get("parent_task"):
             return False
-        merged = self._merge_erpnext_mirror_params(
+        merged = self._merge_jardal_erp_mirror_params(
             self._task_params(task), {"parent_task": live_parent}
         )
         await self.patch_task(str(task.get("task_id") or ""), {"params": merged})
@@ -2146,7 +2153,7 @@ class TaskService:
                     "business_synced_at": datetime.now(timezone.utc).isoformat(),
                 }
                 await self.patch_task(str(task.get("task_id") or ""), {
-                    "params": self._merge_erpnext_mirror_params(self._task_params(task), mirror),
+                    "params": self._merge_jardal_erp_mirror_params(self._task_params(task), mirror),
                 })
                 self._enqueue_visibility(
                     str(task.get("task_id") or "") or None, self._webhook_name(task), "erp:gated")
@@ -2204,7 +2211,7 @@ class TaskService:
                   "business_status": str(payload.get("business_status") or "Open"),
                   "business_synced_at": datetime.now(timezone.utc).isoformat(),
                   "status_pushed": str(doc.status.value if hasattr(doc.status, "value") else doc.status or "")}
-        doc.params = self._merge_erpnext_mirror_params(doc.params, mirror)
+        doc.params = self._merge_jardal_erp_mirror_params(doc.params, mirror)
         try:
             created = await repo.create_task(doc.model_dump(mode="python"))
         except DuplicateKeyError:
@@ -2238,7 +2245,7 @@ class TaskService:
         else:
             mirror["observed_business_progress"] = round(progress, 2)
         await self.patch_task(str(task.get("task_id") or ""), {
-            "params": self._merge_erpnext_mirror_params(self._task_params(task), mirror),
+            "params": self._merge_jardal_erp_mirror_params(self._task_params(task), mirror),
         })
         self._enqueue_visibility(
             str(task.get("task_id") or "") or None, self._webhook_name(task), "erp:progress")
@@ -2265,7 +2272,7 @@ class TaskService:
     ) -> dict[str, Any] | None:
         """Build, persist and deliver one execution event. Never raises."""
         try:
-            adapter = getattr(self, "_erpnext", None)
+            adapter = getattr(self, "_business", None)
             if adapter is None or getattr(adapter, "provider", "erpnext") != "jardal_erp":
                 return None
             if not isinstance(task, dict) or not task.get("task_id"):
@@ -2366,7 +2373,7 @@ class TaskService:
     async def drain_erp_outbox_startup(self, limit: int = 50) -> dict[str, Any]:
         """Bounded recovery drain. Never raises, never sweeps tickets."""
         try:
-            adapter = getattr(self, "_erpnext", None)
+            adapter = getattr(self, "_business", None)
             if adapter is None or getattr(adapter, "provider", "erpnext") != "jardal_erp":
                 return {"sent": 0, "retried": 0, "failed": 0, "skipped": True}
             client = getattr(adapter, "client", None)
@@ -2380,7 +2387,7 @@ class TaskService:
     async def replay_erp_outbox_entry(self, event_id: str) -> dict[str, Any]:
         """Directed replay of one outbox entry by id. Never raises."""
         try:
-            adapter = getattr(self, "_erpnext", None)
+            adapter = getattr(self, "_business", None)
             if adapter is None or getattr(adapter, "provider", "erpnext") != "jardal_erp":
                 return {"replayed": False, "reason": "provider_inactive"}
             client = getattr(adapter, "client", None)
@@ -2465,7 +2472,7 @@ class TaskService:
             "business_synced_at": now,
             "transition": audit,
         }
-        merged_params = self._merge_erpnext_mirror_params(
+        merged_params = self._merge_jardal_erp_mirror_params(
             self._task_params(task), mirror
         )
         if secret_block is not None:
@@ -2565,7 +2572,7 @@ class TaskService:
                 decision=requires_owner(action, self._company_mandate()),
                 source_id=source_id,
             )
-        except ERPNextError as exc:
+        except JardalERPError as exc:
             return _classify_transition_error(exc)
         return {
             "ok": True,
@@ -2603,7 +2610,7 @@ class TaskService:
     ) -> dict[str, Any]:
         """Mueve el estado de NEGOCIO con el criterio global (TASK-2026-00132).
 
-        `to_status` nombra el estado ERPNext exacto (Open, Working,
+        `to_status` nombra el estado Jardal ERP exacto (Open, Working,
         Pending Review, Completed, Cancelled); `reason` es obligatoria siempre.
         Pending Review exige `human_action` nombrable y nunca es el defecto;
         Completed exige `evidence` de verificacion y respeta el gate de QA;
@@ -2619,16 +2626,16 @@ class TaskService:
         el negocio. No disponible: sin cambios, error `unavailable` (registrar
         `pending_status` sin cambiar la ejecucion falsearia la reconciliacion).
         """
-        adapter = getattr(self, "_erpnext", None)
+        adapter = getattr(self, "_business", None)
         if adapter is None or not getattr(adapter, "is_enabled", False):
             return {
                 "ok": False,
                 "status": "not_configured",
-                "message": "ERPNext no esta configurado.",
+                "message": "Jardal ERP no esta configurado.",
             }
         try:
             target = normalize_transition_status(to_status)
-        except ERPNextValidationError as exc:
+        except JardalERPValidationError as exc:
             return {"ok": False, "status": "invalid_input", "message": str(exc)}
         clean_marker: dict[str, Any] | None = None
         if secret_block is not None:
@@ -2657,7 +2664,7 @@ class TaskService:
             }
         try:
             business = await adapter.resolve_task(ticket)
-        except ERPNextError as exc:
+        except JardalERPError as exc:
             return _classify_transition_error(exc)
 
         name = str(business.get("name") or "").strip()
@@ -2676,7 +2683,7 @@ class TaskService:
                 )
                 task = None
 
-        equivalent = _ERPNEXT_TO_TASK_STATUS[target]
+        equivalent = _JARDAL_ERP_TO_TASK_STATUS[target]
         if current == target:
             # Idempotente: relee y devuelve. Si la ejecucion (no terminal)
             # discrepa del negocio, la alinea: es la reparacion del webhook
@@ -2826,7 +2833,7 @@ class TaskService:
                     await adapter.transition_status(
                         name, target, work_dates=transition_dates, **transition_context
                     )
-                except ERPNextDateBoundError:
+                except JardalERPDateBoundError:
                     # Como en `_push_status`: extender ancestros y reintentar
                     # una vez; si vuelve a fallar es error duro.
                     if span_extended or not transition_dates:
@@ -2842,10 +2849,10 @@ class TaskService:
                         name, target, work_dates=transition_dates, **transition_context
                     )
                 break
-            except ERPNextUnavailable as exc:
+            except JardalERPUnavailable as exc:
                 if attempt == 2:
                     logger.warning(
-                        "ERPNext no respondio a la transicion %s -> %s: %s",
+                        "Jardal ERP no respondio a la transicion %s -> %s: %s",
                         name,
                         target,
                         exc,
@@ -2855,11 +2862,11 @@ class TaskService:
                         "status": "unavailable",
                         "ticket": name,
                         "business_status": current,
-                        "message": f"ERPNext no respondio; {name} sigue en {current}.",
+                        "message": f"Jardal ERP no respondio; {name} sigue en {current}.",
                     }
                 await asyncio.sleep(delay)
                 delay *= 2
-            except ERPNextDependencyBlockedError as exc:
+            except JardalERPDependencyBlockedError as exc:
                 blocked = sorted(
                     {hit for hit in _TASK_NAME_PATTERN.findall(str(exc)) if hit != name}
                 )
@@ -2876,12 +2883,12 @@ class TaskService:
                 if known is not None:
                     result["depends_on"] = known
                 return result
-            except ERPNextError as exc:
+            except JardalERPError as exc:
                 return _classify_transition_error(exc)
 
         try:
             reread = await adapter.resolve_task(name)
-        except ERPNextError as exc:
+        except JardalERPError as exc:
             return {
                 "ok": False,
                 "status": "unverified",
@@ -2981,26 +2988,26 @@ class TaskService:
         }
         return result
 
-    async def startup_reconcile_erpnext(self) -> int:
+    async def startup_reconcile_jardal_erp(self) -> int:
         """Repara al arrancar los enlaces de negocio que quedaron a medias.
 
         Cinturon de seguridad del observador de transiciones: si el proceso murio entre el
-        cambio de estado y el envio a ERPNext, o si ERPNext estaba caido, la brecha se
+        cambio de estado y el envio a Jardal ERP, o si Jardal ERP estaba caido, la brecha se
         repara aqui. Nunca replica un efecto ya exitoso, porque compara contra el estado
         empujado y no contra el estado anterior.
 
         Acotada y de una sola pasada, como la de Notion: no es un barrido periodico
         (reglas permanentes de AGENTS.md).
         """
-        adapter = getattr(self, "_erpnext", None)
+        adapter = getattr(self, "_business", None)
         if adapter is None or not adapter.is_enabled:
             return 0
 
-        pending = await self._repo.list_tasks_needing_erpnext_sync(limit=200)
-        queue = getattr(self, "_erpnext_queue", None)
+        pending = await self._repo.list_tasks_needing_jardal_erp_sync(limit=200)
+        queue = getattr(self, "_jardal_erp_queue", None)
         repaired = 0
         if pending:
-            logger.info("Startup reconcile ERPNext: %d tickets con enlace roto", len(pending))
+            logger.info("Startup reconcile Jardal ERP: %d tickets con enlace roto", len(pending))
             for task in pending:
                 try:
                     params = self._task_params(task)
@@ -3011,7 +3018,7 @@ class TaskService:
 
                     if not str(mirror.get("name") or "").strip():
                         # El ticket de negocio nunca llego a crearse (o no se supo): reintentar.
-                        await self._enqueue_erpnext_registration(task)
+                        await self._enqueue_jardal_erp_registration(task)
                         repaired += 1
                         continue
 
@@ -3024,7 +3031,7 @@ class TaskService:
                             "name": mirror["name"],
                             "status": status,
                         }
-                        if resolve_erpnext_status(task) is None:
+                        if resolve_jardal_erp_status(task) is None:
                             # Ya no hay nada que empujar (p. ej. espera operativa sin
                             # accion humana): se limpia el pendiente sin HTTP.
                             await self._record_status_outcome(item, pushed=True)
@@ -3033,15 +3040,15 @@ class TaskService:
                         repaired += 1
                 except Exception:
                     logger.warning(
-                        "Startup reconcile ERPNext: ticket %s omitido", task.get("task_id"), exc_info=True
+                        "Startup reconcile Jardal ERP: ticket %s omitido", task.get("task_id"), exc_info=True
                     )
                     continue
 
-            logger.info("Startup reconcile ERPNext: %d reparados de %d", repaired, len(pending))
+            logger.info("Startup reconcile Jardal ERP: %d reparados de %d", repaired, len(pending))
 
         # Visibilidad pendiente (00146 + 00147): valores derivados que quedaron
-        # sin recalcular con ERPNext caído. Consulta separada para no tocar el
-        # pin de `list_tasks_needing_erpnext_sync`.
+        # sin recalcular con Jardal ERP caído. Consulta separada para no tocar el
+        # pin de `list_tasks_needing_jardal_erp_sync`.
         try:
             list_pending = getattr(self._repo, "list_tasks_pending_visibility", None)
             vis_pending = await list_pending(limit=200) if list_pending else []
@@ -3068,9 +3075,9 @@ class TaskService:
     # Valores DERIVADOS del estado de negocio (nunca backlog): % del grupo
     # desde sus hijos, fechas reales al empezar/cerrar, estimaciones
     # deterministas para lo abierto y span del grupo. Se recalculan por
-    # evento vía jobs `kind=visibility` de la cola ERPNext; todo es
+    # evento vía jobs `kind=visibility` de la cola Jardal ERP; todo es
     # compare-before-write (sin cambios no hay PUT: el eco no escribe).
-    # ERPNext caído → `pending_visibility` en el espejo (reconciliación o
+    # Jardal ERP caído → `pending_visibility` en el espejo (reconciliación o
     # siguiente evento). Cero LLM, cero polling, cero barridos.
 
     def _site_zone_name(self) -> str | None:
@@ -3113,7 +3120,7 @@ class TaskService:
         if top:
             updates.update(top)
         if mirror:
-            updates["params"] = self._merge_erpnext_mirror_params(
+            updates["params"] = self._merge_jardal_erp_mirror_params(
                 self._task_params(task), dict(mirror)
             )
         if not updates:
@@ -3128,7 +3135,7 @@ class TaskService:
 
     async def _refresh_visibility(self, item: dict[str, Any]) -> dict[str, Any]:
         """Worker `kind=visibility`: recalcula lo derivado de un ticket."""
-        adapter = getattr(self, "_erpnext", None)
+        adapter = getattr(self, "_business", None)
         if adapter is None or not getattr(adapter, "is_enabled", False):
             return {"ok": False, "status": "no_adapter"}
         name = str(item.get("name") or "").strip()
@@ -3144,7 +3151,7 @@ class TaskService:
         try:
             try:
                 business = await adapter.resolve_task(name)
-            except ERPNextValidationError as exc:
+            except JardalERPValidationError as exc:
                 if exc.status_code == 404 and task_id:
                     return await self._rollup_orphan_parent(task_id)
                 raise
@@ -3183,23 +3190,23 @@ class TaskService:
             if task_id:
                 await self._patch_visibility_state(task_id, None, mirror={"pending_visibility": name})
             return {"ok": False, "status": "version_conflict"}
-        except ERPNextUnavailable as exc:
+        except JardalERPUnavailable as exc:
             logger.warning(
-                "Visibilidad de %s pendiente: ERPNext caído (%s)", name, exc
+                "Visibilidad de %s pendiente: Jardal ERP caído (%s)", name, exc
             )
             if task_id:
                 await self._patch_visibility_state(
                     task_id, None, mirror={"pending_visibility": name}
                 )
             return {"ok": False, "status": "unavailable"}
-        except ERPNextError as exc:
+        except JardalERPError as exc:
             logger.warning("Visibilidad de %s sin recalcular: %s", name, exc)
             return {"ok": False, "status": "business_error"}
 
     async def _rollup_orphan_parent(self, task_id: str) -> dict[str, Any]:
         """El hijo ya no existe (borrado en desk): rollup del padre que
         recuerda el espejo. Sin padre conocido no hay nada que derivar."""
-        adapter = getattr(self, "_erpnext", None)
+        adapter = getattr(self, "_business", None)
         repo = getattr(self, "_repo", None)
         if adapter is None or repo is None:
             return {"ok": False, "status": "no_adapter"}
@@ -3369,7 +3376,7 @@ class TaskService:
         """PUT de fechas con extender-primero ante DateBound (un reintento)."""
         try:
             await adapter.update_work_dates(name, dates)
-        except ERPNextDateBoundError:
+        except JardalERPDateBoundError:
             await self._ensure_span_for_child(
                 adapter,
                 name,
@@ -3448,9 +3455,9 @@ class TaskService:
                     limit=visibility.MAX_HISTORY_ROWS,
                 )
                 medians = visibility.median_durations(rows or [])
-            except ERPNextUnavailable:
+            except JardalERPUnavailable:
                 raise
-            except ERPNextError as exc:
+            except JardalERPError as exc:
                 logger.warning("Sin historial para estimar %s: %s", name, exc)
                 medians = {}
             today = now.astimezone(visibility.site_zone(zone)).date()
@@ -3509,9 +3516,9 @@ class TaskService:
         for dep in names[: visibility.MAX_DEPENDENT_RESOLVE]:
             try:
                 doc = await adapter.resolve_task(dep)
-            except ERPNextUnavailable:
+            except JardalERPUnavailable:
                 raise
-            except ERPNextError:
+            except JardalERPError:
                 continue
             if isinstance(doc, dict) and doc.get("exp_end_date"):
                 ends.append(doc.get("exp_end_date"))
@@ -3542,7 +3549,7 @@ class TaskService:
         while current and depth < visibility.MAX_ROLLUP_DEPTH:
             try:
                 changed, parent = await self._rollup_single(adapter, current)
-            except ERPNextValidationError as exc:
+            except JardalERPValidationError as exc:
                 if exc.status_code == 404:
                     break
                 raise
@@ -3602,7 +3609,7 @@ class TaskService:
             return False, parent
         try:
             await adapter.update_group_rollup(name, desired)
-        except ERPNextDateBoundError:
+        except JardalERPDateBoundError:
             # El grupo pasa a SU padre: extender arriba y reintentar una vez.
             await self._ensure_span_for_child(
                 adapter, name,
@@ -3627,14 +3634,14 @@ class TaskService:
             return
         try:
             child = await adapter.resolve_task(name)
-        except ERPNextError:
+        except JardalERPError:
             return
         chain: list[tuple[str, Any, Any]] = []
         current = str(child.get("parent_task") or "").strip()
         while current and len(chain) < visibility.MAX_ROLLUP_DEPTH:
             try:
                 doc = await adapter.resolve_task(current)
-            except ERPNextError:
+            except JardalERPError:
                 break
             chain.append((
                 current,
@@ -3691,9 +3698,9 @@ class TaskService:
                 status="Open", project_key=project_key,
                 limit=visibility.MAX_DEPENDENT_RESOLVE,
             )
-        except ERPNextUnavailable:
+        except JardalERPUnavailable:
             raise
-        except ERPNextError as exc:
+        except JardalERPError as exc:
             logger.warning("Sin re-estimación tras %s: %s", subject, exc)
             return 0
         count = 0
@@ -3703,9 +3710,9 @@ class TaskService:
                 continue
             try:
                 doc = await adapter.resolve_task(candidate)
-            except ERPNextUnavailable:
+            except JardalERPUnavailable:
                 raise
-            except ERPNextError:
+            except JardalERPError:
                 continue
             if not isinstance(doc, dict):
                 continue
@@ -3725,9 +3732,9 @@ class TaskService:
                     adapter, doc, dep_execution, zone, now, "dep_closed"
                 ):
                     count += 1
-            except ERPNextUnavailable:
+            except JardalERPUnavailable:
                 raise
-            except ERPNextError as exc:
+            except JardalERPError as exc:
                 logger.warning("Sin re-estimar %s: %s", candidate, exc)
                 continue
         return count
@@ -4358,7 +4365,7 @@ class TaskService:
         breaks execution.
         """
         try:
-            adapter = getattr(self, "_erpnext", None)
+            adapter = getattr(self, "_business", None)
             if adapter is None or not getattr(adapter, "is_enabled", False):
                 return
             key = reason.split(":", 1)[0].strip()
@@ -4466,7 +4473,7 @@ class TaskService:
             row = current if isinstance(current, dict) else task
             mirror = mirror_ticket(row) \
                 if isinstance(row, dict) else None
-            adapter = getattr(self, "_erpnext", None)
+            adapter = getattr(self, "_business", None)
             attach = adapter.attach_file \
                 if adapter is not None \
                 and getattr(adapter, "is_enabled", False) else None
@@ -4496,7 +4503,7 @@ class TaskService:
         missing; the adapter itself dedupes identical content.
         """
         try:
-            adapter = getattr(self, "_erpnext", None)
+            adapter = getattr(self, "_business", None)
             if adapter is None or not getattr(adapter, "is_enabled", False):
                 return False
             task = await self._repo.get_task(task_id)
@@ -4628,7 +4635,7 @@ class TaskService:
     ) -> dict[str, Any]:
         """Owner-escalation entry (autonomy F4 TASK-2026-00114).
 
-        Persists the escalation ERPNext-first through :meth:`create_task`
+        Persists the escalation Jardal ERP-first through :meth:`create_task`
         (autorun off, caller-provided ``source_id`` for idempotency), then
         parks it in ``waiting``/``owner_escalation`` with any project phase
         workflow cleared: the status observer pushes Pending Review, the
@@ -4683,7 +4690,7 @@ class TaskService:
     ) -> dict[str, Any]:
         """Owner-question entry (single human channel, TASK-2026-00206).
 
-        Persists the question ERPNext-first through :meth:`create_task`
+        Persists the question Jardal ERP-first through :meth:`create_task`
         (autorun off, caller-provided ``source_id`` for idempotency), then
         parks it in ``waiting``/``owner_question`` with any project phase
         workflow cleared: the status observer pushes Pending Review, the
@@ -5229,7 +5236,7 @@ class TaskService:
         records the decision and resumes (approve) or fails + returns to the
         planner (deny) its origin; a standalone owner-escalation ticket
         records the decision and completes, so the status observer pushes
-        Completed to ERPNext. Anything else (personal scope, no human wait,
+        Completed to Jardal ERP. Anything else (personal scope, no human wait,
         QA without phases) is rejected fail-closed with a reason.
         """
         task = await self._repo.get_task(task_id)
@@ -5273,7 +5280,7 @@ class TaskService:
         ):
             # H3 (revisión 00206): una decisión ya grabada manda sobre el
             # botón que pulse el reintento; así un fallo parcial (desk con
-            # ERPNext caído) no puede invertirse desde cockpit.
+            # Jardal ERP caído) no puede invertirse desde cockpit.
             recorded = (
                 owner_question_block(task).get("decision") or {}
             ).get("decision")
@@ -5477,7 +5484,7 @@ class TaskService:
                     Path(__file__).resolve().parent.parent,
                     dict(draft), approval=seal)
         if kind == "new_tool" and approve:
-            # The dev ticket first: creation may raise (ERPNext hard fail),
+            # The dev ticket first: creation may raise (Jardal ERP hard fail),
             # and then the question must stay open for a retry.
             dev_task_id = await self._create_tool_ticket_from_question(
                 task, block

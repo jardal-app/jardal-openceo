@@ -1,7 +1,7 @@
 """Single human channel: owner-question tickets (TASK-2026-00206).
 
 Pure builders and predicates; :class:`TaskService` persists them
-ERPNext-first. Everything the Owner must see arrives as one waiting
+Jardal ERP-first. Everything the Owner must see arrives as one waiting
 ticket in ``Pending Review`` with the exact human action, and the
 Owner's answer resumes the origin ticket from its checkpoint.
 
@@ -50,7 +50,7 @@ _KIND_TITLES = {
     "playbook": "Playbook",
 }
 
-#: ERPNext Task subject fits 140 chars.
+#: Jardal ERP Task subject fits 140 chars.
 _TITLE_MAX = 140
 
 

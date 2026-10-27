@@ -837,7 +837,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
 class PendingLinkTests(unittest.IsolatedAsyncioTestCase):
     def _pending(self, mirror: dict) -> dict:
         return _ticket("queued-1", project="free",
-                       waiting_reason="erpnext_pending",
+                       waiting_reason="jardal_erp_pending",
                        params={"_mirrors": {"erpnext": mirror}})
 
     async def test_pending_mirror_skips_but_holds_backup(self) -> None:

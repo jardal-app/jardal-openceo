@@ -1,4 +1,4 @@
-"""Adapter de tickets hacia ERPNext.
+"""Adapter de tickets hacia Jardal ERP.
 
 Lo que se prueba aqui son las decisiones que NO son obvias y que ya costaron
 verificacion contra el sitio vivo:
@@ -24,15 +24,15 @@ CORE_DIR = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
-from tools.erpnext_client import ERPNextDuplicateError, ERPNextValidationError  # noqa: E402
-from tools.erpnext_tickets import (  # noqa: E402
+from tools.jardal_erp_client import JardalERPDuplicateError, JardalERPValidationError  # noqa: E402
+from tools.jardal_erp_tickets import (  # noqa: E402
     SUBJECT_MAX_LENGTH,
-    ERPNextTicketAdapter,
+    JardalERPTicketAdapter,
     map_coding_tool,
     map_priority,
     map_status,
     normalize_due_date,
-    resolve_erpnext_status,
+    resolve_jardal_erp_status,
     tags_footer,
     to_html_description,
     truncate_subject,
@@ -58,11 +58,11 @@ class FakeClient:
     async def get_doc(self, doctype, name):
         row = self.docs.get(name)
         if row is None:
-            raise ERPNextValidationError(f"No existe {doctype} {name}")
+            raise JardalERPValidationError(f"No existe {doctype} {name}")
         return row
 
     def config_error(self) -> str | None:
-        return None if self.is_configured else "Falta configuracion de ERPNext: ERPNEXT_URL."
+        return None if self.is_configured else "Falta configuracion de Jardal ERP: ERPNEXT_URL."
 
     async def list_docs(self, doctype, *, filters=None, fields=None, limit=20):
         self.listed.append((doctype, filters))
@@ -88,9 +88,9 @@ class FakeClient:
         return {"name": name, **body}
 
 
-def make_adapter(client: FakeClient) -> ERPNextTicketAdapter:
+def make_adapter(client: FakeClient) -> JardalERPTicketAdapter:
     settings = SimpleNamespace(ERPNEXT_TICKETS_PROJECT_COMPANY="Jardal")
-    return ERPNextTicketAdapter(settings, client=client)  # type: ignore[arg-type]
+    return JardalERPTicketAdapter(settings, client=client)  # type: ignore[arg-type]
 
 
 def run(coro):
@@ -117,7 +117,7 @@ class MappingTests(unittest.TestCase):
         self.assertNotIn("<b>", html)
 
     def test_prioridad_critical_mapea_a_urgent(self):
-        # OpenCEO dice `critical`; ERPNext solo admite Low/Medium/High/Urgent.
+        # OpenCEO dice `critical`; Jardal ERP solo admite Low/Medium/High/Urgent.
         self.assertEqual(map_priority("critical"), "Urgent")
         self.assertEqual(map_priority("high"), "High")
         self.assertEqual(map_priority(None), "Medium")
@@ -220,7 +220,7 @@ class PayloadTests(unittest.TestCase):
         self.assertNotIn("openceo_coding_tool", payload)
         self.assertNotIn("openceo_external_url", payload)
 
-    def test_provider_y_origen_llegan_a_erpnext(self):
+    def test_provider_y_origen_llegan_a_business(self):
         """Sin ellos el tablero oculta si un ticket es Tier S y de donde vino."""
         adapter = make_adapter(FakeClient())
         payload = run(
@@ -281,7 +281,7 @@ class CreateTicketTests(unittest.TestCase):
         """Un 417 significa que un intento anterior SI creo el documento."""
         existente = {"name": "TASK-2026-00007", "status": "Open", "openceo_ref": "api:1"}
         client = FakeClient(
-            create_error=ERPNextDuplicateError("duplicado"),
+            create_error=JardalERPDuplicateError("duplicado"),
             by_ref=existente,
         )
         adapter = make_adapter(client)
@@ -321,16 +321,16 @@ class CreateTicketTests(unittest.TestCase):
                   "qa_review_state": "approved"}))
         self.assertEqual(client.updated[-1], ("Task", "TASK-1", {"status": "Completed"}))
 
-    def test_resolve_erpnext_status_no_qa_es_done(self):
-        self.assertEqual(resolve_erpnext_status({"status": "completed"}), "Completed")
+    def test_resolve_jardal_erp_status_no_qa_es_done(self):
+        self.assertEqual(resolve_jardal_erp_status({"status": "completed"}), "Completed")
         self.assertEqual(
-            resolve_erpnext_status({"status": "completed", "qa_review_required": True,
+            resolve_jardal_erp_status({"status": "completed", "qa_review_required": True,
                                     "qa_review_state": "pending"}),
             "Pending Review",
         )
-        self.assertEqual(resolve_erpnext_status({"status": "in_progress"}), "Working")
-        self.assertIsNone(resolve_erpnext_status({"status": "failed"}))
-        self.assertIsNone(resolve_erpnext_status({"status": "lo-que-sea"}))
+        self.assertEqual(resolve_jardal_erp_status({"status": "in_progress"}), "Working")
+        self.assertIsNone(resolve_jardal_erp_status({"status": "failed"}))
+        self.assertIsNone(resolve_jardal_erp_status({"status": "lo-que-sea"}))
 
     def test_autorun_se_persiste_en_el_documento(self):
         """TASK-2026-00043: el False del registro se perdia (TaskDocument sin campo)
@@ -389,7 +389,7 @@ class FakeAdapter:
         class _Client:
             @staticmethod
             def config_error() -> str | None:
-                return None if enabled else "Falta configuracion de ERPNext: ERPNEXT_URL."
+                return None if enabled else "Falta configuracion de Jardal ERP: ERPNEXT_URL."
 
         self.client = _Client()
 
@@ -412,7 +412,7 @@ class BusinessRegistrationTests(unittest.TestCase):
             TASK_AUTORUN=False,
             HORIZON_PERSONAL_MIRROR_ENABLED=personal_mirror,
         )
-        service._erpnext = adapter
+        service._business = adapter
         self._make_doc = lambda **kw: make_task_document(
             TaskCreateRequest(source=TaskSource.API, title="t", description="d", **kw)
         )
@@ -431,11 +431,11 @@ class BusinessRegistrationTests(unittest.TestCase):
         tickets solo en Mongo. Eso producia tickets que el sistema de negocio nunca
         veria, y la reconciliacion no los recupera. Ahora se falla.
         """
-        from tools.erpnext_client import ERPNextValidationError
+        from tools.jardal_erp_client import JardalERPValidationError
 
         adapter = FakeAdapter(enabled=False)
         service = self._service(adapter)
-        with self.assertRaises(ERPNextValidationError):
+        with self.assertRaises(JardalERPValidationError):
             run(service._register_business_ticket(self._make_doc(project="jardal-openceo")))
         self.assertEqual(adapter.calls, [])
 
@@ -450,7 +450,7 @@ class BusinessRegistrationTests(unittest.TestCase):
         mirror, pending = run(service._register_business_ticket(doc))
         self.assertIsNone(mirror)
         self.assertFalse(pending)
-        self.assertEqual(adapter.calls, [], "un ticket personal no debe llegar a ERPNext")
+        self.assertEqual(adapter.calls, [], "un ticket personal no debe llegar a Jardal ERP")
 
     def test_alcance_personal_se_publica_si_el_dueno_lo_habilita(self):
         from horizon.privacy import personal_scope_params
@@ -469,28 +469,28 @@ class BusinessRegistrationTests(unittest.TestCase):
         mirror, pending = run(service._register_business_ticket(self._make_doc(source_id="s1", project="jardal-openceo")))
         self.assertFalse(pending)
         self.assertEqual(mirror["name"], "TASK-2026-00042")
-        # `status_pushed` guarda el vocabulario de OpenCEO (`queued`), no el de ERPNext
+        # `status_pushed` guarda el vocabulario de OpenCEO (`queued`), no el de Jardal ERP
         # (`Open`): es contra este valor que el observador decide si hubo transicion.
         self.assertEqual(mirror["status_pushed"], "queued")
         self.assertEqual(adapter.calls[0]["project_key"], "jardal-openceo")
 
-    def test_erpnext_caido_deja_el_enlace_pendiente_y_no_lanza(self):
-        from tools.erpnext_client import ERPNextUnavailable
+    def test_business_caido_deja_el_enlace_pendiente_y_no_lanza(self):
+        from tools.jardal_erp_client import JardalERPUnavailable
 
-        adapter = FakeAdapter(error=ERPNextUnavailable("timeout"))
+        adapter = FakeAdapter(error=JardalERPUnavailable("timeout"))
         service = self._service(adapter)
         mirror, pending = run(service._register_business_ticket(self._make_doc(project="jardal-openceo")))
-        self.assertTrue(pending, "ERPNext caido debe marcar el enlace como pendiente")
+        self.assertTrue(pending, "Jardal ERP caido debe marcar el enlace como pendiente")
         self.assertIsNone(mirror["name"])
         self.assertTrue(mirror["ref"])
 
     def test_datos_invalidos_lanzan_para_no_dejar_ejecucion_huerfana(self):
         """Un 4xx no puede producir un ticket de ejecucion sin contraparte de negocio."""
-        from tools.erpnext_client import ERPNextValidationError
+        from tools.jardal_erp_client import JardalERPValidationError
 
-        adapter = FakeAdapter(error=ERPNextValidationError("subject invalido"))
+        adapter = FakeAdapter(error=JardalERPValidationError("subject invalido"))
         service = self._service(adapter)
-        with self.assertRaises(ERPNextValidationError):
+        with self.assertRaises(JardalERPValidationError):
             run(service._register_business_ticket(self._make_doc(project="jardal-openceo")))
 
     def test_ref_determinista_con_source_id(self):
@@ -517,8 +517,8 @@ class StatusObserverTests(unittest.TestCase):
         service._settings = SimpleNamespace(
             TASK_AUTORUN=False, HORIZON_PERSONAL_MIRROR_ENABLED=personal_mirror
         )
-        service._erpnext = adapter
-        service._erpnext_queue = asyncio.Queue()
+        service._business = adapter
+        service._jardal_erp_queue = asyncio.Queue()
         self._mirror = {"name": "TASK-1", "ref": "api:1", "status_pushed": status_pushed}
         return service
 
@@ -531,8 +531,8 @@ class StatusObserverTests(unittest.TestCase):
 
     def _queued(self, service):
         items = []
-        while not service._erpnext_queue.empty():
-            items.append(service._erpnext_queue.get_nowait())
+        while not service._jardal_erp_queue.empty():
+            items.append(service._jardal_erp_queue.get_nowait())
         return items
 
     def test_in_progress_se_empuja(self):
@@ -569,7 +569,7 @@ class StatusObserverTests(unittest.TestCase):
         """Idempotencia: se compara contra el ultimo estado EMPUJADO, no contra la base.
 
         Ambos valores estan en el vocabulario de OpenCEO: comparar `in_progress` contra el
-        `Working` de ERPNext haria que cada parche pareciera una transicion nueva.
+        `Working` de Jardal ERP haria que cada parche pareciera una transicion nueva.
         """
         service = self._service(FakeAdapter(), status_pushed="in_progress")
         run(service.observe_task_status(self._task("in_progress")))
@@ -591,7 +591,7 @@ class StatusObserverTests(unittest.TestCase):
         task = self._task("in_progress")
         task["params"].update(personal_scope_params("usr_1", extra={}))
         run(service.observe_task_status(task))
-        self.assertEqual(self._queued(service), [], "una transicion personal no debe salir a ERPNext")
+        self.assertEqual(self._queued(service), [], "una transicion personal no debe salir a Jardal ERP")
 
     def test_adapter_apagado_no_encola(self):
         service = self._service(FakeAdapter(enabled=False))
@@ -606,7 +606,7 @@ class ReconciliationQueryTests(unittest.TestCase):
         import horizon_support
 
         repo = horizon_support.make_fake_mongo(rows)
-        run(repo.list_tasks_needing_erpnext_sync())
+        run(repo.list_tasks_needing_jardal_erp_sync())
         return repo.tasks.last_query
 
     def test_lleva_el_filtro_de_privacidad(self):
@@ -623,7 +623,7 @@ class ReconciliationQueryTests(unittest.TestCase):
 
 
 class ReversePathTests(unittest.TestCase):
-    """Camino inverso: una decision humana en ERPNext llega al runtime.
+    """Camino inverso: una decision humana en Jardal ERP llega al runtime.
 
     Solo se propagan las decisiones de NEGOCIO. Los demas estados de `Task` son eco de
     lo que OpenCEO ya empujo, y propagarlos seria un bucle infinito.
@@ -634,7 +634,7 @@ class ReversePathTests(unittest.TestCase):
 
         service = TaskService.__new__(TaskService)
         service._settings = SimpleNamespace(TASK_AUTORUN=False, HORIZON_PERSONAL_MIRROR_ENABLED=False)
-        service._erpnext = FakeAdapter()
+        service._business = FakeAdapter()
         self._task = {
             "task_id": "t1",
             "status": status,
@@ -669,7 +669,7 @@ class ReversePathTests(unittest.TestCase):
         # Sin esto, un `waiting` con resume_at volveria a arrancar trabajo cancelado.
         self.assertIsNone(updates["resume_at"])
 
-    def test_borrado_en_erpnext_cancela_el_ticket(self):
+    def test_borrado_en_business_cancela_el_ticket(self):
         service = self._service("in_progress")
         result = run(service.apply_business_status(task_id="t1", deleted=True))
         self.assertEqual(result["task_status"], "cancelled")

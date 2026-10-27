@@ -1,7 +1,7 @@
 """Tests del registro ocasional de gastos por voz (TASK-2026-00032).
 
 Sin red: parser, clasificacion, idempotencia y Decimal se prueban con un
-cliente falso. La prueba viva contra ERPNext se corre a mano una vez y sus
+cliente falso. La prueba viva contra Jardal ERP se corre a mano una vez y sus
 documentos se eliminan (los borradores se borran limpio).
 """
 
@@ -41,7 +41,7 @@ class FakeDuplicate(Exception):
         self.status_code = 417
 
 
-class FakeERPNextClient:
+class FakeJardalERPClient:
     """Imita create/list/update del cliente real sobre Journal Entry."""
 
     def __init__(self) -> None:
@@ -234,7 +234,7 @@ class ClassifyTests(unittest.TestCase):
 class RegisterExpenseTests(unittest.TestCase):
     def test_create_and_submit(self) -> None:
         async def scenario() -> None:
-            client = FakeERPNextClient()
+            client = FakeJardalERPClient()
             parsed = parse_expense("registra gastos personales carne 50 bolivianos")
             assert parsed is not None
             result = await register_expense(client, parsed, ref="voice-expense:test1")
@@ -253,7 +253,7 @@ class RegisterExpenseTests(unittest.TestCase):
 
     def test_retry_same_ref_is_idempotent(self) -> None:
         async def scenario() -> None:
-            client = FakeERPNextClient()
+            client = FakeJardalERPClient()
             parsed = parse_expense("pago de luz de casa 300 bs")
             assert parsed is not None
             first = await register_expense(client, parsed, ref="voice-expense:retry")
@@ -266,7 +266,7 @@ class RegisterExpenseTests(unittest.TestCase):
 
     def test_different_ref_creates_distinct_operation(self) -> None:
         async def scenario() -> None:
-            client = FakeERPNextClient()
+            client = FakeJardalERPClient()
             parsed = parse_expense("pago de luz de casa 300 bs")
             assert parsed is not None
             first = await register_expense(client, parsed, ref="voice-expense:a")

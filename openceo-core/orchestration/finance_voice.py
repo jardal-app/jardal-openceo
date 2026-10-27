@@ -2,7 +2,7 @@
 
 The chat layer names the skill; this validates it against the live
 catalog, runs its exact workflow on the YAML engine and returns the
-spoken summary. The record (or the read) in ERPNext is the effect:
+spoken summary. The record (or the read) in Jardal ERP is the effect:
 no tickets, no planner. The engine summarizes runs generically, so
 the spoken line is read back from the persisted run steps.
 """

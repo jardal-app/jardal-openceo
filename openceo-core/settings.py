@@ -90,14 +90,16 @@ class Settings(BaseSettings):
     NOTION_SYNC_BACK_ENABLED: bool = True
     NOTION_SYNC_BACK_PROPERTY_MAP_JSON: str = ""
 
-    # ERPNext — adapter del agente Finance y de tickets.
+    # Jardal ERP — adapter del agente Finance y de tickets.
     # Secretos en openceo-core/.env.finance.local (git-ignored). Todos los campos
     # llevan default: un campo sin default rompe Settings() y con ella toda la suite.
     #
-    # NO hay flag de encendido/apagado y es deliberado: ERPNext es el registro de negocio
+    # NO hay flag de encendido/apagado y es deliberado: Jardal ERP es el registro de negocio
     # de los tickets, asi que un modo que los cree solo en Mongo produciria tickets que el
     # sistema de negocio nunca vera, y la reconciliacion no los recupera. La resiliencia
-    # ante un ERPNext caido la da la marca `erpnext_pending`, no un interruptor.
+    # ante un Jardal ERP caido la da la marca `jardal_erp_pending`, no un interruptor.
+    # El valor "erpnext" es alias depreciado (una version) del canonico "jardal_erp"
+    # para el adapter Frappe sin manifiesto (TASK-2026-00318).
     BUSINESS_PROVIDER: str = "erpnext"
     BUSINESS_AUTHORITY_FILE: str = ""
     JARDAL_ERP_URL: str = ""
@@ -113,14 +115,17 @@ class Settings(BaseSettings):
     JARDAL_ERP_WEBHOOK_SECRET: str = ""
     JARDAL_ERP_OPENCEO_USER: str = "openceo@jardal.app"
     ROLLUP_PROVIDER: str = "core"
-    # Finanzas (00263): "erpnext" (DocTypes, defecto) o "jardal_erp" (contrato
-    # financiero, exige manifiesto de autoridad listo como identidad/eventos).
+    # Finanzas (00263): "erpnext" == adapter Frappe (DocTypes, defecto; alias
+    # depreciado una version) o "jardal_erp" (contrato financiero, exige manifiesto
+    # de autoridad listo como identidad/eventos) (TASK-2026-00318).
     FINANCE_PROVIDER: str = "erpnext"
     # Horizon personal (00264): "mongo" (defecto) o "jardal_erp" (dominio
     # privado ERP para objetivos/capturas; exige manifiesto + identidad
     # federada, pues cada llamada usa la sesión del usuario).
     HORIZON_STORE: str = "mongo"
 
+    # Nombres ERPNEXT_*: alias depreciados (una version) del adapter Frappe de
+    # Jardal ERP (TASK-2026-00318).
     ERPNEXT_URL: str = ""
     ERPNEXT_USER: str = ""
     ERPNEXT_API_KEY: str = ""
@@ -128,9 +133,9 @@ class Settings(BaseSettings):
     ERPNEXT_TIMEOUT_SECONDS: float = 5.0
     ERPNEXT_CONNECT_TIMEOUT_SECONDS: float = 2.0
     ERPNEXT_TICKETS_PROJECT_COMPANY: str = "Jardal"
-    # Secreto compartido que ERPNext debe enviar en sus webhooks de vuelta (camino inverso).
+    # Secreto compartido que Jardal ERP debe enviar en sus webhooks de vuelta (camino inverso).
     ERPNEXT_WEBHOOK_SECRET: str = ""
-    # Zona IANA del sitio ERPNext (`exp_*` son naive en hora local). Defecto
+    # Zona IANA del sitio Jardal ERP (`exp_*` son naive en hora local). Defecto
     # verificado en vivo (00147): UTC-4 fijo en toda la ventana observada.
     ERPNEXT_SITE_TIMEZONE: str = "America/Caracas"
     # Adjuntos de tickets (TASK-2026-00079). Dos limites, uno por lado:

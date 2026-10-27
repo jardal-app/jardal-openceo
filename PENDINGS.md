@@ -1,6 +1,6 @@
 # Tareas pendientes
 
-**El backlog vive en ERPNext: <https://erp.jardal.app/app/task>**
+**El backlog vive en Jardal ERP: <https://erp.jardal.app/app/task>**
 
 Este archivo ya no es el backlog. Los tickets se crean y se consultan ahí, no aquí.
 
@@ -13,7 +13,7 @@ problemas: **se desactualizaba en silencio** (al migrar se encontró que 7 items
 pendientes pero ya estaban implementados, y 2 estaban absorbidos por otro ticket) y **no lo veía
 nadie más que quien lo editaba**.
 
-Desde esa fecha el trabajo empresarial pertenece a ERPNext — proyectos, tickets, prioridades,
+Desde esa fecha el trabajo empresarial pertenece a Jardal ERP — proyectos, tickets, prioridades,
 aprobaciones — y OpenCEO conserva la ejecución. La dirección está en
 [`docs/OPENCEO_DIRECTION.md`](docs/OPENCEO_DIRECTION.md) v1.1 y las fronteras en
 [`docs/ARCHITECTURE_REFERENCE_2026.md`](docs/ARCHITECTURE_REFERENCE_2026.md) §System Boundaries.

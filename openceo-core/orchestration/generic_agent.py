@@ -25,7 +25,7 @@ a crash invalidates a hecho claim (rewritten bloqueado, so the planner
 loop still runs), and a truncated output makes any parse untrustworthy
 (bloqueado, review 00006). The orchestrator owns the outcome:
 this runner returns ``result_comment`` and ``run_task`` posts it to
-ERPNext; the agent never changes ticket states.
+Jardal ERP; the agent never changes ticket states.
 """
 
 from __future__ import annotations
@@ -644,7 +644,7 @@ async def _run_llm(
     badge_ticket = badge_ticket_for_task(task)
     if badge_ticket is None and wiring.badge_provider_factory is None:
         return _waiting(agent_name,
-                        "config: agent badges bind to the ERPNext mirror "
+                        "config: agent badges bind to the Jardal ERP mirror "
                         "ticket and this task has none", params)
     factory = wiring.executor_factory or default_executor_factory
     # Injected factories are test-only (production wires none and waited

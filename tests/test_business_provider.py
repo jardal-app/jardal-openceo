@@ -106,7 +106,7 @@ def test_missing_configuration_and_unknown_provider_fail_closed():
 
 def test_canonical_link_wins_and_objectives_and_missions_read_it():
     from ceo.service import CEOService
-    from dispatcher import _erpnext_link_pending
+    from dispatcher import _business_link_pending
     from horizon.cockpit import erp_mirror_name
     from orchestration.role_muse import badge_ticket_for_task
     from pilot_report import _ticket_row
@@ -118,14 +118,14 @@ def test_canonical_link_wins_and_objectives_and_missions_read_it():
     assert CEOService._erp_name(task) == erp_mirror_name(task) == badge_ticket_for_task(task) == "TASK-2026-99999"
     assert _ticket_row(task)["ref"] == "TASK-2026-99999"
     task["params"]["_mirrors"]["business"] = {"provider": "jardal_erp", "ref": "api:synthetic", "pending": True}
-    assert _erpnext_link_pending(task)
+    assert _business_link_pending(task)
 
 
 def test_link_update_preserves_legacy_record_without_mutating_input():
     service = TaskService.__new__(TaskService)
-    service._erpnext = SimpleNamespace(provider="jardal_erp")
+    service._business = SimpleNamespace(provider="jardal_erp")
     params = {"_mirrors": {"erpnext": {"name": "TASK-2026-00001"}}}
-    merged = service._merge_erpnext_mirror_params(params, {"name": "TASK-2026-99999", "pending": False})
+    merged = service._merge_jardal_erp_mirror_params(params, {"name": "TASK-2026-99999", "pending": False})
     assert params == {"_mirrors": {"erpnext": {"name": "TASK-2026-00001"}}}
     assert merged["_mirrors"]["business"]["provider"] == "jardal_erp"
     assert merged["_mirrors"]["erpnext"]["name"] == "TASK-2026-00001"
@@ -190,7 +190,7 @@ def test_real_status_worker_supplies_erp_transition_evidence(status, extra, targ
             return httpx.Response(200, json={"task": {**ROW, "status": target, "version": 2}})
         client = JardalERPClient(settings(), transport=httpx.MockTransport(handle))
         service = TaskService.__new__(TaskService)
-        service._erpnext = JardalERPWork(settings(), client=client)
+        service._business = JardalERPWork(settings(), client=client)
         service._settings = SimpleNamespace(ERPNEXT_SITE_TIMEZONE="UTC")
         task = {"task_id": "synthetic", "status": status, "params": {"_mirrors": {"business": {"provider": "jardal_erp", "name": ROW["businessReference"]}}}, **extra}
         service._repo = SimpleNamespace(get_task=AsyncMock(return_value=task), patch_task=AsyncMock())
@@ -230,11 +230,11 @@ def test_automatic_transition_rereads_after_concurrent_date_update():
 def test_worker_rejects_legacy_authority_for_every_execution_status(status):
     async def run():
         service = TaskService.__new__(TaskService)
-        service._erpnext = SimpleNamespace(provider="jardal_erp", is_enabled=True, update_status=AsyncMock())
+        service._business = SimpleNamespace(provider="jardal_erp", is_enabled=True, update_status=AsyncMock())
         service._repo = SimpleNamespace(get_task=AsyncMock(return_value={"params": {"_mirrors": {"erpnext": {"name": ROW["businessReference"]}}}}))
         with pytest.raises(BusinessValidationError):
             await service._push_status({"task_id": "legacy", "status": status, "name": ROW["businessReference"]})
-        service._erpnext.update_status.assert_not_awaited()
+        service._business.update_status.assert_not_awaited()
     asyncio.run(run())
 
 
@@ -243,12 +243,12 @@ def test_pending_registration_replays_original_request_if_no_effect_happened():
         request = {"ref": "api:synthetic", "title": "Synthetic", "project_key": "contract-test", "task_id": "original"}
         task = {"task_id": "original", "status": "queued", "params": {"_mirrors": {"business": {"provider": "jardal_erp", "name": None, "ref": "api:synthetic", "pending": True, "registration": request}}}}
         service = TaskService.__new__(TaskService)
-        service._erpnext = SimpleNamespace(provider="jardal_erp", is_enabled=True, find_by_ref=AsyncMock(return_value=None),
+        service._business = SimpleNamespace(provider="jardal_erp", is_enabled=True, find_by_ref=AsyncMock(return_value=None),
             create_ticket=AsyncMock(return_value={"task": {"name": ROW["businessReference"], "openceo_task_id": "original"}}))
         service._repo = SimpleNamespace(patch_task=AsyncMock())
         service._wake_dispatcher = lambda: None
-        await service._enqueue_erpnext_registration(task)
-        service._erpnext.create_ticket.assert_awaited_once_with(**request)
+        await service._enqueue_jardal_erp_registration(task)
+        service._business.create_ticket.assert_awaited_once_with(**request)
         patch = service._repo.patch_task.call_args.args[1]
         assert patch["params"]["_mirrors"]["business"]["pending"] is False
     asyncio.run(run())
@@ -288,16 +288,16 @@ def test_legacy_webhook_rejects_valid_secret_after_authority_switch():
     async def run():
         app = FastAPI()
         context = SimpleNamespace(provider="erpnext", writes=0)
-        @app.post('/api/integrations/erpnext/task')
+        @app.post('/api/integrations/jardal_erp/task')
         async def receive(x_openceo_secret: str | None = Header(default=None)):
             require_legacy_webhook(SimpleNamespace(ERPNEXT_WEBHOOK_SECRET="synthetic"), context.provider, x_openceo_secret)
             context.writes += 1
             return {"ok": True}
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             headers = {"X-OpenCEO-Secret": "synthetic"}
-            assert (await client.post('/api/integrations/erpnext/task', headers=headers)).status_code == 200
+            assert (await client.post('/api/integrations/jardal_erp/task', headers=headers)).status_code == 200
             context.provider = "jardal_erp"
-            assert (await client.post('/api/integrations/erpnext/task', headers=headers)).status_code == 409
+            assert (await client.post('/api/integrations/jardal_erp/task', headers=headers)).status_code == 409
             assert context.writes == 1
     asyncio.run(run())
 
@@ -305,7 +305,7 @@ def test_legacy_webhook_rejects_valid_secret_after_authority_switch():
 def test_business_status_callback_rejects_legacy_events_before_lookup_or_visibility():
     async def run():
         service = TaskService.__new__(TaskService)
-        service._erpnext = SimpleNamespace(provider="jardal_erp")
+        service._business = SimpleNamespace(provider="jardal_erp")
         service.find_task_for_business_ref = AsyncMock()
         result = await service.apply_business_status(task_id="original", business_status="Cancelled", business_name=ROW["businessReference"])
         assert result["status"] == "authority_mismatch"

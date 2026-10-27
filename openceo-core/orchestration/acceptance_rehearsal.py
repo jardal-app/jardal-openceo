@@ -12,7 +12,7 @@ returns as no_aplica and is reassigned, an OpenCode role switch by
 config alone, cost per ticket/objective/mission and declared spend
 with prior approval.
 
-No network, no LLM, no ERPNext, no Cloudflare, no push outside tmp.
+No network, no LLM, no Jardal ERP, no Cloudflare, no push outside tmp.
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ __all__ = [
     "run_acceptance_rehearsal",
 ]
 
-#: ERPNext mirror the rehearsal tickets bind to. Memory-only, never
+#: Jardal ERP mirror the rehearsal tickets bind to. Memory-only, never
 #: persisted; far above the live numbering.
 REHEARSAL_MIRROR = "TASK-2026-09998"
 

@@ -319,7 +319,7 @@ class ClosureArtifactsTests(unittest.TestCase):
 
 
 class InternalTicketPreservesContractTests(unittest.IsolatedAsyncioTestCase):
-    async def test_params_and_hint_ride_through_erpnext_first(self) -> None:
+    async def test_params_and_hint_ride_through_business_first(self) -> None:
         captured: dict[str, Any] = {}
 
         async def create_task(request: Any) -> dict[str, Any]:

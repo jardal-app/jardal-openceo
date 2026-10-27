@@ -7,7 +7,7 @@ departments:
   - name: engineering
     summary: Builds, deploys and maintains company repos and systems.
   - name: finance
-    summary: Answers and records dated company money against ERPNext.
+    summary: Answers and records dated company money against Jardal ERP.
   - name: research
     summary: Runs grounded research on demand for company work.
   - name: operations
@@ -26,7 +26,7 @@ agents:
     summary: Sends email and coordinates lightly.
     card: agents/secretary.yaml
   - name: finance
-    summary: Answers and records dated finance against ERPNext, never executes a transfer by itself.
+    summary: Answers and records dated finance against Jardal ERP, never executes a transfer by itself.
     card: agents/finance.yaml
   - name: research
     summary: Runs grounded research on demand through the ticket bridge.

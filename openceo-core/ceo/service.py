@@ -1,7 +1,7 @@
 """Company-level CEO wiring (F4 TASK-2026-00119).
 
 :mod:`ceo.review` is pure flow over protocols; this module binds it to
-production: the mandate file, the ticket API (ERPNext first), the ERP
+production: the mandate file, the ticket API (Jardal ERP first), the ERP
 group-aware objective service, the live one-shot executor and the
 global config. The CEO is company-wide, so the ``ceo`` block is read
 from the global defaults — projects must not set it.
@@ -231,7 +231,7 @@ class CEOService:
                 limit=CEO_BUSINESS_ROWS,
             )
         except Exception:
-            logger.warning("CEO: ERPNext unreadable", exc_info=True)
+            logger.warning("CEO: Jardal ERP unreadable", exc_info=True)
             return {"rows": [], "unknown": True}
         return {
             "rows": [

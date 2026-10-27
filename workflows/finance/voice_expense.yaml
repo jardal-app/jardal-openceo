@@ -1,7 +1,7 @@
 workflow: finance.register_expense
 name: Registro de gasto ocasional por voz
 agent: finance
-description: Registra un gasto ocasional dictado por voz o chat como asiento de diario idempotente en ERPNext. Sin tickets por gasto.
+description: Registra un gasto ocasional dictado por voz o chat como asiento de diario idempotente en Jardal ERP. Sin tickets por gasto.
 auto_match: true
 triggers:
   - registra gasto

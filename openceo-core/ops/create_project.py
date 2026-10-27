@@ -2,7 +2,7 @@
 
 Deterministic, idempotent library behind the operations ``crear-proyecto``
 skill (TASK-2026-00214): the exact CLI calls ``ensure_*`` while the
-ERPNext-project and DNS steps run through their boundary tools. Every
+Jardal ERP-project and DNS steps run through their boundary tools. Every
 ``ensure_*`` returns what already existed untouched and reports
 ``created``/``existed`` per artifact, so re-running a creation never
 duplicates anything. Every ``remove_*`` only deletes what this module could
@@ -147,7 +147,7 @@ def _readme_md(*, display_name: str, description: str, project_key: str) -> str:
         f"\n"
         f"## Reglas\n"
         f"\n"
-        f"- ERPNext es el registro de negocio; este repo es la verdad de implementación.\n"
+        f"- Jardal ERP es el registro de negocio; este repo es la verdad de implementación.\n"
         f"- Sin secretos, credenciales ni datos personales en el repo ni en notas.\n"
     )
 
@@ -185,7 +185,7 @@ def _claude_md(
         f"\n"
         f"## Reglas\n"
         f"\n"
-        f"- ERPNext es el registro de negocio; Mongo (vía OpenCEO) conserva la ejecución.\n"
+        f"- Jardal ERP es el registro de negocio; Mongo (vía OpenCEO) conserva la ejecución.\n"
         f"- Sin secretos, credenciales ni datos personales en notas ni docs temporales.\n"
         f"- Convenciones sobre configuración: espejar el código hermano, reusar sus helpers.\n"
     )
@@ -349,7 +349,7 @@ def _presets_yaml() -> str:
         "    description: \"Refactorizar y optimizar código reciente\"\n"
         "  sync_context:\n"
         "    number: 4\n"
-        '    prompt: "Revisa el estado del proyecto y actualiza STATUS.md y el ticket ERPNext correspondiente con un resumen claro del trabajo realizado y estado vigente."\n'
+        '    prompt: "Revisa el estado del proyecto y actualiza STATUS.md y el ticket Jardal ERP correspondiente con un resumen claro del trabajo realizado y estado vigente."\n'
         "    description: \"Sincronizar STATUS.md y ticket\"\n"
         "  security_audit:\n"
         "    number: 5\n"

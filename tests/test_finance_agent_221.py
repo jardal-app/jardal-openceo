@@ -329,7 +329,7 @@ class FinanceBoxTest(unittest.TestCase):
         grant = self._grant(FINANCE_BOX)
         for foreign in ("manage_dns_record", "openceo_send_email",
                         "openceo_transition_ticket",
-                        "openceo_ensure_erpnext_project"):
+                        "openceo_ensure_business_project"):
             with self.subTest(tool=foreign), self.assertRaises(McpDenied):
                 grant.check(foreign, {"ticket": "TASK-2026-00221",
                                       "project": "jardal-openceo"})
@@ -446,7 +446,7 @@ class ExactSkillLiveTest(unittest.TestCase):
                           new=_fake_summary), \
                 patch.object(scope_mod, "build_spoken_summary",
                              return_value="spoken"), \
-                patch("tools.erpnext_client.ERPNextClient", _Client):
+                patch("tools.jardal_erp_client.JardalERPClient", _Client):
             out = asyncio.run(service._tools.call(
                 "finance.get_scope_summary", {"text": text}, {}))
         self.assertTrue(out["ok"])
@@ -477,7 +477,7 @@ class ExactSkillLiveTest(unittest.TestCase):
                           new=_fake_summary), \
                 patch.object(scope_mod, "build_spoken_summary",
                              return_value="spoken"), \
-                patch("tools.erpnext_client.ERPNextClient", _Client):
+                patch("tools.jardal_erp_client.JardalERPClient", _Client):
             out = asyncio.run(service._tools.call(
                 "finance.get_scope_summary",
                 {"text": "cuánto gastamos este mes",
@@ -510,7 +510,7 @@ class ExactSkillLiveTest(unittest.TestCase):
                           new=_fake_status), \
                 patch.object(contribution_mod, "build_spoken_summary",
                              return_value="spoken"), \
-                patch("tools.erpnext_client.ERPNextClient", _Client):
+                patch("tools.jardal_erp_client.JardalERPClient", _Client):
             out = asyncio.run(service._tools.call(
                 "finance.get_contribution_10_status", {"text": text}, {}))
         self.assertTrue(out["ok"])

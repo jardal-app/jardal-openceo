@@ -1,7 +1,7 @@
-"""Registro ocasional de ingresos por voz/chat hacia ERPNext. Cero logica LLM.
+"""Registro ocasional de ingresos por voz/chat hacia Jardal ERP. Cero logica LLM.
 
 Segundo flujo real de la Fase B del contrato
-(`docs/finance-erpnext-integration-contract.md` §16): `finance.register_income`,
+(`docs/finance-jardal-erp-integration-contract.md` §16): `finance.register_income`,
 espejo de `finance.register_expense` (TASK-2026-00032) con las dos patas del
 asiento invertidas: debito a efectivo / credito a la cuenta de ingreso.
 
@@ -18,7 +18,7 @@ tasa real usada y el asiento se convierte a BOB, o `build_journal_entry`
 levanta `MissingExchangeRateError` y no escribe nada. Nunca se inventa una tasa.
 
 Las cuentas de ingreso son las que existen en el plan de cuentas real de
-Jardal, verificadas contra ERPNext el 2026-09-28; no se crea ninguna cuenta
+Jardal, verificadas contra Jardal ERP el 2026-09-28; no se crea ninguna cuenta
 nueva ni se inventa ninguna dimension.
 
 Contabiliza dinero YA cobrado: `execute_money_movements=false` sigue vigente
@@ -226,7 +226,7 @@ async def register_income(
     ref: str | None = None,
     submit: bool = True,
 ) -> dict[str, Any]:
-    """Registra el ingreso en ERPNext. Idempotente por `ref` (ver `journal`)."""
+    """Registra el ingreso en Jardal ERP. Idempotente por `ref` (ver `journal`)."""
     operation_ref = (ref or "").strip() or new_openceo_ref()
     return await submit_journal_entry(
         client,

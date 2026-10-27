@@ -45,7 +45,7 @@ class TaskStatus(str, Enum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     # A Tier S ticket converted into an objective (§9.2): its own execution
-    # ended, the children carry the work. Terminal, never pushed to ERPNext
+    # ended, the children carry the work. Terminal, never pushed to Jardal ERP
     # (map_status has no entry); the parent goes Completed only at
     # objective close (§9.7).
     CONVERTED = "converted"
@@ -53,7 +53,7 @@ class TaskStatus(str, Enum):
     ESCALATED = "escalated"
     INTERRUPTED = "interrupted"
     WAITING = "waiting"
-    # El negocio cancelo el ticket (o lo borro) en ERPNext. Es terminal y no reanuda:
+    # El negocio cancelo el ticket (o lo borro) en Jardal ERP. Es terminal y no reanuda:
     # se distingue de WAITING, que implica que algo lo va a desbloquear.
     CANCELLED = "cancelled"
 
@@ -240,12 +240,12 @@ class TaskCreateRequest(BaseModel):
     blocked_by: list[str] | None = None
     origin: str | None = None
     finding_fingerprint: str | None = None
-    # Business hierarchy (TASK-2026-00013): ERPNext `Task` names, consumed at
+    # Business hierarchy (TASK-2026-00013): Jardal ERP `Task` names, consumed at
     # business registration and recorded in the erpnext mirror. They do NOT flow
-    # into TaskDocument: ERPNext owns the hierarchy, Mongo must not cache it.
+    # into TaskDocument: Jardal ERP owns the hierarchy, Mongo must not cache it.
     parent_task: str | None = None
     depends_on: list[str] | None = None
-    # Group birth (TASK-2026-00117): the ticket is created as an ERPNext group
+    # Group birth (TASK-2026-00117): the ticket is created as an Jardal ERP group
     # (the parent of an objective). Same rule: registration-only, never cached
     # in TaskDocument.
     is_group: bool = False

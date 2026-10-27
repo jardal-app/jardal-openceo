@@ -143,7 +143,7 @@ MCP_BOUNDARY_TOOLS = frozenset({
     "openceo_update_ticket_attachment",
     "openceo_delete_ticket_attachment",
     "openceo_send_email",
-    "openceo_ensure_erpnext_project",
+    "openceo_ensure_business_project",
     "openceo_register_expense",
     "openceo_register_income",
     "openceo_scope_summary",

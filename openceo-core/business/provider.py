@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 from business.ports import BusinessWork
-from tools.erpnext_tickets import ERPNextTicketAdapter
+from tools.jardal_erp_tickets import JardalERPTicketAdapter
 
 
 def validate_authority_manifest(settings: Any) -> None:
@@ -26,7 +26,7 @@ def validate_authority_manifest(settings: Any) -> None:
 def build_business_work(settings: Any) -> BusinessWork:
     provider = str(settings.BUSINESS_PROVIDER).strip()
     if provider == "erpnext":
-        return ERPNextTicketAdapter(settings)
+        return JardalERPTicketAdapter(settings)
     if provider == "jardal_erp":
         validate_authority_manifest(settings)
         from business.work import JardalERPWork
@@ -34,4 +34,4 @@ def build_business_work(settings: Any) -> BusinessWork:
         if not adapter.is_enabled:
             raise ValueError(adapter.client.config_error())
         return adapter
-    raise ValueError("BUSINESS_PROVIDER debe ser erpnext o jardal_erp.")
+    raise ValueError("BUSINESS_PROVIDER debe ser jardal_erp (alias depreciado: erpnext).")

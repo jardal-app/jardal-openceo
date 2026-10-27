@@ -460,7 +460,7 @@ def project_requires_human_review(project_config: Mapping[str, Any] | None) -> b
 
 
 # ---------------------------------------------------------------------------
-# Escalation ticket spec (pure; TaskService persists it ERPNext-first)
+# Escalation ticket spec (pure; TaskService persists it Jardal ERP-first)
 # ---------------------------------------------------------------------------
 
 ESCALATION_PHASE = "owner_escalation"
@@ -473,7 +473,7 @@ def build_escalation_ticket(
 ) -> dict[str, Any]:
     """Spec for the owner-escalation ticket. Pure: no I/O, no tokens.
 
-    The ticket lands in ERPNext as ``Pending Review`` with the exact human
+    The ticket lands in Jardal ERP as ``Pending Review`` with the exact human
     action, shows in the "Requiere humano" tray (TASK-2026-00041 consumes
     waiting tickets by phase through the search API, no new backend), and
     carries the fields Horizon F5 reads (phase, waiting_reason, tag).

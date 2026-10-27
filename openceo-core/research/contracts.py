@@ -483,7 +483,7 @@ class ResearchJobResult(_StrictModel):
 class ResearchJobRecord(_StrictModel):
     """Documento persistido en ``research_jobs``.
 
-    No es un ticket: no se escribe en ``tasks`` ni dispara el observador de ERPNext.
+    No es un ticket: no se escribe en ``tasks`` ni dispara el observador de Jardal ERP.
     """
 
     model_config = ConfigDict(extra="ignore")

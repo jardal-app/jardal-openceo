@@ -8,18 +8,18 @@
 
 OpenCEO is an **Agent Control Plane**: it coordinates AI agents, providers, workers, sessions, queues, schedules, quotas, automation, workflow execution, and technical approvals. Open-source. Self-hosted. LangGraph + FastAPI + n8n + OpenWebUI + MongoDB.
 
-**ERPNext coordinates business work. OpenCEO controls its execution. Obsidian preserves engineering knowledge. Git preserves implementation.** Each agent is a competent role; crystallized workflows are deterministic recipes.
+**Jardal ERP coordinates business work. OpenCEO controls its execution. Obsidian preserves engineering knowledge. Git preserves implementation.** Each agent is a competent role; crystallized workflows are deterministic recipes.
 
 > **ARCHITECTURE DOCUMENT — DO NOT ADD STATUS, PROGRESS, OR RUNTIME SNAPSHOTS HERE.**
 > This file defines architecture, flows, and interfaces only. Operational tracking belongs in `STATUS.md`.
 
-The ownership boundaries follow [OpenCEO Architecture Direction](OPENCEO_DIRECTION.md), version 1.1. [CLAUDE.md](../CLAUDE.md) describes the developer/runtime contract; [STATUS.md](../STATUS.md) records operational state. Earlier documents that assign business projects and tickets to OpenCEO, or restrict ERPNext to finance alone, are superseded **on those ownership boundaries**. This includes section 14 of the [Finance integration contract](finance-erpnext-integration-contract.md) and the narrower scope in [ERPNEXT.md](../ERPNEXT.md). Their compatible financial and deployment constraints still apply.
+The ownership boundaries follow [OpenCEO Architecture Direction](OPENCEO_DIRECTION.md), version 1.1. [CLAUDE.md](../CLAUDE.md) describes the developer/runtime contract; [STATUS.md](../STATUS.md) records operational state. Earlier documents that assign business projects and tickets to OpenCEO, or restrict Jardal ERP to finance alone, are superseded **on those ownership boundaries**. This includes section 14 of the [Finance integration contract](finance-jardal-erp-integration-contract.md) and the narrower scope in [JARDAL_ERP.md](../JARDAL_ERP.md). Their compatible financial and deployment constraints still apply.
 
 ## System Boundaries
 
 | System | Owns | Answers |
 |---|---|---|
-| ERPNext | Business project identity, tasks/tickets/requests, priorities, users, human business approvals, and business workflows; financial records in its accounting domain | What work exists? |
+| Jardal ERP | Business project identity, tasks/tickets/requests, priorities, users, human business approvals, and business workflows; financial records in its accounting domain | What work exists? |
 | OpenCEO | Agent orchestration, providers, workers, sessions, queues, scheduling, quotas, execution workflows, and technical approval gates | How is this work executed? |
 | MongoDB | OpenCEO runtime state, execution tasks and attempts, session focus, workflow runs, and execution audit history | What is happening in the runtime? |
 | Obsidian vault | Architecture, ADRs, technical decisions, research, incidents, and lessons learned as Markdown files | Why was it designed this way? |
@@ -31,12 +31,12 @@ OpenCEO does not own a second business backlog, accounting ledger, documentation
 
 ### Integration Shape
 
-The diagram describes the target boundaries. ERPNext integration requires an explicit adapter contract; this document does not imply that the existing runtime already calls ERPNext.
+The diagram describes the target boundaries. Jardal ERP integration requires an explicit adapter contract; this document does not imply that the existing runtime already calls Jardal ERP.
 
 ```mermaid
 flowchart LR
     Channels[Chat / Voice / Dashboard / MCP clients] --> Core[OpenCEO control plane]
-    ERP[ERPNext business records] <-->|Business operations and execution evidence| Core
+    ERP[Jardal ERP business records] <-->|Business operations and execution evidence| Core
     Core --> Mongo[(MongoDB runtime state)]
     Core --> Runtime[LangGraph / YAML / sessions / workers]
     Runtime --> Agents[Coding and domain agents]
@@ -47,27 +47,27 @@ flowchart LR
     Agents -->|Search / LSP / code changes| Repo[Git repositories]
 ```
 
-Business approval and execution approval are distinct. ERPNext owns the human business decision; OpenCEO validates the applicable decision and enforces technical gates such as QA or permission to resume a run. A completed agent run is execution evidence, not automatic business acceptance.
+Business approval and execution approval are distinct. Jardal ERP owns the human business decision; OpenCEO validates the applicable decision and enforces technical gates such as QA or permission to resume a run. A completed agent run is execution evidence, not automatic business acceptance.
 
 ### Distributed Project Identity
 
-The shared integration identifier is **`project_key`**. A project spans ERPNext (identity, business tickets and status), Git (code and configuration), Obsidian (architecture and decisions), and OpenCEO/MongoDB (execution state).
+The shared integration identifier is **`project_key`**. A project spans Jardal ERP (identity, business tickets and status), Git (code and configuration), Obsidian (architecture and decisions), and OpenCEO/MongoDB (execution state).
 
-`project_key` is an integration contract, not a field rename in the existing API. The runtime still uses `project`, `project.name`, directory names, and `task_id`. An adapter must map these explicitly to ERPNext references and the vault project hub, preserving existing identifiers and open sessions. `task_id` identifies OpenCEO execution work; it is not the ERPNext ticket ID. Technical subtasks can share one business reference without creating a business ticket for every execution step.
+`project_key` is an integration contract, not a field rename in the existing API. The runtime still uses `project`, `project.name`, directory names, and `task_id`. An adapter must map these explicitly to Jardal ERP references and the vault project hub, preserving existing identifiers and open sessions. `task_id` identifies OpenCEO execution work; it is not the Jardal ERP ticket ID. Technical subtasks can share one business reference without creating a business ticket for every execution step.
 
 ### Read and Write Boundaries
 
 - Agents read the vault as files, run `qmd search`, and inspect repositories directly. OpenCEO is not a mandatory proxy for every read.
 - Knowledge writes go directly to the vault under the `obsidian-vault-links` skill and pass its checker. They do not require a ticket mutation or an Obsidian MCP.
-- Agent-originated operational writes, including ticket creation, status transitions, workflow execution, and approvals, pass through OpenCEO capabilities. The ERPNext adapter applies business changes in ERPNext; runtime changes remain in MongoDB.
-- Human business activity in ERPNext reaches OpenCEO through explicit integration events or requests. Reads and knowledge edits must not silently start execution or change business status.
-- MCP exposes selected capabilities, not raw database access or unrestricted ERPNext APIs. There is no Obsidian MCP or Graphify MCP in this design.
+- Agent-originated operational writes, including ticket creation, status transitions, workflow execution, and approvals, pass through OpenCEO capabilities. The Jardal ERP adapter applies business changes in Jardal ERP; runtime changes remain in MongoDB.
+- Human business activity in Jardal ERP reaches OpenCEO through explicit integration events or requests. Reads and knowledge edits must not silently start execution or change business status.
+- MCP exposes selected capabilities, not raw database access or unrestricted Jardal ERP APIs. There is no Obsidian MCP or Graphify MCP in this design.
 
 ### Compatibility Contract
 
 The modular monolith, LangGraph worker graph, deterministic YAML executor, discovery/crystallization model, Tier S reviews, tmux sessions, voice/chat endpoints, and existing MCP mounts retain their roles. Existing Mongo tasks, local auth, project configuration, and Notion integrations remain usable while adapters are introduced; a documentation change does not migrate their data or remove their APIs.
 
-The integration must preserve `TaskDocument`, task/source idempotency, explicit dev-session activation, immediate background-turn acknowledgement through `send_message_async`, and queryable progress/results. ERPNext availability must not become a prerequisite for continuing an already-authorized dev session or reading local engineering knowledge. A failed business write remains a visible integration failure or pending operation; it must not create a competing business record in MongoDB.
+The integration must preserve `TaskDocument`, task/source idempotency, explicit dev-session activation, immediate background-turn acknowledgement through `send_message_async`, and queryable progress/results. Jardal ERP availability must not become a prerequisite for continuing an already-authorized dev session or reading local engineering knowledge. A failed business write remains a visible integration failure or pending operation; it must not create a competing business record in MongoDB.
 
 ---
 
@@ -78,17 +78,17 @@ The integration must preserve `TaskDocument`, task/source idempotency, explicit 
 | Orchestration | LangGraph (Python) | Supervisor-workers graph for the wired runtime (`dev`) plus the generic catalog-agent node |
 | API Server | FastAPI | OpenAI-compatible endpoint for OpenWebUI, REST API for dashboard/n8n, WebSocket for real-time |
 | Runtime database | MongoDB | Execution tasks, dev sessions, user context, queues, workflow state, and agent metadata |
-| Business system of record | ERPNext | Business projects, tickets, priorities, users, approvals, workflows, and financial records, connected through scoped adapters |
+| Business system of record | Jardal ERP | Business projects, tickets, priorities, users, approvals, workflows, and financial records, connected through scoped adapters |
 | Engineering memory | Obsidian-format Markdown vault | Durable engineering knowledge, read and written directly as files |
 | Knowledge retrieval | qmd keyword search | Find vault notes with `qmd search`; rebuildable index, not a source of truth |
 | Code intelligence | Repository search + LSP where supported | Read code relationships on demand, without a stored code graph |
-| Automation | n8n (self-hosted, Docker) | External triggers (ERPNext and existing Jira, Notion, GitHub sources), webhook normalization, and integration flows |
+| Automation | n8n (self-hosted, Docker) | External triggers (Jardal ERP and existing Jira, Notion, GitHub sources), webhook normalization, and integration flows |
 | Chat/Multimedia | OpenWebUI (self-hosted) | Text chat, file/image/video uploads, basic voice. Connects via OpenAI-compatible API |
 | Voice (realtime) | LiveKit Agents + Silero VAD | Fluid voice conversations. Groq Whisper Turbo STT, OpenCEO as LLM backend. Mobile app via LiveKit Android starter |
 | MCP Server | FastMCP (inside openceo-core) | Exposes selected OpenCEO and infrastructure capabilities to coding agents; owner-curated, never full backing APIs |
 | Notifications | Telegram Bot API | Bidirectional: user sends commands, agents send status updates |
 | LLM Observability | Langfuse (self-hosted) | LLM call tracing, token usage per agent, prompt debugging |
-| Dashboard | React (custom) | Execution mission control: sessions, queues, runs, quotas, evidence, and technical gates; business records remain in ERPNext |
+| Dashboard | React (custom) | Execution mission control: sessions, queues, runs, quotas, evidence, and technical gates; business records remain in Jardal ERP |
 | Browser Automation | Playwright | Browser-based workflows, form filling, authenticated portals |
 | Web Search | SearXNG / Brave Search API / provider search API | Agents search the internet for information, then fetch or browse results |
 | Coding Tier 1 | Codex CLI + GPT-5.4 | Subscription. Complex features, architectural changes |
@@ -97,7 +97,7 @@ The integration must preserve `TaskDocument`, task/source idempotency, explicit 
 | Real-time | WebSocket (FastAPI native) | Dashboard live updates. No Redis needed |
 | In-memory cache | Python process memory | Active connections, live agent state. Rebuilds from MongoDB on restart |
 
-OpenCEO core does not require Redis, PostgreSQL, LiteLLM, or aider. ERPNext operates its own stack and persistence outside the core; this statement does not constrain ERPNext's deployment dependencies.
+OpenCEO core does not require Redis, PostgreSQL, LiteLLM, or aider. Jardal ERP operates its own stack and persistence outside the core; this statement does not constrain Jardal ERP's deployment dependencies.
 
 ---
 
@@ -107,7 +107,7 @@ OpenCEO core does not require Redis, PostgreSQL, LiteLLM, or aider. ERPNext oper
 - LLMs support contextual conversation in `first_layer.py`, routing fallback (`router.py`), document extraction, secretary payload extraction fallback, and the coding CLIs. Crystallized workflow sequencing, conditions, and variable resolution stay deterministic; `llm_eval` is a design extension, not an enabled condition type in the deterministic executor.
 - Runtime wiring is explicit. A folder in `openceo-core/agents/` is a portable agent package (paquete de agente), but it becomes executable only when it is registered in `router.py`, `graph.py`, and the relevant service entrypoints.
 - The bundled worker graph wires `dev`; enabled catalog agents (operations, secretary, finance, research) run on the generic node.
-- Versioned execution configuration lives in YAML (`projects/*/project.yaml`); business project identity lives in ERPNext. CEO routing triggers and patterns are read from `routing.agents`. Project is optional for runtime operations using company-level defaults; the Dev agent needs repository context. A missing project never implies personal scope or authorizes a project-sensitive business write.
+- Versioned execution configuration lives in YAML (`projects/*/project.yaml`); business project identity lives in Jardal ERP. CEO routing triggers and patterns are read from `routing.agents`. Project is optional for runtime operations using company-level defaults; the Dev agent needs repository context. A missing project never implies personal scope or authorizes a project-sensitive business write.
 - Guided chat workflows are deterministic state machines. They accept required inputs in any order, persist whatever the user already provided, and ask only for the missing fields before executing.
 - Trigger phrases start a workflow but are not treated as the real payload unless they contain substantive content. Example: a trigger phrase opens the guided flow, but the substantive payload must still arrive before execution.
 - Voice/chat UX must guide the user explicitly. The system should not assume the employee already knows the input order or that all required data will arrive in the first turn.
@@ -115,8 +115,8 @@ OpenCEO core does not require Redis, PostgreSQL, LiteLLM, or aider. ERPNext oper
 - Browser automation uses Playwright-based flows.
 - Agents never talk to each other: the agent returns hecho / bloqueado / no_aplica and the single planner re-decides (the peer-to-peer Tier 2 rule was retired 2026-10-11, TASK-2026-00187/00189; see Inter-Agent Communication below). In crystallized workflows (YAML), the executor calls Python functions directly — no inter-agent communication, only sequential tool execution. The CEO initiates tasks (top-down) but does not relay data between active agents.
 - User project selection and active dev-session focus live in MongoDB.
-- MongoDB is authoritative for OpenCEO execution state, queues, runtime tasks, workflow-local params, and execution dashboard data. ERPNext is authoritative for business work. Notion compatibility mirrors do not change either boundary.
-- Business status and runtime status are distinct: `completed` in an execution record does not bypass an ERPNext business approval. Local users/groups govern access to OpenCEO; they are not a replacement business directory.
+- MongoDB is authoritative for OpenCEO execution state, queues, runtime tasks, workflow-local params, and execution dashboard data. Jardal ERP is authoritative for business work. Notion compatibility mirrors do not change either boundary.
+- Business status and runtime status are distinct: `completed` in an execution record does not bypass an Jardal ERP business approval. Local users/groups govern access to OpenCEO; they are not a replacement business directory.
 - `TaskDocument` is a stable cross-agent contract. Do not add a new top-level task field for every workflow-specific need.
 - Promote a task attribute to top-level only when it changes runtime semantics across the system: routing, scheduling, lifecycle gates, idempotency, global filtering, or sync-back to external systems.
 - Example: approval gating belongs at top-level (`approval_required`, `approval_state`) because it affects lifecycle, filters, and sync-back. Individual review events do not; they belong in a separate collection linked by `task_id`.
@@ -138,11 +138,11 @@ OpenCEO core does not require Redis, PostgreSQL, LiteLLM, or aider. ERPNext oper
 
 Not every external integration goes through n8n. Each tool is evaluated case by case by the developer at implementation time:
 
-**Local Tool (Python in agent's `tools.py`)** — A simple API call or deterministic workflow used by one agent. The credential manifest belongs in that agent's `.env.example`; in the bundled deployment, the actual values are merged into `openceo-core/.env` or `.env.finance.local`. Examples: a scoped Finance adapter call to ERPNext, an agent-only SaaS integration, or skill-local parsing logic. Routine ERPNext REST calls belong here, not in a separate microservice or n8n round trip.
+**Local Tool (Python in agent's `tools.py`)** — A simple API call or deterministic workflow used by one agent. The credential manifest belongs in that agent's `.env.example`; in the bundled deployment, the actual values are merged into `openceo-core/.env` or `.env.finance.local`. Examples: a scoped Finance adapter call to Jardal ERP, an agent-only SaaS integration, or skill-local parsing logic. Routine Jardal ERP REST calls belong here, not in a separate microservice or n8n round trip.
 
-**Shared Tool (Python module in `openceo-core/tools/`)** — Multiple agents need the same function. Imported by any agent's `tools.py`. Examples: generate documents from templates, send email via SMTP, or query execution state. Shared business operations still go through the OpenCEO capability that validates policy and calls ERPNext; sharing a helper does not grant arbitrary database access.
+**Shared Tool (Python module in `openceo-core/tools/`)** — Multiple agents need the same function. Imported by any agent's `tools.py`. Examples: generate documents from templates, send email via SMTP, or query execution state. Shared business operations still go through the OpenCEO capability that validates policy and calls Jardal ERP; sharing a helper does not grant arbitrary database access.
 
-**n8n Workflow** — External webhooks triggering requests into OpenCEO, or integration flows with retries, delays, and conditional branching that benefit from visual debugging. Examples: ERPNext/Jira/GitHub webhook → normalize → POST to OpenCEO, WhatsApp incoming → classify contact → route. ERPNext owns business workflow decisions; OpenCEO owns agent execution. n8n must not duplicate either state machine or periodically reconcile whole external datasets.
+**n8n Workflow** — External webhooks triggering requests into OpenCEO, or integration flows with retries, delays, and conditional branching that benefit from visual debugging. Examples: Jardal ERP/Jira/GitHub webhook → normalize → POST to OpenCEO, WhatsApp incoming → classify contact → route. Jardal ERP owns business workflow decisions; OpenCEO owns agent execution. n8n must not duplicate either state machine or periodically reconcile whole external datasets.
 
 **Worker PC (browser task)** — Exclusively for platforms with NO usable API requiring browser automation with authenticated Chrome profiles. Examples: send Teams messages, generate content on AI platforms (Gemini web, ChatGPT web).
 
@@ -166,7 +166,7 @@ The engineering vault lives at `/home/develop/development/Jardal/jardal-knowledg
 
 Retrieve context in this order:
 
-1. Resolve the authorized work and execution state through OpenCEO, with the business reference in ERPNext when integrated.
+1. Resolve the authorized work and execution state through OpenCEO, with the business reference in Jardal ERP when integrated.
 2. Find the project hub using the vault mapping and read the relevant linked notes. Search with `qmd search "<words>" -c vault` when needed.
 3. Read current code relationships with targeted repository search (`rg`) and LSP where the agent supports it.
 4. Inspect implementation state with Git and targeted diffs.
@@ -197,7 +197,7 @@ OpenCEO had two execution modes for any task:
 1. **Deterministic** — a crystallized YAML workflow already exists → Python executor runs it with zero LLM tokens
 2. **Discovery** — the flow was unknown → the service proposed it → a human approved → it crystallized into YAML (removed)
 
-The tiers describe the execution design. The full ReAct/claim design below is not a claim that every tier was wired. Discovery could compose only registered capabilities and had to respect ERPNext business authority. Approval to crystallize a recipe never granted approval for later business operations.
+The tiers describe the execution design. The full ReAct/claim design below is not a claim that every tier was wired. Discovery could compose only registered capabilities and had to respect Jardal ERP business authority. Approval to crystallize a recipe never granted approval for later business operations.
 
 ### Two Levels of Discovery
 
@@ -250,7 +250,7 @@ Next time: deterministic executor, zero LLM
 
 Captures: step sequence + data mapping between steps.
 
-Domain tool names in the following examples illustrate composition, not a live capability catalog. Finance operations must wrap approved ERPNext/provider contracts, without implementing accounting inside OpenCEO; money movement is disabled in the initial Finance integration. The live registry determines what can execute.
+Domain tool names in the following examples illustrate composition, not a live capability catalog. Finance operations must wrap approved Jardal ERP/provider contracts, without implementing accounting inside OpenCEO; money movement is disabled in the initial Finance integration. The live registry determines what can execute.
 
 ```yaml
 workflow: crypto_reembolso
@@ -321,7 +321,7 @@ YAML schema (designed once)
 
 OpenCEO enforces technical approval gates through task phases and YAML `type: human_in_the_loop` steps. A YAML gate persists `WorkflowRunStatus.BLOCKED_HUMAN`, keeps the task at `status=waiting` with the requested permission/phase, and resumes through `create_phase_action` after approval without replaying completed steps.
 
-ERPNext owns business approvals and business workflow transitions. OpenCEO records the reference to an applicable business decision and uses it to gate execution; an OpenCEO QA approval cannot stand in for ERPNext business acceptance. Existing dashboard phases such as `pm_approval` and `client_signoff` remain compatibility interfaces until their business decisions are mapped explicitly to ERPNext. Technical YAML recipes remain deterministic while paused.
+Jardal ERP owns business approvals and business workflow transitions. OpenCEO records the reference to an applicable business decision and uses it to gate execution; an OpenCEO QA approval cannot stand in for Jardal ERP business acceptance. Existing dashboard phases such as `pm_approval` and `client_signoff` remain compatibility interfaces until their business decisions are mapped explicitly to Jardal ERP. Technical YAML recipes remain deterministic while paused.
 
 Dashboard phase workflows are configured per project with reusable `workflow_templates`. A ticket stores a snapshot of the selected template so future project changes do not rewrite active work. Since TASK-2026-00118 the *default* attachment skips the human `qa_review` phase unless the project policy mandates human review (`dev.qa.require_human_review` in `project.yaml`); explicitly requested templates or phases keep their human gates:
 
@@ -357,7 +357,7 @@ At task level the generic fields are:
 }
 ```
 
-`phase_assignments` adds local QA/client identities as involved users for execution visibility. The existing action route is `POST /api/tasks/{task_id}/phase-action`; QA can open a Kimi review session with `POST /api/tasks/{task_id}/phase-kimi`. Approve advances the execution phase; request changes/reject returns the execution task to `queued` for CEO re-routing while preserving history. Business user identity and approval state require explicit ERPNext mapping, not an implicit replacement of local authentication.
+`phase_assignments` adds local QA/client identities as involved users for execution visibility. The existing action route is `POST /api/tasks/{task_id}/phase-action`; QA can open a Kimi review session with `POST /api/tasks/{task_id}/phase-kimi`. Approve advances the execution phase; request changes/reject returns the execution task to `queued` for CEO re-routing while preserving history. Business user identity and approval state require explicit Jardal ERP mapping, not an implicit replacement of local authentication.
 
 #### Workflow Composition (Tier 1.5)
 
@@ -563,14 +563,14 @@ def create_ticket(
 
 CEO uses `assigned_to` with any agent. (The retired PM agent always used `assigned_to="dev"`; TASK-2026-00209 removed it.)
 
-In the target integration, OpenCEO validates the request and creates the business ticket in ERPNext through an adapter, then associates execution work with its reference. Pure execution subtasks stay in the runtime. The ticket capability and task APIs are the compatibility entrypoints (the `pm.create_tickets` workflow named here retired with the PM agent in TASK-2026-00209); writing a Mongo task alone does not claim successful ERPNext registration.
+In the target integration, OpenCEO validates the request and creates the business ticket in Jardal ERP through an adapter, then associates execution work with its reference. Pure execution subtasks stay in the runtime. The ticket capability and task APIs are the compatibility entrypoints (the `pm.create_tickets` workflow named here retired with the PM agent in TASK-2026-00209); writing a Mongo task alone does not claim successful Jardal ERP registration.
 
 ### Parent Task Tracking
 
-Execution fragmentation uses a **parent execution task** in MongoDB. Subtasks or `workflow_runs` reference that parent and retain the business reference. This technical hierarchy does not replace ERPNext's business task hierarchy. (`discovery_runs` retired with TASK-2026-00215; orphan rows were left unmigrated and no code reads them.)
+Execution fragmentation uses a **parent execution task** in MongoDB. Subtasks or `workflow_runs` reference that parent and retain the business reference. This technical hierarchy does not replace Jardal ERP's business task hierarchy. (`discovery_runs` retired with TASK-2026-00215; orphan rows were left unmigrated and no code reads them.)
 
 ```
-Parent execution: "close the month"  (MongoDB, linked to ERPNext work)
+Parent execution: "close the month"  (MongoDB, linked to Jardal ERP work)
   │
   ├── Parallel case:
   │   ├── ticket: "accounting close"      → assigned_to: finance
@@ -586,21 +586,21 @@ Parent execution: "close the month"  (MongoDB, linked to ERPNext work)
 
 The parent task always exists — it gives visibility of total progress. Children can be of different types depending on how the CEO resolved the task.
 
-Business hierarchy is separate and lives in ERPNext: group Tasks (`is_group`), real children (`parent_task`, `lft`/`rgt` tree), and the `depends_on` table. No ERPNext pre-configuration is needed — the DocType already brings these fields; the work is OpenCEO-side: closed semantic adapter operations, `parent_task`/`depends_on` parameters on ticket creation (so the planner, the CEO, and sessions link at creation), and a `blocked_by` ↔ `depends_on` mapping with topological state moves (ERPNext answers 417 while dependencies are open).
+Business hierarchy is separate and lives in Jardal ERP: group Tasks (`is_group`), real children (`parent_task`, `lft`/`rgt` tree), and the `depends_on` table. No Jardal ERP pre-configuration is needed — the DocType already brings these fields; the work is OpenCEO-side: closed semantic adapter operations, `parent_task`/`depends_on` parameters on ticket creation (so the planner, the CEO, and sessions link at creation), and a `blocked_by` ↔ `depends_on` mapping with topological state moves (Jardal ERP answers 417 while dependencies are open).
 
-> Implemented by TASK-2026-00013 (2026-10-06): `create_group_task`, `convert_to_group`, `link_child`, `set_dependencies` in `tools/erpnext_tickets.py`; content-based 417 classification (`classify_417`); `pending_status` retry for dependency-blocked pushes. Linking a child auto-adds a `depends_on` row on the parent (Frappe-side), so a group cannot complete with open children.
+> Implemented by TASK-2026-00013 (2026-10-06): `create_group_task`, `convert_to_group`, `link_child`, `set_dependencies` in `tools/jardal_erp_tickets.py`; content-based 417 classification (`classify_417`); `pending_status` retry for dependency-blocked pushes. Linking a child auto-adds a `depends_on` row on the parent (Frappe-side), so a group cannot complete with open children.
 
 #### Group Progress and Gantt Dates (Derived Visibility)
 
 Group `%`, real start/end dates, deterministic estimates for open tickets, and the group span are DERIVED from business state — never backlog. Frappe computes none of this (verified live): it leaves group progress at 0, keeps leaf progress at 100 after a reopen, never sets `completed_on`, and never reschedules dependents — but it does enforce child-end ≤ parent-end (417 `InvalidDates`), so date writers extend ancestors first and retry once.
 
-Rules live in `openceo-core/visibility.py` (pure, zero LLM); I/O in closed adapter operations (`list_children`, `update_work_dates`, `update_group_rollup`, `list_closed_with_dates`) plus `work_dates` riding the same PUT as the status transition. Recalculation is event-driven through a dedicated visibility queue and worker (push, explicit transition, inverse webhook, creation), always compare-before-write so echoes never write; ERPNext down parks a `pending_visibility` mirror flag for the startup reconcile. Real dates overwrite estimates, estimates never overwrite explicit due dates (externally set dues are adopted into the mirror), and `exp_*` convert through `ERPNEXT_SITE_TIMEZONE` (site-local naive datetimes).
+Rules live in `openceo-core/visibility.py` (pure, zero LLM); I/O in closed adapter operations (`list_children`, `update_work_dates`, `update_group_rollup`, `list_closed_with_dates`) plus `work_dates` riding the same PUT as the status transition. Recalculation is event-driven through a dedicated visibility queue and worker (push, explicit transition, inverse webhook, creation), always compare-before-write so echoes never write; Jardal ERP down parks a `pending_visibility` mirror flag for the startup reconcile. Real dates overwrite estimates, estimates never overwrite explicit due dates (externally set dues are adopted into the mirror), and `exp_*` convert through `ERPNEXT_SITE_TIMEZONE` (site-local naive datetimes).
 
-> Implemented by TASK-2026-00146 + TASK-2026-00147 (2026-10-08): `visibility.py`, `ERPNextDateBoundError`, `_refresh_visibility` in `TaskService`, one-shot backfill verified by reread.
+> Implemented by TASK-2026-00146 + TASK-2026-00147 (2026-10-08): `visibility.py`, `JardalERPDateBoundError`, `_refresh_visibility` in `TaskService`, one-shot backfill verified by reread.
 
 #### External References and Notion Compatibility
 
-ERPNext holds the business hierarchy; OpenCEO holds execution dependencies and evidence. A Notion compatibility view may represent parent/child links with a Relation property, but it is not the authority for either hierarchy. Do not assume the conceptual parent relation is implemented by every adapter or duplicate one technical step as a business ticket in each external system.
+Jardal ERP holds the business hierarchy; OpenCEO holds execution dependencies and evidence. A Notion compatibility view may represent parent/child links with a Relation property, but it is not the authority for either hierarchy. Do not assume the conceptual parent relation is implemented by every adapter or duplicate one technical step as a business ticket in each external system.
 
 ---
 
@@ -613,7 +613,7 @@ ERPNext holds the business hierarchy; OpenCEO holds execution dependencies and e
 - Research runs as a catalog agent (TASK-2026-00222): the `investigar` recipe over two bridge tools that admit and poll under a per-ticket consumer.
 - Secretary-specific action extraction in `openceo-core/agents/secretary/session.py`: JSON or structured-text parsing first, optional LLM fallback second.
 
-ERPNext integration supplies authorized work and business references to these paths; it does not replace routing, introduce another agent runtime, or turn knowledge lookup into a dev instruction.
+Jardal ERP integration supplies authorized work and business references to these paths; it does not replace routing, introduce another agent runtime, or turn knowledge lookup into a dev instruction.
 
 ---
 
@@ -639,14 +639,14 @@ These paths never mix inside the same request. A workflow exposed in MCP must be
 - ChatGPT waits for explicit confirmation before calling `execute_workflow`.
 - This applies to payments, emails, Notion writes, and any other real-world or irreversible external action.
 
-Chat confirmation is an execution authorization, not a substitute for an ERPNext business approval required by the operation. The adapter must verify the business decision and preserve its reference before allowing the side effect.
+Chat confirmation is an execution authorization, not a substitute for an Jardal ERP business approval required by the operation. The adapter must verify the business decision and preserve its reference before allowing the side effect.
 
 ### MCP Tools
 
 Capability boundary:
 
 - Expose semantic operations such as `ticket.create()`, `ticket.transition()`, `execution.start()`, `execution.status()`, and `approval.request()`. These names are the direction document's capability vocabulary, not a claim that new tools with those exact names are registered.
-- Preserve the external connector's workflow-first contract below. A semantic capability can be implemented by an existing workflow behind `execute_workflow`; adding a raw ERPNext CRUD tool or a second write path is not required.
+- Preserve the external connector's workflow-first contract below. A semantic capability can be implemented by an existing workflow behind `execute_workflow`; adding a raw Jardal ERP CRUD tool or a second write path is not required.
 - Only the curated registry/catalog defines callable tools. Do not expose arbitrary DocTypes, unrestricted database queries, or complete infrastructure APIs.
 
 External connector contract:
@@ -663,14 +663,14 @@ Core execution tools:
 - `execute_workflow`: runs one already-resolved workflow directly, without using the CEO router or graph fallback path. This is the single execution entrypoint for real OpenCEO actions once ChatGPT has already discovered and prepared the correct workflow. The intended behavior is MCP-first: when the cached catalog already shows a compatible connected workflow, ChatGPT should prefer executing it over local-only behavior and, for approval-required side effects, move into a compact approval step instead of stopping at a full drafted artifact. Once the workflow is known, `execute_workflow` is also the right place to let the connector resolve the last confirmable/selectable params through `needs_input` or MCP Apps.
 - `get_task_status`: reads one async task from MongoDB so ChatGPT can report progress later.
 - Batch safety rule: ticket-batch creation and other project-sensitive writes must not fall back silently to `active_project`. If the project was not explicitly provided, the connector should force confirmation or UI selection.
-- Batch creation goes through `openceo_create_pm_tickets_batch` (Owner badge only; keeps its public name) with its structured batch contract. Its compatibility implementation registers one Mongo execution task per ticket with `autorun=false`. ERPNext-backed business creation belongs behind the same capability once integrated; neither the frontend nor the agent writes a second business backlog directly.
+- Batch creation goes through `openceo_create_pm_tickets_batch` (Owner badge only; keeps its public name) with its structured batch contract. Its compatibility implementation registers one Mongo execution task per ticket with `autorun=false`. Jardal ERP-backed business creation belongs behind the same capability once integrated; neither the frontend nor the agent writes a second business backlog directly.
 
 ### MCP Apps Presentation
 
 - The external MCP connector should use MCP Apps standard for presentation. Do not build new ChatGPT-only widgets for this path.
 - This UI layer remains optional and must not become a runtime dependency or architectural foundation. The durable contract stays MCP tools + deterministic workflows + `structuredContent`.
 - If the UI disappears, the workflow must still be operable through plain tool calls and text fallback.
-- The batch-review app hangs from `execute_workflow` for the ticket-batch workflow, reviewing the batch and confirming project selection before registration. (The original direction named the PM app over `pm.create_tickets`; the PM agent retired in TASK-2026-00209.) The existing Mongo/Notion path is a compatibility implementation; business persistence can move to an ERPNext adapter without making the UI its owner.
+- The batch-review app hangs from `execute_workflow` for the ticket-batch workflow, reviewing the batch and confirming project selection before registration. (The original direction named the PM app over `pm.create_tickets`; the PM agent retired in TASK-2026-00209.) The existing Mongo/Notion path is a compatibility implementation; business persistence can move to an Jardal ERP adapter without making the UI its owner.
 - Client compatibility depends on MCP Apps support in the host. When a client does not support it, the connector falls back to text and structured data.
 - Host-specific APIs such as `widgetState`, `requestModal()`, `requestClose()`, OpenAI tool invocation strings, or ChatGPT file upload bridges are intentionally out of scope for this connector.
 - MCP Apps bind presentation to MCP tools, not to internal workflow identifiers. The architectural response is to attach presentation to an existing execution tool, not to invent new business tools.
@@ -691,7 +691,7 @@ The intended ChatGPT-path behavior is documented in `openceo-core/agents/ceo/cha
 
 ### CEO / Supervisor
 
-Role: Receives authorized work and routes execution to the correct worker agent + project. It uses ERPNext business context, relevant vault knowledge, and repository evidence without taking ownership of those domains.
+Role: Receives authorized work and routes execution to the correct worker agent + project. It uses Jardal ERP business context, relevant vault knowledge, and repository evidence without taking ownership of those domains.
 
 Routing behavior:
 - Message contains `@agent_name` prefix → route directly when the alias exists.
@@ -710,9 +710,9 @@ captured ideas and the next action. Specification:
 
 Horizon preserves private personal planning and the CEO's mandate. It is not the
 business backlog, engineering vault, or accounting system. Business work it
-requests follows the ERPNext/OpenCEO boundary; personal context is not exported
+requests follows the Jardal ERP/OpenCEO boundary; personal context is not exported
 by default. Delivery phases and operational tracking belong in `STATUS.md` and
-TASK-2026-00026 en ERPNext.
+TASK-2026-00026 en Jardal ERP.
 
 Storage (owner-scoped, indexed in `db/mongo.py`):
 `horizon_profile`, `horizon_objectives`, `horizon_captures`, `horizon_actions`,
@@ -741,11 +741,11 @@ Four rules this module enforces, all of which are easy to regress:
 2. **Personal scope never reaches an external mirror.** There are two paths to
    Notion and both filter it: `TaskService._task_needs_notion_mirror` and
    `MongoRepository.list_tasks_missing_notion_mirror` (startup reconcile). New
-   ERPNext adapters must preserve this isolation; the shared engineering vault
+   Jardal ERP adapters must preserve this isolation; the shared engineering vault
    must not become an automatic destination for private personal captures.
 3. **Unknown is `null` with uncertainty `unknown` — never `0`.** "Recorded
    minutes" and "usable minutes" are different measurements; don't seed one with
-   the other. Financial records live in ERPNext. Finance uses `Decimal` and
+   the other. Financial records live in Jardal ERP. Finance uses `Decimal` and
    explicit currencies under its adapter contract; any Horizon monetary summary
    must respect its integer-minor-unit contract, retain provenance and a cutoff
    date, and never use floats or become a local ledger.
@@ -759,7 +759,7 @@ provenance — never hardcoded in Python (`horizon/importer.py`).
 
 ### Dev & DevOps Agent
 
-Role: Codes, deploys, maintains CI/CD, and executes technical work in configured repositories. ERPNext owns business project management.
+Role: Codes, deploys, maintains CI/CD, and executes technical work in configured repositories. Jardal ERP owns business project management.
 
 Flow:
 - Peer programming runtime with persistent tmux sessions
@@ -792,14 +792,14 @@ Flow:
 
 ### Finance Agent
 
-Role: Interpret financial intent and invoke scoped, deterministic tools against ERPNext. ERPNext owns documents, ledger, balances, budgets, and reconciliation; OpenCEO owns orchestration, policy enforcement, execution gates, and dated references/summaries.
+Role: Interpret financial intent and invoke scoped, deterministic tools against Jardal ERP. Jardal ERP owns documents, ledger, balances, budgets, and reconciliation; OpenCEO owns orchestration, policy enforcement, execution gates, and dated references/summaries.
 
-The [Finance integration contract](finance-erpnext-integration-contract.md) defines the adapter within `agents/finance/`, with direct REST calls and closed semantic inputs. It is not a separate financial microservice. The contract's older assignment of business projects/tickets to OpenCEO is superseded by [the direction document](OPENCEO_DIRECTION.md); its financial rules remain applicable.
+The [Finance integration contract](finance-jardal-erp-integration-contract.md) defines the adapter within `agents/finance/`, with direct REST calls and closed semantic inputs. It is not a separate financial microservice. The contract's older assignment of business projects/tickets to OpenCEO is superseded by [the direction document](OPENCEO_DIRECTION.md); its financial rules remain applicable.
 
-- Use `Decimal`, explicit currency, cutoff dates, and ERPNext document references. Do not replicate a ledger or live balances in MongoDB.
-- Preserve operation identity across retries; add ERPNext fields only when a real workflow needs them.
+- Use `Decimal`, explicit currency, cutoff dates, and Jardal ERP document references. Do not replicate a ledger or live balances in MongoDB.
+- Preserve operation identity across retries; add Jardal ERP fields only when a real workflow needs them.
 - Keep `execute_money_movements=false` for the initial integration. Recording an already-confirmed movement is distinct from executing an external transfer, and an HTTP success is not proof of money movement.
-- ERPNext owns business approvals; OpenCEO checks them and applies its technical gates. No arbitrary DocType/method API is exposed to an LLM.
+- Jardal ERP owns business approvals; OpenCEO checks them and applies its technical gates. No arbitrary DocType/method API is exposed to an LLM.
 
 Existing browser-workflow compatibility:
 - Deterministic Playwright workflows for browser-based payment portals
@@ -884,9 +884,9 @@ Inspired by OpenCode team functions:
 
 ## Proactive CEO — Autonomous Objectives
 
-The CEO acts autonomously under a company mandate approved once by the Owner (2026-10-06, TASK-2026-00110; epic closed, historical base): it emits company work as pedidos the single planner shapes (ticket or objective), without per-ticket approval. Doing nothing is a valid outcome. The Owner steps in only where a human is required: new spend, an irreversible external action, a strategic replanning, a mandate change, or a policy-mandated human review — never plans. Autonomy never transfers ownership of business work from ERPNext and never authorizes an unrestricted stream of new tickets. The governing contract for new work is Agentes por rol (epic TASK-2026-00187) below; this section keeps the 00110 machinery its tickets have not replaced yet.
+The CEO acts autonomously under a company mandate approved once by the Owner (2026-10-06, TASK-2026-00110; epic closed, historical base): it emits company work as pedidos the single planner shapes (ticket or objective), without per-ticket approval. Doing nothing is a valid outcome. The Owner steps in only where a human is required: new spend, an irreversible external action, a strategic replanning, a mandate change, or a policy-mandated human review — never plans. Autonomy never transfers ownership of business work from Jardal ERP and never authorizes an unrestricted stream of new tickets. The governing contract for new work is Agentes por rol (epic TASK-2026-00187) below; this section keeps the 00110 machinery its tickets have not replaced yet.
 
-> **Single company Objective, single planner (amends "One engine, two scopes", 2026-10-06, TASK-2026-00111).** Identity lives in ERPNext: a group Task with real children (`parent_task`) and `depends_on`. Mongo `objectives` holds execution state only (capsule, cycles, replans, final review, telemetry) — never a business backlog. One global planner (Muse Code headless, one fresh run per cycle, `PlannerResult` validated with Pydantic + deterministic rules) is the only component that decides which tickets exist for an Objective. A deterministic dispatcher (0 tokens) launches ready tickets on events, with a single conditional backup trigger while tickets wait for a slot. Work is persisted with `next_run_at` and awakened reactively, never by per-minute database sweeps.
+> **Single company Objective, single planner (amends "One engine, two scopes", 2026-10-06, TASK-2026-00111).** Identity lives in Jardal ERP: a group Task with real children (`parent_task`) and `depends_on`. Mongo `objectives` holds execution state only (capsule, cycles, replans, final review, telemetry) — never a business backlog. One global planner (Muse Code headless, one fresh run per cycle, `PlannerResult` validated with Pydantic + deterministic rules) is the only component that decides which tickets exist for an Objective. A deterministic dispatcher (0 tokens) launches ready tickets on events, with a single conditional backup trigger while tickets wait for a slot. Work is persisted with `next_run_at` and awakened reactively, never by per-minute database sweeps.
 
 Normative sources: vault decision `decisions/2026-10-06-objetivo-unico-ceo-autonomo` (why + history), `openceo-core/objectives/routing_policy.md` (runtime policy the planner reads: core always in the prompt, per-agent detail on demand, split by TASK-2026-00201), and Agentes por rol below with vault decision `decisions/2026-10-11-agentes-por-rol-planner-unico` (epic TASK-2026-00187 contract). Behaviour the code does not have yet is marked `pendiente: TASK-2026-00NNN` below.
 
@@ -898,9 +898,9 @@ Normative sources: vault decision `decisions/2026-10-06-objetivo-unico-ceo-auton
 
 ### Identity and execution state
 
-One Objetivo corresponds to one project/repo. Its identity is an ERPNext group Task; children are real ERPNext Tasks (`parent_task`) and ordering is `depends_on` (mapped from OpenCEO `blocked_by`; ERPNext answers 417 while dependencies are open, so states move in topological order, children first). Mongo `objectives` carries only execution state. Four entries feed the same engine: the CEO (a pedido inside the mandate, shaped by the single planner), the owner (voice, chat, or ERPNext), a ticket that outgrows its session (`convert_ticket`: the ticket itself becomes the group Task, no new record), and automatic promotion from Horizon. A ticket already inside an Objetivo decomposes within it; loose tickets go through the common API without fabricating an objective. Business priorities and approvals come from ERPNext, and financial measurements come from Finance's dated ERPNext reads.
+One Objetivo corresponds to one project/repo. Its identity is an Jardal ERP group Task; children are real Jardal ERP Tasks (`parent_task`) and ordering is `depends_on` (mapped from OpenCEO `blocked_by`; Jardal ERP answers 417 while dependencies are open, so states move in topological order, children first). Mongo `objectives` carries only execution state. Four entries feed the same engine: the CEO (a pedido inside the mandate, shaped by the single planner), the owner (voice, chat, or Jardal ERP), a ticket that outgrows its session (`convert_ticket`: the ticket itself becomes the group Task, no new record), and automatic promotion from Horizon. A ticket already inside an Objetivo decomposes within it; loose tickets go through the common API without fabricating an objective. Business priorities and approvals come from Jardal ERP, and financial measurements come from Finance's dated Jardal ERP reads.
 
-> Implemented: TASK-2026-00013 (adapter group ops, no ERPNext pre-configuration needed), TASK-2026-00117 (engine outside Tier S in `openceo-core/objectives/`; one parent ticket per objective that IS the ERP group; top-down/API/MCP/voice entries; deterministic admission limits; delivery verification with dev-pool / deterministic review by domain; inverse group propagation). Corrected by TASK-2026-00175 (non-dev delivery needs a registered deterministic verifier per domain — none registered today, so unverified non-dev work parks as `capability_gap`; failed evidence or no verified delivery parks as `data_gaps`; cancelled/failed children are history, never proof). and TASK-2026-00121 (Horizon promotion: explicit company touch per action, company work promoted to ticket or objective ERPNext-first with the work spec only, escalation only on mandate signals, personal work stays private, owner capacity never brakes promotion).
+> Implemented: TASK-2026-00013 (adapter group ops, no Jardal ERP pre-configuration needed), TASK-2026-00117 (engine outside Tier S in `openceo-core/objectives/`; one parent ticket per objective that IS the ERP group; top-down/API/MCP/voice entries; deterministic admission limits; delivery verification with dev-pool / deterministic review by domain; inverse group propagation). Corrected by TASK-2026-00175 (non-dev delivery needs a registered deterministic verifier per domain — none registered today, so unverified non-dev work parks as `capability_gap`; failed evidence or no verified delivery parks as `data_gaps`; cancelled/failed children are history, never proof). and TASK-2026-00121 (Horizon promotion: explicit company touch per action, company work promoted to ticket or objective Jardal ERP-first with the work spec only, escalation only on mandate signals, personal work stays private, owner capacity never brakes promotion).
 
 ### Single planner
 
@@ -910,15 +910,15 @@ Muse Code headless, one fresh run per cycle over bounded OpenCEO-compiled state,
 
 ### Company mandate and escalation
 
-The mandate is a versioned YAML beside `projects/<project>/project.yaml`: optimization principles the CEO and planner prompts carry (`principios`), axes with optional KPIs + data source, money/quota budget, active-work limits, CEO review cadence, and the escalation policy. The owner edits it by telling Horizon or the CEO ("nuevo eje: …"); an agent applies the change and git keeps history. The CEO never edits its own mandate. The owner is asked only for: new spend over the mandate threshold; an irreversible external action; strategic replanning; a mandate change; a policy-mandated human review. Consuming already-paid subscription quota is not new spend. Credentials are not an escalation: credentials, sessions and connection strings reachable from the session are ordinary inputs, checked in every accessible source first; a secret found in none of them blocks the ticket in `Working` naming the exact secret, and surfaces in the Horizon cockpit as blocked — never as a decision. Notice arrives as one ERPNext ticket in `Pending Review` with the exact human action, via the "Requiere humano" tray and Horizon, once.
+The mandate is a versioned YAML beside `projects/<project>/project.yaml`: optimization principles the CEO and planner prompts carry (`principios`), axes with optional KPIs + data source, money/quota budget, active-work limits, CEO review cadence, and the escalation policy. The owner edits it by telling Horizon or the CEO ("nuevo eje: …"); an agent applies the change and git keeps history. The CEO never edits its own mandate. The owner is asked only for: new spend over the mandate threshold; an irreversible external action; strategic replanning; a mandate change; a policy-mandated human review. Consuming already-paid subscription quota is not new spend. Credentials are not an escalation: credentials, sessions and connection strings reachable from the session are ordinary inputs, checked in every accessible source first; a secret found in none of them blocks the ticket in `Working` naming the exact secret, and surfaces in the Horizon cockpit as blocked — never as a decision. Notice arrives as one Jardal ERP ticket in `Pending Review` with the exact human action, via the "Requiere humano" tray and Horizon, once.
 
 > Implemented by TASK-2026-00114 (`projects/company_mandate.yaml` + `openceo-core/company_mandate.py`: validated load, `requires_owner`, owner-gated writer, escalation parked in waiting/Pending Review), TASK-2026-00118 (autonomy by default: `waiting` pushes `Pending Review` only with a nameable human action — pending approval, owner escalation, phase waits; the default dev template skips human QA unless `dev.qa.require_human_review`; objective parks are operational reasons, `max_tickets` defers or completes; explicit discovery/HITL approvals and external `autorun=false` defaults stay) and TASK-2026-00142 (five categories: credentials out of escalation; missing-secret report parks in Working with a `params.secret_block` marker the cockpit reads as blocked).
 
 ### CEO loop
 
-Scheduled review (mandate cadence) plus reactive review (objective closed or blocked, `capability_gap`, incident, research, deferred findings, KPI change) over the same persisted-trigger engine as Horizon and research. Each review ends in exactly one of: keep going, emit a pedido, escalate, close a mission, or do nothing; the single planner gives the pedido its form. A pedido links the mandate with a measured KPI or, when none is measured, a written justification. Missing capabilities are declared as `capability_gap`, never silently worked around. Business acceptance and transitions remain ERPNext decisions; agent completion and delivery to the user remain distinct events.
+Scheduled review (mandate cadence) plus reactive review (objective closed or blocked, `capability_gap`, incident, research, deferred findings, KPI change) over the same persisted-trigger engine as Horizon and research. Each review ends in exactly one of: keep going, emit a pedido, escalate, close a mission, or do nothing; the single planner gives the pedido its form. A pedido links the mandate with a measured KPI or, when none is measured, a written justification. Missing capabilities are declared as `capability_gap`, never silently worked around. Business acceptance and transitions remain Jardal ERP decisions; agent completion and delivery to the user remain distinct events.
 
-> Implemented by TASK-2026-00119 (`openceo-core/ceo/`: `models.py` CEODecision contract, `review.py` signal compile + one headless run + validate + act once + publish, `loop.py` scheduled/ reactive loop over one persisted trigger, `service.py` production binding; `ceo_reviewer` role in the global `ceo` block, `CEO_DECISION.json` in the orchestrator scratch). Scheduled review follows the mandate cadence (interval-based, no timezone); reactive review wakes on objective parked/closed (engine `ceo_wake`) and failed/escalated company executions (task funnel, personal scope excluded), debounced (`CEO_REACTIVE_MIN_INTERVAL_SECONDS`). Research results, deferred findings and KPI deltas compile as bounded signals every review; their future event emitters call `loop.wake(reason)` — no fake sources. New work links a declared KPI measured this review when one exists (closed v1 vocabulary: `objectives.active`, `erpnext.open/working/pending_review`; finance sources stay unknown until HZ-005), else a written justification (TASK-2026-00193). Without a valid mandate the review escalates deterministically and never invokes the model; there is deliberately no on/off flag — the mandate is the switch. CEO business effects flow only through sanctioned channels (ERPNext-first creation, `create_owner_escalation`); if a future CEO ever closes or cancels business work directly, it MUST use `TaskService.transition_ticket`, never a direct adapter write. Reshaped by TASK-2026-00213: the review emits pedidos (strategy) and the single planner decides their form (see Agentes por rol).
+> Implemented by TASK-2026-00119 (`openceo-core/ceo/`: `models.py` CEODecision contract, `review.py` signal compile + one headless run + validate + act once + publish, `loop.py` scheduled/ reactive loop over one persisted trigger, `service.py` production binding; `ceo_reviewer` role in the global `ceo` block, `CEO_DECISION.json` in the orchestrator scratch). Scheduled review follows the mandate cadence (interval-based, no timezone); reactive review wakes on objective parked/closed (engine `ceo_wake`) and failed/escalated company executions (task funnel, personal scope excluded), debounced (`CEO_REACTIVE_MIN_INTERVAL_SECONDS`). Research results, deferred findings and KPI deltas compile as bounded signals every review; their future event emitters call `loop.wake(reason)` — no fake sources. New work links a declared KPI measured this review when one exists (closed v1 vocabulary: `objectives.active`, `erpnext.open/working/pending_review`; finance sources stay unknown until HZ-005), else a written justification (TASK-2026-00193). Without a valid mandate the review escalates deterministically and never invokes the model; there is deliberately no on/off flag — the mandate is the switch. CEO business effects flow only through sanctioned channels (Jardal ERP-first creation, `create_owner_escalation`); if a future CEO ever closes or cancels business work directly, it MUST use `TaskService.transition_ticket`, never a direct adapter write. Reshaped by TASK-2026-00213: the review emits pedidos (strategy) and the single planner decides their form (see Agentes por rol).
 
 ### Horizon cockpit
 
@@ -928,7 +928,7 @@ Horizon is the owner's primary interface: "qué sigue" and the daily brief combi
 
 ### Create project end-to-end
 
-Project creation is an operations skill run (`skills/operations/crear-proyecto/SKILL.md`): the ERPNext `Project` (boundary tool, idempotent by `project_key`), the local git repo with the conventional remote URL (recipe line; provisioning the GitHub remote stays out — it needs a credential), the initial commit with README/CLAUDE.md/AGENTS.md-symlink/.gitignore/docs/work plus the validated `projects/<key>/project.yaml` mirror (exact CLI over `openceo-core/ops/create_project.py`, refusing to finish on validation errors), the vault hub plus its own `vault/README.md` line, and the Cloudflare subdomain for web projects (boundary tool). Every step is idempotent — re-running reports `existed` and duplicates nothing. Spend approval lives in the plan (TASK-2026-00207), never in the recipe; needs to create a project route to operations, never a `capability_gap`. Retired (2026-10-13, TASK-2026-00223): the Tier-0 workflow and its `ops.*` tools. Kept as history.
+Project creation is an operations skill run (`skills/operations/crear-proyecto/SKILL.md`): the Jardal ERP `Project` (boundary tool, idempotent by `project_key`), the local git repo with the conventional remote URL (recipe line; provisioning the GitHub remote stays out — it needs a credential), the initial commit with README/CLAUDE.md/AGENTS.md-symlink/.gitignore/docs/work plus the validated `projects/<key>/project.yaml` mirror (exact CLI over `openceo-core/ops/create_project.py`, refusing to finish on validation errors), the vault hub plus its own `vault/README.md` line, and the Cloudflare subdomain for web projects (boundary tool). Every step is idempotent — re-running reports `existed` and duplicates nothing. Spend approval lives in the plan (TASK-2026-00207), never in the recipe; needs to create a project route to operations, never a `capability_gap`. Retired (2026-10-13, TASK-2026-00223): the Tier-0 workflow and its `ops.*` tools. Kept as history.
 
 > Implemented by TASK-2026-00115 (`openceo-core/ops/create_project.py`) and TASK-2026-00214 (skill); TASK-2026-00223 retired the Tier-0 workflow and its `ops.*` tools.
 
@@ -936,7 +936,7 @@ Project creation is an operations skill run (`skills/operations/crear-proyecto/S
 
 Deterministic, 0 tokens: wakes on ticket created/ready, ticket closed/failed/cancelled (frees a slot), dependency resolved, quota reset (persisted trigger), and service start (bounded reconciliation). While ready tickets wait for a slot it keeps a single persisted backup trigger (e.g. every 5 min); with an empty queue there is no timer. Admission checks active limits (global, per project, per objective), Claude/Codex quota and reservations for Tier S (A/B tickets that would invade them wait as `waiting(quota_reserved)`, never silently drop to C), free resources, the per-repo lock, and lease/fencing against double dispatch.
 
-> Implemented by TASK-2026-00113 (`openceo-core/dispatcher.py`: `Dispatcher` with a coalesced wake event plus one conditional persisted backup trigger in `dispatcher_backup`; atomic conditional-update claim against concurrent dispatch cycles — crash recovery is startup `mark_interrupted_tasks` plus the bounded reconcile, and explicit manual `POST /run` stays outside the claim by design; typed `waiting_reason` taxonomy; `RateMonitor.admission_for_ticket` with Tier S reserves; limit/repo parks are event-held without `resume_at`, only quota parks carry the reset instant; "not cancelled in ERPNext" is structural via the inverse webhook, with no live ERPNext reads per ticket). Corrected by TASK-2026-00177 (cancel fencing: `run_task` guards entry — force relaunches completed/converted, never cancelled — re-reads after the project lock, and discards results/failures when the ticket was cancelled mid-run; `patch_task` atomically refuses any status move out of cancelled; the Tier S cycle fences parks and the pre-merge close; a material failure on a cancelled ticket skips record + replan). Corrected by TASK-2026-00180 (a cancel landing — desk webhook, explicit transition, objective cascade — requeues direct dependents like a finish, so event-held `blocked_by` parks never strand).
+> Implemented by TASK-2026-00113 (`openceo-core/dispatcher.py`: `Dispatcher` with a coalesced wake event plus one conditional persisted backup trigger in `dispatcher_backup`; atomic conditional-update claim against concurrent dispatch cycles — crash recovery is startup `mark_interrupted_tasks` plus the bounded reconcile, and explicit manual `POST /run` stays outside the claim by design; typed `waiting_reason` taxonomy; `RateMonitor.admission_for_ticket` with Tier S reserves; limit/repo parks are event-held without `resume_at`, only quota parks carry the reset instant; "not cancelled in Jardal ERP" is structural via the inverse webhook, with no live Jardal ERP reads per ticket). Corrected by TASK-2026-00177 (cancel fencing: `run_task` guards entry — force relaunches completed/converted, never cancelled — re-reads after the project lock, and discards results/failures when the ticket was cancelled mid-run; `patch_task` atomically refuses any status move out of cancelled; the Tier S cycle fences parks and the pre-merge close; a material failure on a cancelled ticket skips record + replan). Corrected by TASK-2026-00180 (a cancel landing — desk webhook, explicit transition, objective cascade — requeues direct dependents like a finish, so event-held `blocked_by` parks never strand).
 
 Loose tickets (no `objective_id`) without an explicit decision are pedidos: the run pre-stage plans them with the single planner before executing (TASK-2026-00204, `openceo-core/objectives/engine.py` (`plan_pedido`) over the same `objective_planner` role, `PlannerResult` horizon [1,1], decision patched with provenance, spend held and quota re-checked for decided A/B/S). The keyword classifier and the dispatcher peek are retired (they lived here since TASK-2026-00137/00148/00171/00178). Explicit dev without a tier runs the safe C default (policy §25); undecided work waits `routing_missing` fail-closed. A money-sensitive project (TASK-2026-00161, `dev.routing.money_sensitive` with optional `money_domain`/`money_stake` vocabulary) feeds the planner prompt — objective and pedido alike — with a PROJECT TIER GUIDE section guiding toward `tier_s` for money/algorithm work without forcing it; an explicit `coding_tool` always wins, and other projects are unaffected.
 
@@ -965,7 +965,7 @@ Company mandate (rules approved once)
       ↓
 CEO review (scheduled + reactive) → pedido | escalate | nothing
       ↓
-Objetivo — identity: ERPNext group Task (+ real children, depends_on)
+Objetivo — identity: Jardal ERP group Task (+ real children, depends_on)
            execution: Mongo `objectives`
       ↓
 Single planner (Muse headless → PlannerResult → deterministic validation)
@@ -1017,7 +1017,7 @@ Translators (TASK-2026-00200): the same profile renders per run engine, chosen b
 
 Consumers (TASK-2026-00195): the planner registry derives from the catalog (AI agents only); the enum, the router aliases and the wired graph nodes validate against it at boot, fail-closed (`catalog.find_consumer_mismatches`, enforced in the `main.py` lifespan). R6 retired with TASK-2026-00244: catalog names resolve through the explicit vocabulary by construction, so an enabled AI agent needs no enum member and no manual alias; the router still never reclassifies by text. The graph agent gate (`graph.resolve_agent_gate`) routes wired names by name and parks unknown, disabled, human or `ceo` targets in `routing_missing` with their reason — never reclassifies, never fails silently. The last disabled-but-wired agent (pm) was removed with its legacy session in TASK-2026-00209. Tests: `tests/test_agent_catalog_consumers_195.py`.
 
-Generic execution (TASK-2026-00205): an enabled AI agent with a muse-code profile runs on the generic graph node (`orchestration/generic_agent.py`): exact skills first (the skill dir carries `workflow.yaml` and the ticket names it in `params.skill` — the YAML engine runs it, the LLM is never invoked), else one fenced Muse run with the role spec, the ticket badge, the ticket folder and the verdict schema. The gate admits enabled unwired AI names and still parks disabled, human, untranslated-engine or unknown names; each migration flips its own agent (enum member + router alias + route mapping; operations is first, others follow in 00220/00221/00222). Verdicts map per 00202 (missing verdict stays legacy, never a failure — unless the output was truncated, which fails closed as bloqueado since a head-cut parse is untrustworthy; a crash rewrites a hecho claim to bloqueado so the planner loop still runs); unknown-tool waits (commented on ERPNext as blocked-tool, review 00006) and HITL waits propagate as the engine returns them. The orchestrator posts the run verdict on the business mirror (`run_task` publishes the node's `result_comment`); agents never change states. The ticket folder survives the run for deliverable evidence (lifecycle cleanup is future work). Tests: `tests/test_generic_agent_205.py`.
+Generic execution (TASK-2026-00205): an enabled AI agent with a muse-code profile runs on the generic graph node (`orchestration/generic_agent.py`): exact skills first (the skill dir carries `workflow.yaml` and the ticket names it in `params.skill` — the YAML engine runs it, the LLM is never invoked), else one fenced Muse run with the role spec, the ticket badge, the ticket folder and the verdict schema. The gate admits enabled unwired AI names and still parks disabled, human, untranslated-engine or unknown names; each migration flips its own agent (enum member + router alias + route mapping; operations is first, others follow in 00220/00221/00222). Verdicts map per 00202 (missing verdict stays legacy, never a failure — unless the output was truncated, which fails closed as bloqueado since a head-cut parse is untrustworthy; a crash rewrites a hecho claim to bloqueado so the planner loop still runs); unknown-tool waits (commented on Jardal ERP as blocked-tool, review 00006) and HITL waits propagate as the engine returns them. The orchestrator posts the run verdict on the business mirror (`run_task` publishes the node's `result_comment`); agents never change states. The ticket folder survives the run for deliverable evidence (lifecycle cleanup is future work). Tests: `tests/test_generic_agent_205.py`.
 
 ### Agent isolation
 
@@ -1027,9 +1027,9 @@ No agent sees secrets or leaves its folder. Env is an allowlist (`child_env`: lo
 
 A tool exists only if it meets at least one condition: (a) it uses a secret the agent must not hold; (b) it enforces a lock that does not depend on the LLM obeying; (c) it writes to the business record under its own rules. Everything else is terminal plus skills. Each agent sees all its role's tools on any ticket; the ticket token is a badge (which agent, on which ticket) enforced server-side; no anonymous access to MCP or REST; dangerous tools carry their lock inside; agents comment and attach on their ticket; code changes states. (TASK-2026-00196, TASK-2026-00199, TASK-2026-00208.)
 
-Identity (TASK-2026-00196): `openceo-core/mcp_identity.py` issues opaque ticket tokens (SHA-256 stored, kinds owner/agent/readonly/service; planner and ceo are read-only principals, never catalog agents) and a FastMCP middleware filters `tools/list` to the grant's box and blocks out-of-box calls; calls with no badge get the default project-management box (`ANONYMOUS_BOX`: ticket tools, DNS, ERPNext project — the agent-specific tools need a badge), while a present but invalid badge answers 401 on every method of `/internal/mcp` (logged with client host, never the token), and every call lands in the `mcp_calls` audit log. The box resolves from the agent's catalog card (`boundary_tools`; dev reads its ticket and comments/attaches on it, owner sees all 26, badge-bearing calls enforce their catalog box and ticket scope); agent badges bind to the ERPNext mirror name (`TASK-2026-NNNNN`), never to the Mongo uuid, which the issuer refuses (TASK-2026-00214); badges die on terminal execution (funnel hook, best-effort) plus a TTL backstop. The shared `MCP_SERVER_API_KEY` is retired on the internal mount; the research broker keeps its own bearer and consumers. PM extraction keeps working through a per-run service badge (single tool, project-scoped, sunset in TASK-2026-00209); interactive dev sessions run under the dev role profile with a project-scoped service badge (TASK-2026-00197). Tests: `tests/test_mcp_identity_196.py`.
+Identity (TASK-2026-00196): `openceo-core/mcp_identity.py` issues opaque ticket tokens (SHA-256 stored, kinds owner/agent/readonly/service; planner and ceo are read-only principals, never catalog agents) and a FastMCP middleware filters `tools/list` to the grant's box and blocks out-of-box calls; calls with no badge get the default project-management box (`ANONYMOUS_BOX`: ticket tools, DNS, Jardal ERP project — the agent-specific tools need a badge), while a present but invalid badge answers 401 on every method of `/internal/mcp` (logged with client host, never the token), and every call lands in the `mcp_calls` audit log. The box resolves from the agent's catalog card (`boundary_tools`; dev reads its ticket and comments/attaches on it, owner sees all 26, badge-bearing calls enforce their catalog box and ticket scope); agent badges bind to the Jardal ERP mirror name (`TASK-2026-NNNNN`), never to the Mongo uuid, which the issuer refuses (TASK-2026-00214); badges die on terminal execution (funnel hook, best-effort) plus a TTL backstop. The shared `MCP_SERVER_API_KEY` is retired on the internal mount; the research broker keeps its own bearer and consumers. PM extraction keeps working through a per-run service badge (single tool, project-scoped, sunset in TASK-2026-00209); interactive dev sessions run under the dev role profile with a project-scoped service badge (TASK-2026-00197). Tests: `tests/test_mcp_identity_196.py`.
 
-Registry and surface (TASK-2026-00199): the YAML registry keeps 16 builtin tools plus the 3 conditional research ticks (removed so far: `pm.*`, `core.check_registry`, `cloudflare.*`, the secretary notes and `ops.*`). The internal mount exposes 26 boundary tools: the ticket/objective set, one DNS tool (`manage_dns_record`, create/delete), email with the sender list in its description, the ERPNext project ensure, the five finance tools (practice-only Elfec), and the two research bridge tools (submit/get under the ticket's consumer). Each description documents its criterion; `catalog.MCP_BOUNDARY_TOOLS` is the canonical set — unknown card boxes fail the load and unknown registrations fail the mount build. `openceo_create_pm_tickets_batch` answers only to the owner badge (the service exception retired with the PM agent in TASK-2026-00209). The one-shot notes migration lives in `orchestration/notes_migration.py` (personal to Horizon capture, company to the vault or the named ticket; dry-run by default). Finance runs as a catalog agent (TASK-2026-00221): its box holds the ticket tools plus the five finance tools, and its five skills run exact over the registry; refused inputs fail the run as `invalid_input` with the refused output on the record, never a silent hecho. Tests: `tests/test_boundary_tools_199.py`, `tests/test_secretary_agent_220.py`, `tests/test_finance_agent_221.py`, `tests/test_research_agent_222.py`.
+Registry and surface (TASK-2026-00199): the YAML registry keeps 16 builtin tools plus the 3 conditional research ticks (removed so far: `pm.*`, `core.check_registry`, `cloudflare.*`, the secretary notes and `ops.*`). The internal mount exposes 26 boundary tools: the ticket/objective set, one DNS tool (`manage_dns_record`, create/delete), email with the sender list in its description, the Jardal ERP project ensure, the five finance tools (practice-only Elfec), and the two research bridge tools (submit/get under the ticket's consumer). Each description documents its criterion; `catalog.MCP_BOUNDARY_TOOLS` is the canonical set — unknown card boxes fail the load and unknown registrations fail the mount build. `openceo_create_pm_tickets_batch` answers only to the owner badge (the service exception retired with the PM agent in TASK-2026-00209). The one-shot notes migration lives in `orchestration/notes_migration.py` (personal to Horizon capture, company to the vault or the named ticket; dry-run by default). Finance runs as a catalog agent (TASK-2026-00221): its box holds the ticket tools plus the five finance tools, and its five skills run exact over the registry; refused inputs fail the run as `invalid_input` with the refused output on the record, never a silent hecho. Tests: `tests/test_boundary_tools_199.py`, `tests/test_secretary_agent_220.py`, `tests/test_finance_agent_221.py`, `tests/test_research_agent_222.py`.
 
 Locks (TASK-2026-00208): email to off-allowlist recipients, DNS deletion and Elfec runs pass `requires_owner` inside the tool (`tool_locks.py`, pure) and escalate as `lock` owner-questions; the tool answers pending and the agent ends bloqueado. The approval executes the stored action exactly once (guarded by the execution marker on the question), then resumes the origin; re-runs replay the stored outcome. A mid-run lock park wins over the run outcome in the funnel, and a YAML step held on a lock blocks its run as `blocked_tool` instead of completing. Resuming re-runs the origin from scratch (established engine semantic): locked steps replay their stored outcome, earlier unlocked steps re-execute. Agent badge calls bind their ticket/project params to the grant; service badges never call lockables; anonymous callers may only request a DNS deletion with a project (never an origin ticket) — email and Elfec need a badge. Per-project `secretary.allowed_recipients` (exact or `@domain`) is the email allowlist, fail-closed when absent. Email attachments snapshot their sha256 at request time and refuse to send on mismatch. Tests: `tests/test_tool_locks_208.py`.
 
@@ -1055,15 +1055,15 @@ Ticket recipes across agents, a reference for the planner, never rigid. One stag
 
 ### Human channel
 
-The Owner only ever receives: the 5 mandate categories (new spend, irreversible action, strategic replanning, mandate change, policy-mandated review); questions only they can answer from their own data; the acceptance-criteria proposal when they gave none, without blocking work; playbook and new-boundary-tool approvals. Never plans. (TASK-2026-00206: every owner need is one owner-question ticket in waiting/owner_question → Pending Review with the exact human action, answered from the cockpit, by voice, or from the ERPNext desk; approve requeues the origin with the owner text, deny fails it with a bloqueado verdict that returns once to the planner, and new_tool approval creates the dev ticket first. Kinds question/lock/new_tool/playbook in `owner_channel.py`; Tier S asks via `cycle.ask_owner`; the planner proposes via `PlannerResult.proposed_tools`. Resumed runs read `params.owner_answer` in their prompt (dev + Tier S planner); a recorded decision is honored on retry, and hook producers clear the default phase template. Tests: `tests/test_owner_channel_206.py`. Mandate TASK-2026-00193; spend gate TASK-2026-00207: declared plan spend is checked against the mandate before anything persists or launches — approval launches the stored plan, denial returns the motive to the planner. Tests: `tests/test_plan_spend_207.py`.)
+The Owner only ever receives: the 5 mandate categories (new spend, irreversible action, strategic replanning, mandate change, policy-mandated review); questions only they can answer from their own data; the acceptance-criteria proposal when they gave none, without blocking work; playbook and new-boundary-tool approvals. Never plans. (TASK-2026-00206: every owner need is one owner-question ticket in waiting/owner_question → Pending Review with the exact human action, answered from the cockpit, by voice, or from the Jardal ERP desk; approve requeues the origin with the owner text, deny fails it with a bloqueado verdict that returns once to the planner, and new_tool approval creates the dev ticket first. Kinds question/lock/new_tool/playbook in `owner_channel.py`; Tier S asks via `cycle.ask_owner`; the planner proposes via `PlannerResult.proposed_tools`. Resumed runs read `params.owner_answer` in their prompt (dev + Tier S planner); a recorded decision is honored on retry, and hook producers clear the default phase template. Tests: `tests/test_owner_channel_206.py`. Mandate TASK-2026-00193; spend gate TASK-2026-00207: declared plan spend is checked against the mandate before anything persists or launches — approval launches the stored plan, denial returns the motive to the planner. Tests: `tests/test_plan_spend_207.py`.)
 
 ### Missions over objectives
 
-The Owner or Horizon gives a mission; the CEO strategy chains objectives until it holds. Spend declared in a plan asks approval before launch (TASK-2026-00207). (TASK-2026-00218: a mission is one ERPNext group Task whose children are objective groups, plus a Mongo `missions` document; entries API/MCP/voice/chat/Horizon through `TaskService.create_mission`; creation wakes the CEO; mission pedidos are born under the mission group and convert linked; each close records the ledger and wakes the CEO, who emits the next pedido or `close_mission` (5th review action: active mission with acceptance, every objective terminal, at least one closed, evidence cited); without Owner criteria the CEO proposes in its first pedido acceptance, adoption asks through the human channel without blocking (48h deadline, silence or «analízalo tú» confirms), and answers adjust/confirm/dispute; the cockpit shows progress plus aggregated cost. Tests: `tests/test_missions_218.py`. No cancel-convergence flow in v1: a desk-cancelled mission shell fails mission ops closed instead of chaining under it.)
+The Owner or Horizon gives a mission; the CEO strategy chains objectives until it holds. Spend declared in a plan asks approval before launch (TASK-2026-00207). (TASK-2026-00218: a mission is one Jardal ERP group Task whose children are objective groups, plus a Mongo `missions` document; entries API/MCP/voice/chat/Horizon through `TaskService.create_mission`; creation wakes the CEO; mission pedidos are born under the mission group and convert linked; each close records the ledger and wakes the CEO, who emits the next pedido or `close_mission` (5th review action: active mission with acceptance, every objective terminal, at least one closed, evidence cited); without Owner criteria the CEO proposes in its first pedido acceptance, adoption asks through the human channel without blocking (48h deadline, silence or «analízalo tú» confirms), and answers adjust/confirm/dispute; the cockpit shows progress plus aggregated cost. Tests: `tests/test_missions_218.py`. No cancel-convergence flow in v1: a desk-cancelled mission shell fails mission ops closed instead of chaining under it.)
 
 ### Measured cost
 
-Every per-ticket execution reports one run record (tokens in/out/cached, duration, engine) and `run_task` folds it onto the ticket's stored `cost`; the objective aggregates its tickets, and the mission its objectives, for the CEO strategy, the planner and the cockpit. Unknown is null, never 0: token totals stay null until a run measures them and the aggregation stays null until a run exists. Money stays null until a dated finance reader links ERPNext money to a ticket or project. Cost is information only: no threshold, tier or dispatch decision derives from it. Planner and CEO planning runs are not ticket runs and are not recorded yet. (TASK-2026-00212: `objectives/ticket_cost.py` normalizes the heterogeneous engine shapes; generic LLM and exact-skill runs (0 measured tokens, the LLM never runs), simple-tier sessions (code step plus gate/handoff fix turns) and Tier S session deltas report `cost_runs`; legacy nodes report nothing until migrated. Tests: `tests/test_ticket_cost_212.py`.)
+Every per-ticket execution reports one run record (tokens in/out/cached, duration, engine) and `run_task` folds it onto the ticket's stored `cost`; the objective aggregates its tickets, and the mission its objectives, for the CEO strategy, the planner and the cockpit. Unknown is null, never 0: token totals stay null until a run measures them and the aggregation stays null until a run exists. Money stays null until a dated finance reader links Jardal ERP money to a ticket or project. Cost is information only: no threshold, tier or dispatch decision derives from it. Planner and CEO planning runs are not ticket runs and are not recorded yet. (TASK-2026-00212: `objectives/ticket_cost.py` normalizes the heterogeneous engine shapes; generic LLM and exact-skill runs (0 measured tokens, the LLM never runs), simple-tier sessions (code step plus gate/handoff fix turns) and Tier S session deltas report `cost_runs`; legacy nodes report nothing until migrated. Tests: `tests/test_ticket_cost_212.py`.)
 
 ### What stays deterministic code
 
@@ -1071,13 +1071,13 @@ Dispatch, quotas, dependencies, states, schema and deliverable validation, locks
 
 ### Memory outside the engine
 
-Skills and playbooks in git; knowledge in the vault; work in ERPNext; execution in Mongo. Switching engines is one config line. Hermes is not an engine, CrewAI is not adopted, tmux stays for live sessions only.
+Skills and playbooks in git; knowledge in the vault; work in Jardal ERP; execution in Mongo. Switching engines is one config line. Hermes is not an engine, CrewAI is not adopted, tmux stays for live sessions only.
 
 ---
 
 ## Internal Scheduler — Recurring Tasks & Reminders
 
-Scheduling agent execution belongs to OpenCEO, independent of n8n. The reference mechanism is Horizon's persisted triggers and reactive timer in `openceo-core/horizon/triggers.py`. Broader recurring-workflow support must use the same scheduling principles; ERPNext retains business workflow scheduling within its own domain.
+Scheduling agent execution belongs to OpenCEO, independent of n8n. The reference mechanism is Horizon's persisted triggers and reactive timer in `openceo-core/horizon/triggers.py`. Broader recurring-workflow support must use the same scheduling principles; Jardal ERP retains business workflow scheduling within its own domain.
 
 ### Schedule Schema (MongoDB)
 
@@ -1108,7 +1108,7 @@ A reminder and a recurring execution use the same mechanism: a persisted due tim
 → resolve owner, timezone, mandate, and registered review workflow
 → persist the next due trigger
 
-"prepara el informe del ticket de ERPNext el lunes"
+"prepara el informe del ticket de Jardal ERP el lunes"
 → resolve business reference and execution authorization
 → schedule a registered reporting workflow with explicit scope
 ```
@@ -1122,11 +1122,11 @@ If the CEO doesn't find a crystallized workflow, it enters the normal tiers. If 
 3. It claims a bounded set of due jobs, executes the registered workflow, records the result, and persists the next occurrence when appropriate.
 4. A bounded startup recovery handles interrupted work. No periodic full-collection scan, external API sweep, or second watcher repeats the originating side effect.
 
-The `WaitingTaskScheduler` retry loop was retired by TASK-2026-00113 (the F3 dispatcher in `openceo-core/dispatcher.py` follows this same reactive pattern); it is not the pattern for new ERPNext, knowledge, or recurring-work integrations.
+The `WaitingTaskScheduler` retry loop was retired by TASK-2026-00113 (the F3 dispatcher in `openceo-core/dispatcher.py` follows this same reactive pattern); it is not the pattern for new Jardal ERP, knowledge, or recurring-work integrations.
 
 ### Personal vs Enterprise
 
-Scope and ownership must be explicit. `project: null` can mean company-level work and does not imply personal data. Personal triggers retain the owner's privacy rules; business execution carries the applicable ERPNext reference and `project_key` mapping. Both use the same scheduling principles without sharing private context.
+Scope and ownership must be explicit. `project: null` can mean company-level work and does not imply personal data. Personal triggers retain the owner's privacy rules; business execution carries the applicable Jardal ERP reference and `project_key` mapping. Both use the same scheduling principles without sharing private context.
 
 ---
 
@@ -1155,7 +1155,7 @@ Retired by TASK-2026-00209: the `pm.default_tool` setting (extraction engine `la
 
 Claude Code and Codex CLI run on subscription-based rate limits with two tiers: a **5-hour rolling window** and a **weekly cap**. When multiple tickets queue up (30+ from a single sprint), OpenCEO must maximize usage without burning everything at once and without blocking the system when a limit hits mid-task.
 
-Quotas and execution admission remain OpenCEO responsibilities, including for work linked to ERPNext. The following describes the existing provider/runtime mechanisms, including legacy retry polling. It does not authorize periodic database or API scans in new integrations: new queue wakeups must originate from execution events, quota-reset deadlines, and persisted triggers. Do not introduce artificial throttling to compensate for duplicate work.
+Quotas and execution admission remain OpenCEO responsibilities, including for work linked to Jardal ERP. The following describes the existing provider/runtime mechanisms, including legacy retry polling. It does not authorize periodic database or API scans in new integrations: new queue wakeups must originate from execution events, quota-reset deadlines, and persisted triggers. Do not introduce artificial throttling to compensate for duplicate work.
 
 ### Design Principles
 
@@ -1304,7 +1304,7 @@ One stateless HTTP mount at `/internal/mcp/` serves both managed runtimes and ma
 ### Design Principles
 
 - **Runs inside openceo-core process.** Same Python process, same `openceo-core/.env`. No extra container, no extra port.
-- **Owner-curated tool list.** Only selected infrastructure and OpenCEO capabilities appear in `mcp_server.py`. A backing ERPNext API, workflow primitive, or database collection is not automatically a public MCP tool.
+- **Owner-curated tool list.** Only selected infrastructure and OpenCEO capabilities appear in `mcp_server.py`. A backing Jardal ERP API, workflow primitive, or database collection is not automatically a public MCP tool.
 - **Shared Python functions.** The MCP tools call the same functions in `openceo-core/tools/` that LangGraph agents can also import. One implementation, two access paths.
 
 ### Exposed Tools
@@ -1317,7 +1317,7 @@ The internal mount registers 26 boundary tools (`catalog.MCP_BOUNDARY_TOOLS`; re
 | `openceo_create_ticket(title, ...)` | Register a ticket through `TaskService`, with source identity and runtime policy. |
 | `openceo_create_tickets_batch(tickets)` | Register a structured JSON batch through the same service. |
 | `openceo_create_pm_tickets_batch(project, source_id, tickets, ...)` | Register a PM batch with explicit project and source context. Owner badge only (the 00199 service exception retired with the PM agent in TASK-2026-00209). |
-| `openceo_search_tickets(query, project, status, limit)` | Read business tickets in ERPNext before creating new ones. |
+| `openceo_search_tickets(query, project, status, limit)` | Read business tickets in Jardal ERP before creating new ones. |
 | `openceo_get_ticket(identifier, limit)` | Read one ticket in full: fields, execution status, comments and attachments. |
 | `openceo_create_objective(project, goal, ...)` | Create a company objective whose children the planner creates. |
 | `openceo_transition_ticket(ticket, to_status, ...)` | Move a ticket's business status under the global policy. |
@@ -1331,23 +1331,23 @@ The internal mount registers 26 boundary tools (`catalog.MCP_BOUNDARY_TOOLS`; re
 | `openceo_update_ticket_attachment(attachment, ticket, file_name, private)` | Rename an attachment or change its privacy. |
 | `openceo_delete_ticket_attachment(attachment, ticket)` | Delete an attachment. |
 | `openceo_send_email(to, subject, body_text, ...)` | Send an operational email from a configured sender (listed in its description). |
-| `openceo_ensure_erpnext_project(project_key, ...)` | Ensure the ERPNext Project identity, idempotent by key. |
-| `openceo_register_expense(text, openceo_ref, ...)` | Register an occasional expense in ERPNext from free text. `openceo_ref` is required so retries never double-post. |
-| `openceo_register_income(text, openceo_ref, ...)` | Register collected income in ERPNext from free text. `openceo_ref` is required so retries never double-post. |
+| `openceo_ensure_business_project(project_key, ...)` | Ensure the Jardal ERP Project identity, idempotent by key. |
+| `openceo_register_expense(text, openceo_ref, ...)` | Register an occasional expense in Jardal ERP from free text. `openceo_ref` is required so retries never double-post. |
+| `openceo_register_income(text, openceo_ref, ...)` | Register collected income in Jardal ERP from free text. `openceo_ref` is required so retries never double-post. |
 | `openceo_scope_summary(...)` | Balance/expense summary by scope from the ledger (read-only). |
 | `openceo_contribution_10_status(...)` | 10% contribution rule status from the ledger (read-only). |
 | `openceo_elfec_house_payment(...)` | Elfec house payment in practice mode: never pays. |
 
-These names reflect `openceo-core/mcp_server.py`. Their existing Mongo/Notion behavior is a compatibility implementation, not an ERPNext adapter. Legacy `notion_create_*` references do not authorize direct writes around OpenCEO. The direction's `ticket.create()`/`ticket.transition()` vocabulary describes semantics; it does not rename deployed tools by documentation alone.
+These names reflect `openceo-core/mcp_server.py`. Their existing Mongo/Notion behavior is a compatibility implementation, not an Jardal ERP adapter. Legacy `notion_create_*` references do not authorize direct writes around OpenCEO. The direction's `ticket.create()`/`ticket.transition()` vocabulary describes semantics; it does not rename deployed tools by documentation alone.
 
 #### Ticket thread: edits, comments and attachments (TASK-2026-00079)
 
-Verified against the live site (Frappe 16.35.0 / ERPNext 16.36.0, compañía Jardal, 2026-10-01) with the API principal `openceo@jardal.app`, whose roles decide what is possible here (`Projects User` + `Accounts User`, plus `OpenCEO API` added the same day — see below):
+Verified against the live site (Frappe 16.35.0 / Jardal ERP 16.36.0, compañía Jardal, 2026-10-01) with the API principal `openceo@jardal.app`, whose roles decide what is possible here (`Projects User` + `Accounts User`, plus `OpenCEO API` added the same day — see below):
 
 - **One read gives the whole ticket.** `openceo_get_ticket` returns fields + execution status + comments + attachments in a single call. A separate `openceo_get_ticket_thread` existed for one day and was folded in (owner decision, 2026-10-01): two tools to understand one ticket cost the agent an extra step on every turn.
 - **Writing the thread uses the desk's own methods, and one deliberate exception.** Creating a comment (`frappe.desk.form.utils.add_comment`), reading the timeline (`get_docinfo`), uploading (`upload_file`) and deleting an attachment (`remove_attach`) all check permission against the **ticket**, which is why `File` enters the client's DocType allowlist only for the rename/privacy update. Editing a comment tries the official `update_comment` first — which Frappe restricts to the author — and falls back to `PUT /api/resource/Comment`; deleting a comment has no public Frappe method at all and goes through `DELETE /api/resource/Comment`.
-- **That fallback needs a role, and the owner granted it (2026-10-01).** `Comment` has no `All` role permission: stock Frappe gives it only to `System Manager` / `Website Manager`, so without a grant an agent could neither edit someone else's comment nor delete any. A dedicated role **`OpenCEO API`** was created in ERPNext with `read`/`write`/`create`/`delete` on `Comment` (permlevel 0, `desk_access=0`, `export=0`) and assigned to `openceo@jardal.app` alongside `Projects User` + `Accounts User`. Because that role opens `Comment` **site-wide**, the adapter re-imposes the boundary Frappe's method used to provide: before writing or deleting, it reads the comment and requires `comment_type == "Comment"`, `reference_doctype == "Task"`, a readable ticket, and — for deletes — that the comment belongs to the ticket the caller named.
-- **Attachments are private by default**, capped at `ERPNEXT_ATTACHMENT_MAX_BYTES` (10 MiB), read from `ERPNEXT_ATTACHMENT_ALLOWED_ROOTS`, with the name sanitized to a single path-free segment and executable/scripted extensions (`.html`, `.svg`, `.sh`, `.exe`, `.js`, …) rejected — a scripted attachment served from ERPNext's own origin is stored XSS once it is public. No URL ingestion: `file_url` is only ever a site-relative path, so there is no SSRF surface.
+- **That fallback needs a role, and the owner granted it (2026-10-01).** `Comment` has no `All` role permission: stock Frappe gives it only to `System Manager` / `Website Manager`, so without a grant an agent could neither edit someone else's comment nor delete any. A dedicated role **`OpenCEO API`** was created in Jardal ERP with `read`/`write`/`create`/`delete` on `Comment` (permlevel 0, `desk_access=0`, `export=0`) and assigned to `openceo@jardal.app` alongside `Projects User` + `Accounts User`. Because that role opens `Comment` **site-wide**, the adapter re-imposes the boundary Frappe's method used to provide: before writing or deleting, it reads the comment and requires `comment_type == "Comment"`, `reference_doctype == "Task"`, a readable ticket, and — for deletes — that the comment belongs to the ticket the caller named.
+- **Attachments are private by default**, capped at `ERPNEXT_ATTACHMENT_MAX_BYTES` (10 MiB), read from `ERPNEXT_ATTACHMENT_ALLOWED_ROOTS`, with the name sanitized to a single path-free segment and executable/scripted extensions (`.html`, `.svg`, `.sh`, `.exe`, `.js`, …) rejected — a scripted attachment served from Jardal ERP's own origin is stored XSS once it is public. No URL ingestion: `file_url` is only ever a site-relative path, so there is no SSRF surface.
 - **Idempotency, because `upload_file` always creates a new `File` document** (its `content_hash` reuses the file on disk, not the record): attaching is keyed on `md5(content)` + ticket, and a retry returns the existing attachment. Comments are keyed on author + normalized text. The creating POSTs are sent with a **single attempt**, so the client never duplicates on its own retry.
 - **Ticket editing excludes status.** State transitions belong to the execution (or the desk) and are tracked by `status_pushed`; writing them here would bypass that bookkeeping and could bounce against the `on_update` webhook. A comment or attachment never changes status, priority, dependencies or execution.
 - **`description` accepts plain text or the HTML the field already holds.** Plain text is escaped and newlines become `<br>`; text that already contains a tag is passed through, because escaping it would show the existing markup as literal text. Frappe sanitizes the HTML on save (verified live: `<script>` and `javascript:` hrefs are stripped, formatting is kept), so this is not an XSS opening.
@@ -1357,7 +1357,7 @@ Verified against the live site (Frappe 16.35.0 / ERPNext 16.36.0, compañía Jar
 
 ### What is NOT exposed
 
-The curated email and finance tools require an explicit badge and invoke their owning services. No unrestricted ERPNext DocType access, Mongo write interface, Obsidian MCP, or Graphify MCP is exposed. A new capability must be explicitly registered and preserve its approval and idempotency policies.
+The curated email and finance tools require an explicit badge and invoke their owning services. No unrestricted Jardal ERP DocType access, Mongo write interface, Obsidian MCP, or Graphify MCP is exposed. A new capability must be explicitly registered and preserve its approval and idempotency policies.
 
 ### How coding agents connect
 
@@ -1394,15 +1394,15 @@ WhatsApp message arrives at n8n
 
 Clients NEVER reach the CEO directly. Only internal contacts can interact with the CEO.
 
-This routing sketch uses the existing local contact lookup. Under the target boundary, ERPNext owns business users and contacts; any local lookup is an explicit mapping/projection for channel routing, not a second CRM. Local OpenCEO authentication remains in force.
+This routing sketch uses the existing local contact lookup. Under the target boundary, Jardal ERP owns business users and contacts; any local lookup is an explicit mapping/projection for channel routing, not a second CRM. Local OpenCEO authentication remains in force.
 
 ---
 
 ## Per-Project Configuration
 
-Each repository-backed execution project has YAML configuration for providers, routing, technical workflows, and post-actions. OpenCEO reads it without project-specific code in core. ERPNext owns the business project and workflow; the vault owns its engineering knowledge.
+Each repository-backed execution project has YAML configuration for providers, routing, technical workflows, and post-actions. OpenCEO reads it without project-specific code in core. Jardal ERP owns the business project and workflow; the vault owns its engineering knowledge.
 
-The configuration below documents existing execution concepts. `project_key` is mapped to the existing project name at the integration boundary; adding an ERPNext source or new mapping fields requires an implemented and validated adapter, not just another YAML value. The runtime's `TaskSource` enum does not yet include `erpnext`.
+The configuration below documents existing execution concepts. `project_key` is mapped to the existing project name at the integration boundary; adding an Jardal ERP source or new mapping fields requires an implemented and validated adapter, not just another YAML value. The runtime's `TaskSource` enum does not yet include `erpnext`.
 
 ```yaml
 project:
@@ -1471,9 +1471,9 @@ project:
       message: string
 ```
 
-Adding an execution project means configuring `projects/{name}/project.yaml` and linking the same `project_key` to its ERPNext business identity, repository, and vault hub where applicable. Existing local projects remain usable before that mapping is integrated. No per-project memory file is created as a second engineering knowledge base.
+Adding an execution project means configuring `projects/{name}/project.yaml` and linking the same `project_key` to its Jardal ERP business identity, repository, and vault hub where applicable. Existing local projects remain usable before that mapping is integrated. No per-project memory file is created as a second engineering knowledge base.
 
-Adding an execution process means defining a technical workflow for a registered worker. Business workflow rules and approvals belong in ERPNext; project YAML selects and configures how OpenCEO executes authorized work.
+Adding an execution process means defining a technical workflow for a registered worker. Business workflow rules and approvals belong in Jardal ERP; project YAML selects and configures how OpenCEO executes authorized work.
 
 ---
 
@@ -1481,14 +1481,14 @@ Adding an execution process means defining a technical workflow for a registered
 
 ### Target Business-to-Execution Contract
 
-1. A request identifies existing ERPNext work, or asks an OpenCEO capability to create it. Resolve `project_key`, business reference, actor, priority, and required approvals explicitly.
+1. A request identifies existing Jardal ERP work, or asks an OpenCEO capability to create it. Resolve `project_key`, business reference, actor, priority, and required approvals explicitly.
 2. The adapter validates the request and retains a stable operation identity. A business ticket reference, an incoming event/operation ID, and an OpenCEO `task_id` serve different purposes; retries must not create new work.
 3. OpenCEO associates a runtime task with the business reference and routes execution through the existing graph, workflow executor, or explicitly activated dev session. Business approval and technical admission both apply where required.
 4. Agents obtain relevant vault notes and code context directly. A run stores its state and evidence in MongoDB; it does not copy the vault or the business database.
-5. Completion emits evidence and an idempotent adapter update for the associated ERPNext work. Business acceptance remains subject to its workflow; partial failures retain traceable retry state instead of reporting a successful business transition.
+5. Completion emits evidence and an idempotent adapter update for the associated Jardal ERP work. Business acceptance remains subject to its workflow; partial failures retain traceable retry state instead of reporting a successful business transition.
 6. Knowledge discovered during execution is written directly to linked, checked vault notes. This does not itself create a ticket, advance a business status, or launch another run.
 
-The ERPNext adapter and event mapping are integration contracts to implement, not additional endpoints or source values already accepted by the runtime.
+The Jardal ERP adapter and event mapping are integration contracts to implement, not additional endpoints or source values already accepted by the runtime.
 
 ### Existing Entry Points and Compatibility
 
@@ -1501,7 +1501,7 @@ The ERPNext adapter and event mapping are integration contracts to implement, no
 - **Notion mirror on creation:** `TaskService.create_task()` schedules the minimum human-facing mirror from the originating CRUD operation; run/patch paths drive relevant updates. This is a compatibility projection of execution work. Private Horizon tasks are excluded.
 - **Notion sync-back:** when a Notion-sourced task changes status (`in_progress`, `completed`, `failed`, etc.), `task_service.py` writes back to the originating Notion page via `tools/notion.py`. Properties updated: `Runtime Status`, `OpenCEO Ref`, `Runtime Summary`, `Last Sync At`, `Agent`. Sync-back is fire-and-forget and never blocks task execution. Controlled by `NOTION_SYNC_BACK_ENABLED`.
 - Mirror reconciliation runs once at startup as a bounded safety net for orphaned tasks. No Notion change stream, periodic mirror scan, or second watcher reprocesses CRUD events.
-- MongoDB is the canonical **execution** queue; ERPNext is the target business system of record. Notion mirrors only the fields needed for compatibility and human visibility.
+- MongoDB is the canonical **execution** queue; Jardal ERP is the target business system of record. Notion mirrors only the fields needed for compatibility and human visibility.
 - Legacy PM extraction paths that write directly to Notion are compatibility exceptions, not the pattern for new integrations. The internal `openceo_create_*` paths enter through OpenCEO task registration (the external `pm.create_tickets` workflow retired with the PM agent in TASK-2026-00209). Preserve consumers during adapter changes and verify each path rather than assuming that documentation migrated it.
 
 ---
@@ -1521,23 +1521,23 @@ Persistent tmux runtime with explicit provider sessions. Deterministic Python or
 
 ## MongoDB Collections
 
-- **tasks** — Canonical OpenCEO execution queue and runtime task tracking. Business identity/status belongs in ERPNext; execution hierarchy and references must use explicit contracts rather than copying the business backlog
+- **tasks** — Canonical OpenCEO execution queue and runtime task tracking. Business identity/status belongs in Jardal ERP; execution hierarchy and references must use explicit contracts rather than copying the business backlog
 - **dev_sessions** — tmux-backed dev peer/autonomous sessions
 - **user_context** — selected project + active dev-session focus per user/chat
 - **agent_status** — provider quota and health data
 - **browser_tasks** — reserved for browser/worker style queues
 - **workflow_runs** — Runtime execution state for crystallized workflows, including `blocked_human` for a paused approval step. Persisted status values follow `WorkflowRunStatus` in `state.py`
 - **discovery_runs** — Retired with TASK-2026-00215 (orphan rows unmigrated; no code reads them). Was: proposals, approval/rejection, and discovery execution state under `DiscoveryRunStatus`
-- **task_reviews** — Append-only technical review history linked by `task_id`; does not replace ERPNext business approval history
-- **projects**, **project_presets** — Local execution configuration/overrides and presets; business project identity is mapped from ERPNext
-- **users**, **groups** — Local authentication and OpenCEO permissions; business user ownership remains ERPNext's, with explicit identity mapping
+- **task_reviews** — Append-only technical review history linked by `task_id`; does not replace Jardal ERP business approval history
+- **projects**, **project_presets** — Local execution configuration/overrides and presets; business project identity is mapped from Jardal ERP
+- **users**, **groups** — Local authentication and OpenCEO permissions; business user ownership remains Jardal ERP's, with explicit identity mapping
 - **horizon_profile**, **horizon_objectives**, **horizon_captures**, **horizon_actions**, **horizon_events** — Private, owner-scoped CEO context and action/result links, not business or engineering memory replicas
 - **horizon_plans**, **horizon_triggers** — Personal capacity plans and persisted reactive triggers; reuse this planning mechanism instead of adding parallel `objectives`/`schedules` engines
 - **workflow_state** (design envelope below) — Optional supplementary execution state when `params` is insufficient, not a claim that a generic collection/service is already wired. No business masters, durable engineering notes, accounting ledger, or code graph belongs here
 
 ### Data Modeling Strategy
 
-Choose the owning system before choosing a storage format: business records go to ERPNext, durable engineering knowledge to Obsidian, implementation/configuration to Git, and execution state to OpenCEO. The following three patterns apply **inside the execution domain**, not to every piece of company data.
+Choose the owning system before choosing a storage format: business records go to Jardal ERP, durable engineering knowledge to Obsidian, implementation/configuration to Git, and execution state to OpenCEO. The following three patterns apply **inside the execution domain**, not to every piece of company data.
 
 #### Three Storage Layers
 
@@ -1568,7 +1568,7 @@ Choose the owning system before choosing a storage format: business records go t
 }
 ```
 
-`scope=run` means the data belongs to one execution and can be cleaned up afterward. `scope=global` means cross-run execution bookkeeping, such as a processed external-event marker, not global business ownership. This storage scope is separate from personal/business privacy scope. `expires_at` enables TTL cleanup; `kind` distinguishes runtime payloads and `key` provides lookup/deduplication identity within a workflow and kind. Business references and dated snapshots must remain traceable to ERPNext.
+`scope=run` means the data belongs to one execution and can be cleaned up afterward. `scope=global` means cross-run execution bookkeeping, such as a processed external-event marker, not global business ownership. This storage scope is separate from personal/business privacy scope. `expires_at` enables TTL cleanup; `kind` distinguishes runtime payloads and `key` provides lookup/deduplication identity within a workflow and kind. Business references and dated snapshots must remain traceable to Jardal ERP.
 
 Recommended indexes: `{workflow: 1, kind: 1, key: 1}`, `{owner_type: 1, owner_id: 1}`, `{expires_at: 1}` (TTL index).
 
@@ -1576,15 +1576,15 @@ Recommended indexes: `{workflow: 1, kind: 1, key: 1}`, `{owner_type: 1, owner_id
 
 When implementing a new workflow or tool that needs to persist data, the developer (human or AI agent) must answer these questions in order:
 
-**Ownership first:** Is this business data, durable engineering knowledge, or code structure? Use ERPNext, the vault, or on-demand repository inspection respectively. Only execution data proceeds through the questions below. A frequent query or dashboard requirement does not transfer domain ownership to MongoDB.
+**Ownership first:** Is this business data, durable engineering knowledge, or code structure? Use Jardal ERP, the vault, or on-demand repository inspection respectively. Only execution data proceeds through the questions below. A frequent query or dashboard requirement does not transfer domain ownership to MongoDB.
 
 **Question 1: Does the data fit in `params` inside an existing `tasks` or `workflow_runs` document?** If the data is small, workflow-local metadata that does not need independent queries — yes, use `params`. This is already the documented pattern: `params` is for workflow-local request metadata and small per-task knobs that do not need global semantics. Examples: country filter for a search, retry interval, preferred contact channel, template name.
 
-**Question 2: Is this a runtime entity with its own lifecycle that multiple workflows or agents query independently?** First reuse an existing structured collection and service. Add a new one only when execution semantics and indexed access justify it; supplementary state can use the `workflow_state` pattern. Business entities still belong in ERPNext even when multiple agents use them.
+**Question 2: Is this a runtime entity with its own lifecycle that multiple workflows or agents query independently?** First reuse an existing structured collection and service. Add a new one only when execution semantics and indexed access justify it; supplementary state can use the `workflow_state` pattern. Business entities still belong in Jardal ERP even when multiple agents use them.
 
 **Question 3: Does the data need complex indexed queries across all instances (e.g., "all entities with status X and last_updated older than Y")?** If yes — it should be in a structured collection, not `workflow_state`. The generic collection works for basic lookups (`workflow` + `kind` + `key`) but is not optimized for arbitrary cross-field queries on `data.*`. When you find yourself needing `db.workflow_state.find({"data.status": "awaiting", "data.last_updated": {$lt: ...}})` across thousands of documents regularly, that data has graduated to its own collection.
 
-**Question 4: None of the above — the data is intermediate, variable, or workflow-specific?** Use the supplementary-state pattern with bounded size and retention: input snapshots, attempt logs, and intermediate computation results. Retain source references. A settled debugging discovery belongs in the vault; a customer or financial record belongs in ERPNext.
+**Question 4: None of the above — the data is intermediate, variable, or workflow-specific?** Use the supplementary-state pattern with bounded size and retention: input snapshots, attempt logs, and intermediate computation results. Retain source references. A settled debugging discovery belongs in the vault; a customer or financial record belongs in Jardal ERP.
 
 #### When `workflow_state` Graduates to a Structured Collection
 
@@ -1599,7 +1599,7 @@ Example: worker execution-attempt metadata may eventually need shared indexed qu
 
 #### Anti-Patterns
 
-- **One collection per business case.** Business data belongs in ERPNext. A new workflow reuses execution collections or supplementary state rather than creating its own business database.
+- **One collection per business case.** Business data belongs in Jardal ERP. A new workflow reuses execution collections or supplementary state rather than creating its own business database.
 - **Querying `data.*` fields heavily in `workflow_state`.** If you're building indexes on `data.status` or `data.last_contact` inside `workflow_state`, the data should be in its own collection.
 - **Storing canonical runtime state in `workflow_state`.** Task status, workflow execution state, approval gates — these belong in `tasks` and `workflow_runs`. The generic collection is for supplementary data.
 - **Creating `memory`, code-graph, or document-replica collections.** The vault and repository retain those responsibilities. Supplementary runtime storage must not grow into another knowledge system.
@@ -1607,9 +1607,9 @@ Example: worker execution-attempt metadata may eventually need shared indexed qu
 
 #### Markdown vs MongoDB
 
-Vault Markdown preserves the reasoning behind decisions and is discoverable through qmd. Repository Markdown defines versioned contracts or local execution artifacts. MongoDB supports atomic execution updates and indexed runtime queries; ERPNext supports business records and their lifecycle. Choose by responsibility, not merely by whether a query is needed.
+Vault Markdown preserves the reasoning behind decisions and is discoverable through qmd. Repository Markdown defines versioned contracts or local execution artifacts. MongoDB supports atomic execution updates and indexed runtime queries; Jardal ERP supports business records and their lifecycle. Choose by responsibility, not merely by whether a query is needed.
 
-Notion may mirror execution summaries for compatibility. ERPNext is the business authority, not another mirror; neither replaces MongoDB's responsibility for resumable execution state.
+Notion may mirror execution summaries for compatibility. Jardal ERP is the business authority, not another mirror; neither replaces MongoDB's responsibility for resumable execution state.
 
 ---
 
@@ -1620,7 +1620,7 @@ Used for **external webhook triggers** and **complex multi-step flows** — not 
 **Inbound contract:** external systems can normalize into `POST /api/tasks`.
 **Outbound contract:** complex multi-step flows with retry, delays, or conditional branching.
 
-ERPNext events must map to explicit, idempotent OpenCEO operations. Do not introduce periodic API synchronization, duplicate CRUD side effects, or a parallel business workflow engine. Routine adapter reads/writes use scoped Python tools directly.
+Jardal ERP events must map to explicit, idempotent OpenCEO operations. Do not introduce periodic API synchronization, duplicate CRUD side effects, or a parallel business workflow engine. Routine adapter reads/writes use scoped Python tools directly.
 
 **Rule: n8n is for receiving external webhooks and orchestrating complex multi-step flows. Simple API calls go directly in agent tools (local or shared).**
 
@@ -1648,7 +1648,7 @@ OpenWebUI remains for: text chat, sending images/files, conversation history. Bo
 
 Each agent is a Python package within the same project. No microservices unless there is a real technical reason.
 
-This applies to OpenCEO's execution code. ERPNext and the engineering vault are independent systems with their own responsibilities, not modules to reproduce inside the monolith. Adapters stay in the owning agent, or in shared tools when there are multiple consumers.
+This applies to OpenCEO's execution code. Jardal ERP and the engineering vault are independent systems with their own responsibilities, not modules to reproduce inside the monolith. Adapters stay in the owning agent, or in shared tools when there are multiple consumers.
 
 ### Agent Folder Structure
 
@@ -1659,11 +1659,11 @@ openceo-core/agents/
   finance/
     __init__.py
     tools/
-      queries.py          # scoped ERPNext balance, budget, and obligation reads
-      records.py          # permitted document registration through ERPNext
+      queries.py          # scoped Jardal ERP balance, budget, and obligation reads
+      records.py          # permitted document registration through Jardal ERP
       payments.py         # prepare/confirm operations under the Finance contract
       reporting.py        # dated summaries with source references
-    erpnext_client.py      # scoped deterministic HTTP adapter (integration design)
+    jardal_erp_client.py   # scoped deterministic HTTP adapter (integration design)
     workflows/
       cierre_contable.yaml
       crypto_reembolso.yaml
@@ -1706,7 +1706,7 @@ TOOL_REGISTRY = {
     # Local — direct Python function
     "core.echo": echo_fn,
 
-    # External — scoped adapter calling ERPNext (integration design)
+    # External — scoped adapter calling Jardal ERP (integration design)
     "finance.get_scope_summary": get_scope_summary_fn,
 }
 ```
@@ -1726,7 +1726,7 @@ openceo/
 │   └── systemd/
 ├── docs/
 │   ├── OPENCEO_DIRECTION.md          # Domain ownership and integration direction
-│   ├── finance-erpnext-integration-contract.md
+│   ├── finance-jardal-erp-integration-contract.md
 │   └── SETUP.md
 ├── openceo-core/                     # Backend: FastAPI + OpenWebUI-compatible API + MCP
 │   ├── .env.example
@@ -1812,7 +1812,7 @@ openceo/
     └── health_check.sh
 ```
 
-Outside this repository: ERPNext owns business persistence and its deployment; `jardal-knowledge/vault/` owns engineering memory and its qmd index. Neither is embedded into MongoDB or copied into the project tree.
+Outside this repository: Jardal ERP owns business persistence and its deployment; `jardal-knowledge/vault/` owns engineering memory and its qmd index. Neither is embedded into MongoDB or copied into the project tree.
 
 ---
 
@@ -1909,7 +1909,7 @@ Notes:
 - Finance secrets belong in `openceo-core/.env.finance.local`, not in source files.
 - Free-router secrets belong in openceo-core/.env.free-router.local (0600, `FREE_ROUTER_*` names only, template `openceo-core/.env.free-router.local.example`); never in openceo-core/.env, where `GROQ_API_KEY` is the voice key.
 - Each `openceo-core/agents/{name}/.env.example` file documents the skill-local credential contract for packaging and marketplace export.
-- ERPNext adapter credentials and settings follow the Finance/integration contract when implemented; documentation alone does not enable an adapter or add accepted runtime fields. Keep them scoped to permitted operations, outside Git and the vault.
+- Jardal ERP adapter credentials and settings follow the Finance/integration contract when implemented; documentation alone does not enable an adapter or add accepted runtime fields. Keep them scoped to permitted operations, outside Git and the vault.
 - Vault paths, qmd setup, and the link checker are documented in the [engineering memory setup](../../jardal-knowledge/README.md), not added as a new MCP service.
 
 ---
@@ -1932,7 +1932,7 @@ Docker build note:
 - `openceo-core/Dockerfile` now installs shared requirements plus every bundled `agents/*/requirements.txt`.
 - If a bundled skill installs Playwright, Docker also installs Chromium during build.
 
-These commands deploy OpenCEO, not ERPNext or the vault. ERPNext retains an independent deployment lifecycle. Host coding agents use direct filesystem access to the vault; containerized agents need explicitly configured access to that same vault and its approved tooling, not an internal copy of the knowledge base.
+These commands deploy OpenCEO, not Jardal ERP or the vault. Jardal ERP retains an independent deployment lifecycle. Host coding agents use direct filesystem access to the vault; containerized agents need explicitly configured access to that same vault and its approved tooling, not an internal copy of the knowledge base.
 
 LiveKit Voice:
 - `cd openceo-voice && cp .env.example .env`
@@ -1950,19 +1950,19 @@ LiveKit Android: Open `openceo-voice-android/` in Android Studio → Build → R
 3. Declare only that skill's credentials/config in `.env.example`.
 4. If the skill should be executable in the bundled runtime, wire it explicitly in `router.py`, `graph.py`, and the relevant service/runtime code. A folder alone is not enough.
 5. If the skill should run inside the bundled deployment, merge its env keys into `openceo-core/.env` or add dedicated env loading support.
-6. Keep business operations behind OpenCEO capabilities backed by ERPNext, engineering knowledge in the vault, and code relationships in repository search/LSP. A new agent does not gain its own business or memory database.
+6. Keep business operations behind OpenCEO capabilities backed by Jardal ERP, engineering knowledge in the vault, and code relationships in repository search/LSP. A new agent does not gain its own business or memory database.
 
 ## Adding a New Project
 
-1. For business work, identify the ERPNext project and stable `project_key`; preserve the explicit mapping to the local execution name.
-2. Create `projects/{name}/project.yaml` with repository/provider/routing configuration. Existing local-only execution remains compatible until an ERPNext adapter is integrated.
-3. Link the project to its vault hub using `obsidian-vault-links`; reuse existing knowledge and validate links. New projects get no `CONTEXT.md`: status goes to `STATUS.md` and work to ERPNext tickets (preset `sync_context`).
+1. For business work, identify the Jardal ERP project and stable `project_key`; preserve the explicit mapping to the local execution name.
+2. Create `projects/{name}/project.yaml` with repository/provider/routing configuration. Existing local-only execution remains compatible until an Jardal ERP adapter is integrated.
+3. Link the project to its vault hub using `obsidian-vault-links`; reuse existing knowledge and validate links. New projects get no `CONTEXT.md`: status goes to `STATUS.md` and work to Jardal ERP tickets (preset `sync_context`).
 
 ## Adding a New Business Process
 
-1. Define the business process, priority, and human approvals in ERPNext.
+1. Define the business process, priority, and human approvals in Jardal ERP.
 2. Define its technical execution recipe in the YAML/config consumed by the registered OpenCEO worker; use existing routing and discovery contracts.
-3. Connect business references and transitions through a scoped, idempotent OpenCEO adapter. Do not expose arbitrary ERPNext APIs or duplicate its workflow state.
+3. Connect business references and transitions through a scoped, idempotent OpenCEO adapter. Do not expose arbitrary Jardal ERP APIs or duplicate its workflow state.
 
 ## Adding a New Tool
 
@@ -1977,7 +1977,7 @@ LiveKit Android: Open `openceo-voice-android/` in Android Studio → Build → R
 
 ## VM Restart Recovery
 
-1. MongoDB persists canonical OpenCEO execution state. ERPNext persists business records independently; the vault and Git retain knowledge and implementation. Notion compatibility views remain projections.
+1. MongoDB persists canonical OpenCEO execution state. Jardal ERP persists business records independently; the vault and Git retain knowledge and implementation. Notion compatibility views remain projections.
 2. Interrupted tasks are marked accordingly on startup reconcile.
 3. tmux-backed dev sessions can be reattached by `dev_session_service.startup_reconcile()`.
 4. WebSocket clients reconnect normally.
@@ -1988,8 +1988,8 @@ LiveKit Android: Open `openceo-voice-android/` in Android Studio → Build → R
 ## Development Rules
 
 - **README.md is an architecture document.** It defines flows, functionalities, and design decisions. NEVER add operational tracking here. That information belongs in `STATUS.md`.
-- Follow [OPENCEO_DIRECTION.md](OPENCEO_DIRECTION.md) for domain ownership. Preserve execution contracts when introducing ERPNext adapters or replacing compatibility context files.
-- Record durable engineering conclusions in the vault using `obsidian-vault-links`, with valid links and a passing checker. Keep code topology in the repository and business records in ERPNext.
+- Follow [OPENCEO_DIRECTION.md](OPENCEO_DIRECTION.md) for domain ownership. Preserve execution contracts when introducing Jardal ERP adapters or replacing compatibility context files.
+- Record durable engineering conclusions in the vault using `obsidian-vault-links`, with valid links and a passing checker. Keep code topology in the repository and business records in Jardal ERP.
 - Keep `README.md`, `STATUS.md`, and the affected skill manifests in sync whenever architecture, install contracts, or runtime behavior changes.
 - Do not put planning or tracking notes in `README.md`.
 - If you change the dev runtime flow, re-run the smoke checklist from `CLAUDE.md` §9 before closing the task.

@@ -7,7 +7,7 @@ Version: 1.1 (2026-09-23)
 OpenCEO is an Agent Control Plane. It coordinates AI coding agents,
 execution workflows, workers, sessions, quotas and automation.
 
-OpenCEO is not intended to replace Jira, Notion, ERPNext, documentation
+OpenCEO is not intended to replace Jira, Notion, Jardal ERP, documentation
 platforms or code intelligence systems.
 
 ## Architecture Domains
@@ -15,7 +15,7 @@ platforms or code intelligence systems.
   -----------------------------------------------------------------------
   System                              Responsibility
   ----------------------------------- -----------------------------------
-  ERPNext                             Business work management: projects,
+  Jardal ERP                             Business work management: projects,
                                       tickets, requests, approvals
 
   Obsidian                            Engineering knowledge memory, a
@@ -57,9 +57,9 @@ OpenCEO does not own:
 -   Code graphs
 -   Business information
 
-## ERPNext Role
+## Jardal ERP Role
 
-ERPNext is the business system of record.
+Jardal ERP is the business system of record.
 
 It owns:
 
@@ -71,7 +71,7 @@ It owns:
 -   Users
 -   Business workflows
 
-ERPNext answers:
+Jardal ERP answers:
 
 "What work exists?"
 
@@ -165,7 +165,7 @@ Avoid exposing complete infrastructure APIs.
 
 A project is distributed:
 
-ERPNext: - identity - tickets - status
+Jardal ERP: - identity - tickets - status
 
 Git: - code - configuration
 
@@ -181,7 +181,7 @@ project_key
 
 OpenCEO coordinates intelligence.
 
-ERPNext coordinates work.
+Jardal ERP coordinates work.
 
 Obsidian preserves engineering memory.
 

@@ -225,7 +225,7 @@ async def migrate_notes(notes: Any, *, horizon: Any, tickets: Any,
 
     ``notes`` is the motor ``notes`` collection (``find`` + ``delete_one``
     only); ``horizon`` answers ``capture`` like ``HorizonService`` and
-    ``tickets`` answers ``get_ticket``/``add_comment`` like the ERPNext
+    ``tickets`` answers ``get_ticket``/``add_comment`` like the Jardal ERP
     adapter. ``mappings`` routes company projects to vault paths
     (``{"demo": "projects/jardal/demo"}``); ``channel`` defaults to the
     Horizon ``import`` channel.
@@ -387,7 +387,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     from db.mongo import MongoRepository
     from horizon.service import HorizonService
     from settings import get_settings
-    from tools.erpnext_tickets import ERPNextTicketAdapter
+    from tools.jardal_erp_tickets import JardalERPTicketAdapter
 
     try:
         mappings = _load_mappings(args.mappings)
@@ -399,7 +399,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = get_settings()
         repo = MongoRepository(settings)
         await repo.connect()
-        tickets = ERPNextTicketAdapter(settings)
+        tickets = JardalERPTicketAdapter(settings)
         try:
             horizon = HorizonService(settings, repo)
             return await migrate_notes(

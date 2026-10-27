@@ -17,7 +17,7 @@ Routing is enforced before admission: objective children without the planner
 tier park fail-closed as ``routing_missing``; loose tickets without a tier
 launch tier-unaware and the run pre-stage plans the pedido before executing
 (TASK-2026-00204). Tickets
-whose ERPNext business link is still pending never launch. Wait reasons are
+whose Jardal ERP business link is still pending never launch. Wait reasons are
 typed (``state.WAIT_*``) and stored on the ticket's ``waiting_reason`` so
 the dashboard and Horizon read them through the existing queries. All of
 them classify as operational (``waiting_needs_human_review`` allowlists
@@ -81,11 +81,11 @@ def _aware(moment: Any) -> datetime | None:
     return _FAR_FUTURE
 
 
-def _erpnext_link_pending(ticket: dict[str, Any]) -> bool:
+def _business_link_pending(ticket: dict[str, Any]) -> bool:
     """True when the business link is still pending (ERP outage at creation).
 
     Reads only the local mirror (``pending`` flag or a ref without a name):
-    no live ERPNext reads. Tickets without any mirror section (personal
+    no live Jardal ERP reads. Tickets without any mirror section (personal
     scope, pre-integration legacy) are not pending.
     """
     params = ticket.get("params")
@@ -344,7 +344,7 @@ class Dispatcher:
         task_id = str(ticket.get("task_id") or "")
         if not self._service._task_allows_autorun(ticket):
             return "skipped"
-        if _erpnext_link_pending(ticket):
+        if _business_link_pending(ticket):
             # No execution on work with no business record (§8/§10). The
             # repair path wakes when the link heals; the backup is the net.
             return "skipped"

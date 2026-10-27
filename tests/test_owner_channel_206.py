@@ -80,7 +80,7 @@ class BuildOwnerQuestionTests(unittest.TestCase):
             spec["source_id"], "tool-proposal:OBJ-1:dns.delete_record"
         )
 
-    def test_title_truncated_to_erpnext_subject(self) -> None:
+    def test_title_truncated_to_business_subject(self) -> None:
         spec = build_owner_question(
             kind="question",
             question="x" * 300,
@@ -339,7 +339,7 @@ def _make_service(repo: _SvcRepo):
 
 
 class CreateOwnerQuestionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_creates_erpnext_first_and_parks_waiting(self) -> None:
+    async def test_creates_business_first_and_parks_waiting(self) -> None:
         from state import TaskCreateRequest
 
         repo = _SvcRepo()
@@ -637,24 +637,24 @@ class NewToolApproveTests(unittest.IsolatedAsyncioTestCase):
 
 class WaitingNeedsHumanReviewTests(unittest.TestCase):
     def test_owner_question_wait_pushes_pending_review(self) -> None:
-        from tools.erpnext_tickets import (
-            resolve_erpnext_status,
+        from tools.jardal_erp_tickets import (
+            resolve_jardal_erp_status,
             waiting_needs_human_review,
         )
 
         task = _question_task("q1")
         self.assertTrue(waiting_needs_human_review(task))
-        self.assertEqual(resolve_erpnext_status(task), "Pending Review")
+        self.assertEqual(resolve_jardal_erp_status(task), "Pending Review")
 
     def test_tier_s_wait_stays_operational(self) -> None:
-        from tools.erpnext_tickets import (
-            resolve_erpnext_status,
+        from tools.jardal_erp_tickets import (
+            resolve_jardal_erp_status,
             waiting_needs_human_review,
         )
 
         task = _svc_task("t1", waiting_reason="needs_owner: gates failed")
         self.assertFalse(waiting_needs_human_review(task))
-        self.assertIsNone(resolve_erpnext_status(task))
+        self.assertIsNone(resolve_jardal_erp_status(task))
 
 
 class _TrayRepo:
@@ -709,7 +709,7 @@ class PendingDecisionsOwnerQuestionTests(unittest.IsolatedAsyncioTestCase):
 class DeskAnswerTests(unittest.IsolatedAsyncioTestCase):
     def _desk_service(self, repo: _SvcRepo):
         service = _make_service(repo)
-        service._erpnext = SimpleNamespace(is_enabled=True)
+        service._business = SimpleNamespace(is_enabled=True)
         service.set_dispatcher_wake(lambda: None)
         return service
 
@@ -1101,14 +1101,14 @@ class OwnerAnswerRetryTests(unittest.IsolatedAsyncioTestCase):
         }
         repo.tasks["q1"] = question
         service = _make_service(repo)
-        service._erpnext = SimpleNamespace(is_enabled=True)
+        service._business = SimpleNamespace(is_enabled=True)
         service.set_dispatcher_wake(lambda: None)
         calls: list[Any] = []
 
         async def _flaky(payload: Any) -> dict[str, Any]:
             calls.append(payload)
             if len(calls) == 1:
-                raise RuntimeError("erpnext caido")
+                raise RuntimeError("jardal_erp caido")
             return {"task_id": "dev-1"}
 
         service.create_task = _flaky  # type: ignore[method-assign]

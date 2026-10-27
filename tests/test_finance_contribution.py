@@ -1,4 +1,4 @@
-"""Tests de la regla del 10% desde ERPNext (TASK-2026-00054).
+"""Tests de la regla del 10% desde Jardal ERP (TASK-2026-00054).
 
 Sin red: aritmética Decimal, base elegible, estado `needs_input` cuando no hay
 cuenta de aportes y solo-lectura se prueban con un cliente falso.

@@ -2232,17 +2232,17 @@ class TierSCycle:
                            exc_info=True)
         await self._runs.patch_run(ctx.run_id, {
             "status": "superseded",
-            "superseded_reason": "ticket cancelled in ERPNext",
+            "superseded_reason": "ticket cancelled in Jardal ERP",
             "waiting": None,
             "active_repo": None,
             "metrics": ctx.metrics,
             "updated_at": _utcnow_iso(),
         })
-        await self._say(ctx, "ticket cancelled in ERPNext; cycle fenced "
+        await self._say(ctx, "ticket cancelled in Jardal ERP; cycle fenced "
                         "(no merge, work branch dropped)")
         return CycleOutcome(
             status="failed", run_id=ctx.run_id, reason="cancelled",
-            detail="ticket cancelled in ERPNext; close fenced",
+            detail="ticket cancelled in Jardal ERP; close fenced",
             branch=None)
 
     async def ask_owner(
@@ -2261,7 +2261,7 @@ class TierSCycle:
         planner as verdicts, never as questions). Without a ticket hook
         the park still lands and the question degrades to today's manual
         resume. The Owner's answer requeues the origin from the cockpit,
-        by voice, or from the ERPNext desk.
+        by voice, or from the Jardal ERP desk.
         """
         outcome = await self._park(
             ctx, "needs_owner", detail or question, patch_run=True)
@@ -2399,7 +2399,7 @@ class TierSCycle:
         if ctx.fenced_cancelled:
             return CycleOutcome(status="failed", run_id=ctx.run_id,
                                 reason="cancelled",
-                                detail="ticket cancelled in ERPNext; "
+                                detail="ticket cancelled in Jardal ERP; "
                                 "park fenced",
                                 branch=None)
         if ctx.parked_outcome is not None:

@@ -792,7 +792,7 @@ class HookTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertFalse(crys.has_drafts("../x", base_dir=Path(tmp)))
 
-    def test_mirror_ticket_reads_erpnext_name(self) -> None:
+    def test_mirror_ticket_reads_business_name(self) -> None:
         task = {"params": {"_mirrors": {"erpnext": {"name": TICKET}}}}
         self.assertEqual(TICKET, crys.mirror_ticket(task))
         self.assertIsNone(crys.mirror_ticket({"params": {}}))

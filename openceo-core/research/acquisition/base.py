@@ -11,7 +11,7 @@ con dinero o con cuota:
    rate-limit, transporte y parseo son causas distintas, con recuperacion distinta.
    Mezclarlas produce dos fallos clasicos: reintentar un 402 (gasta sin poder) o
    dar por gratis un timeout ambiguo (gasta sin registrar). Aqui no se copia la
-   excepcion ``Duplicate`` de ERPNext: un proveedor de busqueda no tiene semantica
+   excepcion ``Duplicate`` de Jardal ERP: un proveedor de busqueda no tiene semantica
    de duplicado de negocio, y arrastrarla haria que un resultado repetido se
    tratara como error transitorio.
 

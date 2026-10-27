@@ -1,6 +1,6 @@
-"""Registro ocasional de gastos por voz/chat hacia ERPNext. Cero logica LLM.
+"""Registro ocasional de gastos por voz/chat hacia Jardal ERP. Cero logica LLM.
 
-Flujo Fase B del contrato (`docs/finance-erpnext-integration-contract.md`):
+Flujo Fase B del contrato (`docs/finance-jardal-erp-integration-contract.md`):
 un solo flujo real end-to-end, `finance.register_expense` sobre el unico
 DocType que este flujo crea: `Journal Entry` (que ya trae `openceo_ref`
 unico y verificado: reintento con el mismo ref devuelve HTTP 417).
@@ -235,7 +235,7 @@ async def register_expense(
     ref: str | None = None,
     submit: bool = True,
 ) -> dict[str, Any]:
-    """Registra el gasto en ERPNext. Idempotente por `ref` (ver `journal`)."""
+    """Registra el gasto en Jardal ERP. Idempotente por `ref` (ver `journal`)."""
     operation_ref = (ref or "").strip() or new_openceo_ref()
     return await submit_journal_entry(
         client,

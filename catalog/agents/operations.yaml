@@ -9,7 +9,7 @@ boundary_tools:
   - openceo_get_ticket
   - openceo_add_ticket_comment
   - openceo_attach_ticket_file
-  - openceo_ensure_erpnext_project
+  - openceo_ensure_business_project
   - manage_dns_record
 skills_dir: skills/operations
 skills:
@@ -17,7 +17,7 @@ skills:
 inputs:
   - ticket with project spec
 outputs:
-  - created project (ERPNext, repo, config, vault, DNS)
+  - created project (Jardal ERP, repo, config, vault, DNS)
 enabled: true
 disabled_reason: null
 decided_by_ticket: null

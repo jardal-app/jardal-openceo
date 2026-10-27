@@ -7,14 +7,14 @@ with the deterministic anti-bloat rules, performs exactly one action,
 and publishes the review record Horizon reads.
 
 Business-state effects flow only through sanctioned channels
-(ERPNext-first creation, ``create_owner_escalation``, the engine
+(Jardal ERP-first creation, ``create_owner_escalation``, the engine
 observer). If a future CEO ever needs to close or cancel business
 work directly, it MUST go through ``TaskService.transition_ticket``
 (TASK-2026-00132) — never through a direct adapter write. No such
 call site exists in this ticket: the five-action contract states a
 need (a pedido the single planner shapes), escalates, reports, or
 closes a mission with evidence, and business acceptance stays an
-ERPNext decision.
+Jardal ERP decision.
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@
 Contratos y reglas probadas:
 1. Clasificacion determinista: sin toque declarado -> personal; toque
    conocido -> empresa; toque desconocido -> rechazo sin crear nada.
-2. Frontera de privacidad: a ERPNext solo viaja la especificacion del
+2. Frontera de privacidad: a Jardal ERP solo viaja la especificacion del
    trabajo (canarios personales nunca aparecen en el borde ERP real).
 3. Promocion idempotente por accion y por `source_id` de la API.
 4. Costo/gasto/replanificacion -> escalado al dueno; el resto, automatico.
@@ -217,7 +217,7 @@ class FakeTaskService:
 
 
 class FakeErpAdapter:
-    """Adapter ERPNext: graba el payload que cruzaria a negocio."""
+    """Adapter Jardal ERP: graba el payload que cruzaria a negocio."""
 
     def __init__(self) -> None:
         self.is_enabled = True
@@ -799,11 +799,11 @@ class ErpBoundaryTests(_Base):
 
         service = TaskService.__new__(TaskService)
         service._settings = _settings(HORIZON_PERSONAL_MIRROR_ENABLED=False)
-        service._erpnext = FakeErpAdapter()
+        service._business = FakeErpAdapter()
         service._repo = None
         return service
 
-    async def test_promoted_reaches_erpnext_with_spec_only(self) -> None:
+    async def test_promoted_reaches_business_with_spec_only(self) -> None:
         await self.repo.upsert_horizon_profile(
             {
                 "user_id": "usr_owner",
@@ -833,7 +833,7 @@ class ErpBoundaryTests(_Base):
         self.assertFalse(pending)
         self.assertTrue(mirror and mirror.get("name"))
 
-        adapter: FakeErpAdapter = service._erpnext
+        adapter: FakeErpAdapter = service._business
         self.assertEqual(len(adapter.calls), 1)
         payload = adapter.calls[0]
         blob = "\n".join(
@@ -847,7 +847,7 @@ class ErpBoundaryTests(_Base):
         ):
             self.assertNotIn(canary, blob)
 
-    async def test_personal_stays_out_of_erpnext(self) -> None:
+    async def test_personal_stays_out_of_business(self) -> None:
         stored = await self._store(_action())
         delegated = await self.service.delegate_action(
             "usr_owner", action_id=stored["action_id"]
@@ -859,7 +859,7 @@ class ErpBoundaryTests(_Base):
         mirror, pending = await service._register_business_ticket(doc)
         self.assertIsNone(mirror)
         self.assertFalse(pending)
-        adapter: FakeErpAdapter = service._erpnext
+        adapter: FakeErpAdapter = service._business
         self.assertEqual(adapter.calls, [])
 
 
