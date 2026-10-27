@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Callable, Container, Literal, Mapping, Protocol
 from uuid import uuid4
 
+from model_routing import serve_evidence as router_serve_evidence
 from model_routing.availability import (
     AvailabilityStore,
     Candidate,
@@ -929,6 +930,8 @@ class ResearchSession:
                 self._apply_deltas(
                     queries_and_sources, validated, pending_goal, decisions,
                     artifacts)
+                router_serve_evidence.record_native_serve(
+                    candidate.provider, candidate.deployment_id)
                 self._turn += 1
                 self._partial_text = ""
                 checkpoint = self._save(turn=self._turn, partial_text="")
@@ -1042,6 +1045,8 @@ class ResearchSession:
                 self._apply_deltas(
                     queries_and_sources, validated, pending, decisions,
                     artifacts)
+                router_serve_evidence.record_native_serve(
+                    self._static_model.split("/", 1)[0], self._static_model)
                 self._turn += 1
                 self._partial_text = ""
                 checkpoint = self._save(turn=self._turn, partial_text="")

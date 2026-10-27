@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from model_routing import live as router_live
+from model_routing import serve_evidence as router_serve_evidence
 from model_routing.errors import classify_text
 from model_routing.models import Capabilities
 
@@ -695,6 +696,7 @@ def run_native_probe(
         capabilities=Capabilities(tools=bool(calls)),
         observed_at=datetime.now(timezone.utc).isoformat(),
     )
+    router_serve_evidence.record_native_serve(provider, model)
     return result, {"events": events}
 
 

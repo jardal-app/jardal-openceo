@@ -65,6 +65,29 @@ drops are an initial hypothesis (0.15/0.20/0.25). Research prefers
 128K context and falls back to 64K when nothing qualifies, recording
 the applied floor. Policy `profiles:` overrides merge per field.
 
+## Native serve evidence (TASK-2026-00315)
+
+OpenCode Free only serves from the native CLI, so a group A
+deployment verifies only with fresh serve evidence: proof the model
+served natively at zero cost within the last 7 days
+(`SERVE_EVIDENCE_TTL` in `sources.py`).
+
+Producer (`model_routing/serve_evidence.py`, state file
+`~/.local/state/free-router/serve-evidence.json`,
+`{model_id: iso_timestamp}`): every native zero-cost serve records
+one entry, best-effort, never raising. Hooks: `probes.run_native_probe`
+on success (cost already verified zero), `review_wiring.record_receipt`
+for native-route receipts, `research_wiring` managed/static turns on
+completion. Cron B loads the file in `_fetch_providers` and feeds it
+to `refresh_source`; a missing or corrupt file means no evidence,
+never an error. Stale entries are pruned on write; unknown ids are
+kept but ignored (only listed models verify).
+
+Operator: `free-router serve-evidence --model <bare-id>` records one
+id manually; bare `free-router serve-evidence` (or `--json`) lists
+entries with freshness. Offline test runs may leave synthetic ids in
+a dev state file; they never verify because they are not offered.
+
 ## Known limits
 
 - If `rankings.json` is missing or corrupt, the next publication

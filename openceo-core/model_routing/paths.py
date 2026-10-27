@@ -26,6 +26,7 @@ __all__ = [
     "POLICY_FILENAME",
     "PROVIDERS_FILENAME",
     "RANKINGS_FILENAME",
+    "SERVE_EVIDENCE_FILENAME",
     "STATE_DIRNAME",
     "UPDATER_LOCK_FILENAME",
     "UPDATER_LOG_FILENAME",
@@ -38,6 +39,7 @@ __all__ = [
     "policy_path",
     "providers_path",
     "rankings_path",
+    "serve_evidence_path",
     "state_dir",
 ]
 
@@ -51,6 +53,7 @@ RANKINGS_FILENAME = "rankings.json"
 PAID_FILENAME = "paid.json"
 HISTORY_DIRNAME = "history"
 GATEWAY_GENERATED_FILENAME = "gateway.generated.yaml"
+SERVE_EVIDENCE_FILENAME = "serve-evidence.json"
 GATEWAY_FROZEN_FILENAME = "gateway.frozen"
 AVAILABILITY_DB_FILENAME = "availability.sqlite"
 UPDATER_LOCK_FILENAME = "update.lock"
@@ -113,3 +116,8 @@ def history_dir() -> Path:
 def availability_db_path() -> Path:
     """Health, cooldowns, usage, locks and reservations store."""
     return state_dir() / AVAILABILITY_DB_FILENAME
+
+
+def serve_evidence_path() -> Path:
+    """Native serve evidence map (TASK-2026-00315)."""
+    return state_dir() / SERVE_EVIDENCE_FILENAME

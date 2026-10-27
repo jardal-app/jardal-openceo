@@ -42,6 +42,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Container, Mapping, Sequence
 
+from model_routing import serve_evidence as router_serve_evidence
 from model_routing.availability import (
     AvailabilityStore,
     Candidate,
@@ -974,6 +975,8 @@ def record_receipt(
         json.dumps(receipt.to_dict(), indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8")
     routing.receipts[label] = receipt
+    if receipt.route_type == "opencode_native_free":
+        router_serve_evidence.record_native_serve(receipt.provider, receipt.model_id)
     return receipt
 
 
