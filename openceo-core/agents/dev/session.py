@@ -48,6 +48,7 @@ from orchestration.provider_recovery import (
 from orchestration.role_claude import (
     CLAUDE_MCP_OVERLAY_RELPATH,
     claude_config_bytes,
+    claude_no_auto_memory_env,
     ensure_mcp_placeholder,
     profile_box_tools,
 )
@@ -2540,7 +2541,8 @@ class DevSessionManager:
                 argv=argv,
                 prompt_via="argv",
                 cwd=self._provider_cwd(provider_cfg, repo_cwd),
-                env=self._provider_env(provider_cfg),
+                env=claude_no_auto_memory_env(
+                    self._provider_env(provider_cfg)),
                 label="tier_a",
                 role_profile=(str(profile_name) if profile_name else None),
             )
@@ -2602,12 +2604,15 @@ class DevSessionManager:
             argv = self._as_argv(link_cfg.get("command")) or [link]
             if link == "claudep":
                 argv = self._ensure_print_flag(argv)
+            link_env = {str(k): str(v)
+                        for k, v in dict(link_cfg.get("env") or {}).items()}
             return TierExecutor(
                 argv=self._with_model_args(
                     argv, self._model_args(link_cfg)),
                 prompt_via="stdin" if link == "dsh" else "argv",
                 cwd=repo_cwd,
-                env={str(k): str(v) for k, v in dict(link_cfg.get("env") or {}).items()},
+                env=(claude_no_auto_memory_env(link_env)
+                     if link == "claudep" else link_env),
                 label=f"tier_c:{link}",
             )
         raise ValueError(f"no simple executor for tier {tool!r}")

@@ -30,7 +30,9 @@ __all__ = [
     "CLAUDE_BUILTIN_TOOLS",
     "CLAUDE_MCP_OVERLAY_RELPATH",
     "CLAUDE_MCP_SERVER",
+    "CLAUDE_NO_AUTO_MEMORY_ENV",
     "claude_config_bytes",
+    "claude_no_auto_memory_env",
     "ensure_mcp_placeholder",
     "profile_box_tools",
     "render_allowed_tools",
@@ -47,6 +49,16 @@ CLAUDE_MCP_OVERLAY_RELPATH = ".claude/openceo-run-mcp.json"
 
 #: MCP server name the box tools are pre-approved under.
 CLAUDE_MCP_SERVER = "openceo-internal"
+
+#: Auto memory stays off in OpenCEO-launched Claude runs (D5): learnings
+#: belong to the project vault, never to the engine's own memory.
+CLAUDE_NO_AUTO_MEMORY_ENV = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
+
+
+def claude_no_auto_memory_env(extra: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Launch env for a Claude run: D5 kill-switch wins over ``extra``."""
+    return {**{str(k): str(v) for k, v in dict(extra or {}).items()},
+            **CLAUDE_NO_AUTO_MEMORY_ENV}
 
 #: Engine file/shell tools pre-approved next to the box. The fence still
 #: decides WHERE the run may write and the badge which MCP tools answer;
