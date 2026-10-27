@@ -323,6 +323,20 @@ def _dev_vault_roots(
     return vault_project_read_root(project_config)
 
 
+def _dev_vault_index(
+    project_config: Mapping[str, Any] | None,
+) -> str:
+    """Bounded hub + practices index for Dev prompts (00329, D6).
+
+    Never fails: without a vault the prompt runs exactly as before.
+    """
+    from orchestration.vault_index import build_vault_index
+    try:
+        return build_vault_index(project_config)
+    except Exception:
+        return ""
+
+
 def _tier_s_roles_with_vault(
     roles: Mapping[str, Any],
     project_config: Mapping[str, Any] | None,
@@ -2102,6 +2116,8 @@ class DevSessionManager:
         if cycle_issuer is not None and badge_ticket and project:
             badge_provider = TicketBadgeProvider(
                 cycle_issuer, self._settings, "dev", badge_ticket, project)
+        cycle_cfg = {**cycle_cfg,
+                       "vault_index": _dev_vault_index(project_config)}
         executor = ProcessExecutor(
             roles=_tier_s_roles_with_vault(cycle_cfg["roles"],
                                            project_config),
@@ -2864,6 +2880,10 @@ class DevSessionManager:
             ]
         )
         lines.extend(["", AGENT_RESULT_PROMPT])
+
+        vault_index = _dev_vault_index(config)
+        if vault_index:
+            lines.extend(["", vault_index])
 
         return with_preamble(
             "\n".join(lines), self._resolve_repo_path(config), "es")
