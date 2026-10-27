@@ -1488,11 +1488,19 @@ class TierSCycle:
                     wiring_mod.derive_slot(slot, nxt), None)
             return outcome
 
-        result = await review_mod.run_quorum_round(
-            pool if pool is not None else ctx.pool, self._slots, plan,
-            run_one, builder_family=builder_family, quorum=quorum,
-            recovery=ctx.review_cfg.get("recovery"),
-            cascade=ctx.review_cfg.get("cascade"))
+        round_pool = pool if pool is not None else ctx.pool
+        critical = (str(ctx.ticket.get("priority") or "").lower()
+                    == "critical")
+        cascade = review_mod.arm_premium_slots(
+            self._exec, round_pool, ctx.review_cfg.get("cascade"), critical)
+        try:
+            result = await review_mod.run_quorum_round(
+                round_pool, self._slots, plan,
+                run_one, builder_family=builder_family, quorum=quorum,
+                recovery=ctx.review_cfg.get("recovery"),
+                cascade=cascade)
+        finally:
+            review_mod.disarm_premium_slots(self._exec, round_pool)
         slots_run = sorted(result.valid)
         valid_reports = sum(1 for label in slots_run if result.valid.get(label))
         verdicts = result.verdicts

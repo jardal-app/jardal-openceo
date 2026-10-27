@@ -271,7 +271,8 @@ class ProcessExecutor:
             try:
                 from model_routing import paid as paid_mod
                 paid_target, config_argv, paid_model = (
-                    paid_mod.resolve_paid_review(config_argv))
+                    paid_mod.resolve_paid_review(
+                        config_argv, premium=bool(spec.get("premium"))))
             except Exception:
                 paid_target, paid_model = None, None
             if paid_model is not None:
@@ -540,6 +541,18 @@ class ProcessExecutor:
         for entry in entries:
             if isinstance(entry, Mapping) and entry.get("label"):
                 self._pool[str(entry["label"])] = dict(entry)
+
+    def arm_premium(self, label: str) -> None:
+        """Serve the premium paid list for one round-scoped label."""
+        spec = self._pool.get(str(label))
+        if spec is not None:
+            spec["premium"] = True
+
+    def disarm_premium(self, label: str) -> None:
+        """Drop the round-scoped premium flag from one label."""
+        spec = self._pool.get(str(label))
+        if spec is not None:
+            spec.pop("premium", None)
 
     async def cleanup(self, role: str) -> None:
         """One-shot processes own nothing between calls."""

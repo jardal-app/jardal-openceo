@@ -566,6 +566,10 @@ class ConfigLoader:
                             "inclusionai/ling-3.0-flash",
                             "mistralai/mistral-nemo",
                         ],
+                        "premium": False,
+                        "premium_cap_usd": "1.00",
+                        "premium_estimate_usd": "0.50",
+                        "premium_whitelist": [],
                     },
                     "free_router": {
                         "enabled": False,

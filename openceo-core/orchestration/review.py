@@ -22,7 +22,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -77,6 +77,9 @@ class ReviewSlot:
     cost_tier: str = "metered"
     # Cascade-only slots (paid last resort) never join classic rounds.
     cascade_only: bool = False
+    # Premium serves the proven paid list on critical tickets; the tier
+    # order never changes (paid stays the last resort either way).
+    premium: bool = False
 
 
 #: Cascade wave order (TASK-2026-00310): free routes first, own flat-rate
@@ -185,6 +188,7 @@ def parse_pool(raw: Sequence[Mapping[str, Any]] | None) -> list[ReviewSlot]:
             reserve_only=bool(entry.get("reserve_only", False)),
             cost_tier=tier,
             cascade_only=bool(entry.get("cascade_only", False)),
+            premium=bool(entry.get("premium", False)),
         ))
     slots.sort(key=lambda slot: (slot.priority, slot.label))
     return slots
@@ -442,6 +446,10 @@ CASCADE_DEFAULTS = {
     "dsh_estimate_usd": "0.00",
     "paid_whitelist": [],
     "paid_dynamic": True,
+    "premium": False,
+    "premium_cap_usd": "1.00",
+    "premium_estimate_usd": "0.50",
+    "premium_whitelist": [],
 }
 
 
@@ -504,45 +512,81 @@ class CascadeGuard:
     def __init__(self, cascade: Mapping[str, Any] | None,
                  threshold_usd: Decimal | None = None,
                  paid_loader: Callable[[], list[str] | None] | None = None,
+                 premium_loader: Callable[[], list[str] | None] | None = None,
                  ) -> None:
         raw = dict(cascade or {})
         self.static_whitelist = [str(item) for item in raw.get("paid_whitelist") or []]
         self.paid_dynamic = bool(raw.get(
             "paid_dynamic", CASCADE_DEFAULTS["paid_dynamic"]))
         self._paid_loader = paid_loader
+        self.static_premium_whitelist = [
+            str(item) for item in raw.get("premium_whitelist") or []]
+        self._premium_loader = premium_loader
+        self._ranking: Any = None
+        self._ranking_loaded = False
         self.cap = _money(raw.get("paid_cap_usd",
                                   CASCADE_DEFAULTS["paid_cap_usd"]))
         self.paid_estimate = _money(raw.get(
             "paid_estimate_usd", CASCADE_DEFAULTS["paid_estimate_usd"]))
         self.dsh_estimate = _money(raw.get(
             "dsh_estimate_usd", CASCADE_DEFAULTS["dsh_estimate_usd"]))
+        self.premium_cap = _money(raw.get(
+            "premium_cap_usd", CASCADE_DEFAULTS["premium_cap_usd"]))
+        self.premium_estimate = _money(raw.get(
+            "premium_estimate_usd", CASCADE_DEFAULTS["premium_estimate_usd"]))
         self.threshold = (threshold_usd if threshold_usd is not None
                           else cascade_mandate_threshold())
 
     @property
     def whitelist(self) -> list[str]:
         """Auto-ranked paid ids when fresh, else the static config list."""
-        if self.paid_dynamic:
-            dynamic = self._dynamic_paid_models()
-            if dynamic:
-                return dynamic
-        return self.static_whitelist
+        return self.whitelist_for(premium=False)
 
-    def _dynamic_paid_models(self) -> list[str] | None:
-        if self._paid_loader is not None:
-            try:
-                return self._paid_loader()
-            except Exception:
-                return None
+    def whitelist_for(self, premium: bool) -> list[str]:
+        """Effective paid ids; premium degrades to cheap without data."""
+        whitelist, _cap, _estimate, _tier = self._paid_terms(premium)
+        return whitelist
+
+    def _paid_terms(self, premium: bool,
+                    ) -> tuple[list[str], Decimal | None, Decimal | None, str]:
+        """Whitelist, cap, estimate and tier; mirrors the executor rule."""
+        if premium:
+            dynamic = self._dynamic_paid_models(premium=True)
+            if dynamic:
+                return dynamic, self.premium_cap, self.premium_estimate, "premium"
+            if self.static_premium_whitelist:
+                return (self.static_premium_whitelist, self.premium_cap,
+                        self.premium_estimate, "premium")
+            premium = False
+        dynamic = self._dynamic_paid_models(premium=False)
+        if dynamic:
+            return dynamic, self.cap, self.paid_estimate, "cheap"
+        return self.static_whitelist, self.cap, self.paid_estimate, "cheap"
+
+    def _dynamic_ranking(self) -> Any:
+        if self._ranking_loaded:
+            return self._ranking
+        self._ranking_loaded = True
         try:
             from model_routing import paid as paid_mod
             from model_routing.paths import paid_path
-            ranking = paid_mod.load_paid_ranking(paid_path())
+            self._ranking = paid_mod.load_paid_ranking(paid_path())
         except Exception:
-            return None
+            self._ranking = None
+        return self._ranking
+
+    def _dynamic_paid_models(self, premium: bool = False) -> list[str] | None:
+        loader = self._premium_loader if premium else self._paid_loader
+        if loader is not None:
+            try:
+                return loader() or None
+            except Exception:
+                return None
+        ranking = self._dynamic_ranking()
         if ranking is None:
             return None
-        return [item.model_id for item in ranking.models] or None
+        shortlist = ranking.premium if premium else ranking.models
+        return [item.model_id for item in shortlist] or None
 
     def check(self, slot: ReviewSlot, state: CascadeSpendState,
               ) -> SpendDecision:
@@ -551,35 +595,39 @@ class CascadeGuard:
             return SpendDecision(True, f"{slot.cost_tier} tier needs no guard",
                                  "0.00", str(self.cap or 0),
                                  str(self.threshold), str(state.spent_usd))
-        if self.cap is None or self.threshold is None:
+        if self.threshold is None:
             return SpendDecision(False, "unreadable cap or mandate threshold",
                                  "?", "?", "?", str(state.spent_usd))
-        estimate = self.dsh_estimate
+        estimate: Decimal | None = self.dsh_estimate
+        cap: Decimal | None = self.cap
+        tier_word = ""
         if slot.model.startswith("openrouter/") or slot.cascade_only:
             model = slot.model.split("/", 1)[1] if "/" in slot.model else slot.model
-            if model not in self.whitelist:
+            whitelist, cap, estimate, tier = self._paid_terms(slot.premium)
+            if tier == "premium":
+                tier_word = "premium "
+            if model not in whitelist:
                 return SpendDecision(
-                    False, f"{model} is outside the paid whitelist",
-                    "?", str(self.cap), str(self.threshold),
+                    False, f"{model} is outside the {tier_word}paid whitelist",
+                    "?", str(cap), str(self.threshold),
                     str(state.spent_usd))
-            estimate = self.paid_estimate
-        if estimate is None:
+        if estimate is None or cap is None:
             return SpendDecision(False, "unreadable spend estimate",
-                                 "?", str(self.cap), str(self.threshold),
+                                 "?", str(cap), str(self.threshold),
                                  str(state.spent_usd))
-        if self.cap > self.threshold:
+        if cap > self.threshold:
             return SpendDecision(
-                False, f"cap {self.cap} exceeds mandate threshold {self.threshold}",
-                str(estimate), str(self.cap), str(self.threshold),
+                False, f"cap {cap} exceeds mandate threshold {self.threshold}",
+                str(estimate), str(cap), str(self.threshold),
                 str(state.spent_usd))
-        if estimate > self.cap or state.spent_usd + estimate > self.cap:
+        if estimate > cap or state.spent_usd + estimate > cap:
             return SpendDecision(
-                False, f"estimate {estimate} over cap {self.cap}",
-                str(estimate), str(self.cap), str(self.threshold),
+                False, f"estimate {estimate} over cap {cap}",
+                str(estimate), str(cap), str(self.threshold),
                 str(state.spent_usd))
         state.spent_usd += estimate
         return SpendDecision(True, "within cap and mandate threshold",
-                             str(estimate), str(self.cap), str(self.threshold),
+                             str(estimate), str(cap), str(self.threshold),
                              str(state.spent_usd))
 
 
@@ -720,6 +768,52 @@ def cascade_enabled(cascade: Mapping[str, Any] | None) -> bool:
     return bool(isinstance(cascade, Mapping) and cascade.get("enabled"))
 
 
+def cascade_for_priority(cascade: Mapping[str, Any] | None,
+                         priority: str | None) -> dict[str, Any]:
+    """Round cascade copy; critical tickets arm the premium paid list."""
+    out = dict(cascade or {})
+    out["premium"] = str(priority or "").lower() == "critical"
+    return out
+
+
+def premium_slots(pool: Sequence[ReviewSlot], enabled: bool,
+                  ) -> list[ReviewSlot]:
+    """Flag cascade-only slots premium; tier order never changes."""
+    if not enabled:
+        return list(pool)
+    return [replace(slot, premium=True) if slot.cascade_only else slot
+            for slot in pool]
+
+
+def arm_premium_slots(executor: Any, pool: Sequence[ReviewSlot],
+                      cascade: Mapping[str, Any] | None,
+                      critical: bool) -> dict[str, Any]:
+    """Arm the paid slot premium on executor plus mapping, in one call.
+
+    Scripted executors without ``arm_premium`` keep the static slot; the
+    guard still decides from the slot flag, so nothing spends blind.
+    """
+    out = dict(cascade or {})
+    out["premium"] = bool(critical)
+    if critical:
+        arm = getattr(executor, "arm_premium", None)
+        if callable(arm):
+            for slot in pool or []:
+                if slot.cascade_only:
+                    arm(slot.label)
+    return out
+
+
+def disarm_premium_slots(executor: Any, pool: Sequence[ReviewSlot]) -> None:
+    """Drop round-scoped premium flags; call in a finally after the round."""
+    disarm = getattr(executor, "disarm_premium", None)
+    if not callable(disarm):
+        return
+    for slot in pool or []:
+        if slot.cascade_only:
+            disarm(slot.label)
+
+
 def _cascade_note(result: QuorumRound) -> str:
     """Tiers tried, guard denials and the final verdict for the ticket."""
     tiers = sorted({str(outcome.get("tier") or "?") for outcome in result.outcomes},
@@ -758,6 +852,8 @@ async def run_quorum_round(
     and builder-family reports count toward quorum, audited.
     """
     enabled = cascade_enabled(cascade)
+    pool = premium_slots(
+        pool, enabled and bool((cascade or {}).get("premium")))
     if enabled:
         guard = CascadeGuard(cascade)
         spend = CascadeSpendState()

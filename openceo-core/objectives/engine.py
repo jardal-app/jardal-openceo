@@ -3390,11 +3390,20 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
             env, slot, request, head, objective, attempt=attempt,
             previous=previous, review_no=reviews + 1)
 
-    result = await review_mod.run_quorum_round(
-        env.pool, env.slots, plan, run_one, builder_family="muse",
-        quorum=int(env.review_cfg.get("quorum", 2)),
-        recovery=env.review_cfg.get("recovery"),
-        cascade=env.review_cfg.get("cascade"))
+    critical = any(
+        isinstance(child, Mapping)
+        and str(child.get("priority") or "").lower() == "critical"
+        for child in children)
+    cascade = review_mod.arm_premium_slots(
+        env.executor, env.pool, env.review_cfg.get("cascade"), critical)
+    try:
+        result = await review_mod.run_quorum_round(
+            env.pool, env.slots, plan, run_one, builder_family="muse",
+            quorum=int(env.review_cfg.get("quorum", 2)),
+            recovery=env.review_cfg.get("recovery"),
+            cascade=cascade)
+    finally:
+        review_mod.disarm_premium_slots(env.executor, env.pool)
     if not result.met:
         return await _objective_park(
             env, objective, "no_quorum",
