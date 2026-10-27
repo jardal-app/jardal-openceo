@@ -7,7 +7,7 @@
 
 ## 0. Cómo usar este documento
 
-- Es la referencia para todo cambio en la memoria y el aprendizaje de los agentes. Complementa `ARCHITECTURE_REFERENCE_2026-OPENCEO.md`, `README-KNOWLEDGE.md`, el skill `obsidian-vault-links` y `ARCHITECTURE_REFERENCE_2026-ERP.md`. No modifica los ADR aprobados del ERP.
+- Es la referencia para todo cambio en la memoria y el aprendizaje de los agentes. Complementa `docs/ARCHITECTURE_REFERENCE_2026.md`, la sección «Vault y mantenimiento del conocimiento» de `jardal-knowledge/README.md`, el skill `obsidian-vault-links` (`jardal-knowledge/.agents/skills/obsidian-vault-links/SKILL.md`) y —fuera de estas fases— el documento del ERP (D14, etapa 5). No modifica los ADR aprobados del ERP.
 - Lo que este documento describe como existente procede de esa documentación y **no está auditado en código**. Antes de crear tickets de implementación se verifica contra el código y los tests (paso 1.1).
 - No es un backlog. Los tickets se registran en ERPNext y citan la decisión que implementan (D1–D14).
 - Una decisión solo cambia con una decisión nueva del Owner, basada en un problema observado o en una medición.
@@ -51,10 +51,10 @@ La columna «Origen» indica la sección o el ticket de la documentación de ref
 
 | Capacidad | Hoy (según la documentación) | Falta | Origen |
 |---|---|---|---|
-| Vault por proyecto, skill y checker con `--project` | Existe | Tipo `practice` (D3) | README-KNOWLEDGE, SKILL.md |
+| Vault por proyecto, skill y checker con `--project` | Existe | Tipo `practice` (D3) | `jardal-knowledge/README.md` (§ Vault y mantenimiento), skill `obsidian-vault-links` |
 | Lectura del vault por agentes autónomos | No: el sandbox no monta el vault | Montaje de solo lectura del proyecto activo e índice de prácticas (D6) | Agent isolation (00192, 00214) |
 | Escritura del vault por agentes autónomos | No | Propuestas y publicador (D7, D8) | — |
-| Respaldo nocturno | Existe: systemd, bloqueo, trabaja en `main`, no hace pull ni force-push | Exclusión mutua con el publicador (D8) | README-KNOWLEDGE |
+| Respaldo nocturno | Existe: systemd, bloqueo, trabaja en `main`, no hace pull ni force-push | Exclusión mutua con el publicador (D8) | `jardal-knowledge/README.md` (§ Vault y mantenimiento), `jardal-knowledge/scripts/nightly-git-backup.sh` |
 | Cristalización de skills | Existe: corre tras cierres completados o fallidos y promueve por reutilización en otro ticket | Promoción por resultado verificado, métricas por versión, reversión y retiro (D9) | 00210 |
 | Canal del Owner y locks | Existe: preguntas al Owner y locks de correo, DNS y Elfec; lo aprobado se ejecuta una sola vez | Enlazar la respuesta con su resultado (D10) y locks para Teams, Jira y Autotask (D12) | 00206, 00208 |
 | Envío a Teams, Jira y Autotask | No existe; solo hay correo | Herramientas sobre los locks existentes (D12) | 00199 |
@@ -62,7 +62,7 @@ La columna «Origen» indica la sección o el ticket de la documentación de ref
 | Telemetría del planner | Existe solo como información (`tier_mix`, `executor_link`, coste) | Precedentes de tickets cerrados (D10) | 00148, 00178, 00212 |
 | Handoff entre tickets | Solo desde los predecesores directos | Cubierto por los precedentes | 00211 |
 | Memoria automática de Claude Code | Activada por defecto en sesiones locales; estado real desconocido | Comprobar, migrar y desactivar (D5) | Documentación de Claude Code |
-| Sección «Engineering Knowledge and Code Context» | Desactualizada: búsqueda global con qmd, checker sin `--project`, `qmd update` | Alinearla con el skill (paso 1.3) | ARCHITECTURE_REFERENCE_2026-OPENCEO |
+| Sección «Engineering Knowledge and Code Context» | Desactualizada: búsqueda global con qmd, checker sin `--project`, `qmd update` | Alinearla con el skill (paso 1.3) | `docs/ARCHITECTURE_REFERENCE_2026.md` |
 | Insignias de agente | Se atan al nombre del ticket en ERPNext | Aceptar referencias externas si se ejecutan tickets de Jira o Autotask en autónomo (D13) | 00214 |
 
 ## 5. Decisiones
@@ -288,8 +288,8 @@ Se revisan en el resumen del Owner. Mientras haya pocos casos, la revisión es c
 
 ## 9. Referencias
 
-- `README-KNOWLEDGE.md` y skill `obsidian-vault-links`: estructura, aislamiento y checker del vault.
-- `ARCHITECTURE_REFERENCE_2026-OPENCEO.md`: sandbox (00192, 00214), canal del Owner (00206), locks (00208), cristalización (00210), handoff (00211) y CEO (00119, 00213).
+- `jardal-knowledge/README.md` (§ Vault y mantenimiento del conocimiento) y skill `obsidian-vault-links` (`jardal-knowledge/.agents/skills/obsidian-vault-links/SKILL.md`, `scripts/vault_check.py`): estructura, aislamiento y checker del vault.
+- `docs/ARCHITECTURE_REFERENCE_2026.md`: sandbox (00192, 00214), canal del Owner (00206), locks (00208), cristalización (00210), handoff (00211) y CEO (00119, 00213).
 - `ARCHITECTURE_REFERENCE_2026-ERP.md`: principios, etapa 5 y ADR aprobados.
 - How Claude remembers your project — Claude Code Docs: https://code.claude.com/docs/en/memory
 - OWASP Top 10 for Agentic Applications 2026, ASI06 (Memory & Context Poisoning).
