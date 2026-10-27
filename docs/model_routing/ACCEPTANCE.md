@@ -22,13 +22,13 @@ PYTHONPATH=openceo-core ./.venv/bin/python -c "from pathlib import Path; from mo
 | T08 | round 2 reviews the corrected state | r2 serves opencode/alpha-free on c0ffee2, not c0ffee | pass |
 | T09 | final verification before next | second failure exhausts the chain with an audit event | pass |
 | T10 | fallback follows live priorities | down example/alpha serves example/beta twice alike | pass |
-| T11 | unfree or unknown-price models leave the usable set | unknown/paid refused; 17 recorded :free replay clean | pass |
+| T11 | only paid routes leave the usable set; unknown-price stays usable | unknown-price usable, paid refused; 17 recorded :free replay clean | pass |
 | T12 | failed refresh keeps the previous snapshot and the round | catalog byte-identical; frozen round untouched | pass |
 | T13 | no duplicated tool call, no false success | t1 executed once; checkpoint rebuilds the turn | pass |
 | T14 | clear error, native mechanisms still usable | free-review native via opencode/alpha-free with notice | pass |
 | T15 | content logging off, secrets never persist | excerpt redacted; registry scan finds no key-like pattern | pass |
 | T16 | broken tool-calling leaves MCP/review profiles | epsilon excluded; served opencode/alpha-free | pass |
-| T17 | two valid reviews continue on distinct families | pair fam-alpha+fam-beta; unknown dropped | pass |
+| T17 | two valid reviews continue on distinct families | pair fam-alpha+fam-beta; same model twice = two failover entries | pass |
 | T18 | verified reports survive restarts byte-identical | valid receipt reuses; tampered bytes refuse | pass |
 | T19 | sources, date, snapshot and motive recorded | snapshot valid with aa 4.3 + agent/latest | pass |
 | T20 | freeze new deployments, roll back to native | freeze holds; generation refuses; alert recorded | pass |
@@ -46,7 +46,7 @@ PYTHONPATH=openceo-core ./.venv/bin/python -c "from pathlib import Path; from mo
 | A07 | failed reviewer restarts whole on the same snapshot | label2 rotates to gamma on the same snapshot; label1 receipt sha intact | pass |
 | A08 | history survives switches; tools run once | 3 turns, 1 rotation, checkpoint turn=3, cut stream re-claims call_sky without re-execution | pass |
 | A09 | launcher failure observed and routed next turn | launcher session failure observed; next turn routed alpha→beta | pass |
-| A10 | paid or unverified routes never serve | paid + unverified dropped; served opencode/good-free | pass |
+| A10 | only paid routes never serve; unverified serves in ranking order | paid dropped; unverified serves in ranking order | pass |
 | A11 | router off returns to native with files intact | router off in both pools; gateway stripped and frozen; 3 files intact; native alpha servable | pass |
 | A12 | audit keeps model data; prompts stay out | switch+receipt audit keeps model/family/provider/reason/result; canary, secrets and key-like absent | pass |
 

@@ -99,16 +99,18 @@ class SourceStaleness:
 
 
 def apply_catalog_verdicts(document: CatalogDocument) -> CatalogDocument:
-    """Catalog-layer health: presently listed plus verified free.
+    """Catalog-layer health: presently listed and registered free.
 
-    Transient serving state lives in the availability store (00291)
-    and is consulted at reservation time, never baked into the
-    six-hour catalog; probes verify capabilities and reliability.
+    TASK-2026-00319: ``healthy`` means registered and alive
+    (``free_offered``), not verified. Serve evidence and quota order
+    the ranking; they never decide health. Transient serving state
+    lives in the availability store (00291) and is consulted at
+    reservation time, never baked into the six-hour catalog.
     """
     entries = []
     for entry in document.entries:
         deployments = [
-            deployment.model_copy(update={"healthy": deployment.free_verified})
+            deployment.model_copy(update={"healthy": bool(deployment.free_offered)})
             for deployment in entry.deployments
         ]
         entries.append(entry.model_copy(update={"deployments": deployments}))

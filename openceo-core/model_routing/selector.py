@@ -1,21 +1,20 @@
-"""native_first target selection over ranking order (TASK-2026-00305).
+"""Ranking-order target selection over the single free pool (TASK-2026-00319).
 
-Addendum v1.2 §2-§3 as code: one selector delivers, per logical
-profile, the ordered list of real ``provider_id/model_id`` targets:
-first OpenCode Free native (group A), then zero-cost external
-providers configured directly in OpenCode (group B). ``best_global``
-exists only as an explicit policy opt-in; the default is
-``native_first``. No HTTP alias spans both groups: group B runs
-through the provider configured in OpenCode (or the approved
-gateway, still on HOLD).
+One selector delivers, per task profile, the ordered list of real
+``provider_id/model_id`` targets across every free provider in one
+ranked pool: the ranking order decides, never the provider. The
+legacy ``native_first`` regroup (group A OpenCode Free, then group B
+external) survives only as an explicit policy opt-in. No HTTP alias
+spans groups: group B runs through the provider configured in
+OpenCode (or the approved gateway, still on HOLD).
 
 Filters reuse the sibling gates instead of duplicating them: the
 catalog price gate (:func:`is_usable`), health, :func:`meets_profile`
-(context/tools/confidentiality), the ranking floor/drop
-(:func:`fallback_chain`), the instance allowlist for group A, and
-the availability store (cooldowns, disabled routes, provider
-blocks). With no eligible target the selector blocks with every
-reason recorded, never degrading silently. One
+(context/tools/confidentiality), the published ranking order
+(:func:`fallback_chain`, no numeric discard), the instance allowlist
+for group A, and the availability store (cooldowns, disabled routes,
+provider blocks). With no eligible target the selector blocks with
+every reason recorded, never degrading silently. One
 :class:`AttemptBudget` counts every attempt so OpenCode, the
 gateway and the coordinator never multiply retries; failing over
 across providers never eludes a shared OpenRouter quota because
@@ -301,6 +300,9 @@ def select_targets(
                 quality=item.quality,
             ))
     if active.selection_policy == "native_first":
+        # Explicit opt-in only (TASK-2026-00319 keeps it for compat):
+        # the default best_global preserves the ranking order so the
+        # ranking, never the provider, decides which target goes first.
         ordered = ([target for target in ordered if target.group == "A"]
                    + [target for target in ordered if target.group != "A"])
     if not ordered:
@@ -318,7 +320,7 @@ def _blocked(
 ) -> Selection:
     reasons = [f"{item.deployment_id}: {item.reason}" for item in dropped]
     if not reasons:
-        reasons = ["ranking order is empty after the quality floor and drop"]
+        reasons = ["ranking order is empty (no registered live route)"]
     if store is not None and run_id:
         write_audit_event(store, run_id, "selection_blocked",
                           f"{profile} [{policy.selection_policy}]: "

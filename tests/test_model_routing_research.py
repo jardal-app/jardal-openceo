@@ -187,7 +187,9 @@ def test_snapshot_without_research_profile_fails_closed(tmp_path):
 # -------------------------------------------------------------- candidates
 
 
-def test_candidates_keep_order_and_opencode_routes_only():
+def test_candidates_keep_ranking_order_across_providers():
+    # TASK-2026-00319: single multi-provider pool; every route is its
+    # own failover entry in ranking order.
     ranking = _profile([
         _entry(1, "canon-a", "fam-a", "opencode/a"),
         _entry(2, "canon-b", "fam-b", "groq/b", provider="groq"),
@@ -195,16 +197,18 @@ def test_candidates_keep_order_and_opencode_routes_only():
                backups=[("opencode/c", "opencode")]),
     ])
     got = wiring.research_candidates(ranking)
-    assert [item.deployment_id for item in got] == ["opencode/a", "opencode/c"]
+    assert [item.deployment_id for item in got] == [
+        "opencode/a", "groq/b", "groq/c", "opencode/c"]
 
 
-def test_candidates_collapse_same_canonical_t05():
+def test_candidates_keep_one_entry_per_route_t05():
+    # TASK-2026-00319: same model on N providers = N failover entries.
     ranking = _profile([
-        _entry(1, "canon-a", "fam-a", "opencode/a"),
-        _entry(2, "canon-a", "fam-a", "opencode/a2"),
+        _entry(1, "canon-a", "fam-a", "opencode/a",
+               backups=[("opencode/a2", "opencode")]),
     ])
     got = wiring.research_candidates(ranking)
-    assert [item.deployment_id for item in got] == ["opencode/a"]
+    assert [item.deployment_id for item in got] == ["opencode/a", "opencode/a2"]
 
 
 def test_candidates_keep_unknown_families():

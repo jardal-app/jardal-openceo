@@ -622,12 +622,15 @@ def _scenario_t10(directory: Path, ledger: _Ledger, catalog: CatalogDocument) ->
 
 def _scenario_t11(directory: Path, ledger: _Ledger, catalog: CatalogDocument,
                   fixtures: Path) -> ScenarioResult:
+    # TASK-2026-00319: unknown prices order, never exclude; only a
+    # non-zero price (not free at all) leaves the usable set.
     active = RouterPolicy()
     unknown = _deployment("openrouter/mystery:free", "openrouter", "mystery:free", price=None)
-    assert usability(unknown, active) == "unknown_price"
-    assert not is_usable(unknown, active)
+    assert usability(unknown, active) == "usable"
+    assert is_usable(unknown, active)
     paid = _deployment("openrouter/rich:free", "openrouter", "rich:free", price=0.001)
     assert usability(paid, active) == "paid"
+    assert not is_usable(paid, active)
     raw = json.loads((fixtures / "sources-openrouter-catalog.json").read_text(encoding="utf-8"))
     verified = raw.get("verified_free") or []
     assert verified, "recorded catalog carries no verified_free models"
@@ -636,8 +639,9 @@ def _scenario_t11(directory: Path, ledger: _Ledger, catalog: CatalogDocument,
         pricing = item.get("pricing") or {}
         assert pricing.get("prompt") in ("0", 0), item.get("id")
         assert pricing.get("completion") in ("0", 0), item.get("id")
-    return ScenarioResult("T11", "free status lost means unusable", True,
-                          f"unknown/paid refused; {len(verified)} recorded :free replay clean")
+    return ScenarioResult("T11", "only paid routes leave the usable set", True,
+                          f"unknown-price usable, paid refused; "
+                          f"{len(verified)} recorded :free replay clean")
 
 
 def _scenario_t12(directory: Path, ledger: _Ledger, catalog: CatalogDocument) -> ScenarioResult:
@@ -771,11 +775,13 @@ def _scenario_t16(directory: Path, ledger: _Ledger, catalog: CatalogDocument) ->
 
 
 def _scenario_t17(directory: Path, ledger: _Ledger, catalog: CatalogDocument) -> ScenarioResult:
+    # TASK-2026-00319: one pool, one order; the same model on two
+    # providers yields two failover entries, and the strict pair still
+    # needs two distinct families.
     ranking = battery_rankings().profiles["free-review"]
     candidates = review_mod.review_candidates(ranking)
     families = [item.family_id for item in candidates]
-    assert "unknown-family" not in families, families
-    assert families[:2] == ["fam-alpha", "fam-beta"], families
+    assert families == ["fam-alpha", "fam-alpha", "fam-beta", "fam-gamma"], families
     store = _store(directory)
     try:
         first, second = review_mod.pick_pair(candidates, store)
@@ -783,7 +789,8 @@ def _scenario_t17(directory: Path, ledger: _Ledger, catalog: CatalogDocument) ->
         ledger.round_families.append((first.family_id, second.family_id))
         ledger.served.extend([first.deployment_id, second.deployment_id])
         return ScenarioResult("T17", "two valid reviews need distinct families", True,
-                              f"pair {first.family_id}+{second.family_id}; unknown dropped")
+                              f"pair {first.family_id}+{second.family_id}; "
+                              f"same model twice = two failover entries")
     finally:
         store.close()
 
@@ -1552,8 +1559,10 @@ def _scenario_a10(directory: Path, ledger: _Ledger,
     })
     selection = router_selector.select_targets(
         "free-general", extended, rankings)
+    # TASK-2026-00319: paid never serves; the unverified route serves
+    # in ranking order (0.94 ahead of 0.80).
     assert [item.deployment_id for item in selection.targets] == [
-        "opencode/good-free"]
+        "openrouter/org/unver", "opencode/good-free"]
     reasons = " ".join(item.reason for item in selection.dropped)
     assert "zero-cost" in reasons, reasons
     usable = {route.deployment_id
@@ -1562,8 +1571,8 @@ def _scenario_a10(directory: Path, ledger: _Ledger,
     assert all(item.deployment_id in usable
                for item in selection.targets)
     return ScenarioResult(
-        "A10", "paid or unverified routes never serve", True,
-        "paid + unverified dropped; served opencode/good-free")
+        "A10", "only paid routes never serve; unverified orders", True,
+        "paid dropped; unverified serves in ranking order")
 
 
 def _scenario_a11(directory: Path, ledger: _Ledger,
@@ -1760,7 +1769,7 @@ _TITLES = {
     "T08": "round 2 reviews the corrected state",
     "T09": "corrections stay bounded and audited",
     "T10": "number one down follows live priorities",
-    "T11": "free status lost means unusable",
+    "T11": "only paid routes leave the usable set",
     "T12": "failed refresh keeps the round intact",
     "T13": "cut stream never reruns the tool",
     "T14": "absent gateway falls back to native",
@@ -1779,7 +1788,7 @@ _TITLES = {
     "A07": "failed reviewer restarts whole on one snapshot",
     "A08": "history survives switches; tools run once",
     "A09": "launcher failure observed and routed next turn",
-    "A10": "paid or unverified routes never serve",
+    "A10": "only paid routes never serve; unverified orders",
     "A11": "router off returns to native with files intact",
     "A12": "audit keeps model data; prompts stay out",
 }
@@ -2029,7 +2038,7 @@ def render_report(report: BatteryReport, *, fixtures_dir: Path | None = None) ->
         "T08": "round 2 reviews the corrected state",
         "T09": "final verification before next",
         "T10": "fallback follows live priorities",
-        "T11": "unfree or unknown-price models leave the usable set",
+        "T11": "only paid routes leave the usable set; unknown-price stays usable",
         "T12": "failed refresh keeps the previous snapshot and the round",
         "T13": "no duplicated tool call, no false success",
         "T14": "clear error, native mechanisms still usable",
@@ -2048,7 +2057,7 @@ def render_report(report: BatteryReport, *, fixtures_dir: Path | None = None) ->
         "A07": "failed reviewer restarts whole on the same snapshot",
         "A08": "history survives switches; tools run once",
         "A09": "launcher failure observed and routed next turn",
-        "A10": "paid or unverified routes never serve",
+        "A10": "only paid routes never serve; unverified serves in ranking order",
         "A11": "router off returns to native with files intact",
         "A12": "audit keeps model data; prompts stay out",
     }

@@ -1,11 +1,10 @@
-"""native_first selector: group A/B order, gates, budget (TASK-2026-00305).
+"""Ranking-order selector: single-pool order, gates, budget (TASK-2026-00319).
 
-Offline only: addendum §11.2 (native preference), §11.3 (native
-fallback), §11.4 (native to external crossing without a global HTTP
-alias), §11.5 (context, tools and privacy), §11.10 (no costs), the
-no-eligible block with recorded reasons, explicit best_global
-opt-in, and the single global attempt budget. No network, no
-models, no real state.
+Offline only: ranking order decides (native_first is an explicit
+opt-in regroup), §11.3 fallback, §11.4 crossing without a global
+HTTP alias, §11.5 (context, tools and privacy), §11.10 (no costs),
+the no-eligible block with recorded reasons, and the single global
+attempt budget. No network, no models, no real state.
 """
 
 from __future__ import annotations
@@ -152,9 +151,11 @@ def _rankings() -> RankingsDocument:
 
 
 def test_native_first_is_default_and_best_global_is_explicit():
-    assert RouterPolicy().selection_policy == "native_first"
-    explicit = RouterPolicy.model_validate({"selection_policy": "best_global"})
-    assert explicit.selection_policy == "best_global"
+    # TASK-2026-00319: the ranking decides, never the provider, so the
+    # default is best_global; native_first stays an explicit opt-in.
+    assert RouterPolicy().selection_policy == "best_global"
+    explicit = RouterPolicy.model_validate({"selection_policy": "native_first"})
+    assert explicit.selection_policy == "native_first"
     with pytest.raises(ValueError, match="selection_policy"):
         RouterPolicy.model_validate({"selection_policy": "cheapest"})
 
@@ -174,8 +175,11 @@ def test_missing_profile_ranking_blocks_with_reason():
 
 
 def test_native_preference_11_2():
+    # TASK-2026-00319: native_first is an explicit opt-in regroup; the
+    # default best_global keeps the ranking order instead.
+    opt_in = RouterPolicy(selection_policy="native_first")
     selection = router_selector.select_targets(
-        "free-research", _catalog(), _rankings())
+        "free-research", _catalog(), _rankings(), policy=opt_in)
     assert selection.policy == "native_first"
     assert [target.deployment_id for target in selection.targets] == [
         "opencode/alpha-free",
@@ -285,7 +289,9 @@ def test_privacy_gate_blocks_unapproved_confidentiality():
     assert "confidentiality" in dropped["opencode/alpha-free"]
 
 
-def test_no_costs_11_10_nothing_paid_or_unverified_serves():
+def test_no_costs_11_10_nothing_paid_serves():
+    # TASK-2026-00319: only paid/paywalled routes are out. Missing
+    # verification and unknown prices stay servable in ranking order.
     catalog = _catalog()
     alpha, beta = catalog.entries[0], catalog.entries[1]
     alpha.deployments[0].input_price_usd = 0.01
@@ -297,27 +303,30 @@ def test_no_costs_11_10_nothing_paid_or_unverified_serves():
     with pytest.raises(router_selector.NoEligibleTarget):
         router_selector.select_targets("free-review", catalog, rankings)
     selection = router_selector.select_targets("free-research", catalog, rankings)
-    assert [target.deployment_id for target in selection.targets] == ["nvidia/gamma"]
+    assert [target.deployment_id for target in selection.targets] == [
+        "openrouter/example/alpha:free",
+        "nvidia/gamma",
+        "groq/beta-70b",
+    ]
     dropped = {item.deployment_id: item.reason for item in selection.dropped}
     assert "paid" in dropped["opencode/alpha-free"]
-    assert "unverified" in dropped["openrouter/example/alpha:free"]
     assert "paywalled" in dropped["opencode/beta-free"]
-    assert "unknown_price" in dropped["groq/beta-70b"]
 
 
-def test_quality_floor_excludes_and_block_records_every_reason(tmp_path):
+def test_low_quality_still_serves_in_ranking_order(tmp_path):
+    # TASK-2026-00319: quality orders, never blocks; a low-quality
+    # ranking still yields targets and records no block audit.
     rankings = _rankings()
     rankings.profiles["free-review"].order[0].quality = 0.10
     store = AvailabilityStore(tmp_path / "availability.sqlite")
     try:
-        with pytest.raises(router_selector.NoEligibleTarget) as exc_info:
-            router_selector.select_targets(
-                "free-review", _catalog(), rankings,
-                store=store, run_id="selector-test")
-        assert "quality floor" in str(exc_info.value)
-        events = store.audit_since("selector-test", 0.0)
-        assert [event for _ts, event, _detail in events] == ["selection_blocked"]
-        assert "free-review [native_first]" in events[0][2]
+        selection = router_selector.select_targets(
+            "free-review", _catalog(), rankings,
+            store=store, run_id="selector-test")
+        assert [target.deployment_id for target in selection.targets] == [
+            "opencode/beta-free",
+        ]
+        assert store.audit_since("selector-test", 0.0) == []
     finally:
         store.close()
 
@@ -375,16 +384,16 @@ def test_walk_targets_spends_one_attempt_per_target():
         selection.targets, router_selector.AttemptBudget(max_attempts=5)))
     assert [target.deployment_id for target, _ in walked] == [
         "opencode/alpha-free",
-        "opencode/beta-free",
         "openrouter/example/alpha:free",
         "nvidia/gamma",
         "groq/beta-70b",
+        "opencode/beta-free",
     ]
     assert walked[-1][1].remaining == 0
     short = list(itertools.islice(router_selector.walk_targets(
         selection.targets, router_selector.AttemptBudget(max_attempts=2)), 2))
     assert [target.deployment_id for target, _ in short] == [
-        "opencode/alpha-free", "opencode/beta-free"]
+        "opencode/alpha-free", "openrouter/example/alpha:free"]
     assert short[-1][1].remaining == 0
     with pytest.raises(router_selector.BudgetExhausted):
         list(router_selector.walk_targets(

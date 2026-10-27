@@ -367,21 +367,26 @@ def test_context_floor_excludes_small_context():
     assert router_ranking.rank_catalog("free-general", catalog).order == []
 
 
-def test_unverified_and_unhealthy_excluded_t11():
+def test_unverified_orders_but_unhealthy_excluded_t11():
+    # TASK-2026-00319: missing verification orders (down), it never
+    # excludes; only a dead route (unhealthy) stays out.
     catalog = _catalog(
         _entry("example/unverified",
                deployments=[_dep("openrouter/example/unverified:free", free_verified=False)]),
         _entry("example/sick",
                deployments=[_dep("openrouter/example/sick:free", healthy=False)]),
     )
-    assert router_ranking.rank_catalog("free-general", catalog).order == []
+    order = router_ranking.rank_catalog("free-general", catalog).order
+    assert [item.canonical_model_id for item in order] == ["example/unverified"]
 
 
-def test_unknown_price_excluded():
+def test_unknown_price_orders_instead_of_excluding():
+    # TASK-2026-00319: unknown prices order, never exclude.
     catalog = _catalog(_entry(
         "example/pricy",
         deployments=[_dep("openrouter/example/pricy:free", input_price_usd=None)]))
-    assert router_ranking.rank_catalog("free-general", catalog).order == []
+    order = router_ranking.rank_catalog("free-general", catalog).order
+    assert [item.canonical_model_id for item in order] == ["example/pricy"]
 
 
 def test_confidentiality_gate():
@@ -404,23 +409,33 @@ def test_meets_profile_rpm_gate():
     assert meets_profile(base, unknown, ProfileRequirements()) == (True, "")
 
 
-def test_experimental_models_never_rank():
+def test_experimental_models_rank_and_stay_listed():
+    # TASK-2026-00319: thin evidence is listed for transparency AND
+    # ranked (low quality sorts it down); nothing is discarded.
     catalog = _catalog(
         _entry("example/thin", benchmarks=_bench(coding=1.0)),
         _entry("example/none", benchmarks={}),
     )
     ranked = router_ranking.rank_catalog("free-general", catalog)
-    assert ranked.order == []
+    assert [item.canonical_model_id for item in ranked.order] == [
+        "example/thin", "example/none"]
     assert [item.canonical_model_id for item in ranked.experimental] == [
         "example/none", "example/thin"]
     assert "no benchmark observations" in ranked.experimental[0].reason
     assert "1 more needed" in ranked.experimental[1].reason
 
 
-def test_quality_floor_excludes_weak_models():
-    catalog = _catalog(_entry(
-        "example/weak", benchmarks=_bench(coding=0.1, agentic=0.1, intelligence=0.1)))
-    assert router_ranking.rank_catalog("free-review", catalog).order == []
+def test_quality_floor_orders_weak_models():
+    # TASK-2026-00319: no numeric floor excludes a registered live model.
+    catalog = _catalog(
+        _entry("example/strong",
+               benchmarks=_bench(coding=0.9, agentic=0.9, intelligence=0.9)),
+        _entry("example/weak",
+               benchmarks=_bench(coding=0.1, agentic=0.1, intelligence=0.1)),
+    )
+    order = router_ranking.rank_catalog("free-review", catalog).order
+    assert [item.canonical_model_id for item in order] == [
+        "example/strong", "example/weak"]
 
 
 def test_order_sorts_by_quality_with_deterministic_tiebreak():
@@ -669,12 +684,15 @@ def test_fallback_keeps_canonical_with_live_backup():
         ranking, down={"openrouter/example/a:free", "groq/a-groq"}) == []
 
 
-def test_fallback_enforces_floor_and_drop():
+def test_fallback_keeps_full_order_without_floor_or_drop():
+    # TASK-2026-00319: the published order is the chain; only ``down``
+    # (really dead or already tried) removes an entry.
     ranking = _profile_ranking("free-review", ["example/a", "example/b", "example/c"])
     ranking.order[1] = ranking.order[1].model_copy(update={"quality": 0.80})
     ranking.order[2] = ranking.order[2].model_copy(update={"quality": 0.50})
     chain = router_ranking.fallback_chain(ranking)
-    assert [item.canonical_model_id for item in chain] == ["example/a", "example/b"]
+    assert [item.canonical_model_id for item in chain] == [
+        "example/a", "example/b", "example/c"]
 
 
 def test_explain_verdicts():
@@ -689,7 +707,8 @@ def test_explain_verdicts():
     assert ranked.verdict == "ranked #1"
     assert ranked.quality == pytest.approx(0.9)
     thin = router_ranking.explain_model("example/thin", "free-general", catalog, document)
-    assert thin.verdict == "experimental"
+    assert thin.verdict.startswith("ranked #")
+    assert "thin evidence" in thin.verdict
     gated = router_ranking.explain_model("example/zgated", "free-review", catalog, document)
     assert gated.verdict == "excluded"
     assert any("tools" in reason for reason in gated.reasons)
@@ -764,16 +783,22 @@ def test_openrouter_supported_parameters_set_tools():
     assert entries[2].capabilities.tools is False
 
 
-def test_apply_catalog_verdicts_marks_listed_verified_healthy():
+def test_apply_catalog_verdicts_marks_registered_live_healthy():
+    # TASK-2026-00319: healthy means registered and alive
+    # (free_offered), not verified; verification only orders.
     decided = router_refresh.apply_catalog_verdicts(_catalog(
         _entry("example/good",
                deployments=[_dep("openrouter/example/good:free", healthy=False)]),
-        _entry("example/bad",
-               deployments=[_dep("openrouter/example/bad:free", healthy=True,
+        _entry("example/unverified-but-registered",
+               deployments=[_dep("openrouter/example/unverified:free", healthy=False,
                                  free_verified=False)]),
+        _entry("example/unlisted",
+               deployments=[_dep("openrouter/example/unlisted:free", healthy=False,
+                                 free_offered=False, free_verified=False)]),
     ))
     assert decided.entries[0].deployments[0].healthy is True
-    assert decided.entries[1].deployments[0].healthy is False
+    assert decided.entries[1].deployments[0].healthy is True
+    assert decided.entries[2].deployments[0].healthy is False
 
 
 def test_attach_benchmarks_replaces_dimensions():
@@ -862,7 +887,11 @@ def test_update_providers_preserves_previous_benchmarks(isolated_home, tmp_path)
     assert beta.benchmarks == {}
     rankings = router_ranking.load_rankings(config / "rankings.json")
     general = rankings.profiles["free-general"]
-    assert [item.canonical_model_id for item in general.order] == ["example/alpha"]
+    # TASK-2026-00319: scored alpha leads; thin-evidence beta ranks
+    # too (low, at the tail) while staying listed as experimental.
+    assert general.order[0].canonical_model_id == "example/alpha"
+    assert any(item.canonical_model_id == "example/beta"
+               for item in general.order)
     assert any(item.canonical_model_id == "example/beta"
                for item in general.experimental)
 
@@ -1227,7 +1256,10 @@ def test_cli_simulate_honors_policy_overrides(capsys, tmp_path):
     payload = json.loads(capsys.readouterr().out)
     assert payload["floor"] == pytest.approx(0.1)
     assert payload["max_drop"] == pytest.approx(0.05)
-    assert [item["canonical_model_id"] for item in payload["chain"]] == ["example/alpha"]
+    # TASK-2026-00319: floors/drops are reported context only; the
+    # chain keeps the full ranking order.
+    assert [item["canonical_model_id"] for item in payload["chain"]] == [
+        "example/alpha", "example/beta"]
 
 
 def test_cli_sources_shows_staleness(capsys, tmp_path):

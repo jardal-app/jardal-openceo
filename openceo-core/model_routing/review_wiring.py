@@ -306,36 +306,21 @@ def review_candidates(
     ranking: ProfileRanking,
     policy: Any | None = None,
 ) -> list[Candidate]:
-    """Ranked entries servable through the ``opencode`` CLI, in order.
+    """Single multi-provider pool in ranking order (TASK-2026-00319).
 
-    Floor and drop come from :func:`fallback_chain` (SPEC §8.4);
-    entries without an OpenCode route and unverified families never
-    serve a strict pair. Same canonical model twice collapses to its
-    first occurrence: backups are not opinions (T05).
+    Every ranked route is its own failover entry: the primary first,
+    then each backup, preserving the ranking order. The order decides,
+    never the provider; benchmarks, serve evidence and quota already
+    ordered the ranking. The strict pair still needs two distinct
+    families, enforced by :func:`pick_pair`, not here.
     """
     candidates: list[Candidate] = []
-    seen_canonicals: set[str] = set()
     for item in fallback_chain(ranking, policy):
-        family = item.family_id.strip().lower()
-        if family in UNVERIFIED_FAMILIES:
-            continue
-        if item.canonical_model_id in seen_canonicals:
-            continue
-        route = None
-        if item.primary.provider == "opencode":
-            route = item.primary.deployment_id
-        else:
-            for backup in item.backups:
-                if backup.provider == "opencode":
-                    route = backup.deployment_id
-                    break
-        if route is None:
-            continue
-        seen_canonicals.add(item.canonical_model_id)
-        candidates.append(Candidate(
-            deployment_id=route, family_id=item.family_id,
-            canonical_model_id=item.canonical_model_id,
-            provider="opencode", quality=item.quality))
+        for route in (item.primary, *item.backups):
+            candidates.append(Candidate(
+                deployment_id=route.deployment_id, family_id=item.family_id,
+                canonical_model_id=item.canonical_model_id,
+                provider=route.provider, quality=item.quality))
     return candidates
 
 
@@ -694,7 +679,7 @@ def pick_pair(
     *,
     exclude_families: frozenset[str] | set[str] = frozenset(),
 ) -> tuple[Candidate, Candidate]:
-    """Two best servable candidates of distinct verified families."""
+    """Two best servable candidates of distinct families (TASK-2026-00319)."""
     excluded = frozenset(exclude_families)
     try:
         first = get_next_candidate(
