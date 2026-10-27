@@ -2421,7 +2421,8 @@ class TierSCycle:
         for item in results:
             ctx.gate_runs.append({"phase": phase, **item.to_dict()})
 
-    def _read_artifact(self, ctx: _Ctx, name: str) -> str:
+    @staticmethod
+    def _read_artifact(ctx: _Ctx, name: str) -> str:
         try:
             return (_tier_dir(ctx.repo) / name).read_text(
                 encoding="utf-8", errors="replace")
@@ -2509,7 +2510,7 @@ class TierSCycle:
             "work uncommitted; the orchestrator integrates it.\n"
             "Write .openceo/HANDOFF.md (§16.6, executor sections ≤300 words) "
             f"and emit {SIGNALS['build_done']} in .openceo/status.\n"
-            f"Previous checkpoint (recheck; never repeat confirmed effects):\n{self._read_artifact(ctx, 'WAIT.md')}\n"
+            f"Previous checkpoint (recheck; never repeat confirmed effects):\n{TierSCycle._read_artifact(ctx, 'WAIT.md')}\n"
             + AGENT_RESULT_PROMPT
         )
         return knowledge_mod.with_preamble(body, ctx.repo, "en")
