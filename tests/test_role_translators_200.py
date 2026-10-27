@@ -454,7 +454,8 @@ class FollowUpParityTests(unittest.IsolatedAsyncioTestCase):
 
         async def fake_run(command, stdin_payload=None, timeout=120,
                            cwd=None, env=None, sandbox=True,
-                           config_argv=None, home_file_overlays=None):
+                           config_argv=None, home_file_overlays=None,
+                           extra_read_roots=()):
             seen["command"] = list(command)
             seen["env"] = env
             seen["overlays"] = home_file_overlays

@@ -315,6 +315,39 @@ def _merge_session_params(
     return merged
 
 
+def _dev_vault_roots(
+    project_config: Mapping[str, Any] | None,
+) -> list[str]:
+    """Active-project vault folder for Dev read-only mounts (00328)."""
+    from orchestration.agent_sandbox import vault_project_read_root
+    return vault_project_read_root(project_config)
+
+
+def _tier_s_roles_with_vault(
+    roles: Mapping[str, Any],
+    project_config: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Tier S cycle roles carrying the project vault read-only (00328).
+
+    Each role spec keeps its own ``extra_read_roots`` with the active
+    project vault folder appended; the reviewer pool is untouched
+    (reviewers are not Dev). Projects without ``vault_project`` keep
+    their specs unchanged.
+    """
+    roots = _dev_vault_roots(project_config)
+    if not roots:
+        return dict(roles)
+    mounted: dict[str, Any] = {}
+    for name, spec in dict(roles).items():
+        if not isinstance(spec, Mapping):
+            mounted[str(name)] = spec
+            continue
+        extra = list(spec.get("extra_read_roots") or [])
+        extra.extend(root for root in roots if root not in extra)
+        mounted[str(name)] = {**spec, "extra_read_roots": extra}
+    return mounted
+
+
 class DevSessionManager:
     """Runs deterministic step-based Dev Agent sessions."""
 
@@ -1738,7 +1771,8 @@ class DevSessionManager:
                 command, stdin_payload=stdin_payload, timeout=1800,
                 cwd=str(repo), env=run_env,
                 config_argv=list(executor.argv),
-                home_file_overlays=overlays)
+                home_file_overlays=overlays,
+                extra_read_roots=_dev_vault_roots(project_config))
         finally:
             if badge is not None and badge_provider is not None:
                 await badge_provider.revoke(badge)
@@ -2068,7 +2102,9 @@ class DevSessionManager:
             badge_provider = TicketBadgeProvider(
                 cycle_issuer, self._settings, "dev", badge_ticket, project)
         executor = ProcessExecutor(
-            roles=cycle_cfg["roles"], pool=cycle_cfg["reviewers"],
+            roles=_tier_s_roles_with_vault(cycle_cfg["roles"],
+                                           project_config),
+            pool=cycle_cfg["reviewers"],
             badge_provider=badge_provider)
         quota: Any = self._objective_quota()
         notices: list[str] = []
@@ -2451,6 +2487,7 @@ class DevSessionManager:
                 cwd=executor.cwd, env=run_env,
                 config_argv=list(executor.argv),
                 home_file_overlays=overlays,
+                extra_read_roots=_dev_vault_roots(config),
             )
         finally:
             if badge is not None and badge_provider is not None:
@@ -2887,6 +2924,7 @@ class DevSessionManager:
         sandbox: bool = True,
         config_argv: list[str] | None = None,
         home_file_overlays: dict[str, bytes] | None = None,
+        extra_read_roots: Sequence[str | Path] = (),
     ) -> tuple[bool, str, str]:
         result = await self._run_process_detailed(
             command,
@@ -2897,6 +2935,7 @@ class DevSessionManager:
             sandbox=sandbox,
             config_argv=config_argv,
             home_file_overlays=home_file_overlays,
+            extra_read_roots=extra_read_roots,
         )
         return result.ok, result.stdout, result.stderr
 
@@ -2910,6 +2949,7 @@ class DevSessionManager:
         sandbox: bool = True,
         config_argv: list[str] | None = None,
         home_file_overlays: dict[str, bytes] | None = None,
+        extra_read_roots: Sequence[str | Path] = (),
     ) -> "ProcessRunResult":
         plan = None
         if sandbox:
@@ -2924,7 +2964,8 @@ class DevSessionManager:
                     base=os.environ, overlay=env,
                     config_args=(config_argv if config_argv is not None
                                  else [str(command[0])] if command else []),
-                    home_file_overlays=home_file_overlays)
+                    home_file_overlays=home_file_overlays,
+                    extra_read_roots=extra_read_roots)
             except (IsolationUnavailable, ValueError, OSError) as exc:
                 return ProcessRunResult(
                     False, "", f"sandbox refused: {exc}", None)
