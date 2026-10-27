@@ -362,7 +362,7 @@ class SimpleTierCostTests(unittest.IsolatedAsyncioTestCase):
 
         async def _ok(command, stdin_payload=None, timeout=120, cwd=None,
                       env=None, sandbox=True, config_argv=None,
-                      home_file_overlays=None):
+                      home_file_overlays=None, extra_read_roots=()):
             return True, "did the thing", ""
 
         manager._run_process = _ok  # type: ignore[method-assign]
@@ -391,7 +391,7 @@ class SimpleTierCostTests(unittest.IsolatedAsyncioTestCase):
 
         async def _fail(command, stdin_payload=None, timeout=120, cwd=None,
                         env=None, sandbox=True, config_argv=None,
-                        home_file_overlays=None):
+                        home_file_overlays=None, extra_read_roots=()):
             return False, "", "cli exploded"
 
         manager._run_process = _fail  # type: ignore[method-assign]
@@ -413,7 +413,7 @@ class SimpleTierCostTests(unittest.IsolatedAsyncioTestCase):
 
         async def _ok(command, stdin_payload=None, timeout=120, cwd=None,
                       env=None, sandbox=True, config_argv=None,
-                      home_file_overlays=None):
+                      home_file_overlays=None, extra_read_roots=()):
             return True, "fixed", ""
 
         manager._run_process = _ok  # type: ignore[method-assign]

@@ -377,7 +377,8 @@ class SimpleTierPromptsTests(_RepoCases):
 
         async def fake_run_process(command, stdin_payload=None, timeout=120,
                                    cwd=None, env=None, sandbox=True,
-                                   config_argv=None, home_file_overlays=None):
+                                   config_argv=None, home_file_overlays=None,
+                                   extra_read_roots=()):
             calls.append({"command": command, "stdin": stdin_payload})
             return True, "ok", ""
 

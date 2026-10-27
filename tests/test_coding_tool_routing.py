@@ -337,7 +337,8 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
         calls = []
 
         async def fake_run_process(command, stdin_payload=None, timeout=120, cwd=None, env=None,
-                                   sandbox=True, config_argv=None, home_file_overlays=None):
+                                   sandbox=True, config_argv=None, home_file_overlays=None,
+                                   extra_read_roots=()):
             calls.append({"command": command, "stdin": stdin_payload, "cwd": cwd, "env": env})
             return True, "did the thing", ""
 
@@ -438,7 +439,8 @@ class TierExecutorTests(unittest.IsolatedAsyncioTestCase):
         calls = []
 
         async def fake_run_process(command, stdin_payload=None, timeout=120, cwd=None, env=None,
-                                   sandbox=True, config_argv=None, home_file_overlays=None):
+                                   sandbox=True, config_argv=None, home_file_overlays=None,
+                                   extra_read_roots=()):
             calls.append({"command": command, "stdin": stdin_payload})
             return True, "did the thing", ""
 

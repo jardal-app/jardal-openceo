@@ -45,6 +45,7 @@ __all__ = [
     "sandbox_env",
     "sandboxed_shell_command",
     "ticket_dir",
+    "vault_project_read_root",
 ]
 
 #: Vars forced on every agent spawn, over base and overlay alike.
@@ -450,6 +451,64 @@ def _checked_extra_root(raw: str | Path, home: Path, kind: str) -> Path:
     if resolved == Path("/") or resolved == home_dir:
         raise ValueError(f"extra {kind} root {resolved} is too broad")
     return resolved
+
+
+def vault_project_read_root(
+    project_config: Mapping[str, object] | None,
+) -> list[str]:
+    """Active-project vault dir for read-only Dev mounts (TASK-2026-00328).
+
+    Resolves ``dev.vault_project`` (``{dir, project}``) to the project
+    folder inside the vault, for ``extra_read_roots``. Never fails: a
+    missing mapping, an unreadable dir, or a path escaping the vault
+    (``..`` or a symlink pointing out) yields ``[]`` — a project
+    without ``vault_project`` runs exactly as before, with no mount.
+    Only this project folder is ever returned: never the whole vault,
+    another project, ``shared/`` or ``inbox/``. Any symlink along the
+    configured project path is rejected, even when it resolves inside
+    the vault.
+    """
+    if not isinstance(project_config, Mapping):
+        return []
+    dev = project_config.get("dev")
+    if not isinstance(dev, Mapping):
+        return []
+    vault = dev.get("vault_project")
+    if not isinstance(vault, Mapping):
+        return []
+    raw_dir = vault.get("dir")
+    raw_project = vault.get("project")
+    if not raw_dir or not raw_project:
+        return []
+    if Path(str(raw_project)).is_absolute():
+        return []
+    try:
+        base = Path(str(raw_dir)).expanduser().resolve()
+    except OSError:
+        return []
+    probe = base
+    for part in Path(str(raw_project)).parts:
+        if part in ("", ".", "/", ".."):
+            continue
+        probe = probe / part
+        try:
+            if probe.is_symlink():
+                return []
+        except OSError:
+            return []
+    try:
+        target = (base / str(raw_project)).resolve()
+    except OSError:
+        return []
+    if not target.is_dir():
+        return []
+    try:
+        rel = target.relative_to(base / "projects")
+    except ValueError:
+        return []
+    if len(rel.parts) < 2:
+        return []
+    return [str(target)]
 
 
 def _prune_contained(roots: list[Path]) -> list[Path]:
