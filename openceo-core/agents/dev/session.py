@@ -343,7 +343,8 @@ def _tier_s_roles_with_vault(
             mounted[str(name)] = spec
             continue
         extra = list(spec.get("extra_read_roots") or [])
-        extra.extend(root for root in roots if root not in extra)
+        seen = {str(entry) for entry in extra}
+        extra.extend(root for root in roots if root not in seen)
         mounted[str(name)] = {**spec, "extra_read_roots": extra}
     return mounted
 

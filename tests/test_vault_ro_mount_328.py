@@ -10,7 +10,7 @@ import shutil
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 CORE = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE) not in sys.path:
@@ -96,6 +96,28 @@ class VaultProjectReadRootTests(unittest.TestCase):
 
     def test_dot_project_rejected(self) -> None:
         self.assertEqual(vault_project_read_root(_cfg(self.vault, ".")), [])
+
+    def test_non_project_folders_rejected(self) -> None:
+        for project in ("shared", "inbox", "projects", "projects/org",
+                        "projects/org/ghost", ".", "/etc",
+                        "projects/org/active/../../.."):
+            with self.subTest(project=project):
+                self.assertEqual(
+                    vault_project_read_root(_cfg(self.vault, project)), [])
+
+    def test_internal_symlink_to_other_project_rejected(self) -> None:
+        link = self.vault / "projects" / "org" / "link"
+        link.symlink_to(self.vault / "projects" / "org" / "other")
+        self.assertEqual(
+            vault_project_read_root(_cfg(self.vault, "projects/org/link")),
+            [])
+
+    def test_nested_symlink_component_rejected(self) -> None:
+        active = self.vault / "projects" / "org" / "active"
+        (active / "evade").symlink_to(self.vault / "projects" / "org" / "other")
+        self.assertEqual(
+            vault_project_read_root(
+                _cfg(self.vault, "projects/org/active/evade")), [])
 
 
 class VaultMountPlanTests(unittest.TestCase):
@@ -184,6 +206,74 @@ class TierSRolesWithVaultTests(unittest.TestCase):
         mounted = _tier_s_roles_with_vault(roles, {"dev": {}})
         self.assertEqual(mounted, roles)
         self.assertIsNot(mounted, roles)
+
+    def test_no_double_mount_with_path_entry(self) -> None:
+        from agents.dev.session import _tier_s_roles_with_vault
+        target = self.vault / "projects/org/active"
+        roles = {"builder": {"extra_read_roots": [target]}}
+        mounted = _tier_s_roles_with_vault(roles, _cfg(self.vault))
+        self.assertEqual(mounted["builder"]["extra_read_roots"], [target])
+
+
+class StepCodeVaultWiringTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.vault = _vault(Path(self._tmp.name))
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _manager(self):
+        from agents.dev.session import DevSessionManager
+        settings = MagicMock()
+        settings.DEV_EXECUTION_MODE = "live"
+        return DevSessionManager(settings, MagicMock())
+
+    def _executor(self):
+        return MagicMock(argv=["musej", "exec"], prompt_via="argv",
+                         cwd="/tmp", env={}, label="tier_c:dsh",
+                         role_profile=None)
+
+    async def test_step_code_once_forwards_vault_root(self) -> None:
+        from state import CodingTool
+        manager = self._manager()
+        calls = []
+
+        async def fake_run_process(
+                command, stdin_payload=None, timeout=120, cwd=None,
+                env=None, sandbox=True, config_argv=None,
+                home_file_overlays=None, extra_read_roots=()):
+            calls.append({"extra_read_roots": list(extra_read_roots)})
+            return True, "did the thing", ""
+
+        manager._run_process = fake_run_process  # type: ignore[method-assign]
+        task = {"task_id": "task-1", "title": "t", "description": "d"}
+        await manager._step_code_once(
+            task, _cfg(self.vault), CodingTool.TIER_C,
+            executor=self._executor())
+        self.assertEqual(
+            calls[0]["extra_read_roots"],
+            [str(self.vault / "projects/org/active")])
+
+    async def test_step_code_once_without_vault_forwards_empty(self) -> None:
+        from state import CodingTool
+        manager = self._manager()
+        calls = []
+
+        async def fake_run_process(
+                command, stdin_payload=None, timeout=120, cwd=None,
+                env=None, sandbox=True, config_argv=None,
+                home_file_overlays=None, extra_read_roots=()):
+            calls.append({"extra_read_roots": list(extra_read_roots)})
+            return True, "did the thing", ""
+
+        manager._run_process = fake_run_process  # type: ignore[method-assign]
+        task = {"task_id": "task-1", "title": "t", "description": "d"}
+        await manager._step_code_once(
+            task, {"dev": {}}, CodingTool.TIER_C,
+            executor=self._executor())
+        self.assertEqual(calls[0]["extra_read_roots"], [])
 
 
 @unittest.skipUnless(

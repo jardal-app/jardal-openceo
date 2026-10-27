@@ -464,7 +464,9 @@ def vault_project_read_root(
     (``..`` or a symlink pointing out) yields ``[]`` — a project
     without ``vault_project`` runs exactly as before, with no mount.
     Only this project folder is ever returned: never the whole vault,
-    another project, ``shared/`` or ``inbox/``.
+    another project, ``shared/`` or ``inbox/``. Any symlink along the
+    configured project path is rejected, even when it resolves inside
+    the vault.
     """
     if not isinstance(project_config, Mapping):
         return []
@@ -478,18 +480,33 @@ def vault_project_read_root(
     raw_project = vault.get("project")
     if not raw_dir or not raw_project:
         return []
+    if Path(str(raw_project)).is_absolute():
+        return []
     try:
         base = Path(str(raw_dir)).expanduser().resolve()
+    except OSError:
+        return []
+    probe = base
+    for part in Path(str(raw_project)).parts:
+        if part in ("", ".", "/", ".."):
+            continue
+        probe = probe / part
+        try:
+            if probe.is_symlink():
+                return []
+        except OSError:
+            return []
+    try:
         target = (base / str(raw_project)).resolve()
     except OSError:
         return []
     if not target.is_dir():
         return []
     try:
-        target.relative_to(base)
+        rel = target.relative_to(base / "projects")
     except ValueError:
         return []
-    if target == base:
+    if len(rel.parts) < 2:
         return []
     return [str(target)]
 
