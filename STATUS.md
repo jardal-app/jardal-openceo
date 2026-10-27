@@ -4,6 +4,8 @@ Resumen operativo corto del estado real del repo.
 
 ## Continuar aquí (traspaso a la próxima sesión)
 
+**00322 ÉPICA MEMORIA Y APRENDIZAJE (2026-10-27, Owner).** `docs/MEMORY_AND_LEARNING_DIRECTION.md` versionado; épica TASK-2026-00322 (grupo) con 18 hijos 00323–00340, pasos 1.1–4.4 del §7 (4.5 es condicional: la registra 1.1 si se cumple). Se ejecuta con `./automatico.py` (local, sin versionar): sesiones muse con traspaso, revisores opencode free + agy2 en paralelo con quórum 1, cierre §9 y verificación propia; cada ejecución reanuda. Carpetas: jardal-openceo (todo salvo 1.4), jardal-knowledge (1.4 y rutas acotadas de 1.2/1.3/1.5/2.4), jardal-erp no se usa. Sigue: lanzar el runner, empieza por 1.1 (TASK-2026-00323).
+
 **POOL (2026-10-26, Owner).** Nemotron re-apuntado a `super-vl-free` vivo (`60bd861`, pid 1830190); ultra-free muerto fuera de pool (9 reservas) y tests al día (141 verde). Acuerdo: "cero preguntas" no es regla — preguntar cuando toque (nota en memoria, corrección en 00310). Ticket serve-evidence creado: **TASK-2026-00315** (grupo A). Pendiente Owner: cifras tramo pago (umbral + cap) y nombre/scopen del renombro ERPNext.
 
 **00284 WORKING (2026-10-26, Owner).** Evidencia agregada registrada. 00286/00296/00298 Completed, 00300 Cancelled, 00310 Completed standalone; 00299 Working (programada 1/2 OK 18:20, falta benchmarks 02:15); 00301/00302 verificados bloqueados por 00299. Prod: main==origin/main `6dbd52a`, pid 1300322, flags router off, cascada on. Mañana: cerrar 00299 con logs → 00301 → 00302 → épica.
