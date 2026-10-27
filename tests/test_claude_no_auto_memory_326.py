@@ -1,10 +1,11 @@
 """Auto memory stays off in OpenCEO-launched Claude runs (TASK-2026-00326, D5).
 
 Tier A, Tier C/claudep and every live role on the claude provider carry
-``CLAUDE_CODE_DISABLE_AUTO_MEMORY=1``; learnings belong to the project
-vault, never to the engine's own memory. No tokens, no subprocesses:
-executors resolve against faked availability and the live overlay is
-captured before any process spawns.
+``CLAUDE_CODE_DISABLE_AUTO_MEMORY=1``, fail-closed: neither provider env
+nor role env can re-enable it. Learnings belong to the project vault,
+never to the engine's own memory. No tokens, no subprocesses: executors
+resolve against faked availability and the live overlay is captured
+before any process spawns.
 """
 
 import asyncio
@@ -60,10 +61,15 @@ class NoAutoMemoryHelperTests(unittest.TestCase):
         self.assertEqual(CLAUDE_NO_AUTO_MEMORY_ENV,
                          {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"})
 
-    def test_extra_wins_without_dropping_switch(self) -> None:
+    def test_extra_keys_survive_beside_switch(self) -> None:
         env = claude_no_auto_memory_env({"PROVIDER_KEEP": "yes"})
         self.assertEqual(env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1")
         self.assertEqual(env["PROVIDER_KEEP"], "yes")
+
+    def test_explicit_config_cannot_reenable(self) -> None:
+        env = claude_no_auto_memory_env(
+            {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"})
+        self.assertEqual(env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1")
 
 
 class TierExecutorNoAutoMemoryTests(unittest.IsolatedAsyncioTestCase):
@@ -105,7 +111,7 @@ class TierExecutorNoAutoMemoryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LiveClaudeRoleNoAutoMemoryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_live_claude_overlay_carries_switch(self) -> None:
+    async def _overlay_for(self, role: str, spec: dict) -> dict:
         from orchestration.live import ProcessExecutor
 
         captured: dict = {}
@@ -114,33 +120,68 @@ class LiveClaudeRoleNoAutoMemoryTests(unittest.IsolatedAsyncioTestCase):
             captured.update(kwargs)
             raise RuntimeError("stop-before-spawn")
 
-        roles = {
-            "dev": {
-                "provider": "claude",
-                "account": "claudej",
-                "label": "dev",
-                "model": "opus",
-                "effort": "max",
-                "active": True,
-                "command": ["claudej"],
-                "headless_args": ["--print"],
-                "prompt_via": "argv",
-                "role_profile": "dev",
-            },
-        }
         badge_provider = MagicMock()
         badge_provider.mint = AsyncMock(return_value="badge-stub")
         badge_provider.mcp_servers = MagicMock(return_value={})
         badge_provider.revoke = AsyncMock()
-        executor = ProcessExecutor(roles=roles,
+        executor = ProcessExecutor(roles={role: spec},
                                    badge_provider=badge_provider)
         with tempfile.TemporaryDirectory(prefix="no-auto-memory-") as tmp:
             with patch("orchestration.live.plan_agent",
                        side_effect=fake_plan_agent):
                 with self.assertRaises(RuntimeError):
-                    await executor._run_once("dev", "hello", Path(tmp), 60)
-        overlay = captured.get("overlay") or {}
+                    await executor._run_once(role, "hello", Path(tmp), 60)
+        return captured.get("overlay") or {}
+
+    def _claude_spec(self, **overrides) -> dict:
+        spec = {
+            "provider": "claude",
+            "account": "claudej",
+            "label": "claudej",
+            "model": "opus",
+            "effort": "max",
+            "active": True,
+            "command": ["claudej"],
+            "headless_args": ["--print"],
+            "prompt_via": "argv",
+        }
+        spec.update(overrides)
+        return spec
+
+    async def test_live_claude_overlay_carries_switch(self) -> None:
+        overlay = await self._overlay_for(
+            "dev", self._claude_spec(role_profile="dev"))
         self.assertEqual(overlay.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"), "1")
+
+    async def test_live_planner_without_profile_carries_switch(self) -> None:
+        overlay = await self._overlay_for("planner", self._claude_spec())
+        self.assertEqual(overlay.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"), "1")
+
+    async def test_live_arbiter_without_profile_carries_switch(self) -> None:
+        overlay = await self._overlay_for("arbiter", self._claude_spec())
+        self.assertEqual(overlay.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"), "1")
+
+    async def test_live_role_env_cannot_reenable(self) -> None:
+        overlay = await self._overlay_for(
+            "planner", self._claude_spec(
+                env={"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"}))
+        self.assertEqual(overlay.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"), "1")
+
+    async def test_live_non_claude_role_untouched(self) -> None:
+        overlay = await self._overlay_for(
+            "builder", self._claude_spec(provider="codex"))
+        self.assertNotIn("CLAUDE_CODE_DISABLE_AUTO_MEMORY", overlay)
+
+
+class SandboxEnvCarriesSwitchTests(unittest.TestCase):
+    def test_overlay_reaches_child_env(self) -> None:
+        from orchestration.agent_sandbox import sandbox_env
+
+        env = sandbox_env(
+            {}, {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+                 "KEEP": "yes"})
+        self.assertEqual(env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1")
+        self.assertEqual(env["KEEP"], "yes")
 
 
 if __name__ == "__main__":

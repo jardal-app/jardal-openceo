@@ -56,9 +56,9 @@ CLAUDE_NO_AUTO_MEMORY_ENV = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
 
 
 def claude_no_auto_memory_env(extra: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Launch env for a Claude run: ``extra`` over the D5 memory kill-switch."""
-    return {**CLAUDE_NO_AUTO_MEMORY_ENV,
-            **{str(k): str(v) for k, v in dict(extra or {}).items()}}
+    """Launch env for a Claude run: D5 kill-switch wins over ``extra``."""
+    return {**{str(k): str(v) for k, v in dict(extra or {}).items()},
+            **CLAUDE_NO_AUTO_MEMORY_ENV}
 
 #: Engine file/shell tools pre-approved next to the box. The fence still
 #: decides WHERE the run may write and the badge which MCP tools answer;

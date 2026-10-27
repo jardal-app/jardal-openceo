@@ -35,8 +35,8 @@ from model_routing.secrets import SecretsError, load_router_secrets
 from orchestration.agent_sandbox import cleanup_sandbox_scratch, plan_agent
 from orchestration.role_claude import (
     CLAUDE_MCP_OVERLAY_RELPATH,
+    CLAUDE_NO_AUTO_MEMORY_ENV,
     claude_config_bytes,
-    claude_no_auto_memory_env,
     ensure_mcp_placeholder,
     profile_box_tools,
 )
@@ -349,7 +349,6 @@ class ProcessExecutor:
                     file_overlays = {CLAUDE_MCP_OVERLAY_RELPATH: rendered}
                     config_argv += claude_argv_extras(
                         profile, box, str(mcp_path))
-                    translator_env.update(claude_no_auto_memory_env())
                 elif provider == "opencode":
                     rendered = opencode_config_bytes(
                         profile, home, servers)
@@ -390,6 +389,9 @@ class ProcessExecutor:
         overlay = {**extra_env, **translator_env, **{
             str(k): str(v)
             for k, v in dict(spec.get("env") or {}).items()}}
+        # D5 fail-closed: no role env re-enables auto memory.
+        if str(spec.get("provider") or "") == "claude":
+            overlay.update(CLAUDE_NO_AUTO_MEMORY_ENV)
         if role.startswith("review:"):
             overlay["GIT_OPTIONAL_LOCKS"] = "0"
         model = str(spec.get("model") or "")
