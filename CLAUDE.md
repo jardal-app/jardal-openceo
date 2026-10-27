@@ -8,7 +8,7 @@ Trabajo temporal de tickets: `docs/work/TASK-2026-000NN-tema.md`.
 
 Operativa del repo (F7a): `AGENTS.md` — los CLI del roster lo leen directo; las sesiones del Owner leen este archivo, que lo importa en §8.
 
-Roadmap vigente: épico **TASK-2026-00248**; TASK-2026-00245 y TASK-2026-00187 cerrados; pilotos reales separados en **TASK-2026-00233**. Las sesiones del Owner trabajan por orden directa (§9).
+Roadmap vigente: épico **TASK-2026-00248**; TASK-2026-00245 y TASK-2026-00187 cerrados; pilotos reales separados en **TASK-2026-00233**. Las sesiones del Owner trabajan por orden directa (§10).
 
 ---
 
@@ -16,10 +16,10 @@ Roadmap vigente: épico **TASK-2026-00248**; TASK-2026-00245 y TASK-2026-00187 c
 
 Cómo se trabaja en este proyecto (vault, una nota por área; cada regla con fuente, autoridad y fecha):
 
-- Autonomía y escalado: avanzar solo; el Owner solo donde hace falta un humano.
-- Ciclo automático y revisión: bucles sin tokens ni `Pending Review`; revisores con quórum 1.
-- Comunicación y atribución: «orden del Owner» solo para sus palabras; traspaso en `STATUS.md`.
-- Validación: tests con el venv de la raíz; LLM solo con modelo gratuito; confirmar con mutaciones.
+- Autonomía y escalado (`practices/autonomia-y-escalado.md`): avanzar solo; el Owner solo donde hace falta un humano.
+- Ciclo automático y revisión (`practices/ciclo-automatico-y-revision.md`): bucles sin tokens ni `Pending Review`; revisores del bucle con quórum 1 (distinto del quórum en 2 rondas de Tier S, §5).
+- Comunicación y atribución (`practices/comunicacion-y-atribucion.md`): «orden del Owner» solo para sus palabras; traspaso en `STATUS.md`.
+- Validación (`practices/validacion.md`): tests con el venv de la raíz; LLM solo con modelo gratuito; confirmar con mutaciones.
 
 Hub: nota del proyecto en el vault; detalle bajo demanda, nunca el vault entero.
 
@@ -44,7 +44,7 @@ scripts/openceo-core-host.sh restart     # rearranque canónico; nunca `python m
 scripts/openceo-core-host.sh status      # verifica instancia única + dueño del puerto
 ```
 
-**Instancia única (obligatorio)**: solo un openceo-core por host. El lifespan tiene efectos globales y uvicorn lo ejecuta antes de bindear: una segunda instancia corrompe el estado y muere con `Errno 98`. `main.py` toma un flock en `.runtime/openceo-core-host.lock` y muere con exit 3 si está tomado.
+**Instancia única (obligatorio)**: solo un openceo-core por host. El lifespan tiene efectos globales y uvicorn lo ejecuta antes de bindear: una segunda instancia corrompe el estado y muere con `Errno 98`. `main.py` toma un flock en `.runtime/openceo-core-host.lock` y muere con exit 3 si está tomado. No habilitar el script y la unit systemd a la vez.
 
 ---
 
@@ -52,7 +52,7 @@ scripts/openceo-core-host.sh status      # verifica instancia única + dueño de
 
 1. **Sin barridos ni polling**: prohibido el polling contra Mongo o APIs en loops; todo cambio es reactivo por eventos CRUD.
 2. **Respuesta inmediata en dev**: turnos de código en background, HTTP/SSE instantáneo; 1 call de API por operación.
-3. **`musej` es el `muse` de dev por defecto** (`--yolo --disable-sandbox --disable-approval --trust-workspace`); **`muse` pelado es sesión aislada** (sandbox ON, para revisores/auditorías).
+3. **`musej` es el `muse` de dev por defecto** (`--yolo --disable-sandbox --disable-approval --approval-mode never --trust-workspace`, van los últimos y no se pueden reescribir encima); **`muse` pelado es sesión aislada** (sandbox ON, para revisores/auditorías).
 4. **Memoria de motores**: no se usa; la automática de Claude Code está apagada en este repo (`.claude/settings.json`) y en las ejecuciones que lanza OpenCEO. Lo personal va a `CLAUDE.local.md` (sin versionar), nunca al vault.
 5. **Credenciales y paths**: host usa `~/.codex`, `~/.claude`, `/home/develop/.local/bin/agyd`; `gemini` corre con `agyd`.
 
@@ -68,7 +68,7 @@ Workflows deterministas (0 tokens) en `workflows/<agente>/<nombre>.yaml`; pasos 
 
 ## 6. Tickets: Jardal ERP es el registro de negocio
 
-El trabajo empresarial pertenece a Jardal ERP; OpenCEO conserva la **ejecución** (dirección en `docs/OPENCEO_DIRECTION.md`). `TaskService.create_task()` crea el ticket de negocio antes de persistir en Mongo (ramas: éxito, `jardal_erp_pending` por timeout sin `autorun`, fallo duro 4xx sin persistir); un webhook propaga el inverso. `completed` es condicional (con `qa_review_required` pendiente empuja `Pending Review`); `openceo_ref` es la clave de idempotencia; `Working` solo con ejecución real (`autorun` explícito).
+El trabajo empresarial pertenece a Jardal ERP; OpenCEO conserva la **ejecución** (dirección en `docs/OPENCEO_DIRECTION.md`). `TaskService.create_task()` crea el ticket de negocio antes de persistir en Mongo (ramas: éxito, `jardal_erp_pending` por timeout sin `autorun`, fallo duro 4xx sin persistir); un webhook propaga el inverso. `completed` es condicional (con `qa_review_required` pendiente empuja `Pending Review`); `openceo_ref` es la clave de idempotencia; `Working` solo con ejecución real (`autorun` explícito; legacy sin el campo equivale a `True`). Detalle operativo por zona en `.claude/rules/tickets.md`.
 
 ---
 
@@ -92,7 +92,7 @@ Una sesión no termina con el código listo: termina con el ticket cerrado en su
 
 1. **Merge a `main` + push** (`git checkout main && git merge --no-ff <rama> && git push origin main`).
 2. **Servicio reiniciado** (`scripts/openceo-core-host.sh restart` + `status` + smoke).
-3. **Ticket en su estado final** (`Completed` con `evidence`; `Pending Review` solo con `human_action` que únicamente el Owner puede dar; `Working` con `reason` si sigue abierto). Borrar la rama tras el merge.
+3. **Ticket en su estado final** (`Completed` con `evidence`; `Pending Review` solo con `human_action` que únicamente el Owner puede dar; `Working` con `reason` si sigue abierto; cancelar trabajo del Owner exige citar su orden). Borrar la rama tras el merge.
 4. **Docs temporales eliminados** (`docs/work/TASK-2026-000NN-tema.md` tras el checklist; informar en una línea).
 5. **Registro durable**: `STATUS.md`, ticket y vault (solo hechos reutilizables, con el número de ticket).
 

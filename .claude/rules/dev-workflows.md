@@ -3,6 +3,8 @@ paths:
   - "workflows/**"
   - "openceo-core/agents/dev/**"
   - "openceo-core/objectives/**"
+  - "openceo-core/orchestration/**"
+  - "catalog/**"
 ---
 
 # Dev workflows — reglas por zona

@@ -957,7 +957,7 @@ class MongoRepository:
                       "waiting_reason": "Tier S interrumpido por reinicio; relanza el ticket (abre un intento nuevo)",
                       "resume_at": None, "updated_at": datetime.now(timezone.utc)}},
         )
-        # Single instance (CLAUDE.md §4): no cycle survives a restart, so a
+        # Single instance (CLAUDE.md §3): no cycle survives a restart, so a
         # run still marked live died with the old process. Close it and free
         # its repo marker, or the unique ``active_repo`` index would refuse
         # the next run on that repo (TASK-2026-00162).

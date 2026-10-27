@@ -24,6 +24,7 @@ PRACTICES = (
 RULES = {
     ".claude/rules/horizon.md": "openceo-core/horizon/",
     ".claude/rules/dev-workflows.md": "workflows/",
+    ".claude/rules/tickets.md": "openceo-core/task_service.py",
 }
 
 
@@ -53,12 +54,25 @@ class ShortClaudeContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = Path(tmp) / "rule.md"
             fixture.write_text("---\npaths:\n  - \"some/zone/**\"\n---\n\n# Title\n")
-            head = fixture.read_text().split("---")[1]
+            fixture_head = fixture.read_text().split("---")[1]
+            self.assertIn("paths:", fixture_head)
             for rule in RULES:
                 body = (REPO / rule).read_text()
                 self.assertEqual(body.count("---"), 2, rule)
-                self.assertIn("paths:", body.split("---")[1], rule)
-            self.assertIn("paths:", head)
+                rule_head = body.split("---")[1]
+                self.assertIn("paths:", rule_head, rule)
+                for key in ("paths:",):
+                    self.assertIn(key, rule_head, rule)
+                    self.assertIn(key, fixture_head, rule)
+
+    def test_combined_import_stays_under_200_lines(self):
+        claude = (REPO / "CLAUDE.md").read_text().splitlines()
+        agents = (REPO / "AGENTS.md").read_text().splitlines()
+        self.assertIn("@AGENTS.md", "\n".join(claude))
+        self.assertLess(
+            len(claude) + len(agents), 200,
+            f"combined {len(claude)} + {len(agents)} lines",
+        )
 
     def test_no_procedure_dumps_in_claude_md(self):
         text = (REPO / "CLAUDE.md").read_text()

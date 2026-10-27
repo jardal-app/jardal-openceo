@@ -47,6 +47,7 @@ EXCLUDED_PREFIXES = (
     "vault/",
     "jardal-knowledge/",
     "projects/jardal/",
+    "practices/",
 )
 
 #: Roots tried in order for shorthand citations ("" = repo root).

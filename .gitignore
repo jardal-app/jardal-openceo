@@ -1,5 +1,8 @@
 # Local agent/runtime state
-.claude/
+.claude/*
+!.claude/rules/
+!.claude/settings.json
+CLAUDE.local.md
 .codex/
 .opencode/
 .runtime/

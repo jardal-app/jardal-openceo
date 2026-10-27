@@ -79,4 +79,4 @@ scripts/openceo-core-host.sh restart|status
   token allowance from completed epic TASK-2026-00187. Its pilots remain
   separate in TASK-2026-00233 (TASK-2026-00219 and TASK-2026-00224), only
   with `valida` in a dedicated Owner session and completed dependencies,
-  never through the current coding loop (CLAUDE.md §11).
+  never through the current coding loop (CLAUDE.md §10).

@@ -40,8 +40,11 @@ OWNER_MARKS = (
 )
 
 
-def _section_10(text: str) -> str:
-    return text[text.index("## 10."):text.index("## 11.")]
+def _import_section(text: str) -> str:
+    anchor = text.index("@AGENTS.md")
+    start = text.rindex("## ", 0, anchor)
+    end = text.find("\n## ", anchor)
+    return text[start:] if end == -1 else text[start:end]
 
 
 class AgentsSplitTests(unittest.TestCase):
@@ -67,8 +70,7 @@ class AgentsSplitTests(unittest.TestCase):
 
     def test_claude_md_imports_agents_md(self) -> None:
         text = (REPO / "CLAUDE.md").read_text(encoding="utf-8")
-        self.assertIn("## 10.", text)
-        section = _section_10(text)
+        section = _import_section(text)
         self.assertIn("@AGENTS.md", section)
         self.assertNotIn("### Tier S executor contract", section)
         self.assertNotIn("### Standing rules", section)
