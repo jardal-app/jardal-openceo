@@ -36,6 +36,7 @@ from orchestration.agent_sandbox import cleanup_sandbox_scratch, plan_agent
 from orchestration.role_claude import (
     CLAUDE_MCP_OVERLAY_RELPATH,
     claude_config_bytes,
+    claude_no_auto_memory_env,
     ensure_mcp_placeholder,
     profile_box_tools,
 )
@@ -348,6 +349,7 @@ class ProcessExecutor:
                     file_overlays = {CLAUDE_MCP_OVERLAY_RELPATH: rendered}
                     config_argv += claude_argv_extras(
                         profile, box, str(mcp_path))
+                    translator_env.update(claude_no_auto_memory_env())
                 elif provider == "opencode":
                     rendered = opencode_config_bytes(
                         profile, home, servers)
