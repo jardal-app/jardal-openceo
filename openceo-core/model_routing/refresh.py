@@ -21,6 +21,7 @@ from typing import Callable
 from model_routing import alerts as router_alerts
 from model_routing import benchmarks as router_benchmarks
 from model_routing import live as router_live
+from model_routing import serve_evidence as router_serve_evidence
 from model_routing import paid as router_paid
 from model_routing import ranking as router_ranking
 from model_routing import sources as router_sources
@@ -199,13 +200,15 @@ def _fetch_providers(
 ) -> tuple[list[FetchedCatalog], dict[str, str]]:
     fetched: list[FetchedCatalog] = []
     failed: dict[str, str] = {}
+    evidence = router_serve_evidence.load_serve_evidence()
     for provider in providers:
         if provider not in SOURCE_TTLS:
             failed[provider] = f"unsupported provider: {provider}"
             continue
         try:
             catalog = router_sources.refresh_source(
-                provider, terms, api_key=_provider_key(secrets, provider), get=get)
+                provider, terms, api_key=_provider_key(secrets, provider),
+                serve_evidence=evidence, get=get)
         except (SourceError, router_live.LiveError) as exc:
             failed[provider] = str(exc)
             continue

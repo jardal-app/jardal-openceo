@@ -32,6 +32,14 @@ CORE = Path(__file__).resolve().parents[1] / "openceo-core"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "model_routing_live"
 
 
+@pytest.fixture()
+def isolated_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    return tmp_path
+
+
 def _run(returncode=0, stdout="", stderr="", argv=()):
     return router_probes.NativeRun(
         args=tuple(argv), returncode=returncode, stdout=stdout, stderr=stderr
@@ -74,7 +82,7 @@ def test_package_carries_no_opencode_inference_url():
 # Native probes ----------------------------------------------------------------
 
 
-def test_run_probe_routes_opencode_to_the_native_cli():
+def test_run_probe_routes_opencode_to_the_native_cli(isolated_home):
     seen: list = []
 
     def _runner(argv, _cwd, _timeout):
@@ -92,7 +100,7 @@ def test_run_probe_routes_opencode_to_the_native_cli():
     assert len(raw["events"]) == 2
 
 
-def test_native_tool_probe_marks_tools_capability():
+def test_native_tool_probe_marks_tools_capability(isolated_home):
     stdout = _events(
         {"type": "tool_use", "part": {"id": "call-1", "tool": "read", "input": {}}},
         _text_event("ok"),

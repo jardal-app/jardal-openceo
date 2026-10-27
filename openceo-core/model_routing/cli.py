@@ -42,11 +42,13 @@ from model_routing.research_wiring import (  # noqa: E402
     native_research_targets,
 )
 from model_routing.models import RouterPolicy, collect_status  # noqa: E402
+from model_routing import serve_evidence as router_serve_evidence  # noqa: E402
 from model_routing.paths import (  # noqa: E402
     AVAILABILITY_DB_FILENAME,
     CATALOG_FILENAME,
     POLICY_FILENAME,
     RANKINGS_FILENAME,
+    SERVE_EVIDENCE_FILENAME,
     config_dir,
     state_dir,
 )
@@ -139,6 +141,12 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Accepted-report receipts to check (repeatable)")
     cost.add_argument("--state-dir", default=None)
     cost.add_argument("--json", action="store_true", help="Machine-readable output")
+    evidence = sub.add_parser(
+        "serve-evidence", help="Record or list native serve evidence (group A)")
+    evidence.add_argument("--model", default=None,
+                          help="Bare OpenCode model id to record (e.g. big-pickle)")
+    evidence.add_argument("--state-dir", default=None)
+    evidence.add_argument("--json", action="store_true", help="Machine-readable output")
     sessions = sub.add_parser("sessions", help="List research sessions by freshness")
     sessions.add_argument("--active", action="store_true",
                           help="Only sessions updated within the window")
@@ -544,6 +552,37 @@ def _run_cost_audit(args: argparse.Namespace) -> int:
     return 0 if audit.clean else 1
 
 
+def _run_serve_evidence(args: argparse.Namespace) -> int:
+    base = Path(args.state_dir) if args.state_dir else state_dir()
+    target = base / SERVE_EVIDENCE_FILENAME
+    if args.model is not None:
+        stamp = router_serve_evidence.record_native_serve(
+            router_serve_evidence.NATIVE_PROVIDER, args.model, path=target)
+        if stamp is None:
+            print(f"serve-evidence: refused model id: {args.model}")
+            return 2
+        if args.json:
+            print(json.dumps({"model": args.model, "observed_at": stamp,
+                              "path": str(target)}, indent=2))
+        else:
+            print(f"serve-evidence: recorded {args.model} at {stamp}")
+        return 0
+    evidence = router_serve_evidence.load_serve_evidence(target)
+    rows = [{"model": model, "observed_at": seen,
+             "fresh": router_serve_evidence.is_fresh(seen)}
+            for model, seen in sorted(evidence.items())]
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        print("serve-evidence: no entries")
+        return 0
+    for row in rows:
+        print(f"{row['model']} at {row['observed_at']}"
+              f" ({'fresh' if row['fresh'] else 'stale'})")
+    return 0
+
+
 def _run_sessions(args: argparse.Namespace) -> int:
     if args.max_age_h <= 0:
         print("sessions: --max-age-h must be above zero")
@@ -737,6 +776,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_reservations(args)
     if args.command == "cost-audit":
         return _run_cost_audit(args)
+    if args.command == "serve-evidence":
+        return _run_serve_evidence(args)
     if args.command == "sessions":
         return _run_sessions(args)
     if args.command == "tui-launch":
