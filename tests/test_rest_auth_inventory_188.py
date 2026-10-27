@@ -179,7 +179,7 @@ class RestAuthInventoryTests(unittest.TestCase):
 
     def test_webhook_exception_still_guarded_by_secret(self) -> None:
         for route in _iter_write_routes():
-            if route.path == "/api/integrations/erpnext/task":
+            if route.path == "/api/integrations/jardal-erp/task":
                 self.assertEqual(_route_auth_kind(route), "webhook_secret")
                 return
         self.fail("webhook route disappeared")

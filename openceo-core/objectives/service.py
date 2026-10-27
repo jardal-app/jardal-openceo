@@ -1,7 +1,7 @@
 """Company-level objective wiring (F2 TASK-2026-00117).
 
 :mod:`objectives.engine` is pure flow over protocols; this module binds it
-to production: the ticket API (ERPNext first), the ERP group operations,
+to production: the ticket API (Jardal ERP first), the ERP group operations,
 the live planner executor, the reviewer pool and the global config. Dev
 flows keep their own env (see ``DevSessionManager._objective_env_for``);
 every other entry — API, MCP, voice, and later the CEO (F4) and Horizon
@@ -71,7 +71,7 @@ class ObjectiveErpAdapter:
 
 def erp_for_task_service(task_service: Any) -> ObjectiveErpAdapter | None:
     """ObjectiveErp view of a TaskService, or None when ERP is unavailable."""
-    adapter = getattr(task_service, "_business", None) or getattr(task_service, "_erpnext", None)
+    adapter = getattr(task_service, "_business", None) or getattr(task_service, "_business", None)
     if adapter is None or not getattr(adapter, "is_enabled", False):
         return None
     return ObjectiveErpAdapter(adapter)
@@ -80,7 +80,7 @@ def erp_for_task_service(task_service: Any) -> ObjectiveErpAdapter | None:
 async def create_internal_ticket(
     task_service: Any, payload: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Create engine tickets through the internal API (ERPNext first).
+    """Create engine tickets through the internal API (Jardal ERP first).
 
     Idempotent per ``source_id``. ``agent_hint``/``params`` ride through
     from the payload (planner targets; no default: undecided tickets

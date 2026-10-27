@@ -2,7 +2,7 @@
 
 Sin red: detector, parser, clasificacion a cuentas de ingreso reales,
 idempotencia y Decimal se prueban con un cliente falso. La prueba viva contra
-ERPNext se corre a mano una vez (ver STATUS.md).
+Jardal ERP se corre a mano una vez (ver STATUS.md).
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ class FakeDuplicate(Exception):
         self.status_code = 417
 
 
-class FakeERPNextClient:
+class FakeJardalERPClient:
     """Imita create/list/update del cliente real sobre Journal Entry."""
 
     def __init__(self) -> None:
@@ -279,7 +279,7 @@ class JournalEntryShapeTests(unittest.TestCase):
 class RegisterIncomeTests(unittest.TestCase):
     def test_create_and_submit(self) -> None:
         async def scenario() -> None:
-            client = FakeERPNextClient()
+            client = FakeJardalERPClient()
             parsed = parse_income("registra ingreso sueldo 6200 bolivianos")
             assert parsed is not None
             result = await register_income(client, parsed, ref="voice-income:test1")
@@ -296,7 +296,7 @@ class RegisterIncomeTests(unittest.TestCase):
 
     def test_retry_same_ref_is_idempotent(self) -> None:
         async def scenario() -> None:
-            client = FakeERPNextClient()
+            client = FakeJardalERPClient()
             parsed = parse_income("anota ingreso docencia 3800 bs")
             assert parsed is not None
             first = await register_income(client, parsed, ref="voice-income:retry")
@@ -310,7 +310,7 @@ class RegisterIncomeTests(unittest.TestCase):
 
     def test_different_ref_creates_distinct_operation(self) -> None:
         async def scenario() -> None:
-            client = FakeERPNextClient()
+            client = FakeJardalERPClient()
             parsed = parse_income("anota ingreso docencia 3800 bs")
             assert parsed is not None
             first = await register_income(client, parsed, ref="voice-income:a")

@@ -1,4 +1,4 @@
-"""Fechas reales y estimadas del Gantt en ERPNext (TASK-2026-00147).
+"""Fechas reales y estimadas del Gantt en Jardal ERP (TASK-2026-00147).
 
 Contrato que se fija aquí (verificado contra el sitio vivo el 2026-10-08):
 
@@ -14,7 +14,7 @@ Contrato que se fija aquí (verificado contra el sitio vivo el 2026-10-08):
   explícitas; una fecha límite externa se adopta.
 - Grupos: span = [mín inicios, máx fines], con la explícita como suelo.
 
-ERPNext simulado (fakes al estilo `test_group_progress.py`); 0 tokens.
+Jardal ERP simulado (fakes al estilo `test_group_progress.py`); 0 tokens.
 """
 
 from __future__ import annotations
@@ -33,10 +33,10 @@ if str(CORE_DIR) not in sys.path:
 import visibility  # noqa: E402
 from state import TaskSource  # noqa: E402
 from task_service import TaskService  # noqa: E402
-from tools.erpnext_client import (  # noqa: E402
-    ERPNextDateBoundError,
-    ERPNextUnavailable,
-    ERPNextValidationError,
+from tools.jardal_erp_client import (  # noqa: E402
+    JardalERPDateBoundError,
+    JardalERPUnavailable,
+    JardalERPValidationError,
 )
 
 
@@ -76,7 +76,7 @@ class FakeBusinessAdapter:
         for doc in self.docs.values():
             if str(doc.get("openceo_ref") or "") == key:
                 return dict(doc)
-        raise ERPNextValidationError(f"No existe el ticket {key}.", status_code=404)
+        raise JardalERPValidationError(f"No existe el ticket {key}.", status_code=404)
 
     async def list_children(self, parent_name, *, limit=200):
         self._maybe_fail("list_children")
@@ -199,7 +199,7 @@ def make_service(adapter=None, repo=None):
         HORIZON_PERSONAL_MIRROR_ENABLED=False,
         ERPNEXT_SITE_TIMEZONE=ZONE,
     )
-    service._erpnext = adapter
+    service._business = adapter
     service._repo = repo
     service._hub = FakeHub()
     service._horizon_terminal = None
@@ -646,7 +646,7 @@ class EstimateServiceTests(unittest.TestCase):
         execution = exec_doc("exec-b", "B", "queued")
         adapter = FakeBusinessAdapter([group, business])
         adapter.fail_next("update_work_dates",
-                          ERPNextDateBoundError("pasa al padre"))
+                          JardalERPDateBoundError("pasa al padre"))
         service = make_service(adapter, FakeRepo([execution]))
         wrote = run(service._estimate_open_ticket(
             adapter, business, execution, ZONE, NOW, "create"))

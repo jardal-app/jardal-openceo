@@ -89,7 +89,7 @@ ANONYMOUS_BOX = frozenset({
     "openceo_get_ticket_attachment",
     "openceo_update_ticket_attachment",
     "openceo_delete_ticket_attachment",
-    "openceo_ensure_erpnext_project",
+    "openceo_ensure_business_project",
 })
 
 AGENT_TOKEN_TTL = timedelta(days=7)
@@ -183,7 +183,7 @@ class TicketGrant:
             if params.get("project") != self.project:
                 raise McpDenied("Agents only search their own project")
             return
-        if tool == "openceo_ensure_erpnext_project":
+        if tool == "openceo_ensure_business_project":
             # Creation tools carry no ticket/project params to bind, so the
             # box on the token is the whole rule.
             return

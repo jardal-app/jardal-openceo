@@ -2,9 +2,9 @@
 
 **Fecha de auditoría:** 2026-09-20 · **Estado: EJECUTADO el 2026-09-20 a las 19:38 UTC** — corre `v3.7.13`, contenedor recreado sin incidentes y parque verificado por sondeos. Bitácora con la evidencia en `DIGEST-logs-2026-09-20.md` (en el directorio del despliegue). El procedimiento se conserva intacto por si hay que repetirlo o aplicarlo a una versión futura.
 **Ámbito:** `/home/develop/deployments/jardal-traefik/` (Traefik que enruta los 46 servicios de producción)
-**Relacionado:** [`ERPNEXT.md`](file:///home/develop/development/Jardal/jardal-openceo/ERPNEXT.md) §6 · `AGENTS.md` del propio directorio de despliegue
+**Relacionado:** [`JARDAL_ERP.md`](file:///home/develop/development/Jardal/jardal-openceo/JARDAL_ERP.md) §6 · `AGENTS.md` del propio directorio de despliegue
 
-> **Respuesta corta a "¿tengo que tocar Traefik antes de ERPNext?" → NO.** ERPNext no necesita ningún cambio de Traefik: se integra con las 3 labels que ya usa toda la producción. La actualización de versión es **una mejora de seguridad independiente**, y este documento existe para que se haga sin riesgo. No hay que hacerlas juntas.
+> **Respuesta corta a "¿tengo que tocar Traefik antes de Jardal ERP?" → NO.** Jardal ERP no necesita ningún cambio de Traefik: se integra con las 3 labels que ya usa toda la producción. La actualización de versión es **una mejora de seguridad independiente**, y este documento existe para que se haga sin riesgo. No hay que hacerlas juntas.
 
 ---
 
@@ -50,7 +50,7 @@ Ambos directorios se llaman `jardal-traefik`, así que **el project name de comp
 
 **Regla absoluta: los comandos de este runbook se ejecutan SOLO desde `/home/develop/deployments/jardal-traefik/`. Nunca desde el directorio del repo.** Al final (§7) hay un pendiente para dejar el repo coherente.
 
-### 2.2 Traefik está en bucle de errores ACME (riesgo para el certificado de ERPNext)
+### 2.2 Traefik está en bucle de errores ACME (riesgo para el certificado de Jardal ERP)
 
 Baseline medido el 2026-09-20 18:20 UTC — **el 100% de las últimas 2000 líneas de log son `ERR`**:
 
@@ -59,7 +59,7 @@ Baseline medido el 2026-09-20 18:20 UTC — **el 100% de las últimas 2000 líne
 | `Unable to obtain ACME certificate for domains [kimi.jardal.app] … 429 rateLimited` | **665** | `kimi.jardal.app` resuelve a **IPs de Cloudflare** (`188.114.96.3`, `188.114.97.3`). Con el challenge **TLS-ALPN**, Let's Encrypt habla con Cloudflare, nunca con este Traefik → **ese certificado no se puede obtener jamás**. Traefik reintenta cada ~12–60 s. |
 | `Router uses a non-existent certificate resolver certificateResolver=letsencrypt` | **1328** | Los routers `fugovpn-api@docker` (hosts `api.fugovpn.app` y `auth.fugovpn.app`) y `fugovpn-dev-frontend@docker` (hosts `dev.fugovpn.app` y `dev.jardal.app`) piden un resolver llamado `letsencrypt` **que no existe** (el único es `jardal-resolver`). Además `api.fugovpn.app` también está detrás de Cloudflare, y `dev.jardal.app` **no tiene registro DNS**. |
 
-**Por qué esto importa antes de ERPNext:** los 429 de Let's Encrypt son de **cuenta** ("your account is temporarily prevented… for `kimi.jardal.app` **and possibly others**"). Cada reintento consume el presupuesto de *new orders* de la cuenta. Emitir el certificado de `erp.jardal.app` con ese bucle encendido es apostar a que alcanza la cuota.
+**Por qué esto importa antes de Jardal ERP:** los 429 de Let's Encrypt son de **cuenta** ("your account is temporarily prevented… for `kimi.jardal.app` **and possibly others**"). Cada reintento consume el presupuesto de *new orders* de la cuenta. Emitir el certificado de `erp.jardal.app` con ese bucle encendido es apostar a que alcanza la cuota.
 
 **Fix (sin reiniciar Traefik, sin downtime):**
 
@@ -75,12 +75,12 @@ Baseline medido el 2026-09-20 18:20 UTC — **el 100% de las últimas 2000 líne
 
 ---
 
-## 3. Por qué actualizar (y por qué no es urgente para ERPNext)
+## 3. Por qué actualizar (y por qué no es urgente para Jardal ERP)
 
 | Motivo | Detalle |
 |---|---|
 | **La línea 3.0 está fuera de soporte** | La tabla oficial de mantenimiento da a 3.0 soporte comunitario **terminado el 2024-07-15**. Lleva ~2 años sin parches. Han salido releases de seguridad para las líneas 2.11/3.6/3.7. |
-| **No hace falta para ERPNext** | ERPNext usa `Host()`, `entrypoints`, `tls.certresolver` y `websocket`: todo existe en 3.0. |
+| **No hace falta para Jardal ERP** | Jardal ERP usa `Host()`, `entrypoints`, `tls.certresolver` y `websocket`: todo existe en 3.0. |
 | **Versión objetivo** | **`v3.7.13`** (publicada 2026-09-18, `sha256:1c32e7c368…`). Fijar el **tag de parche**, no `v3.7` ni `v3`. No existe v4 en las etiquetas recientes: no hay salto mayor pendiente. |
 
 ---
@@ -257,7 +257,7 @@ Corte esperado del rollback: **segundos**. Los certificados y los 46 routers se 
 
 ## 7. Fuera de alcance de este runbook
 
-- **ERPNext**: no requiere nada de esto (`ERPNEXT.md` §6). Se despliega con las 3 labels ya convencionales.
+- **Jardal ERP**: no requiere nada de esto (`JARDAL_ERP.md` §6). Se despliega con las 3 labels ya convencionales.
 - **Habilitar el dashboard/API de Traefik** para inspeccionar routers: sería útil para verificar, pero es superficie nueva en producción; se decide aparte. Hoy no está habilitado (`--api.dashboard` y `--api.insecure` están comentados), y por eso la verificación se hace con sondeos reales.
 - **DNS challenge** para hostnames detrás de Cloudflare: cambio de configuración ACME, otra ventana.
 

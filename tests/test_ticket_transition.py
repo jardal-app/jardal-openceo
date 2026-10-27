@@ -15,7 +15,7 @@ Contrato que se fija aqui:
   rebota (`status_pushed` en vocabulario OpenCEO);
 - superficie MCP: `openceo_transition_ticket` + batch secuencial verificado.
 
-ERPNext simulado (fakes al estilo `test_erpnext_hierarchy.py`); 0 tokens.
+Jardal ERP simulado (fakes al estilo `test_business_hierarchy.py`); 0 tokens.
 """
 
 from __future__ import annotations
@@ -35,13 +35,13 @@ import mcp_server  # noqa: E402
 from company_mandate import EscalationCategory, parse_mandate  # noqa: E402
 from state import TaskSource  # noqa: E402
 from task_service import TaskService, _transition_cancel_needs_owner  # noqa: E402
-from tools.erpnext_client import (  # noqa: E402
-    ERPNextDependencyBlockedError,
-    ERPNextUnavailable,
-    ERPNextValidationError,
+from tools.jardal_erp_client import (  # noqa: E402
+    JardalERPDependencyBlockedError,
+    JardalERPUnavailable,
+    JardalERPValidationError,
 )
-from tools.erpnext_tickets import (  # noqa: E402
-    ERPNextTicketAdapter,
+from tools.jardal_erp_tickets import (  # noqa: E402
+    JardalERPTicketAdapter,
     normalize_transition_status,
 )
 
@@ -83,7 +83,7 @@ def _valid_mandate_dict() -> dict:
 
 
 class FakeBusinessAdapter:
-    """ERPNext en memoria: resuelve, transiciona y relee como el adapter real."""
+    """Jardal ERP en memoria: resuelve, transiciona y relee como el adapter real."""
 
     is_enabled = True
 
@@ -102,7 +102,7 @@ class FakeBusinessAdapter:
         for doc in self.docs.values():
             if str(doc.get("openceo_ref") or "") == key:
                 return dict(doc)
-        raise ERPNextValidationError(
+        raise JardalERPValidationError(
             f"No existe el ticket {identifier}.", status_code=404
         )
 
@@ -191,7 +191,7 @@ def exec_doc(task_id="exec-1", status="in_progress", **over):
 
 def make_service(adapter, repo):
     service = TaskService.__new__(TaskService)
-    service._erpnext = adapter
+    service._business = adapter
     service._repo = repo
     service._hub = FakeHub()
     service._horizon_terminal = None
@@ -215,10 +215,10 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(normalize_transition_status("  working "), "Working")
 
     def test_desconocido_es_400(self):
-        with self.assertRaises(ERPNextValidationError) as ctx:
+        with self.assertRaises(JardalERPValidationError) as ctx:
             normalize_transition_status("Done")
         self.assertEqual(ctx.exception.status_code, 400)
-        with self.assertRaises(ERPNextValidationError):
+        with self.assertRaises(JardalERPValidationError):
             normalize_transition_status("")
 
 
@@ -518,7 +518,7 @@ class BlockedTests(unittest.TestCase):
         adapter = FakeBusinessAdapter(
             [business],
             failures=[
-                ERPNextDependencyBlockedError(BLOCKED_MESSAGE, status_code=417)
+                JardalERPDependencyBlockedError(BLOCKED_MESSAGE, status_code=417)
             ],
         )
         repo = FakeRepo([exec_doc(status="in_progress")])
@@ -631,9 +631,9 @@ class NoEchoTests(unittest.TestCase):
         )
         self.assertEqual(result["outcome"], "applied")
         updated = repo.tasks["exec-1"]
-        service._erpnext_queue = asyncio.Queue()
+        service._jardal_erp_queue = asyncio.Queue()
         run(service.observe_task_status(updated))
-        self.assertTrue(service._erpnext_queue.empty())
+        self.assertTrue(service._jardal_erp_queue.empty())
         echo = run(
             service.apply_business_status(
                 task_id="exec-1", business_status="Completed"
@@ -652,7 +652,7 @@ class AvailabilityTests(unittest.TestCase):
     def test_put_reintenta_y_aplica(self):
         adapter = FakeBusinessAdapter(
             [business_doc(status="Working")],
-            failures=[ERPNextUnavailable("caido")],
+            failures=[JardalERPUnavailable("caido")],
         )
         repo = FakeRepo([exec_doc(status="in_progress")])
         service = make_service(adapter, repo)
@@ -666,7 +666,7 @@ class AvailabilityTests(unittest.TestCase):
     def test_no_disponible_no_cambia_nada(self):
         adapter = FakeBusinessAdapter(
             [business_doc(status="Working")],
-            failures=[ERPNextUnavailable("c") for _ in range(3)],
+            failures=[JardalERPUnavailable("c") for _ in range(3)],
         )
         task = exec_doc(status="in_progress")
         repo = FakeRepo([task])
@@ -693,7 +693,7 @@ class AvailabilityTests(unittest.TestCase):
         async def flaky_resolve(identifier):
             resolves["n"] += 1
             if resolves["n"] >= 3:
-                raise ERPNextUnavailable("corte a mitad")
+                raise JardalERPUnavailable("corte a mitad")
             return await real_resolve(identifier)
 
         adapter.resolve_task = flaky_resolve  # type: ignore[method-assign]
@@ -739,7 +739,7 @@ class FakeClient:
 
 def make_adapter(client):
     settings = SimpleNamespace(ERPNEXT_TICKETS_PROJECT_COMPANY="Jardal")
-    return ERPNextTicketAdapter(settings, client=client)  # type: ignore[arg-type]
+    return JardalERPTicketAdapter(settings, client=client)  # type: ignore[arg-type]
 
 
 class AdapterOpTests(unittest.TestCase):
@@ -758,7 +758,7 @@ class AdapterOpTests(unittest.TestCase):
         adapter = make_adapter(client)
         run(adapter.transition_status("TASK-2026-00010", "pending_review"))
         self.assertEqual(client.docs["TASK-2026-00010"]["status"], "Pending Review")
-        with self.assertRaises(ERPNextValidationError):
+        with self.assertRaises(JardalERPValidationError):
             run(adapter.transition_status("TASK-2026-00010", "Done"))
 
     def test_transition_status_vacia_coding_tool_v1_congelado(self):
@@ -833,7 +833,7 @@ class AdapterOpTests(unittest.TestCase):
                                   openceo_coding_tool="tier_b")]
                 )
                 adapter = make_adapter(client)
-                with self.assertRaises(ERPNextValidationError):
+                with self.assertRaises(JardalERPValidationError):
                     run(adapter.retier_ticket("TASK-2026-00010", bad))
                 self.assertEqual(client.updated, [])
 

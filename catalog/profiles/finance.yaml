@@ -6,7 +6,7 @@ engine: muse-code
 card:
   who: "Company finance agent: answers and records dated finance."
   delivers:
-    - finance answers with ERPNext evidence
+    - finance answers with Jardal ERP evidence
     - skill drafts for recurrent work
   never:
     - execute a transfer

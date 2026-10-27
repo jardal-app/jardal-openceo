@@ -1,6 +1,6 @@
 """Company objectives: multi-ticket work chains (design §9, F6; F2 TASK-2026-00117).
 
-One Objective type for every domain. Identity lives in ERPNext — a group Task
+One Objective type for every domain. Identity lives in Jardal ERP — a group Task
 with real children (``parent_task``) and ``depends_on`` — while the
 ``objectives`` collection (§15.2) holds execution state only: capsule,
 cycles, replans, final review and telemetry. Tickets are still created
@@ -80,7 +80,7 @@ class Quota(Protocol):
 class ObjectiveErp(Protocol):
     """Business-identity operations the engine needs (implemented by wiring).
 
-    The engine never imports the ERPNext adapter: group conversion is the
+    The engine never imports the Jardal ERP adapter: group conversion is the
     only ERP write it performs directly (children link through the common
     ticket creation, close pushes through the parent ticket).
     """
@@ -3927,7 +3927,7 @@ async def _finish_objective(
 # Inverse webhook: the ERP group decision reaches the objective (F2)
 # ---------------------------------------------------------------------------
 
-#: Children worth cancelling when the group dies in ERPNext. Terminal and
+#: Children worth cancelling when the group dies in Jardal ERP. Terminal and
 #: failed/escalated outcomes are history and are never rewritten.
 CASCADE_CANCEL_STATUSES = frozenset(
     {"queued", "in_progress", "waiting", "interrupted"})
@@ -3967,7 +3967,7 @@ async def reflect_group_decision(
         if env.notify is not None:
             await env.notify(
                 source_id or objective_id,
-                f"Objective {objective_id} closed from ERPNext "
+                f"Objective {objective_id} closed from Jardal ERP "
                 f"({business_status}).")
         return {"ok": True, "action": "closed-by-business",
                 "objective_id": objective_id}
@@ -3982,20 +3982,20 @@ async def reflect_group_decision(
             "status": "cancelled",
             "waiting_reason": None,
             "resume_at": None,
-            "error": (f"Objective {objective_id} cancelled in ERPNext "
+            "error": (f"Objective {objective_id} cancelled in Jardal ERP "
                       f"({business_status})."),
         })
         cancelled.append(child_id)
     await env.objectives.patch_objective(objective_id, {
         "status": "cancelled",
         "cancelled_at": _utcnow_iso(),
-        "cancel_reason": f"group {business_status} in ERPNext",
+        "cancel_reason": f"group {business_status} in Jardal ERP",
         "cancelled_children": cancelled,
     })
     if env.notify is not None:
         await env.notify(
             source_id or objective_id,
-            f"Objective {objective_id} cancelled from ERPNext "
+            f"Objective {objective_id} cancelled from Jardal ERP "
             f"({business_status}): {len(cancelled)} open children cancelled.")
     return {"ok": True, "action": "cancelled",
             "objective_id": objective_id,

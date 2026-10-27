@@ -153,7 +153,7 @@ class SaveStepConfig:
 
 @dataclass
 class SaveOutcome:
-    """What one save run did. ``comment`` is the ERPNext acta (None when
+    """What one save run did. ``comment`` is the Jardal ERP acta (None when
     there is nothing to report); ``deferred`` means an infrastructure
     failure kept the drafts for the next close."""
 
@@ -174,7 +174,7 @@ class _Defer(Exception):
 
 
 def mirror_ticket(task: Mapping[str, Any]) -> str | None:
-    """ERPNext ticket name stamping headers and commits, None to skip."""
+    """Jardal ERP ticket name stamping headers and commits, None to skip."""
     name = badge_ticket_for_task(task)
     if name is None or re.match(TICKET_PATTERN, name) is None:
         return None

@@ -2,7 +2,7 @@
 
 The planner freezes INPUTS as text before the previous ticket ran, so
 every stage but dev (which reads the repo) guesses. On close, the
-ticket's files land as private ERPNext attachments and its data in the
+ticket's files land as private Jardal ERP attachments and its data in the
 execution record (``params.ticket_outputs``); on launch, the executor
 resolves the ``blocked_by`` predecessors and delivers their recorded
 outputs — staged files plus a prompt section. Playbooks do not exist
@@ -55,7 +55,7 @@ UPSTREAM_DIRNAME = "upstream"
 #: Caps: a verdict listing more files than this still closes.
 MAX_OUTPUT_FILES = 20
 
-#: One attached file stays under this (ERPNext allows 10 MiB; prompts
+#: One attached file stays under this (Jardal ERP allows 10 MiB; prompts
 #: and Mongo rows stay usable far below it).
 MAX_OUTPUT_FILE_BYTES = 256 * 1024
 

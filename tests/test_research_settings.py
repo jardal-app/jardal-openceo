@@ -96,9 +96,9 @@ class SettingsDefaultsTests(unittest.TestCase):
         self.assertEqual(self.settings.RESEARCH_QUICK_MAX_STEPS, 8)
         self.assertEqual(self.settings.RESEARCH_QUICK_MAX_SECONDS, 120)
 
-    def test_erpnext_contract_is_untouched_by_research_flags(self) -> None:
+    def test_business_contract_is_untouched_by_research_flags(self) -> None:
         # El epico es explicito: la flag de capacidad research NO modifica el
-        # contrato de ERPNext, que sigue siempre activo.
+        # contrato de Jardal ERP, que sigue siempre activo.
         self.assertFalse(hasattr(self.settings, "ERPNEXT_TICKETS_ENABLED"))
 
 

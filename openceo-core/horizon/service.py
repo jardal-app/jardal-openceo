@@ -183,7 +183,7 @@ class HorizonService:
         self._task_service = task_service
 
     def set_company_reader(self, reader: Any | None) -> None:
-        """Lector del registro de negocio (ERPNext). Opcional.
+        """Lector del registro de negocio (Jardal ERP). Opcional.
 
         Sin lector, la seccion de empresa del cockpit queda en desconocido
         (``unknown``), nunca en cero y nunca inventada.
@@ -777,7 +777,7 @@ class HorizonService:
         Es la interfaz principal del dueno: "que sigue" y el brief combinan
         lo personal con lo que avanzo el CEO y lo que espera decision. Hasta
         que exista el status del CEO (TASK-2026-00119), la empresa se lee de
-        ERPNext y de los objetivos directamente. Sin LLM, como todo Horizon.
+        Jardal ERP y de los objetivos directamente. Sin LLM, como todo Horizon.
         """
         moment = now or _now()
         personal = await self.next_action(user_id, include_company=False)
@@ -990,7 +990,7 @@ class HorizonService:
                     limit=cockpit_module.COMPANY_BUSINESS_LIMIT,
                 )
             except Exception:
-                logger.warning("cockpit: ERPNext no legible", exc_info=True)
+                logger.warning("cockpit: Jardal ERP no legible", exc_info=True)
                 business_unknown = True
             else:
                 desk_only = [r for r in (rows or []) if not str(r.get("openceo_ref") or "").strip()]
@@ -1055,7 +1055,7 @@ class HorizonService:
         nunca entra (el repo ya lo excluye y aqui se vuelve a comprobar).
         """
         from owner_channel import is_owner_question
-        from tools.erpnext_tickets import waiting_needs_human_review
+        from tools.jardal_erp_tickets import waiting_needs_human_review
 
         moment = now or _now()
         rows = await self._repo.list_tasks_needing_human(
@@ -1688,7 +1688,7 @@ class HorizonService:
         human_action_hint: str | None = None,
         task_service: Any | None = None,
     ) -> dict[str, Any]:
-        """Promueve una accion de empresa a Objetivo o ticket (ERPNext primero).
+        """Promueve una accion de empresa a Objetivo o ticket (Jardal ERP primero).
 
         Solo viaja la especificacion del trabajo (``promotion.build_work_spec``).
         Pregunta al dueno solo si la politica de escalado (TASK-2026-00114) lo
@@ -2151,7 +2151,7 @@ class HorizonService:
         aid = str(target_action.get("action_id") or "")
 
         # F5 (TASK-2026-00121): una accion que toca empresa no se delega como
-        # personal solo-Mongo; se promueve por la API comun (ERPNext primero).
+        # personal solo-Mongo; se promueve por la API comun (Jardal ERP primero).
         # El `project` del encargo es substrato, no propiedad: no declara.
         touch = promotion_module.classify_action(
             target_action, company_config=self._company_config

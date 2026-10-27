@@ -318,7 +318,7 @@ def has_explicit_capture(text: str) -> bool:
 
 
 def is_finance_operative(text: str) -> bool:
-    """True si la frase pertenece a Finance (ERPNext), no a Horizon.
+    """True si la frase pertenece a Finance (Jardal ERP), no a Horizon.
 
     Veto, no ruteo: solo abstiene a Horizon para que la frase siga a la
     capa de chat, que nombra la skill exacta. La autoridad son los
@@ -490,7 +490,7 @@ def classify(text: str) -> str | None:
         return INTENT_METRICS
 
     # 0b. Finanzas operativas (ingreso, gasto, regla del 10%):
-    #     pertenecen a Finance sobre ERPNext, no a Horizon. Devolver None deja
+    #     pertenecen a Finance sobre Jardal ERP, no a Horizon. Devolver None deja
     #     que siga el flujo normal (la capa de chat nombra la skill exacta).
     #     Se veta con el texto crudo: el normalizado aqui pierde `.`, `,` y
     #     `$`, que es justo lo que `money_text` necesita para leer el monto.

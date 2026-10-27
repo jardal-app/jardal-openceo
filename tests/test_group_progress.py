@@ -11,10 +11,10 @@ Contrato que se fija aquí (verificado contra el sitio vivo el 2026-10-08):
 - Todo compare-before-write: sin cambios no hay PUT (el eco no escribe).
 - El fin del hijo no pasa el fin del padre (417 `InvalidDates`): quien
   escribe extiende ancestros y reintenta una vez.
-- ERPNext caído → `pending_visibility` en el espejo (reconciliación o
+- Jardal ERP caído → `pending_visibility` en el espejo (reconciliación o
   siguiente evento).
 
-ERPNext simulado (fakes al estilo `test_ticket_transition.py`); 0 tokens.
+Jardal ERP simulado (fakes al estilo `test_ticket_transition.py`); 0 tokens.
 """
 
 from __future__ import annotations
@@ -33,13 +33,13 @@ if str(CORE_DIR) not in sys.path:
 import visibility  # noqa: E402
 from state import TaskSource  # noqa: E402
 from task_service import TaskService  # noqa: E402
-from tools.erpnext_client import (  # noqa: E402
-    ERPNextDateBoundError,
-    ERPNextUnavailable,
-    ERPNextValidationError,
+from tools.jardal_erp_client import (  # noqa: E402
+    JardalERPDateBoundError,
+    JardalERPUnavailable,
+    JardalERPValidationError,
     classify_417,
 )
-from tools.erpnext_tickets import ERPNextTicketAdapter  # noqa: E402
+from tools.jardal_erp_tickets import JardalERPTicketAdapter  # noqa: E402
 
 
 def run(coro):
@@ -74,7 +74,7 @@ class FakeClient:
     async def get_doc(self, doctype, name):
         row = self.docs.get(name)
         if row is None:
-            raise ERPNextValidationError(f"No existe {doctype} {name}", status_code=404)
+            raise JardalERPValidationError(f"No existe {doctype} {name}", status_code=404)
         return dict(row)
 
     async def list_docs(self, doctype, *, filters=None, fields=None, limit=20):
@@ -95,18 +95,18 @@ class FakeClient:
         self.updated.append((doctype, name, dict(body)))
         row = self.docs.get(name)
         if row is None:
-            raise ERPNextValidationError(f"No existe {doctype} {name}", status_code=404)
+            raise JardalERPValidationError(f"No existe {doctype} {name}", status_code=404)
         row.update(body)
         return dict(row)
 
 
 def make_adapter(client):
     settings = SimpleNamespace(ERPNEXT_TICKETS_PROJECT_COMPANY="Jardal")
-    return ERPNextTicketAdapter(settings, client=client)  # type: ignore[arg-type]
+    return JardalERPTicketAdapter(settings, client=client)  # type: ignore[arg-type]
 
 
 class FakeBusinessAdapter:
-    """ERPNext en memoria para el servicio: docs + fallos programados."""
+    """Jardal ERP en memoria para el servicio: docs + fallos programados."""
 
     is_enabled = True
 
@@ -134,7 +134,7 @@ class FakeBusinessAdapter:
         for doc in self.docs.values():
             if str(doc.get("openceo_ref") or "") == key:
                 return dict(doc)
-        raise ERPNextValidationError(f"No existe el ticket {key}.", status_code=404)
+        raise JardalERPValidationError(f"No existe el ticket {key}.", status_code=404)
 
     async def list_children(self, parent_name, *, limit=200):
         self._maybe_fail("list_children")
@@ -233,7 +233,7 @@ class FakeRepo:
     async def list_tasks_pending_visibility(self, limit=200):
         return [dict(t) for t in self.pending_visibility[:limit]]
 
-    async def list_tasks_needing_erpnext_sync(self, limit=200):
+    async def list_tasks_needing_jardal_erp_sync(self, limit=200):
         return []
 
 
@@ -252,7 +252,7 @@ def make_service(adapter=None, repo=None, *, queue=True):
         HORIZON_PERSONAL_MIRROR_ENABLED=False,
         ERPNEXT_SITE_TIMEZONE="America/Caracas",
     )
-    service._erpnext = adapter
+    service._business = adapter
     service._repo = repo
     service._hub = FakeHub()
     service._horizon_terminal = None
@@ -430,15 +430,15 @@ class GroupSpanTests(unittest.TestCase):
 
 class DateBoundClassifyTests(unittest.TestCase):
     def test_payload_vivo_es_date_bound(self):
-        self.assertIs(classify_417(DATE_BOUND_PAYLOAD), ERPNextDateBoundError)
+        self.assertIs(classify_417(DATE_BOUND_PAYLOAD), JardalERPDateBoundError)
 
     def test_invalid_dates_sin_padre_sigue_duro(self):
         payload = {"exception": "frappe.exceptions.InvalidDates: algo raro",
                    "exc_type": "InvalidDates"}
-        self.assertIs(classify_417(payload), ERPNextValidationError)
+        self.assertIs(classify_417(payload), JardalERPValidationError)
 
     def test_date_bound_es_subclase_de_validacion(self):
-        self.assertTrue(issubclass(ERPNextDateBoundError, ERPNextValidationError))
+        self.assertTrue(issubclass(JardalERPDateBoundError, JardalERPValidationError))
 
 
 # --- operaciones cerradas del adapter ------------------------------------------
@@ -477,9 +477,9 @@ class VisibilityAdapterTests(unittest.TestCase):
     def test_update_work_dates_rechaza_vacio_y_claves_abiertas(self):
         client = FakeClient([business_doc("TASK-1", "Working")])
         adapter = make_adapter(client)
-        with self.assertRaises(ERPNextValidationError):
+        with self.assertRaises(JardalERPValidationError):
             run(adapter.update_work_dates("TASK-1", {}))
-        with self.assertRaises(ERPNextValidationError):
+        with self.assertRaises(JardalERPValidationError):
             run(adapter.update_work_dates("TASK-1", {"subject": "hack"}))
         self.assertEqual(client.updated, [])
 
@@ -513,7 +513,7 @@ class VisibilityAdapterTests(unittest.TestCase):
 
     def test_update_group_rollup_rechaza_claves_abiertas(self):
         client = FakeClient([business_doc("TASK-9", "Open", is_group=True)])
-        with self.assertRaises(ERPNextValidationError):
+        with self.assertRaises(JardalERPValidationError):
             run(make_adapter(client).update_group_rollup(
                 "TASK-9", {"status": "Completed"}))
         self.assertEqual(client.updated, [])
@@ -543,7 +543,7 @@ class VisibilityAdapterTests(unittest.TestCase):
 
     def test_update_status_rechaza_claves_de_fecha_abiertas(self):
         client = FakeClient()
-        with self.assertRaises(ERPNextValidationError):
+        with self.assertRaises(JardalERPValidationError):
             run(make_adapter(client).update_status(
                 "TASK-1", "in_progress", work_dates={"subject": "hack"}))
         self.assertEqual(client.updated, [])
@@ -673,9 +673,9 @@ class RefreshRollupTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], "no_parent")
 
-    def test_erpnext_caido_deja_pending_visibility(self):
+    def test_business_caido_deja_pending_visibility(self):
         adapter, repo = _rollup_fixture()
-        adapter.fail_next("resolve_task", ERPNextUnavailable("caído"))
+        adapter.fail_next("resolve_task", JardalERPUnavailable("caído"))
         service = make_service(adapter, repo)
         result = run(service._refresh_visibility(
             {"task_id": "exec-a", "name": "A",
@@ -698,7 +698,7 @@ class RefreshRollupTests(unittest.TestCase):
 
     def test_error_de_negocio_no_lanza(self):
         adapter, repo = _rollup_fixture()
-        adapter.fail_next("resolve_task", ERPNextValidationError("roto"))
+        adapter.fail_next("resolve_task", JardalERPValidationError("roto"))
         service = make_service(adapter, repo)
         result = run(service._refresh_visibility(
             {"task_id": "exec-a", "name": "A",
@@ -745,7 +745,7 @@ class VisibilityEnqueueTests(unittest.TestCase):
 
     def test_push_fallido_no_encola(self):
         adapter = FakeBusinessAdapter([business_doc("TASK-1", "Open")])
-        adapter.fail_next("update_status", ERPNextValidationError("roto"))
+        adapter.fail_next("update_status", JardalERPValidationError("roto"))
         repo = FakeRepo([exec_doc("exec-1", "TASK-1", "in_progress")])
         service = make_service(adapter, repo)
         run(service._push_status(
@@ -776,7 +776,7 @@ class VisibilityEnqueueTests(unittest.TestCase):
         repo = FakeRepo([flagged])
         repo.pending_visibility = [flagged]
         service = make_service(adapter, repo)
-        repaired = run(service.startup_reconcile_erpnext())
+        repaired = run(service.startup_reconcile_jardal_erp())
         self.assertEqual(repaired, 1)
         jobs = drain(service._visibility_queue)
         self.assertEqual(len(jobs), 1)
@@ -911,7 +911,7 @@ class DateBoundRetryTests(unittest.TestCase):
                            openceo_task_id="exec-a", openceo_ref="api:A")
         adapter = FakeBusinessAdapter([group, kid])
         adapter.fail_next("update_status",
-                          ERPNextDateBoundError("Expected End Date should be less "
+                          JardalERPDateBoundError("Expected End Date should be less "
                                                 "than or equal to parent task's."))
         task = exec_doc("exec-a", "A", "completed")
         task["completed_at"] = datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc)
@@ -932,8 +932,8 @@ class DateBoundRetryTests(unittest.TestCase):
     def test_segundo_date_bound_es_error_duro(self):
         adapter = FakeBusinessAdapter([business_doc("A", "Working", parent_task="G"),
                                        business_doc("G", "Open", is_group=True)])
-        adapter.fail_next("update_status", ERPNextDateBoundError("límite 1"))
-        adapter.fail_next("update_status", ERPNextDateBoundError("límite 2"))
+        adapter.fail_next("update_status", JardalERPDateBoundError("límite 1"))
+        adapter.fail_next("update_status", JardalERPDateBoundError("límite 2"))
         task = exec_doc("exec-a", "A", "completed")
         task["completed_at"] = datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc)
         repo = FakeRepo([task])

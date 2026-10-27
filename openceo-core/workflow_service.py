@@ -132,7 +132,7 @@ class WorkflowToolRegistry:
 
         # Operations project creation left the registry in TASK-2026-00223:
         # the operations skill owns it (`skills/operations/crear-proyecto`,
-        # CLI over `ops.create_project` plus the ERPNext-project and DNS
+        # CLI over `ops.create_project` plus the Jardal ERP-project and DNS
         # boundary tools). No `ops.*` tool remains registered.
 
     def set_horizon_service(self, horizon_service: Any) -> None:
@@ -485,7 +485,7 @@ class WorkflowToolRegistry:
         """Referencia idempotente del intento: mismo task -> mismo `openceo_ref`.
 
         El tool acunaba una referencia nueva por llamada, asi que el indice
-        unico de ERPNext no podia frenar nunca un re-despacho (POST /run con
+        unico de Jardal ERP no podia frenar nunca un re-despacho (POST /run con
         `force`) ni un parche a Mongo perdido justo despues de la escritura:
         quedaban dos asientos sometidos, ambos con `duplicate=False` (contrato
         §6.1: "mismo intento/retry -> mismo valor").
@@ -561,7 +561,7 @@ class WorkflowToolRegistry:
         context: dict[str, Any] | None = None,
         **_: Any,
     ) -> dict[str, Any]:
-        """Registra un gasto ocasional por voz/chat en ERPNext (TASK-2026-00032).
+        """Registra un gasto ocasional por voz/chat en Jardal ERP (TASK-2026-00032).
 
         Crea un `Journal Entry` idempotente por `openceo_ref` y lo envia para
         que llegue al libro mayor. Sin tickets por gasto.
@@ -569,7 +569,7 @@ class WorkflowToolRegistry:
         from agents.finance import voice_expense as _voice_expense
         from agents.finance.money_text import MissingExchangeRateError
         from business.finance import finance_provider_is_erp
-        from tools.erpnext_client import ERPNextClient
+        from tools.jardal_erp_client import JardalERPClient
 
         rate = _rate_or_none(exchange_rate)
         parsed = _voice_expense.parse_expense(text, exchange_rate=rate)
@@ -589,7 +589,7 @@ class WorkflowToolRegistry:
                     "summary": "Finanzas ERP sin manifiesto de autoridad listo."}
         if erp_finance:
             return await self._finance_register_expense_erp(parsed, ref=ref, submit=submit)
-        client = ERPNextClient(self._settings)
+        client = JardalERPClient(self._settings)
         try:
             try:
                 result = await _voice_expense.register_expense(
@@ -634,7 +634,7 @@ class WorkflowToolRegistry:
         from agents.finance import scope_summary as _scope
         from business.errors import BusinessError
         from business.finance import JardalERPFinance, finance_provider_is_erp
-        from tools.erpnext_client import ERPNextClient
+        from tools.jardal_erp_client import JardalERPClient
 
         if not (date_from or date_to) and str(text or "").strip():
             date_from, date_to = _scope.period_bounds(text)
@@ -658,7 +658,7 @@ class WorkflowToolRegistry:
                 await adapter.aclose()
             payload["ok"] = True
             return payload
-        client = ERPNextClient(self._settings)
+        client = JardalERPClient(self._settings)
         try:
             summary = await _scope.get_scope_summary(
                 client,
@@ -682,7 +682,7 @@ class WorkflowToolRegistry:
         context: dict[str, Any] | None = None,
         **_: Any,
     ) -> dict[str, Any]:
-        """Registra un ingreso ya cobrado por voz/chat en ERPNext (TASK-2026-00053).
+        """Registra un ingreso ya cobrado por voz/chat en Jardal ERP (TASK-2026-00053).
 
         Espejo de `finance.register_expense`: el mismo `Journal Entry`
         idempotente por `openceo_ref`, con las dos patas invertidas (debito a
@@ -691,7 +691,7 @@ class WorkflowToolRegistry:
         from agents.finance import voice_income as _voice_income
         from agents.finance.money_text import MissingExchangeRateError
         from business.finance import finance_provider_is_erp
-        from tools.erpnext_client import ERPNextClient
+        from tools.jardal_erp_client import JardalERPClient
 
         rate = _rate_or_none(exchange_rate)
         parsed = _voice_income.parse_income(text, exchange_rate=rate)
@@ -711,7 +711,7 @@ class WorkflowToolRegistry:
                     "summary": "Finanzas ERP sin manifiesto de autoridad listo."}
         if erp_finance:
             return await self._finance_register_income_erp(parsed, ref=ref, submit=submit)
-        client = ERPNextClient(self._settings)
+        client = JardalERPClient(self._settings)
         try:
             try:
                 result = await _voice_income.register_income(
@@ -757,7 +757,7 @@ class WorkflowToolRegistry:
         from agents.finance import scope_summary as _scope
         from business.errors import BusinessError
         from business.finance import JardalERPFinance, finance_provider_is_erp
-        from tools.erpnext_client import ERPNextClient
+        from tools.jardal_erp_client import JardalERPClient
 
         if not (date_from or date_to) and str(text or "").strip():
             date_from, date_to = _scope.period_bounds(text)
@@ -781,7 +781,7 @@ class WorkflowToolRegistry:
                 await adapter.aclose()
             payload["ok"] = True
             return payload
-        client = ERPNextClient(self._settings)
+        client = JardalERPClient(self._settings)
         try:
             status = await _contribution.get_contribution_10_status(
                 client,

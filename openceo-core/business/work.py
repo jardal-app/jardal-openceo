@@ -15,7 +15,7 @@ from business.files import read_attachment
 from business.contracts import WorkTicketV1
 from business.errors import BusinessUnavailable, BusinessValidationError, BusinessVersionConflict
 from owner_channel import owner_question_block
-from tools.erpnext_tickets import map_priority, normalize_transition_status, resolve_erpnext_status
+from tools.jardal_erp_tickets import map_priority, normalize_transition_status, resolve_jardal_erp_status
 
 
 def operation_key(operation: str, *values: Any) -> str:
@@ -239,7 +239,7 @@ class JardalERPWork:
         self, name: str, opencero_status: str | None, *, task: dict[str, Any] | None = None,
         work_dates: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        target = resolve_erpnext_status({**(task or {}), "status": opencero_status})
+        target = resolve_jardal_erp_status({**(task or {}), "status": opencero_status})
         if target is None:
             return None
         context = (task or {}).get("params") or {}

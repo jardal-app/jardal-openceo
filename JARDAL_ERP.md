@@ -1,8 +1,8 @@
-# ERPNext — qué instalar (módulos, apps y topología)
+# Jardal ERP — qué instalar (módulos, apps y topología)
 
 **Fecha:** 2026-09-20 · **Estado:** propuesta de instalación — **no desplegado**
 **Alcance:** elección de módulos/apps y topología mínima del sistema financiero de Horizon
-**Se relaciona con:** [decisión del vault](../jardal-knowledge/vault/projects/jardal/jardal-openceo/decisions/2026-09-19-erpnext-financial-record.md) (antes `docs/decision-2026-09-19-sistema-financiero-erpnext.md`, retirado en TASK-2026-00185) · ticket TASK-2026-00025 en ERPNext · `jardal-horizon/README.md` §4.7 y §9.9
+**Se relaciona con:** [decisión del vault](../jardal-knowledge/vault/projects/jardal/jardal-openceo/decisions/2026-09-19-erpnext-financial-record.md) (antes `docs/decision-2026-09-19-sistema-financiero-erpnext.md`, retirado en TASK-2026-00185) · ticket TASK-2026-00025 en Jardal ERP · `jardal-horizon/README.md` §4.7 y §9.9
 
 > **Este documento decide qué instalar. No decide contabilidad.** El contenido del plan de cuentas boliviano y las alícuotas tributarias se definen con criterio contable local, fuera de OpenCEO y fuera de este archivo.
 
@@ -49,7 +49,7 @@ En v16, la app declara `Telephony`, `Communication`, `EDI` y `Bulk Transaction` 
 | **Regional** | Localizaciones y plantillas de plan de cuentas | **Relevante, pero Bolivia no existe (§7)** |
 | **Setup / Utilities / Portal / ERPNext Integrations / Communication / Telephony / Bulk Transaction / EDI** | Andamiaje interno o sin navegación propia | Ignorar |
 | **Stock · Manufacturing · Subcontracting · Quality Management · Maintenance** | Inventario y producción — no existen en este alcance | **No usar** |
-| **Projects** | **Desde el 2026-09-24 sí se usa**: ERPNext pasó a ser dueño del trabajo empresarial y los tickets viven en `Task` (con `Project` como identidad de proyecto). Ya no duplica a OpenCEO, que conserva solo la **ejecución**. Véase `docs/OPENCEO_DIRECTION.md` v1.1 y `docs/ARCHITECTURE_REFERENCE_2026.md` §System Boundaries | **Usar `Task` y `Project`** |
+| **Projects** | **Desde el 2026-09-24 sí se usa**: Jardal ERP pasó a ser dueño del trabajo empresarial y los tickets viven en `Task` (con `Project` como identidad de proyecto). Ya no duplica a OpenCEO, que conserva solo la **ejecución**. Véase `docs/OPENCEO_DIRECTION.md` v1.1 y `docs/ARCHITECTURE_REFERENCE_2026.md` §System Boundaries | **Usar `Task` y `Project`** |
 | **CRM** | Duplica tickets/CRM de OpenCEO | **No usar** |
 | **Support** | **Reservado, no descartado**: `Issue` es para trabajo **entrante** con reloj de SLA (un cliente o ayudante reporta algo). No se usa todavía; se activa cuando exista ese canal | **Reservar** |
 
@@ -141,7 +141,7 @@ Base (`compose.yaml`) = **7 servicios, todos de la misma imagen**:
 | **DNS** | Vía el MCP `manage_dns_record` (ya previsto en TICKET-025 fase 1; renombrado en TASK-2026-00199). |
 | **Una sola imagen para todos los roles** | El split `erpnext-worker` / `erpnext-nginx` / `frappe-socketio` está retirado: *"All the containers now use same image"*. |
 
-**Actualizar Traefik no hace falta para esto.** Se auditó el Traefik real (2026-09-20): corre `v3.0` (3.0.4, jul-2024) desde `/home/develop/deployments/jardal-traefik/` en `network_mode: host`, y **ERPNext se integra con las 3 labels que ya usa toda la producción** — sin cambios en el proxy. La actualización de versión (línea 3.0 sin soporte desde jul-2024) es una **mejora de seguridad independiente**, con procedimiento validado y rollback, en [`docs/traefik-upgrade-runbook.md`](file:///home/develop/development/Jardal/jardal-openceo/docs/traefik-upgrade-runbook.md). Ahí se documenta además un hallazgo que **sí** conviene resolver antes de pedir el certificado de ERPNext: un bucle de errores ACME que consume la cuota *de cuenta* de Let's Encrypt.
+**Actualizar Traefik no hace falta para esto.** Se auditó el Traefik real (2026-09-20): corre `v3.0` (3.0.4, jul-2024) desde `/home/develop/deployments/jardal-traefik/` en `network_mode: host`, y **Jardal ERP se integra con las 3 labels que ya usa toda la producción** — sin cambios en el proxy. La actualización de versión (línea 3.0 sin soporte desde jul-2024) es una **mejora de seguridad independiente**, con procedimiento validado y rollback, en [`docs/traefik-upgrade-runbook.md`](file:///home/develop/development/Jardal/jardal-openceo/docs/traefik-upgrade-runbook.md). Ahí se documenta además un hallazgo que **sí** conviene resolver antes de pedir el certificado de Jardal ERP: un bucle de errores ACME que consume la cuota *de cuenta* de Let's Encrypt.
 
 ### Versión
 
@@ -189,9 +189,9 @@ Dejada por el dueño el **2026-09-20** para una **sesión futura específica**. 
 
 ## 9. Frontera con OpenCEO: nada de esto se mezcla con OpenCEO
 
-**Regla:** el sistema financiero se construye y se opera **fuera de OpenCEO** — su despliegue, su plan de cuentas, sus workflows, sus apps y sus automatizaciones viven en el ciclo de vida del producto ERPNext. OpenCEO **no** construye contabilidad, **no** replica asientos y **no** almacena dinero en floats: guarda **referencias y resúmenes con fecha de corte** (Horizon §4.7).
+**Regla:** el sistema financiero se construye y se opera **fuera de OpenCEO** — su despliegue, su plan de cuentas, sus workflows, sus apps y sus automatizaciones viven en el ciclo de vida del producto Jardal ERP. OpenCEO **no** construye contabilidad, **no** replica asientos y **no** almacena dinero en floats: guarda **referencias y resúmenes con fecha de corte** (Horizon §4.7).
 
-Lo único que cruza la frontera es **el mapa de funciones**: la superficie de herramientas que el agente Finance podrá invocar. Ese mapa es un entregable **futuro** del dueño (registrado como TASK-2026-00027 en ERPNext); los nombres que hoy figuran en TICKET-025 fase 3 son **candidatos provisionales, no un contrato**:
+Lo único que cruza la frontera es **el mapa de funciones**: la superficie de herramientas que el agente Finance podrá invocar. Ese mapa es un entregable **futuro** del dueño (registrado como TASK-2026-00027 en Jardal ERP); los nombres que hoy figuran en TICKET-025 fase 3 son **candidatos provisionales, no un contrato**:
 
 `finance.register_movement` · `finance.get_balance` · `finance.get_project_spend` · `finance.get_goal_progress` · `finance.list_pending` · `finance.register_tithe`
 
@@ -202,10 +202,10 @@ Con dos condiciones ya decididas que el mapa debe respetar:
 
 | Necesidad de Horizon | Dueño | Qué consume OpenCEO |
 |---|---|---|
-| Saldos y asientos por proyecto | ERPNext | Cifra con fecha de corte y referencia |
-| "Cuánto falta" de un objetivo | OpenCEO `horizon_objectives`; la cifra es de ERPNext | Solo el número |
-| Objetivos, tareas, plan del día | OpenCEO | Nada de ERPNext |
-| Crypto (BTC / Lightning) | BTCPay Server | Sincroniza **hacia** ERPNext; no se duplica |
+| Saldos y asientos por proyecto | Jardal ERP | Cifra con fecha de corte y referencia |
+| "Cuánto falta" de un objetivo | OpenCEO `horizon_objectives`; la cifra es de Jardal ERP | Solo el número |
+| Objetivos, tareas, plan del día | OpenCEO | Nada de Jardal ERP |
+| Crypto (BTC / Lightning) | BTCPay Server | Sincroniza **hacia** Jardal ERP; no se duplica |
 | Tickets | MongoDB → espejo Notion | **Notion nunca toca dinero** |
 
 ---
@@ -215,7 +215,7 @@ Con dos condiciones ya decididas que el mapa debe respetar:
 1. **Desplegar** con la topología de §6 y **medir** RAM/disco reales (§8).
 2. **Construir el plan de cuentas boliviano** (§7.3) con criterio contable local.
 3. **Decidir la dimensión** para proyectos multi-empresa antes del primer asiento (§7.4).
-4. **Entregar el mapa de funciones** (§9) cuando el sistema esté definido; recién entonces se implementa el adapter del agente Finance (TASK-2026-00027 en ERPNext).
+4. **Entregar el mapa de funciones** (§9) cuando el sistema esté definido; recién entonces se implementa el adapter del agente Finance (TASK-2026-00027 en Jardal ERP).
 5. **Cerrar el espejo a Notion** antes de importar datos financieros (`NOTION_MIRROR_ENABLED`, fase 0 de TICKET-025).
 
 ---

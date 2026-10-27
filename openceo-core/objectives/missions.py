@@ -1,6 +1,6 @@
 """Company missions over objectives (TASK-2026-00218).
 
-A mission is one ERPNext group Task (business identity) whose children
+A mission is one Jardal ERP group Task (business identity) whose children
 are objective groups, plus a Mongo document (execution state). The CEO
 strategy chains objectives until the acceptance is met, then closes
 the mission with evidence. Creation is deterministic; the semantic

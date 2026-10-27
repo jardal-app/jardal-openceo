@@ -1,7 +1,7 @@
 """Promocion automatica Horizon -> empresa (F5, TASK-2026-00121).
 
 Determinista y sin tokens: si una accion toca un proyecto o repo de la empresa,
-es trabajo de empresa y se promueve por la API comun (ERPNext primero). Solo
+es trabajo de empresa y se promueve por la API comun (Jardal ERP primero). Solo
 viaja la especificacion del trabajo; lo personal (mision, finanzas, familia,
 salud) nunca sale.
 
@@ -17,9 +17,9 @@ Reglas de frontera (ver workfile del ticket):
 - Toque que no resuelve contra la configuracion -> rechazo (`refused`): no se
   crea nada, ni siquiera personal. Degradarlo a personal ocultaria trabajo de
   empresa del negocio y recrearia la contradiccion con AGENTS.md.
-- Un ticket promovido es trabajo de empresa ordinario: ERPNext primero y
+- Un ticket promovido es trabajo de empresa ordinario: Jardal ERP primero y
   espejos normales. Por eso NO lleva `horizon_scope=personal` (ese flag lo
-  excluiria de ERPNext y volveria a ser solo-Mongo).
+  excluiria de Jardal ERP y volveria a ser solo-Mongo).
 """
 
 from __future__ import annotations

@@ -2,7 +2,7 @@
 
 One shared rehearsal run over tmp scratch: pedido, simulated planner
 and agent, real skill script against doubles, verdict, cost fold and
-crystallization. No network, no LLM, no ERPNext, no Cloudflare.
+crystallization. No network, no LLM, no Jardal ERP, no Cloudflare.
 """
 
 from __future__ import annotations
@@ -85,7 +85,7 @@ class PilotRehearsalTests(unittest.TestCase):
             "manage_dns_record",
             "openceo_add_ticket_comment",
             "openceo_attach_ticket_file",
-            "openceo_ensure_erpnext_project",
+            "openceo_ensure_business_project",
             "openceo_get_ticket",
             "openceo_search_tickets",
         ])
@@ -98,7 +98,7 @@ class PilotRehearsalTests(unittest.TestCase):
         for call in self.evidence.boundary_calls:
             self.assertIn(call["tool"], box)
         tools = [call["tool"] for call in self.evidence.boundary_calls]
-        self.assertIn("openceo_ensure_erpnext_project", tools)
+        self.assertIn("openceo_ensure_business_project", tools)
         self.assertIn("manage_dns_record", tools)
         denied = [call["tool"] for call in self.evidence.denied_calls]
         self.assertIn("openceo_send_email", denied)

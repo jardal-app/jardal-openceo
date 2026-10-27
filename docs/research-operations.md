@@ -2,7 +2,7 @@
 
 La configuración efectiva se edita en `openceo-core/.env`. La política de cada
 proyecto solo puede reducir los límites del servidor. Crear un job no crea un
-ticket de ERPNext. La activación recurrente se decide al terminar el proyecto;
+ticket de Jardal ERP. La activación recurrente se decide al terminar el proyecto;
 las pruebas del agente no requieren revisión humana por fase.
 
 Cuando el host está administrado por `openceo-core-host.service`, reiniciar la

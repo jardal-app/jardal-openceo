@@ -1,6 +1,6 @@
-"""Resumen de saldos y gasto por Scope desde ERPNext. Cero logica LLM.
+"""Resumen de saldos y gasto por Scope desde Jardal ERP. Cero logica LLM.
 
-Lectura Fase A del contrato (`docs/finance-erpnext-integration-contract.md`
+Lectura Fase A del contrato (`docs/finance-jardal-erp-integration-contract.md`
 §4 y §15): `finance.get_scope_summary` es un tool semantico cerrado de SOLO
 lectura sobre `GL Entry`. No crea, no envia, no cancela nada: el unico
 escritor del libro mayor sigue siendo el submit del `Journal Entry` de
@@ -129,7 +129,7 @@ def _to_decimal(value: Any) -> Decimal:
 
 @dataclass
 class ScopeSummary:
-    """Resumen reconstruible desde ERPNext, con fecha de corte (§15)."""
+    """Resumen reconstruible desde Jardal ERP, con fecha de corte (§15)."""
 
     as_of: str
     company: str

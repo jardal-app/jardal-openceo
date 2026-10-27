@@ -1,7 +1,7 @@
 """Hilo del ticket: edicion, comentarios y adjuntos por el MCP (TASK-2026-00079).
 
 Lo que se prueba aqui son las decisiones que costaron verificacion contra el sitio vivo
-(Frappe 16.35.0 / ERPNext 16.36.0, 2026-10-01) y las que no se pueden deducir del codigo:
+(Frappe 16.35.0 / Jardal ERP 16.36.0, 2026-10-01) y las que no se pueden deducir del codigo:
 
 - `Comment` **no** es legible ni escribible por rol (`Projects User` + `Accounts User`):
   Frappe lo reserva a `System Manager`/`Website Manager`. Por eso se usan los metodos de
@@ -32,16 +32,16 @@ if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
 import mcp_server  # noqa: E402
-from tools.erpnext_client import (  # noqa: E402
-    ERPNextDuplicateError,
-    ERPNextPermissionError,
-    ERPNextUnavailable,
-    ERPNextValidationError,
+from tools.jardal_erp_client import (  # noqa: E402
+    JardalERPDuplicateError,
+    JardalERPPermissionError,
+    JardalERPUnavailable,
+    JardalERPValidationError,
 )
-from tools.erpnext_tickets import (  # noqa: E402
+from tools.jardal_erp_tickets import (  # noqa: E402
     INLINE_CONTENT_MAX_BYTES,
     AttachmentRejected,
-    ERPNextTicketAdapter,
+    JardalERPTicketAdapter,
     assert_attachment_name_allowed,
     comment_plain_text,
     content_md5,
@@ -79,7 +79,7 @@ class RecordingClient:
             raise self.errors["get_doc"]
         row = self.docs.get(name)
         if row is None:
-            raise ERPNextValidationError(f"No existe {doctype} {name}", status_code=404)
+            raise JardalERPValidationError(f"No existe {doctype} {name}", status_code=404)
         return row
 
     async def list_docs(self, doctype, *, filters=None, fields=None, limit=20):
@@ -124,7 +124,7 @@ class RecordingClient:
         return [call for call in self.calls if call[0] == "call_method" and call[1] == method]
 
 
-def make_adapter(client: RecordingClient, *, root: str, max_bytes: int = 1024) -> ERPNextTicketAdapter:
+def make_adapter(client: RecordingClient, *, root: str, max_bytes: int = 1024) -> JardalERPTicketAdapter:
     settings = SimpleNamespace(
         ERPNEXT_TICKETS_PROJECT_COMPANY="Jardal",
         ERPNEXT_URL="https://erp.test",
@@ -132,7 +132,7 @@ def make_adapter(client: RecordingClient, *, root: str, max_bytes: int = 1024) -
         ERPNEXT_ATTACHMENT_ALLOWED_ROOTS=root,
         ERPNEXT_ATTACHMENT_MAX_BYTES=max_bytes,
     )
-    return ERPNextTicketAdapter(settings, client=client)  # type: ignore[arg-type]
+    return JardalERPTicketAdapter(settings, client=client)  # type: ignore[arg-type]
 
 
 class TempRootCase(unittest.TestCase):
@@ -291,18 +291,18 @@ class ResolveTests(TempRootCase):
         self.assertEqual(self.client.called("list_docs")[0][1], "Task")
 
     def test_ticket_inexistente_es_not_found(self):
-        with self.assertRaises(ERPNextValidationError) as ctx:
+        with self.assertRaises(JardalERPValidationError) as ctx:
             run(self.adapter.resolve_task("TASK-2026-09999"))
         self.assertEqual(ctx.exception.status_code, 404)
         self.assertEqual(self.client.called("update_doc"), [])
 
     def test_ref_inexistente_es_not_found(self):
-        with self.assertRaises(ERPNextValidationError) as ctx:
+        with self.assertRaises(JardalERPValidationError) as ctx:
             run(self.adapter.resolve_task("api:no-existe"))
         self.assertEqual(ctx.exception.status_code, 404)
 
     def test_sin_identificador_es_fallo_de_datos(self):
-        with self.assertRaises(ERPNextValidationError) as ctx:
+        with self.assertRaises(JardalERPValidationError) as ctx:
             run(self.adapter.resolve_task("  "))
         self.assertEqual(ctx.exception.status_code, 400)
 
@@ -385,17 +385,17 @@ class UpdateTicketTests(TempRootCase):
         self.assertIn("&lt;3", body)
 
     def test_prioridad_invalida_se_rechaza_en_vez_de_asumir_medium(self):
-        with self.assertRaises(ERPNextValidationError) as ctx:
+        with self.assertRaises(JardalERPValidationError) as ctx:
             run(self.adapter.update_ticket("TASK-2026-00079", priority="urgentisimo"))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertEqual(self.client.updated, [])
 
     def test_titulo_vacio_se_rechaza(self):
-        with self.assertRaises(ERPNextValidationError):
+        with self.assertRaises(JardalERPValidationError):
             run(self.adapter.update_ticket("TASK-2026-00079", subject="   "))
 
-    def test_sin_campos_no_llama_a_erpnext(self):
-        with self.assertRaises(ERPNextValidationError) as ctx:
+    def test_sin_campos_no_llama_a_business(self):
+        with self.assertRaises(JardalERPValidationError) as ctx:
             run(self.adapter.update_ticket("TASK-2026-00079"))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertEqual(self.client.updated, [])
@@ -496,15 +496,15 @@ class AddCommentTests(TempRootCase):
         self.assertEqual(len(self.client.method_calls("frappe.desk.form.utils.add_comment")), 1)
 
     def test_vacio_se_rechaza(self):
-        with self.assertRaises(ERPNextValidationError):
+        with self.assertRaises(JardalERPValidationError):
             run(self.adapter.add_comment("TASK-2026-00079", "   "))
         self.assertEqual(self.client.method_calls("frappe.desk.form.utils.add_comment"), [])
 
     def test_permiso_denegado_llega_como_permiso(self):
-        self.client.errors["frappe.desk.form.utils.add_comment"] = ERPNextPermissionError(
+        self.client.errors["frappe.desk.form.utils.add_comment"] = JardalERPPermissionError(
             "no permitido", status_code=403
         )
-        with self.assertRaises(ERPNextPermissionError):
+        with self.assertRaises(JardalERPPermissionError):
             run(self.adapter.add_comment("TASK-2026-00079", "hola"))
 
 
@@ -519,7 +519,7 @@ class UpdateCommentTests(TempRootCase):
 
     def test_sin_id_o_sin_texto_se_rechaza(self):
         for args in ((("", "x")), (("abc", "  "))):
-            with self.assertRaises(ERPNextValidationError):
+            with self.assertRaises(JardalERPValidationError):
                 run(self.adapter.update_comment(*args))
         self.assertEqual(self.client.called("call_method"), [])
 
@@ -529,7 +529,7 @@ class UpdateCommentTests(TempRootCase):
         Decision del dueño (2026-10-01): control completo del hilo. La via de reserva
         comprueba antes que el comentario cuelga de un ticket legible.
         """
-        self.client.errors["frappe.desk.form.utils.update_comment"] = ERPNextPermissionError(
+        self.client.errors["frappe.desk.form.utils.update_comment"] = JardalERPPermissionError(
             "Comment can only be edited by the owner", status_code=417
         )
         self.client.docs["ajeno"] = {
@@ -542,29 +542,29 @@ class UpdateCommentTests(TempRootCase):
 
     def test_comentario_de_otro_doctype_no_se_toca(self):
         """El rol abre `Comment` en todo el sitio: la frontera la pone el adapter."""
-        self.client.errors["frappe.desk.form.utils.update_comment"] = ERPNextPermissionError(
+        self.client.errors["frappe.desk.form.utils.update_comment"] = JardalERPPermissionError(
             "solo el autor", status_code=417
         )
         self.client.docs["ajeno"] = {
             "name": "ajeno", "comment_type": "Comment",
             "reference_doctype": "Journal Entry", "reference_name": "ACC-JV-2026-00001",
         }
-        with self.assertRaises(ERPNextValidationError) as ctx:
+        with self.assertRaises(JardalERPValidationError) as ctx:
             run(self.adapter.update_comment("ajeno", "no"))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertEqual(self.client.updated, [])
 
     def test_sin_el_rol_tampoco_puede(self):
         """Si se revoca el permiso, el fallo es de permiso clasificado, no un 500."""
-        self.client.errors["frappe.desk.form.utils.update_comment"] = ERPNextPermissionError(
+        self.client.errors["frappe.desk.form.utils.update_comment"] = JardalERPPermissionError(
             "solo el autor", status_code=417
         )
         self.client.docs["ajeno"] = {
             "name": "ajeno", "comment_type": "Comment",
             "reference_doctype": "Task", "reference_name": "TASK-2026-00079",
         }
-        self.client.errors["update_doc"] = ERPNextPermissionError("sin permiso", status_code=403)
-        with self.assertRaises(ERPNextPermissionError):
+        self.client.errors["update_doc"] = JardalERPPermissionError("sin permiso", status_code=403)
+        with self.assertRaises(JardalERPPermissionError):
             run(self.adapter.update_comment("ajeno", "no"))
 
 
@@ -585,19 +585,19 @@ class DeleteCommentTests(TempRootCase):
         """Un id equivocado no debe borrar el comentario de otro trabajo."""
         self.client.docs["c1"] = self._comment(reference_name="TASK-2026-00001")
         self.client.docs["TASK-2026-00001"] = {"name": "TASK-2026-00001", "status": "Open"}
-        with self.assertRaises(ERPNextValidationError) as ctx:
+        with self.assertRaises(JardalERPValidationError) as ctx:
             run(self.adapter.delete_comment("c1", "TASK-2026-00079"))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertEqual(self.client.called("delete_doc"), [])
 
     def test_registro_que_no_es_comentario_se_rechaza(self):
         self.client.docs["c1"] = self._comment(comment_type="Attachment")
-        with self.assertRaises(ERPNextValidationError):
+        with self.assertRaises(JardalERPValidationError):
             run(self.adapter.delete_comment("c1", "TASK-2026-00079"))
         self.assertEqual(self.client.called("delete_doc"), [])
 
     def test_inexistente_es_not_found(self):
-        with self.assertRaises(ERPNextValidationError) as ctx:
+        with self.assertRaises(JardalERPValidationError) as ctx:
             run(self.adapter.delete_comment("no-existe", "TASK-2026-00079"))
         self.assertEqual(ctx.exception.status_code, 404)
         self.assertEqual(self.client.called("delete_doc"), [])
@@ -685,7 +685,7 @@ class AttachFileTests(TempRootCase):
 
     def test_ticket_inexistente_no_lee_el_archivo_ni_sube(self):
         path = self.write("informe.txt")
-        with self.assertRaises(ERPNextValidationError):
+        with self.assertRaises(JardalERPValidationError):
             run(self.adapter.attach_file("TASK-2026-09999", source_path=str(path)))
         self.assertEqual(self.client.called("upload_file"), [])
 
@@ -721,19 +721,19 @@ class UpdateAttachmentTests(TempRootCase):
     def test_adjunto_de_otro_ticket_se_rechaza(self):
         """Un id adivinado no debe alcanzar el archivo de otro ticket."""
         self.client.docs["FILE-1"] = self._file(attached_to_name="TASK-2026-00001")
-        with self.assertRaises(ERPNextValidationError) as ctx:
+        with self.assertRaises(JardalERPValidationError) as ctx:
             run(self.adapter.update_attachment("FILE-1", "TASK-2026-00079", private=False))
         self.assertEqual(ctx.exception.status_code, 400)
         self.assertEqual(self.client.updated, [])
 
     def test_carpeta_no_es_adjunto(self):
         self.client.docs["FILE-1"] = self._file(is_folder=1)
-        with self.assertRaises(ERPNextValidationError):
+        with self.assertRaises(JardalERPValidationError):
             run(self.adapter.update_attachment("FILE-1", "TASK-2026-00079", private=False))
 
     def test_sin_cambios_no_llama(self):
         self.client.docs["FILE-1"] = self._file()
-        with self.assertRaises(ERPNextValidationError):
+        with self.assertRaises(JardalERPValidationError):
             run(self.adapter.update_attachment("FILE-1", "TASK-2026-00079"))
         self.assertEqual(self.client.updated, [])
 
@@ -766,12 +766,12 @@ class DeleteAttachmentTests(TempRootCase):
 
     def test_adjunto_de_otro_ticket_se_rechaza_sin_borrar(self):
         self.client.docs["FILE-1"] = self._file(attached_to_name="TASK-2026-00001")
-        with self.assertRaises(ERPNextValidationError):
+        with self.assertRaises(JardalERPValidationError):
             run(self.adapter.delete_attachment("FILE-1", "TASK-2026-00079"))
         self.assertEqual(self.client.called("call_method"), [])
 
     def test_inexistente_es_not_found(self):
-        with self.assertRaises(ERPNextValidationError) as ctx:
+        with self.assertRaises(JardalERPValidationError) as ctx:
             run(self.adapter.delete_attachment("NO-EXISTE", "TASK-2026-00079"))
         self.assertEqual(ctx.exception.status_code, 404)
 
@@ -816,7 +816,7 @@ class GetAttachmentTests(TempRootCase):
         self.assertEqual(self.client.called("download_bytes"), [])
 
     def test_url_remota_no_se_sigue(self):
-        """Sin esto habria SSRF: el campo `file_url` es texto de ERPNext."""
+        """Sin esto habria SSRF: el campo `file_url` es texto de Jardal ERP."""
         self.client.docs["FILE-1"] = self._file(file_url="http://169.254.169.254/latest/meta-data/")
         with self.assertRaises(AttachmentRejected) as ctx:
             run(self.adapter.get_attachment("FILE-1", include_content=True))
@@ -824,7 +824,7 @@ class GetAttachmentTests(TempRootCase):
         self.assertEqual(self.client.called("download_bytes"), [])
 
     def test_inexistente_es_not_found(self):
-        with self.assertRaises(ERPNextValidationError) as ctx:
+        with self.assertRaises(JardalERPValidationError) as ctx:
             run(self.adapter.get_attachment("NO-EXISTE"))
         self.assertEqual(ctx.exception.status_code, 404)
 
@@ -928,22 +928,22 @@ class McpSurfaceTests(unittest.TestCase):
             self.assertLessEqual(len(description), 220, f"{name} es demasiado larga")
             self.assertLessEqual(len(description.split()), 32, f"{name} usa demasiadas palabras")
 
-    def test_sin_erpnext_devuelve_not_configured(self):
+    def test_sin_business_devuelve_not_configured(self):
         server, _ = self._register(None)
         result = run(server.tools["openceo_add_ticket_comment"][0](ticket="TASK-1", content="x"))
-        self.assertEqual(result, {"ok": False, "status": "not_configured", "message": "ERPNext no esta configurado."})
+        self.assertEqual(result, {"ok": False, "status": "not_configured", "message": "Jardal ERP no esta configurado."})
 
     def test_clasifica_los_fallos(self):
         cases = (
             (AttachmentRejected("pesa mucho", status="too_large"), "too_large"),
             (AttachmentRejected("fuera", status="forbidden"), "forbidden"),
-            (ERPNextPermissionError("sin permiso", status_code=403), "forbidden"),
-            (ERPNextValidationError("no existe", status_code=404), "not_found"),
-            (ERPNextValidationError("datos", status_code=400), "invalid_input"),
-            (ERPNextValidationError("grande", status_code=413), "too_large"),
-            (ERPNextValidationError("datos raros"), "invalid_input"),
-            (ERPNextUnavailable("caido"), "unavailable"),
-            (ERPNextDuplicateError("ya existe"), "duplicate"),
+            (JardalERPPermissionError("sin permiso", status_code=403), "forbidden"),
+            (JardalERPValidationError("no existe", status_code=404), "not_found"),
+            (JardalERPValidationError("datos", status_code=400), "invalid_input"),
+            (JardalERPValidationError("grande", status_code=413), "too_large"),
+            (JardalERPValidationError("datos raros"), "invalid_input"),
+            (JardalERPUnavailable("caido"), "unavailable"),
+            (JardalERPDuplicateError("ya existe"), "duplicate"),
             (RuntimeError("inesperado"), "error"),
         )
         for error, expected in cases:

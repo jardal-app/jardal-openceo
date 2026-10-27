@@ -442,7 +442,7 @@ PERSONALIDAD Y TONO DE VOZ (CRÍTICO):
    - 'aprueba la decisión', 'rechaza el escalado', 'aprueba la primera', 'rechaza el ticket 170' -> intent="horizon_decide" con dictation igual al texto original. Solo con verbo aprueba/rechaza MÁS sustantivo (decisión/escalado/aprobación), ordinal o 'ticket N'. Un 'sí'/'dale' suelto NUNCA es horizon_decide. 'Autorizo ...' es un compromiso personal -> horizon_capture, nunca horizon_decide.
    REGLA DE ORO: una frase sobre tu vida personal NUNCA es una instrucción de código. Ante duda entre dev_instruction y horizon_capture, si la frase habla de tu vida, tu familia, tu dinero, tu salud, tu voz, tus clientes o una idea tuya, elige horizon_capture. NUNCA envíes notas personales a tmux.
 
-12. FINANZAS (Jardal, ERPNext) — intent="finance_skill" con skill y dictation igual al texto original:
+12. FINANZAS (Jardal, Jardal ERP) — intent="finance_skill" con skill y dictation igual al texto original:
    Traduce el pedido a una skill exacta de finance; el código la valida contra el catálogo y la corre sin tickets (el registro o la consulta es el efecto).
    - Dinero que SALE con monto (gastar, pagar, comprar, "pago de sueldo 3000") -> skill="registrar-gasto".
    - Dinero que ENTRA con monto y señal real de cobro ("me pagaron", "cobré", "recibí", "sueldo 6200") -> skill="registrar-ingreso". Ojo: "pagaron" desnudo y sustantivos con complemento ("honorarios del contador", "sueldo del empleado") son GASTO, no ingreso.

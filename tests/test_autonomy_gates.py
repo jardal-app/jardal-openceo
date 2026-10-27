@@ -2,7 +2,7 @@
 
 Decision table (policy: requires_owner, TASK-2026-00114):
 
-- waiting -> ERPNext resolves per ticket: Pending Review only when the wait
+- waiting -> Jardal ERP resolves per ticket: Pending Review only when the wait
   names a human action (pending approval, owner escalation, phase waits);
   operational waits (quota, transient, config, Tier S, blocked_by) keep the
   business state (Open/Working). Unknown waits default to review (safe).
@@ -43,10 +43,10 @@ from objectives.engine import (  # noqa: E402
 from settings import Settings  # noqa: E402
 from state import AgentName  # noqa: E402
 from task_service import TaskService  # noqa: E402
-from tools.erpnext_tickets import (  # noqa: E402
-    ERPNextTicketAdapter,
+from tools.jardal_erp_tickets import (  # noqa: E402
+    JardalERPTicketAdapter,
     map_status,
-    resolve_erpnext_status,
+    resolve_jardal_erp_status,
     waiting_needs_human_review,
 )
 from workflow_service import (  # noqa: E402
@@ -85,14 +85,14 @@ class WaitingResolveTests(unittest.TestCase):
             "rate_limit_queued",
             "workflow_blocked_tool",
             "routing_missing",
-            "erpnext_pending",
+            "jardal_erp_pending",
             "waiting",
         ]
         for reason in reasons:
             with self.subTest(reason=reason):
                 task = _waiting_task(waiting_reason=reason)
                 self.assertFalse(waiting_needs_human_review(task))
-                self.assertIsNone(resolve_erpnext_status(task))
+                self.assertIsNone(resolve_jardal_erp_status(task))
 
     def test_human_waits_push_pending_review(self) -> None:
         cases = [
@@ -118,19 +118,19 @@ class WaitingResolveTests(unittest.TestCase):
                 task = _waiting_task(**overrides)
                 self.assertTrue(waiting_needs_human_review(task))
                 self.assertEqual(
-                    resolve_erpnext_status(task), "Pending Review")
+                    resolve_jardal_erp_status(task), "Pending Review")
 
     def test_unknown_wait_defaults_to_review(self) -> None:
         # No context at all (bare status dict, as queued before the ticket
         # is re-read): the safe default is the review queue.
         self.assertEqual(
-            resolve_erpnext_status({"status": "waiting"}), "Pending Review")
+            resolve_jardal_erp_status({"status": "waiting"}), "Pending Review")
         self.assertTrue(waiting_needs_human_review(None))
         # A reason-less wait cannot prove it is operational.
         task = _waiting_task(waiting_reason=None)
         self.assertTrue(waiting_needs_human_review(task))
         self.assertEqual(
-            resolve_erpnext_status(task), "Pending Review")
+            resolve_jardal_erp_status(task), "Pending Review")
 
     def test_human_already_acted_does_not_push(self) -> None:
         # Approval granted: the machine must resume, not re-page the owner.
@@ -140,7 +140,7 @@ class WaitingResolveTests(unittest.TestCase):
                     approval_required=True, approval_state=state,
                     waiting_reason="quota: reset at 12:00")
                 self.assertFalse(waiting_needs_human_review(task))
-                self.assertIsNone(resolve_erpnext_status(task))
+                self.assertIsNone(resolve_jardal_erp_status(task))
 
     def test_map_status_keeps_no_context_safe_default(self) -> None:
         self.assertEqual(map_status("waiting"), "Pending Review")
@@ -148,9 +148,9 @@ class WaitingResolveTests(unittest.TestCase):
 
     def test_completed_behavior_unchanged(self) -> None:
         self.assertEqual(
-            resolve_erpnext_status({"status": "completed"}), "Completed")
+            resolve_jardal_erp_status({"status": "completed"}), "Completed")
         self.assertEqual(
-            resolve_erpnext_status({
+            resolve_jardal_erp_status({
                 "status": "completed", "qa_review_required": True,
                 "qa_review_state": "pending"}),
             "Pending Review",
@@ -170,9 +170,9 @@ class FakeClient:
         return {"name": name, **body}
 
 
-def _adapter(client: FakeClient) -> ERPNextTicketAdapter:
+def _adapter(client: FakeClient) -> JardalERPTicketAdapter:
     settings = SimpleNamespace(ERPNEXT_TICKETS_PROJECT_COMPANY="Jardal")
-    return ERPNextTicketAdapter(settings, client=client)  # type: ignore[arg-type]
+    return JardalERPTicketAdapter(settings, client=client)  # type: ignore[arg-type]
 
 
 class UpdateStatusTests(unittest.IsolatedAsyncioTestCase):
@@ -224,7 +224,7 @@ class ObserverTests(unittest.IsolatedAsyncioTestCase):
             graph=MagicMock(),
             realtime_hub=MagicMock(),
         )
-        service._erpnext = _FakeErp()  # noqa: SLF001
+        service._business = _FakeErp()  # noqa: SLF001
         return service
 
     def _mirrored(self, **overrides: Any) -> dict[str, Any]:
@@ -237,14 +237,14 @@ class ObserverTests(unittest.IsolatedAsyncioTestCase):
         service = self._service()
         await service.observe_task_status(
             self._mirrored(waiting_reason="quota: reset"))
-        self.assertTrue(service._erpnext_queue.empty())  # noqa: SLF001
+        self.assertTrue(service._jardal_erp_queue.empty())  # noqa: SLF001
 
     async def test_escalation_wait_is_enqueued(self) -> None:
         service = self._service()
         await service.observe_task_status(self._mirrored(
             phase="owner_escalation",
             waiting_reason="owner_escalation:gasto_nuevo"))
-        item = service._erpnext_queue.get_nowait()  # noqa: SLF001
+        item = service._jardal_erp_queue.get_nowait()  # noqa: SLF001
         self.assertEqual(item["status"], "waiting")
         self.assertEqual(item["name"], "TASK-2026-00001")
 
@@ -253,7 +253,7 @@ class ObserverTests(unittest.IsolatedAsyncioTestCase):
         await service.observe_task_status(self._mirrored(
             approval_required=True, approval_state="pending",
             waiting_reason="phase:qa_review"))
-        item = service._erpnext_queue.get_nowait()  # noqa: SLF001
+        item = service._jardal_erp_queue.get_nowait()  # noqa: SLF001
         self.assertEqual(item["status"], "waiting")
 
 

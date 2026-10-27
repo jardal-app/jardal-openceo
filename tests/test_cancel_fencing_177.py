@@ -168,7 +168,7 @@ class RunTaskCancelFencingTests(unittest.IsolatedAsyncioTestCase):
             run = asyncio.create_task(service.run_task("task-1"))
             await asyncio.sleep(0.05)
             repo.task["status"] = TaskStatus.CANCELLED.value
-            repo.task["error"] = "El ticket fue cancelado en ERPNext."
+            repo.task["error"] = "El ticket fue cancelado en Jardal ERP."
         finally:
             project_lock.release()
         result = await run
@@ -179,7 +179,7 @@ class RunTaskCancelFencingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], TaskStatus.CANCELLED.value)
         self.assertEqual(repo.task["status"], TaskStatus.CANCELLED.value)
         self.assertEqual(repo.task["error"],
-                         "El ticket fue cancelado en ERPNext.")
+                         "El ticket fue cancelado en Jardal ERP.")
 
     async def test_completed_while_waiting_project_lock_does_not_start(
             self) -> None:
@@ -218,7 +218,7 @@ class RunTaskCancelFencingTests(unittest.IsolatedAsyncioTestCase):
             run = asyncio.create_task(service.run_task("task-1"))
             await graph.entered.wait()
             repo.task["status"] = TaskStatus.CANCELLED.value
-            repo.task["error"] = "El ticket fue cancelado en ERPNext."
+            repo.task["error"] = "El ticket fue cancelado en Jardal ERP."
             release.set()
             result = await run
             await asyncio.sleep(0.05)
@@ -227,7 +227,7 @@ class RunTaskCancelFencingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], TaskStatus.CANCELLED.value)
         self.assertEqual(repo.task["status"], TaskStatus.CANCELLED.value)
         self.assertEqual(repo.task["error"],
-                         "El ticket fue cancelado en ERPNext.")
+                         "El ticket fue cancelado en Jardal ERP.")
         for status in repo.written_statuses():
             self.assertNotIn(status, (TaskStatus.COMPLETED.value,
                                       TaskStatus.FAILED.value,
@@ -240,7 +240,7 @@ class RunTaskCancelFencingTests(unittest.IsolatedAsyncioTestCase):
         async def behavior(task):
             repo = repo_holder["repo"]
             repo.task["status"] = TaskStatus.CANCELLED.value
-            repo.task["error"] = "El ticket fue cancelado en ERPNext."
+            repo.task["error"] = "El ticket fue cancelado en Jardal ERP."
             return _graph_out()
 
         service, repo, graph = _service(TaskStatus.QUEUED.value, behavior)
@@ -264,7 +264,7 @@ class RunTaskCancelFencingTests(unittest.IsolatedAsyncioTestCase):
         run = asyncio.create_task(service.run_task("task-1"))
         await graph.entered.wait()
         repo.task["status"] = TaskStatus.CANCELLED.value
-        repo.task["error"] = "El ticket fue cancelado en ERPNext."
+        repo.task["error"] = "El ticket fue cancelado en Jardal ERP."
         release.set()
         result = await run
 
@@ -316,7 +316,7 @@ class CancelPatchNetTests(unittest.IsolatedAsyncioTestCase):
     async def test_exit_from_cancelled_is_refused_whole(self) -> None:
         task_id = await self._insert(
             TaskStatus.CANCELLED.value,
-            error="El ticket fue cancelado en ERPNext.")
+            error="El ticket fue cancelado en Jardal ERP.")
 
         result = await self.repo.patch_task(task_id, {
             "status": TaskStatus.IN_PROGRESS.value,
@@ -327,13 +327,13 @@ class CancelPatchNetTests(unittest.IsolatedAsyncioTestCase):
         assert result is not None
         self.assertEqual(result["status"], TaskStatus.CANCELLED.value)
         self.assertEqual(result["error"],
-                         "El ticket fue cancelado en ERPNext.")
+                         "El ticket fue cancelado en Jardal ERP.")
         self.assertNotIn("waiting_reason", result)
         stored = await self.repo.get_task(task_id)
         assert stored is not None
         self.assertEqual(stored["status"], TaskStatus.CANCELLED.value)
         self.assertEqual(stored["error"],
-                         "El ticket fue cancelado en ERPNext.")
+                         "El ticket fue cancelado en Jardal ERP.")
 
     async def test_completed_relabel_of_cancelled_is_refused(self) -> None:
         task_id = await self._insert(TaskStatus.CANCELLED.value)

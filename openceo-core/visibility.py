@@ -1,4 +1,4 @@
-"""Reglas de visibilidad de negocio en ERPNext (TASK-2026-00146 + 00147).
+"""Reglas de visibilidad de negocio en Jardal ERP (TASK-2026-00146 + 00147).
 
 Puras y deterministas: cero I/O, cero LLM. Todo lo que toca red o Mongo vive
 en `TaskService` (`_refresh_visibility` y ganchos); aquí solo cálculo sobre

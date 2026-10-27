@@ -394,13 +394,13 @@ class GenericAgentRunTest(unittest.TestCase):
 
     def test_bloqueado_fails_and_keeps_verdict(self) -> None:
         _, wiring, _, task = self._world(
-            verdict_stdout("bloqueado", "ERPNext down"))
+            verdict_stdout("bloqueado", "Jardal ERP down"))
         out = asyncio.run(run_generic_agent("operations", task, wiring))
         self.assertEqual(TaskStatus.FAILED.value, out["status"])
         verdict = AgentResult.model_validate(
             out["params"]["agent_result"])
         self.assertEqual("bloqueado", verdict.resultado.value)
-        self.assertIn("ERPNext down", out["error"])
+        self.assertIn("Jardal ERP down", out["error"])
         self.assertIn("bloqueado", out["result_comment"])
 
     def test_no_aplica_fails_and_keeps_verdict(self) -> None:
@@ -437,13 +437,13 @@ class GenericAgentRunTest(unittest.TestCase):
 
     def test_crash_keeps_bloqueado_verdict(self) -> None:
         _, wiring, _, task = self._world(
-            verdict_stdout("bloqueado", "ERPNext down"), returncode=1)
+            verdict_stdout("bloqueado", "Jardal ERP down"), returncode=1)
         out = asyncio.run(run_generic_agent("operations", task, wiring))
         self.assertEqual(TaskStatus.FAILED.value, out["status"])
         verdict = AgentResult.model_validate(
             out["params"]["agent_result"])
         self.assertEqual("bloqueado", verdict.resultado.value)
-        self.assertEqual("ERPNext down", verdict.motivo)
+        self.assertEqual("Jardal ERP down", verdict.motivo)
 
     def test_truncated_output_fails_closed_without_verdict(self) -> None:
         # Review 00006/mimo-W1: output_tail keeps the head, so a
@@ -781,7 +781,7 @@ class ResultCommentTest(unittest.TestCase):
             realtime_hub=_FakeHub(),  # type: ignore[arg-type]
             notion=None, rate_monitor=None)
         erp = _RecordingErp()
-        service._erpnext = erp  # noqa: SLF001
+        service._business = erp  # noqa: SLF001
         return service, erp
 
     def test_run_task_posts_result_comment(self) -> None:

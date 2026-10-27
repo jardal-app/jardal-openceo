@@ -1,7 +1,7 @@
 """Primitivas deterministas para leer dinero en lenguaje natural. Cero logica LLM.
 
 Un solo lugar donde un monto escrito a mano se convierte en `Decimal` (nunca
-`float`, contrato `docs/finance-erpnext-integration-contract.md` §11) y donde
+`float`, contrato `docs/finance-jardal-erp-integration-contract.md` §11) y donde
 la moneda explicita cerca del monto decide BOB / USD / USDT (USDT no es USD).
 Lo comparten los flujos de gasto e ingreso de Finance: dos modulos que
 dupliquen este parseo divergen en cuanto alguien ajusta un separador decimal.

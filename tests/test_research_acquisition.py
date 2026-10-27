@@ -257,9 +257,9 @@ class ErrorTaxonomyTests(unittest.TestCase):
         self.assertEqual(len(kinds), 9)
         self.assertNotIn("duplicate", kinds)
 
-    def test_no_erpnext_duplicate_exception_is_copied(self) -> None:
+    def test_no_business_duplicate_exception_is_copied(self) -> None:
         # El proveedor no tiene semantica de duplicado de negocio: traer la excepcion
-        # `Duplicate` de ERPNext haria pasar un resultado repetido por error de proveedor.
+        # `Duplicate` de Jardal ERP haria pasar un resultado repetido por error de proveedor.
         self.assertFalse(hasattr(acquisition, "Duplicate"))
         self.assertFalse(hasattr(brave_module, "Duplicate"))
 

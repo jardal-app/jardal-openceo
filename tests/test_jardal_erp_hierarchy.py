@@ -1,4 +1,4 @@
-"""Jerarquia de negocio en ERPNext (TASK-2026-00013).
+"""Jerarquia de negocio en Jardal ERP (TASK-2026-00013).
 
 Lo que se prueba aqui es el contrato verificado contra el sitio vivo:
 
@@ -26,14 +26,14 @@ if str(CORE_DIR) not in sys.path:
 
 import mcp_server  # noqa: E402
 from state import TaskCreateRequest, TaskSource, make_task_document  # noqa: E402
-from tools.erpnext_client import (  # noqa: E402
-    ERPNextDependencyBlockedError,
-    ERPNextDuplicateError,
-    ERPNextValidationError,
+from tools.jardal_erp_client import (  # noqa: E402
+    JardalERPDependencyBlockedError,
+    JardalERPDuplicateError,
+    JardalERPValidationError,
     classify_417,
 )
-from tools.erpnext_tickets import (  # noqa: E402
-    ERPNextTicketAdapter,
+from tools.jardal_erp_tickets import (  # noqa: E402
+    JardalERPTicketAdapter,
     depends_on_names,
     depends_on_rows,
 )
@@ -82,29 +82,29 @@ LINK_EXISTS_PAYLOAD = {
 
 class Classify417Tests(unittest.TestCase):
     def test_duplicado_por_exc_type(self):
-        self.assertIs(classify_417(DUPLICATE_PAYLOAD), ERPNextDuplicateError)
+        self.assertIs(classify_417(DUPLICATE_PAYLOAD), JardalERPDuplicateError)
 
     def test_duplicado_por_texto_aunque_falte_exc_type(self):
         payload = {"exception": "Duplicate entry 'x' for key 'openceo_ref'"}
-        self.assertIs(classify_417(payload), ERPNextDuplicateError)
+        self.assertIs(classify_417(payload), JardalERPDuplicateError)
 
     def test_bloqueo_por_dependientes_es_transitorio(self):
-        self.assertIs(classify_417(DEPENDENCY_BLOCKED_PAYLOAD), ERPNextDependencyBlockedError)
+        self.assertIs(classify_417(DEPENDENCY_BLOCKED_PAYLOAD), JardalERPDependencyBlockedError)
 
     def test_padre_no_grupo_es_error_de_datos(self):
-        self.assertIs(classify_417(PARENT_NOT_GROUP_PAYLOAD), ERPNextValidationError)
+        self.assertIs(classify_417(PARENT_NOT_GROUP_PAYLOAD), JardalERPValidationError)
 
     def test_enlace_existente_es_error_de_datos(self):
-        self.assertIs(classify_417(LINK_EXISTS_PAYLOAD), ERPNextValidationError)
+        self.assertIs(classify_417(LINK_EXISTS_PAYLOAD), JardalERPValidationError)
 
     def test_payload_vacio_o_desconocido_es_error_de_datos(self):
-        self.assertIs(classify_417({}), ERPNextValidationError)
-        self.assertIs(classify_417(None), ERPNextValidationError)
+        self.assertIs(classify_417({}), JardalERPValidationError)
+        self.assertIs(classify_417(None), JardalERPValidationError)
 
     def test_bloqueo_es_subclase_de_validacion(self):
         # Los llamadores que solo distinguen duro/transitorio siguen viendo un
         # ValidationError; los que reintentan afinan con la subclase.
-        self.assertTrue(issubclass(ERPNextDependencyBlockedError, ERPNextValidationError))
+        self.assertTrue(issubclass(JardalERPDependencyBlockedError, JardalERPValidationError))
 
 
 class DependsOnHelperTests(unittest.TestCase):
@@ -150,7 +150,7 @@ class FakeClient:
     async def get_doc(self, doctype, name):
         row = self.docs.get(name)
         if row is None:
-            raise ERPNextValidationError(f"No existe {doctype} {name}")
+            raise JardalERPValidationError(f"No existe {doctype} {name}")
         return dict(row)
 
     async def list_docs(self, doctype, *, filters=None, fields=None, limit=20):
@@ -176,9 +176,9 @@ class FakeClient:
         return {**row, **body}
 
 
-def make_adapter(client: FakeClient) -> ERPNextTicketAdapter:
+def make_adapter(client: FakeClient) -> JardalERPTicketAdapter:
     settings = SimpleNamespace(ERPNEXT_TICKETS_PROJECT_COMPANY="Jardal")
-    return ERPNextTicketAdapter(settings, client=client)  # type: ignore[arg-type]
+    return JardalERPTicketAdapter(settings, client=client)  # type: ignore[arg-type]
 
 
 class HierarchyPayloadTests(unittest.TestCase):
@@ -257,7 +257,7 @@ class HierarchyOpsTests(unittest.TestCase):
 
     def test_link_child_rechaza_auto_hijo(self):
         client = self._client_with({"name": "TASK-1", "parent_task": None})
-        with self.assertRaises(ERPNextValidationError):
+        with self.assertRaises(JardalERPValidationError):
             run(make_adapter(client).link_child("TASK-1", "TASK-1"))
 
     def test_set_dependencies_reemplaza_la_tabla(self):
@@ -342,7 +342,7 @@ def make_service(*, adapter=None, repo=None):
 
     service = TaskService.__new__(TaskService)
     service._settings = SimpleNamespace(TASK_AUTORUN=False, HORIZON_PERSONAL_MIRROR_ENABLED=False)
-    service._erpnext = adapter
+    service._business = adapter
     service._repo = repo
     return service
 
@@ -427,7 +427,7 @@ class BusinessRegistrationHierarchyTests(unittest.TestCase):
 class PushBlockedTests(unittest.TestCase):
     def test_bloqueo_por_dependencias_deja_pending(self):
         adapter = FakeBusinessAdapter()
-        adapter.push_error = ERPNextDependencyBlockedError("dependientes abiertos")
+        adapter.push_error = JardalERPDependencyBlockedError("dependientes abiertos")
         task = business_task("t1", "TASK-1")
         repo = FakeRepo({"t1": task})
         service = make_service(adapter=adapter, repo=repo)
@@ -439,7 +439,7 @@ class PushBlockedTests(unittest.TestCase):
 
     def test_otro_rechazo_no_deja_pending(self):
         adapter = FakeBusinessAdapter()
-        adapter.push_error = ERPNextValidationError("datos mal")
+        adapter.push_error = JardalERPValidationError("datos mal")
         repo = FakeRepo({"t1": business_task("t1", "TASK-1")})
         service = make_service(adapter=adapter, repo=repo)
         run(service._push_status({"task_id": "t1", "name": "TASK-1", "status": "in_progress"}))

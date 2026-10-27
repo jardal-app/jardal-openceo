@@ -511,12 +511,12 @@ class MCPDelegationTest(unittest.IsolatedAsyncioTestCase):
             async def get_task(self, task_id: str) -> None:
                 return None
 
-        class _FakeErpnext:
+        class _FakeJardalERP:
             is_enabled = True
 
         server: Any = FastMCP("research-delegation-test")
         _register_all_tools(server, _settings(), _FakeTaskService(),
-                            _FakeErpnext(), **kwargs)
+                            _FakeJardalERP(), **kwargs)
         return server
 
     async def test_submit_wrapper_delegates_to_registry(self) -> None:

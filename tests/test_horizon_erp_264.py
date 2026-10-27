@@ -298,6 +298,6 @@ def test_no_leak_personal_never_publishes_and_promotion_is_spec_only():
         from task_service import TaskService
 
         service = TaskService.__new__(TaskService)
-        service._erpnext = SimpleNamespace(provider="jardal_erp", is_enabled=True, client=None)
+        service._business = SimpleNamespace(provider="jardal_erp", is_enabled=True, client=None)
         assert await service._publish_execution_event("execution.started", personal) is None
     asyncio.run(run())

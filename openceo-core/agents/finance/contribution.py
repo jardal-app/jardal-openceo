@@ -1,12 +1,12 @@
-"""Estado de la regla del 10% desde ERPNext. Cero logica LLM.
+"""Estado de la regla del 10% desde Jardal ERP. Cero logica LLM.
 
 Funcion determinista de lectura del contrato
-(`docs/finance-erpnext-integration-contract.md` §10): ingreso elegible,
+(`docs/finance-jardal-erp-integration-contract.md` §10): ingreso elegible,
 objetivo de aporte, aportes confirmados y pendiente, calculados sobre
-`GL Entry` con datos confirmados desde ERPNext. El LLM puede explicar el
+`GL Entry` con datos confirmados desde Jardal ERP. El LLM puede explicar el
 resultado; la aritmética autoritativa es esta.
 
-**Hallazgo que define el diseño** (verificado contra ERPNext el 2026-09-28): el
+**Hallazgo que define el diseño** (verificado contra Jardal ERP el 2026-09-28): el
 plan de cuentas de Jardal **no tiene ninguna cuenta de aportes, donaciones o
 diezmo**. Por eso `CONTRIBUTION_ACCOUNTS` está vacía y los aportes confirmados
 se devuelven como `None` con `state="needs_input"`, nunca como `0`: el proyecto
@@ -46,7 +46,7 @@ from agents.finance.money_text import (
 CURRENCY = "BOB"
 CONTRIBUTION_RATE = Decimal("0.10")
 
-# Cuentas de ingreso reales de Jardal (verificadas en ERPNext, no inventadas).
+# Cuentas de ingreso reales de Jardal (verificadas en Jardal ERP, no inventadas).
 INCOME_ACCOUNTS: tuple[str, ...] = (
     "Servicios - J",
     "Ventas - J",
@@ -138,7 +138,7 @@ def _money(value: Decimal) -> Decimal:
 
 @dataclass
 class ContributionStatus:
-    """Regla del 10% reconstruible desde ERPNext, con fecha de corte (§15)."""
+    """Regla del 10% reconstruible desde Jardal ERP, con fecha de corte (§15)."""
 
     as_of: str
     company: str
@@ -288,7 +288,7 @@ async def get_contribution_10_status(
         status.reason = (
             "El plan de cuentas de Jardal no tiene una cuenta de aportes o "
             "donaciones, así que lo aportado no es medible todavía. Definir esa "
-            "cuenta en ERPNext es decisión del dueño."
+            "cuenta en Jardal ERP es decisión del dueño."
         )
     return status
 
@@ -335,5 +335,5 @@ def build_spoken_summary(status: ContributionStatus) -> str:
         )
     return (
         f"{base} Todavía no podemos confirmar cuánto aportamos: falta definir "
-        f"en ERPNext la cuenta que recibe los aportes.{notes}"
+        f"en Jardal ERP la cuenta que recibe los aportes.{notes}"
     )

@@ -7,7 +7,7 @@ CEO strategy, the planner and the cockpit read. Unknown is null, never 0:
 a token total is null until at least one run measured it, and the
 aggregation is null until at least one run exists anywhere.
 
-Money stays null: no ERPNext reader links money to a ticket or a project
+Money stays null: no Jardal ERP reader links money to a ticket or a project
 yet (Journal Entry carries no ticket/project link; GL reads are
 company-wide by Cost Center). The ``money``/``money_currency`` fields are
 the seam a dated finance reader (HZ-005) fills later; until then they
@@ -232,7 +232,7 @@ def record_money(
     amount: str,
     currency: str,
 ) -> dict[str, Any]:
-    """Attach ERPNext money to a ticket cost. Pure.
+    """Attach Jardal ERP money to a ticket cost. Pure.
 
     The seam for the dated finance reader: until one lands, money stays
     null (blank amounts are refused, never stored as zero).

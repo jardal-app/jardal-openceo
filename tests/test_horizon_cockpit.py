@@ -7,7 +7,7 @@ Contratos y reglas probadas:
 3. Urgencia determinista (critica, plazo de costo, bloqueo); lo agrupado se
    entrega una sola vez y lo urgente reaparece hasta responderse.
 4. Responder aplica la ruta (resume YAML, fase humana, cierre de escalado) y
-   el cierre viaja a ERPNext como Completed.
+   el cierre viaja a Jardal ERP como Completed.
 5. Privacidad en un solo sentido: empresa entra en solo lectura, nada
    personal sale (filtros, respuestas y marcas de entrega).
 6. Clasificador: brief/bandeja/respuesta sin robar frases dev ni compromisos.
@@ -37,7 +37,7 @@ from horizon_support import FakeHorizonRepo  # noqa: E402
 from settings import Settings  # noqa: E402
 from state import TaskReviewAction, WorkflowRunStatus  # noqa: E402
 from task_service import TaskService  # noqa: E402
-from tools.erpnext_tickets import resolve_erpnext_status  # noqa: E402
+from tools.jardal_erp_tickets import resolve_jardal_erp_status  # noqa: E402
 
 OWNER = "usr_owner"
 
@@ -923,7 +923,7 @@ class ApplyOwnerDecisionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision["decision"], "approved")
         self.assertEqual(decision["by"], OWNER)
         self.assertEqual(
-            resolve_erpnext_status({"status": stored["status"]}), "Completed"
+            resolve_jardal_erp_status({"status": stored["status"]}), "Completed"
         )
         self.assertNotIn("horizon_scope", stored.get("params") or {})
 

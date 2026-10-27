@@ -24,7 +24,7 @@ skills:
 inputs:
   - ticket with dated financial request
 outputs:
-  - ERPNext-backed answer or record
+  - Jardal ERP-backed answer or record
   - hecho / bloqueado / no_aplica result with reason
 enabled: true
 disabled_reason: null

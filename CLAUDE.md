@@ -139,11 +139,11 @@ Contrato vigente: épico TASK-2026-00187, sección «Agentes por rol» de `docs/
 Horizon **no es un agente separado** ni tiene runtime propio. Es la capacidad y contexto personal/estratégico que consume el CEO: misión, objetivos, hitos, capacidad, ideas capturadas y siguiente acción (`mission → objective → milestone → action → result`).
 - **Especificación canónica**: [`jardal-horizon/README.md`](file:///home/develop/development/Jardal/jardal-openceo/jardal-horizon/README.md) v2.1.
 - **Implementación en Core**: [`openceo-core/horizon/`](file:///home/develop/development/Jardal/jardal-openceo/openceo-core/horizon/).
-- **Tracking operacional**: los tickets viven en ERPNext (`https://erp.jardal.app/app/task`); `STATUS.md` guarda el avance y los traspasos de sesión. `PENDINGS.md` es solo un puntero al backlog.
+- **Tracking operacional**: los tickets viven en Jardal ERP (`https://erp.jardal.app/app/task`); `STATUS.md` guarda el avance y los traspasos de sesión. `PENDINGS.md` es solo un puntero al backlog.
 
 ### Horizon como cockpit del Owner (autonomía)
 - **Cockpit**: «qué sigue» y el brief diario combinan el plan personal, el status de lo que avanzó el CEO y las decisiones pendientes. Es la interfaz principal del Owner (TASK-2026-00120: `horizon/cockpit.py`, bandeja con la fuente de Requiere humano, respuesta por voz/móvil/API, entrega única, privacidad un solo sentido).
-- **Promoción automática**: si una acción toca un proyecto o repo de la empresa, es trabajo de empresa y entra sola al Objetivo o ticket por la API común (ERPNext primero); solo viaja la especificación del trabajo. Pregunta solo si implica costo, gasto o replanificación (TASK-2026-00121: `horizon/promotion.py` + `HorizonService.promote_action`, toque explícito por acción, `POST /api/horizon/promote`).
+- **Promoción automática**: si una acción toca un proyecto o repo de la empresa, es trabajo de empresa y entra sola al Objetivo o ticket por la API común (Jardal ERP primero); solo viaja la especificación del trabajo. Pregunta solo si implica costo, gasto o replanificación (TASK-2026-00121: `horizon/promotion.py` + `HorizonService.promote_action`, toque explícito por acción, `POST /api/horizon/promote`).
 - **Privacidad en un solo sentido**: lo de empresa entra a Horizon en solo lectura; lo personal (misión, finanzas, familia, salud) nunca sale. Sin interruptor general de exportación.
 - **Terminología**: los de Horizon son siempre «objetivos personales»; «Objetivo» a secas es objetivo de empresa (contrato: §Proactive CEO de `docs/ARCHITECTURE_REFERENCE_2026.md`; decisión del vault `decisions/2026-10-06-objetivo-unico-ceo-autonomo`).
 - Las tareas personales de Horizon no son tickets de empresa (excepción acotada en §10); la capacidad del Owner frena solo los escalados, no el trabajo autónomo; el plan del día sigue sin depender de un LLM.
@@ -153,7 +153,7 @@ Horizon **no es un agente separado** ni tiene runtime propio. Es la capacidad y 
 2. **HZ-002 — Ciclo proactivo del CEO** (Completada): Capacidad diaria determinista al 70% (`capacity.py`), planificador lexicográfico (`planner.py`), disparadores intencionales persistidos sin barridos (`triggers.py`), revisión periódica (`review.py`), workflows `ceo/horizon_daily.yaml` y `ceo/horizon_review.yaml`.
 3. **HZ-003 — Delegación y dev móvil** (Implementada, pendiente piloto con 3 tickets reales): Encargo de tickets de alcance personal sobre sesiones dev existentes en background, medición de tiempo humano de supervisión y retrabajo, y entrega única del resultado ("delivered once") tolerante a desconexión del móvil.
 4. **HZ-004 — Fuentes conectadas y espacio personal** (vista implementada; fuente conectada pendiente de necesidad observada): vista del espacio personal en `openceo-react` — ruta `/dashboard/personal`, permiso `personal_space` — con misión, objetivos e hitos, plan del día (capacidad, bloques, exclusiones y decisiones), siguiente acción, delegación medida con entrega única, captura y métricas humanas. La integración de fuentes pasivas queda condicionada a que el uso demuestre el ahorro (§9.8 y §11: *"conectar fuente solo si aporta ahorro"*).
-5. **HZ-005 — Frontera financiera con ERPNext**: Consumo de saldos y asientos vía adapter de Finance hacia ERPNext (TICKET-025, decisión del vault `decisions/2026-09-19-erpnext-financial-record`), sin almacenar dinero en floats ni crear contabilidad propia en OpenCEO.
+5. **HZ-005 — Frontera financiera con Jardal ERP**: Consumo de saldos y asientos vía adapter de Finance hacia Jardal ERP (TICKET-025, decisión del vault `decisions/2026-09-19-erpnext-financial-record`), sin almacenar dinero en floats ni crear contabilidad propia en OpenCEO.
 
 ### Reglas Críticas de Horizon
 - **Clasificador determinista antes del LLM**: Evita que frases personales se clasifiquen erróneamente como instrucciones dev enviadas a tmux, y permite operar con presupuesto de IA agotado.
@@ -192,33 +192,33 @@ cd openceo-react && npm run build
 
 ---
 
-## 8. Tickets: ERPNext es el registro de negocio
+## 8. Tickets: Jardal ERP es el registro de negocio
 
-Desde el 2026-09-24 el trabajo empresarial pertenece a ERPNext y OpenCEO conserva la
+Desde el 2026-09-24 el trabajo empresarial pertenece a Jardal ERP y OpenCEO conserva la
 **ejecución**. La dirección está en `docs/OPENCEO_DIRECTION.md` v1.1; las fronteras, en
 `docs/ARCHITECTURE_REFERENCE_2026.md` §System Boundaries.
 
 | Pregunta | Dónde se responde |
 | --- | --- |
-| ¿Qué trabajo existe? | ERPNext — `Task` (ticket) y `Project` (identidad de trabajo) |
+| ¿Qué trabajo existe? | Jardal ERP — `Task` (ticket) y `Project` (identidad de trabajo) |
 | ¿Cómo se está ejecutando? | MongoDB — `tasks`, sesiones, runs |
 
 **No hay flag de encendido/apagado, y es deliberado.** Existió `ERPNEXT_TICKETS_ENABLED` y se
 eliminó: apagado, OpenCEO creaba tickets que vivían solo en Mongo y que el sistema de negocio
-nunca vería, y la reconciliación no los recupera. La resiliencia ante un ERPNext caído la da la
-marca `erpnext_pending`, no un interruptor.
+nunca vería, y la reconciliación no los recupera. La resiliencia ante un Jardal ERP caído la da la
+marca `jardal_erp_pending` (`erpnext_pending` en documentos viejos; sanan por espejo), no un interruptor.
 
-### Flujo directo (OpenCEO → ERPNext)
+### Flujo directo (OpenCEO → Jardal ERP)
 
 `TaskService.create_task()` crea el ticket de negocio **antes** de persistir en Mongo, y tiene
-tres ramas: éxito, `erpnext_pending` (timeout: el ticket se crea igual, **sin `autorun`**, y se
+tres ramas: éxito, `jardal_erp_pending` (timeout: el ticket se crea igual, **sin `autorun`**, y se
 repara al arrancar) y fallo duro (4xx: no se persiste nada). Las transiciones se propagan por un
 observador en `MongoRepository.patch_task`.
 
-### Flujo inverso (ERPNext → OpenCEO)
+### Flujo inverso (Jardal ERP → OpenCEO)
 
 Un webhook de Frappe (`OpenCEO Ticket Sync` para `on_update`, `OpenCEO Ticket Trash` para
-`on_trash`) llama a `POST /api/integrations/erpnext/task` con la cabecera
+`on_trash`) llama a `POST /api/integrations/jardal-erp/task` con la cabecera
 `X-OpenCEO-Webhook-Secret`. Cerrar un ticket lo pasa a `completed`; cancelarlo o borrarlo, a
 `cancelled` (terminal, no reanuda). Los estados que son **eco** de lo que OpenCEO ya empujó se
 ignoran, para no crear un bucle.
@@ -226,10 +226,10 @@ ignoran, para no crear un bucle.
 ### Reglas al tocar esto
 
 1. **`completed` es condicional, no automático a un solo estado**: con revisión humana pendiente (`qa_review_required` sin aprobar) empuja `Pending Review`; sin ella, `Completed` directo. `failed`/`escalated`/`interrupted` no se empujan.
-2. **`status_pushed` guarda el vocabulario de OpenCEO, no el de ERPNext** — comparar `in_progress`
+2. **`status_pushed` guarda el vocabulario de OpenCEO, no el de Jardal ERP** — comparar `in_progress`
    contra `Working` rompería la idempotencia. Y `str(TaskStatus.QUEUED)` da `'TaskStatus.QUEUED'`:
    usar `.value`.
-3. **Nunca un `create_document(doctype, payload)` genérico** hacia ERPNext: solo operaciones
+3. **Nunca un `create_document(doctype, payload)` genérico** hacia Jardal ERP: solo operaciones
    semánticas cerradas, y el cliente tiene allowlist de DocTypes.
 4. **`openceo_ref` es la clave de idempotencia** (nullable, única). Un reintento usa el mismo valor.
 5. **La consola de `bench` decodifica stdin como latin-1**: usar escapes `é` en scripts ASCII.
@@ -246,9 +246,9 @@ del mismo trabajo. Al cerrar, en orden:
 
 1. **Merge a `main` + push** de la rama del ticket (`git checkout main && git merge --no-ff <rama> && git push origin main`).
 2. **Servicio reiniciado con el código nuevo** (`scripts/openceo-core-host.sh restart` + `status` + smoke del endpoint).
-3. **Ticket en ERPNext en su estado final** con `openceo_transition_ticket` (criterio global en el servidor; relee, verifica y deja el espejo coherente sin eco): `Completed` con `evidence` de la verificación si el agente terminó y verificó; `Pending Review` con `human_action` nombrable solo si queda una aprobación o decisión que únicamente el Owner puede tomar; `Working` con `reason` si sigue abierto el trabajo o una dependencia. Cancelar trabajo del Owner exige citar su orden (`owner_instruction`); sin ella la herramienta escala en vez de cancelar. Borrar la rama local (`-d`) y remota si existe una vez mergeada.
+3. **Ticket en Jardal ERP en su estado final** con `openceo_transition_ticket` (criterio global en el servidor; relee, verifica y deja el espejo coherente sin eco): `Completed` con `evidence` de la verificación si el agente terminó y verificó; `Pending Review` con `human_action` nombrable solo si queda una aprobación o decisión que únicamente el Owner puede tomar; `Working` con `reason` si sigue abierto el trabajo o una dependencia. Cancelar trabajo del Owner exige citar su orden (`owner_instruction`); sin ella la herramienta escala en vez de cancelar. Borrar la rama local (`-d`) y remota si existe una vez mergeada.
 4. **Docs temporales eliminados**: `docs/work/TASK-2026-000NN-tema.md` se borra al pasar el checklist (resultado en el ticket + vault actualizado o innecesario + original adjunto como privado si tiene valor futuro); informar en una línea.
-5. **Registro durable**: `STATUS.md` (traspaso), ticket ERPNext (resultado) y vault (solo hechos, decisiones, flujos y conclusiones reutilizables, con el número de ticket como evidencia).
+5. **Registro durable**: `STATUS.md` (traspaso), ticket Jardal ERP (resultado) y vault (solo hechos, decisiones, flujos y conclusiones reutilizables, con el número de ticket como evidencia).
 
 ---
 
@@ -262,4 +262,4 @@ Los CLI del roster leen `AGENTS.md` directamente. El resto de este archivo es el
 
 ## 11. Palabras clave retiradas (`sigue`/`valida`/`audita`)
 
-Retiradas por orden del Owner (2026-10-17): las recetas `sigue`, `valida` y `audita` se eliminaron y las palabras clave ya no disparan ninguna conducta. Las sesiones del Owner trabajan por orden directa; el estado del roadmap vive en ERPNext. Historial en git y STATUS.md. La entrada nocturna externa que pasaba `sigue <épico>` queda sin receta que la atienda.
+Retiradas por orden del Owner (2026-10-17): las recetas `sigue`, `valida` y `audita` se eliminaron y las palabras clave ya no disparan ninguna conducta. Las sesiones del Owner trabajan por orden directa; el estado del roadmap vive en Jardal ERP. Historial en git y STATUS.md. La entrada nocturna externa que pasaba `sigue <épico>` queda sin receta que la atienda.

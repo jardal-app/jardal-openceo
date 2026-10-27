@@ -415,7 +415,7 @@ class _FakeTaskService:
         return None
 
 
-class _FakeErpnext:
+class _FakeJardalERP:
     is_enabled = True
 
     async def add_comment(self, ticket: str, content: str) -> dict[str, Any]:
@@ -428,7 +428,7 @@ class _FakeErpnext:
 def _mounted() -> tuple[Any, TokenIssuer, MemoryAuditSink]:
     server = FastMCP("identity-http-test")
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
-    _register_all_tools(server, settings, _FakeTaskService(), _FakeErpnext())
+    _register_all_tools(server, settings, _FakeTaskService(), _FakeJardalERP())
     issuer = TokenIssuer(MemoryTokenStore(), load_catalog().agents)
     audit = MemoryAuditSink()
     server.add_middleware(MCPIdentityMiddleware(issuer, audit))
@@ -609,7 +609,7 @@ class CatalogBoxConsistencyTests(unittest.TestCase):
         server = FastMCP("identity-registry-test")
         settings = Settings(_env_file=None)  # type: ignore[call-arg]
         names = _register_all_tools(
-            server, settings, _FakeTaskService(), _FakeErpnext())
+            server, settings, _FakeTaskService(), _FakeJardalERP())
         registered = set(names)
         # TASK-2026-00222 added the two research bridge tools;
         # TASK-2026-00218 adds openceo_create_mission.

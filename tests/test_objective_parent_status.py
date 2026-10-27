@@ -34,7 +34,7 @@ from objectives.engine import (
 from settings import Settings
 from state import TaskStatus
 from task_service import TaskService
-from tools.erpnext_tickets import map_status
+from tools.jardal_erp_tickets import map_status
 
 
 def _scratch_repo(test: unittest.TestCase) -> Path:
@@ -148,8 +148,8 @@ class ObjectiveParentStatusTests(unittest.IsolatedAsyncioTestCase):
     async def test_observer_skips_converted_push(self) -> None:
         service = TaskService(Settings(), MagicMock(), MagicMock(),
                               MagicMock())
-        service._erpnext = MagicMock()
-        service._erpnext.is_enabled = True
+        service._business = MagicMock()
+        service._business.is_enabled = True
         task = {
             "task_id": "task-parent",
             "status": "converted",
@@ -157,7 +157,7 @@ class ObjectiveParentStatusTests(unittest.IsolatedAsyncioTestCase):
                 "name": "TASK-1", "status_pushed": "in_progress"}}},
         }
         await service.observe_task_status(task)
-        self.assertTrue(service._erpnext_queue.empty())
+        self.assertTrue(service._jardal_erp_queue.empty())
 
     async def test_finish_completes_converted_parent(self) -> None:
         repo = _scratch_repo(self)

@@ -142,7 +142,6 @@ realtime_hub = RealtimeHub()
 notion_manager = NotionTicketManager(settings) if settings.NOTION_API_TOKEN.strip() else None
 graph._notion = notion_manager  # late-bind after creation
 business_adapter = build_business_work(settings)
-erpnext_adapter = business_adapter
 if not business_adapter.is_enabled:
     logger.error("Business provider unavailable: %s", business_adapter.client.config_error())
 project_service = ProjectService(settings=settings, repo=repo, config_loader=config_loader)
@@ -170,7 +169,7 @@ qa_review_service = QAReviewService(settings=settings, repo=repo)
 task_service = TaskService(
     settings=settings, repo=repo, graph=graph, realtime_hub=realtime_hub,
     notion=notion_manager, rate_monitor=rate_monitor, workflow_service=workflow_service,
-    qa_service=qa_review_service, erpnext=erpnext_adapter,
+    qa_service=qa_review_service, business=business_adapter,
     config_loader=config_loader,
 )
 qa_review_service.set_task_service(task_service)
@@ -197,7 +196,7 @@ objective_service = ObjectiveService(
 )
 task_service.set_objective_service(objective_service)
 # El repositorio avisa de CADA transicion de estado; el servicio decide cuales se
-# propagan a ERPNext. Se instala aqui porque el repositorio es anterior al servicio.
+# propagan a Jardal ERP. Se instala aqui porque el repositorio es anterior al servicio.
 repo.set_status_observer(task_service.observe_task_status)
 def _dispatcher_repo_for(project: str) -> str | None:
     """Execution repo for the dispatcher lock peek (advisory only)."""
@@ -227,7 +226,7 @@ ceo_service = CEOService(
     task_service=task_service,
     config_loader=config_loader,
     settings=settings,
-    company_reader=erpnext_adapter,
+    company_reader=business_adapter,
 )
 
 
@@ -254,7 +253,7 @@ _ticket_research_bridge = TicketResearchBridge(
     on_admitted=lambda research_id: _wake_research_dispatcher(research_id),
 )
 internal_mcp = build_internal_mcp_mount(
-    settings, task_service, erpnext_adapter,
+    settings, task_service, business_adapter,
     issuer=mcp_token_issuer, audit=mcp_audit_sink,
     research_bridge=_ticket_research_bridge)
 from business.personal import ERPHorizonStore, JardalERPPersonal, horizon_store_is_erp
@@ -278,7 +277,7 @@ horizon_scheduler = HorizonScheduler(
 workflow_service.set_horizon_service(horizon_service)
 task_service.set_horizon_hooks(on_task_terminal=horizon_service.acknowledge_task_result)
 horizon_service.set_task_service(task_service)
-horizon_service.set_company_reader(erpnext_adapter)
+horizon_service.set_company_reader(business_adapter)
 horizon_service.set_company_config(config_loader)
 first_layer_gateway = FirstLayerGateway(
     settings=settings,
@@ -355,7 +354,7 @@ async def lifespan(_: FastAPI):
                 logging.getLogger("uvicorn.error"))
         # Research: se construye SIEMPRE, aunque falten claves o CLI, para poder
         # explicar el motivo de indisponibilidad en vez de desaparecer sin traza. La
-        # flag de capacidad no modifica el contrato de ERPNext (siempre activo).
+        # flag de capacidad no modifica el contrato de Jardal ERP (siempre activo).
         research_service, research_resources = build_research_service(get_settings(), repo)
         app.state.research_service = research_service
         if research_service._deps.events is not None:
@@ -403,10 +402,10 @@ async def lifespan(_: FastAPI):
         await dev_session_service.startup_reconcile()
         # Mirror workers + startup repairs (ex-WaitingTaskScheduler.start).
         task_service.start_notion_worker()
-        task_service.start_erpnext_worker()
+        task_service.start_jardal_erp_worker()
         task_service.start_visibility_worker()
         await task_service.startup_reconcile_notion_mirrors()
-        await task_service.startup_reconcile_erpnext()
+        await task_service.startup_reconcile_jardal_erp()
         await task_service.reset_stuck_erp_inbox()
         await task_service.drain_erp_outbox_startup()
         await dispatcher.start()
@@ -514,11 +513,11 @@ async def lifespan(_: FastAPI):
         await ceo_loop.stop()
         await dispatcher.stop()
         await task_service.stop_notion_worker()
-        await task_service.stop_erpnext_worker()
+        await task_service.stop_jardal_erp_worker()
         await task_service.stop_visibility_worker()
         await dev_session_service.shutdown()
-        if erpnext_adapter is not None:
-            await erpnext_adapter.aclose()
+        if business_adapter is not None:
+            await business_adapter.aclose()
         # Research cierra sus workers y su almacen de evidencias ANTES que el
         # repositorio: una escritura suya despues del cierre quedaria huerfana.
         await close_research_service(research_resources)
@@ -1041,9 +1040,9 @@ async def create_task(
     data = payload.model_dump()
     data["created_by"] = current_user.user_id
     # Sin `source_id` no hay clave de idempotencia, y un reintento tras un timeout crearia
-    # un SEGUNDO ticket de negocio en ERPNext (el `task_id` se genera de nuevo). La cabecera
+    # un SEGUNDO ticket de negocio en Jardal ERP (el `task_id` se genera de nuevo). La cabecera
     # `Idempotency-Key` se convierte en `source_id` sintetico para que el reintento
-    # converja al mismo ticket en Mongo y en ERPNext.
+    # converja al mismo ticket en Mongo y en Jardal ERP.
     if idempotency_key and not str(data.get("source_id") or "").strip():
         data["source_id"] = idempotency_key.strip()
     try:
@@ -1149,19 +1148,21 @@ async def get_mission(
 
 
 @app.post("/api/integrations/erpnext/task")
-async def erpnext_task_webhook(
+@app.post("/api/integrations/jardal-erp/task")
+async def jardal_erp_task_webhook(
     payload: dict = Body(...),
     x_openceo_secret: str | None = Header(default=None, alias="X-OpenCEO-Webhook-Secret"),
 ) -> dict:
-    """Camino inverso: una decision humana en ERPNext llega al runtime.
+    """Camino inverso: una decision humana en Jardal ERP llega al runtime.
 
     Lo llama el webhook de Frappe cuando alguien **cierra, cancela o borra** un `Task` en
     el desk. No lo llama un cron: las reglas permanentes de AGENTS.md prohiben
     los barridos periodicos, y el
     contrato exige que la actividad humana llegue por eventos explicitos.
 
-    No usa sesion de usuario (quien llama es ERPNext): se autentica con el secreto
-    compartido `ERPNEXT_WEBHOOK_SECRET`.
+    No usa sesion de usuario (quien llama es Jardal ERP): se autentica con el secreto
+    compartido `ERPNEXT_WEBHOOK_SECRET` (alias depreciado, TASK-2026-00318).
+    La ruta `/api/integrations/erpnext/task` queda como alias de la canonica.
     """
     require_legacy_webhook(settings, business_adapter.provider, x_openceo_secret)
 

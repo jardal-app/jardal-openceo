@@ -60,11 +60,11 @@ scripts/openceo-core-host.sh restart|status
 ### Standing rules
 
 - No polling or Mongo/API sweeps: react to CRUD events only.
-- ERPNext owns business state (`Task`/`Project`); Mongo owns execution.
+- Jardal ERP owns business state (`Task`/`Project`); Mongo owns execution.
   Never create Mongo-only tickets: internal creation goes through the
-  ticket API (ERPNext first). Bounded exception: Horizon personal tasks
+  ticket API (Jardal ERP first). Bounded exception: Horizon personal tasks
   are not company tickets and stay Mongo-only (no business mirror);
-  any work on a company project/repo goes to ERPNext first.
+  any work on a company project/repo goes to Jardal ERP first.
 - No secrets, credentials, or personal data in notes or temp docs.
 - Conventions over configuration: mirror sibling code, reuse its helpers.
 - Owner rule (2026-10-14; current epic TASK-2026-00248): validation uses

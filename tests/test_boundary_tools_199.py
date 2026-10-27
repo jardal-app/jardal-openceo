@@ -77,7 +77,7 @@ REMOVED_TOOLS = (
     # TASK-2026-00223: project creation left the registry for the skill.
     "ops.check_project_spend",
     "ops.escalate_project_spend",
-    "ops.ensure_erpnext_project",
+    "ops.ensure_business_project",
     "ops.ensure_git_repo",
     "ops.ensure_repo_templates",
     "ops.ensure_project_config",
@@ -111,7 +111,7 @@ EXPECTED_MCP = frozenset({
     "openceo_update_ticket_attachment",
     "openceo_delete_ticket_attachment",
     "openceo_send_email",
-    "openceo_ensure_erpnext_project",
+    "openceo_ensure_business_project",
     "openceo_register_expense",
     "openceo_register_income",
     "openceo_scope_summary",
@@ -138,7 +138,7 @@ class _FakeTaskService:
         return None
 
 
-class _FakeErpnext:
+class _FakeJardalERP:
     is_enabled = True
 
     async def search_tickets(self, **kwargs: Any) -> list[dict[str, Any]]:
@@ -192,7 +192,7 @@ class MCPBoundarySetTests(unittest.TestCase):
     def _server(self) -> Any:
         server: Any = FastMCP("boundary-test")
         _register_all_tools(
-            server, _settings(), _FakeTaskService(), _FakeErpnext())
+            server, _settings(), _FakeTaskService(), _FakeJardalERP())
         return server
 
     def test_known_set_matches_ticket_scope(self) -> None:
@@ -201,7 +201,7 @@ class MCPBoundarySetTests(unittest.TestCase):
     def test_all_registered_match_known_set(self) -> None:
         server: Any = FastMCP("boundary-names-test")
         names = _register_all_tools(
-            server, _settings(), _FakeTaskService(), _FakeErpnext())
+            server, _settings(), _FakeTaskService(), _FakeJardalERP())
         self.assertEqual(set(names), set(EXPECTED_MCP))
 
     def test_infra_only_registers_dns(self) -> None:
@@ -409,7 +409,7 @@ class EmailDescriptionTests(unittest.TestCase):
         async def _collect() -> dict[str, str]:
             server: Any = FastMCP("boundary-email-test")
             _register_all_tools(
-                server, _settings(), _FakeTaskService(), _FakeErpnext())
+                server, _settings(), _FakeTaskService(), _FakeJardalERP())
             async with Client(server) as client:
                 tools = await client.list_tools()
             return {tool.name: tool.description or "" for tool in tools}
@@ -443,7 +443,7 @@ class BoundaryDelegationTests(unittest.IsolatedAsyncioTestCase):
     def _server(self) -> Any:
         server: Any = FastMCP("boundary-delegation-test")
         _register_all_tools(
-            server, _settings(), _FakeTaskService(), _FakeErpnext())
+            server, _settings(), _FakeTaskService(), _FakeJardalERP())
         return server
 
     async def test_expense_delegates_to_registry(self) -> None:
@@ -510,18 +510,18 @@ class BoundaryDelegationTests(unittest.IsolatedAsyncioTestCase):
     async def test_project_uses_adapter(self) -> None:
         from fastmcp import Client  # noqa: PLC0415
 
-        from tools.erpnext_tickets import ERPNextTicketAdapter  # noqa: PLC0415
+        from tools.jardal_erp_tickets import JardalERPTicketAdapter  # noqa: PLC0415
 
-        erpnext = AsyncMock(spec=ERPNextTicketAdapter)
-        erpnext.is_enabled = True
-        erpnext.find_project.return_value = None
-        erpnext.ensure_project.return_value = "PROJ-x"
+        jardal_erp = AsyncMock(spec=JardalERPTicketAdapter)
+        jardal_erp.is_enabled = True
+        jardal_erp.find_project.return_value = None
+        jardal_erp.ensure_project.return_value = "PROJ-x"
         server: Any = FastMCP("boundary-project-test")
         _register_all_tools(
-            server, _settings(), _FakeTaskService(), erpnext)
+            server, _settings(), _FakeTaskService(), jardal_erp)
         async with Client(server) as client:
             result = await client.call_tool(
-                "openceo_ensure_erpnext_project",
+                "openceo_ensure_business_project",
                 {"project_key": "jardal-openceo", "display_name": "X"})
         self.assertEqual(result.data["name"], "PROJ-x")
         self.assertTrue(result.data["created"])
@@ -534,7 +534,7 @@ class BoundaryDelegationTests(unittest.IsolatedAsyncioTestCase):
             server, _settings(), _FakeTaskService(), None)
         async with Client(server) as client:
             result = await client.call_tool(
-                "openceo_ensure_erpnext_project", {"project_key": "x"})
+                "openceo_ensure_business_project", {"project_key": "x"})
         self.assertFalse(result.data["ok"])
         self.assertEqual(result.data["status"], "not_configured")
 
@@ -549,7 +549,7 @@ class BoundaryDelegationTests(unittest.IsolatedAsyncioTestCase):
         service.tool_elfec_pay = AsyncMock(return_value={
             "ok": True, "status": "pending_approval"})
         server: Any = FastMCP("boundary-elfec-test")
-        _register_all_tools(server, _settings(), service, _FakeErpnext())
+        _register_all_tools(server, _settings(), service, _FakeJardalERP())
         async with Client(server) as client:
             result = await client.call_tool(
                 "openceo_elfec_house_payment", {})
@@ -566,7 +566,7 @@ class BoundaryDelegationTests(unittest.IsolatedAsyncioTestCase):
         service.tool_send_email = AsyncMock(return_value={
             "ok": True, "status": "pending_approval"})
         server: Any = FastMCP("boundary-email-test")
-        _register_all_tools(server, _settings(), service, _FakeErpnext())
+        _register_all_tools(server, _settings(), service, _FakeJardalERP())
         async with Client(server) as client:
             result = await client.call_tool(
                 "openceo_send_email",
@@ -590,7 +590,7 @@ class NewToolBudgetTests(unittest.TestCase):
     BUDGETED = (
         "manage_dns_record",
         "openceo_send_email",
-        "openceo_ensure_erpnext_project",
+        "openceo_ensure_business_project",
         "openceo_register_expense",
         "openceo_register_income",
         "openceo_scope_summary",
@@ -620,7 +620,7 @@ class NewToolBudgetTests(unittest.TestCase):
             with patch("mcp_server.SMTPEmailSender", _FakeSender):
                 _register_all_tools(
                     server, _settings(), _FakeTaskService(),
-                    _FakeErpnext())
+                    _FakeJardalERP())
             async with Client(server) as client:
                 tools = await client.list_tools()
             return {tool.name: tool.description or "" for tool in tools}
@@ -637,7 +637,7 @@ class NewToolBudgetTests(unittest.TestCase):
 class AnonymousBoxTests(unittest.IsolatedAsyncioTestCase):
     """No token, no badge: the default project-management box (Owner order).
 
-    Ticket tools, DNS and the ERPNext project stay open so the Owner keeps
+    Ticket tools, DNS and the Jardal ERP project stay open so the Owner keeps
     working from anywhere; the agent-specific tools (PM batch, email,
     finance) need a badge. A forged/unknown token still fails closed.
     """
@@ -660,7 +660,7 @@ class AnonymousBoxTests(unittest.IsolatedAsyncioTestCase):
         "openceo_get_ticket_attachment",
         "openceo_update_ticket_attachment",
         "openceo_delete_ticket_attachment",
-        "openceo_ensure_erpnext_project",
+        "openceo_ensure_business_project",
     })
 
     def _server(self) -> Any:
@@ -673,7 +673,7 @@ class AnonymousBoxTests(unittest.IsolatedAsyncioTestCase):
 
         server: Any = FastMCP("boundary-anonymous-test")
         _register_all_tools(
-            server, _settings(), _FakeTaskService(), _FakeErpnext())
+            server, _settings(), _FakeTaskService(), _FakeJardalERP())
         issuer = TokenIssuer(MemoryTokenStore(), load_catalog().agents)
         server.add_middleware(MCPIdentityMiddleware(issuer, MemoryAuditSink()))
         return server
@@ -738,7 +738,7 @@ class BoxAcceptanceTests(unittest.IsolatedAsyncioTestCase):
 
         server: Any = FastMCP("boundary-acceptance-test")
         _register_all_tools(
-            server, _settings(), _FakeTaskService(), _FakeErpnext())
+            server, _settings(), _FakeTaskService(), _FakeJardalERP())
         issuer = TokenIssuer(MemoryTokenStore(), load_catalog().agents)
         server.add_middleware(MCPIdentityMiddleware(issuer, MemoryAuditSink()))
         issued = token

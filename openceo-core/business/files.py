@@ -2,7 +2,7 @@ import base64
 import binascii
 from typing import Any
 
-from tools.erpnext_tickets import AttachmentRejected, assert_attachment_name_allowed, resolve_attachment_path, sanitize_file_name
+from tools.jardal_erp_tickets import AttachmentRejected, assert_attachment_name_allowed, resolve_attachment_path, sanitize_file_name
 
 
 def read_attachment(settings: Any, *, source_path: str | None, content_base64: str | None, file_name: str | None) -> tuple[bytes, str]:

@@ -6,13 +6,13 @@ operations agent simulated and everything else real: the planner path
 (``run_generic_agent`` with the operations profile, a real badge and a
 real ticket folder), the crear-proyecto skill script (real subprocess
 against tmp roots plus the recipe git line against a bare tmp remote),
-recording ERPNext/DNS doubles behind the catalog box, the structured
+recording Jardal ERP/DNS doubles behind the catalog box, the structured
 verdict parse, the cost fold and the crystallization save step (real
 gate against a tmp origin fixture).
 
 Order note: the simulated agent performs the skill work inside its
 ``run()`` — the same order as the pilot — and cites the outputs in its
-hecho verdict. No network, no LLM, no ERPNext, no Cloudflare, no push
+hecho verdict. No network, no LLM, no Jardal ERP, no Cloudflare, no push
 outside tmp. The only credential touching the ticket folder is the
 rehearsal badge itself, by design (short-lived, memory-only, revoked
 at the end); service secrets never leave the fake base env.
@@ -65,8 +65,8 @@ __all__ = [
     "run_pilot_rehearsal",
 ]
 
-#: ERPNext mirror the rehearsal badge binds to. Memory-only, never
-#: persisted to ERPNext; far above the live numbering.
+#: Jardal ERP mirror the rehearsal badge binds to. Memory-only, never
+#: persisted to Jardal ERP; far above the live numbering.
 REHEARSAL_MIRROR = "TASK-2026-09999"
 
 #: Service-secret sentinels: seeded in the fake base env, must appear
@@ -154,7 +154,7 @@ class _BoxGateway:
         if tool not in self._box:
             self.denied.append({"tool": tool, "reason": "outside agent box"})
             return {"ok": False, "denied": "outside agent box"}
-        if tool == "openceo_ensure_erpnext_project":
+        if tool == "openceo_ensure_business_project":
             record = {"tool": tool, "project_key": kwargs.get("project_key"),
                       "display_name": kwargs.get("display_name"),
                       "existed": False}
@@ -270,10 +270,10 @@ class _SkillHands:
     async def perform(self, workdir: Path) -> dict[str, Any]:
         config = self._config
         erp = self._gateway.call(
-            "openceo_ensure_erpnext_project", project_key=config.project_key,
+            "openceo_ensure_business_project", project_key=config.project_key,
             display_name=config.display_name)
         if not erp.get("ok"):
-            raise RehearsalError("ERPNext double refused the call")
+            raise RehearsalError("Jardal ERP double refused the call")
         repo = self._roots["repos"] / config.project_key
         repo.mkdir(parents=True, exist_ok=True)
         if not (repo / ".git").is_dir():

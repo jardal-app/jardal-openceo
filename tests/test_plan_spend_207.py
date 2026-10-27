@@ -1380,7 +1380,7 @@ class PendingLinkSpendTests(unittest.IsolatedAsyncioTestCase):
         stored = await repo.get_task(created["task_id"])
         assert stored is not None
         self.assertEqual(stored["status"], "queued")
-        self.assertEqual(stored["waiting_reason"], "erpnext_pending")
+        self.assertEqual(stored["waiting_reason"], "jardal_erp_pending")
 
 
 class PreParkTests(unittest.IsolatedAsyncioTestCase):

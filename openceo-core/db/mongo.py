@@ -154,7 +154,7 @@ class MongoRepository:
     # ------------------------- Research (TASK-2026-00056) -------------------------
     # Colecciones propias del servicio research. Deliberadamente separadas de
     # ``tasks``: un job de research NO es un ticket de negocio y no pasa por el
-    # observador de estado de ERPNext.
+    # observador de estado de Jardal ERP.
 
     @property
     def research_jobs(self):
@@ -538,7 +538,7 @@ class MongoRepository:
         return self._clean(row)
 
     async def find_task_by_business_name(self, name: str) -> dict[str, Any] | None:
-        """Execution task by its ERPNext mirror name (tool locks, 00208)."""
+        """Execution task by its Jardal ERP mirror name (tool locks, 00208)."""
         row = await self.tasks.find_one({"$or": [{"params._mirrors.business.name": name}, {"params._mirrors.business": {"$exists": False}, "params._mirrors.erpnext.name": name}]})
         return self._clean(row)
 
@@ -757,7 +757,7 @@ class MongoRepository:
         ``mark_interrupted_tasks`` plus the dispatcher's bounded reconcile,
         and an explicit manual ``POST /run`` (force) stays outside the claim
         by design, serializing on the per-task lock instead. The win
-        notifies the status observer like ``patch_task`` so ERPNext still
+        notifies the status observer like ``patch_task`` so Jardal ERP still
         sees the Working transition.
         """
         if not task_id:
@@ -901,12 +901,12 @@ class MongoRepository:
             })
         return out
 
-    async def list_tasks_needing_erpnext_sync(self, limit: int = 200) -> list[dict[str, Any]]:
+    async def list_tasks_needing_jardal_erp_sync(self, limit: int = 200) -> list[dict[str, Any]]:
         """Tickets con el enlace de negocio roto, para reconciliar al arrancar.
 
         Solo mira tickets donde la integracion **ya intento** enlazar (existe
         `params._mirrors.erpnext`). NO hace backfill de los tickets historicos que nunca
-        pasaron por ERPNext: eso inventaria registros de negocio hacia atras, que es justo
+        pasaron por Jardal ERP: eso inventaria registros de negocio hacia atras, que es justo
         lo que el contrato prohibe. Es reparacion de intentos propios, no migracion.
 
         Lleva el filtro de privacidad de Horizon desde el primer commit. Sin el, la
@@ -934,7 +934,7 @@ class MongoRepository:
     async def list_tasks_pending_visibility(self, limit: int = 200) -> list[dict[str, Any]]:
         """Tickets con visibilidad derivada pendiente (00146 + 00147).
 
-        El flag lo deja el worker cuando ERPNext está caído; la
+        El flag lo deja el worker cuando Jardal ERP está caído; la
         reconciliación de arranque los reencola. `$exists` + `$nin` para que
         solo casen valores presentes y no vacíos (los `$ne`/`$nin` solos
         también casarían la clave ausente). Con el filtro de privacidad de
@@ -2350,7 +2350,7 @@ class MongoRepository:
 
     # --------------- Research schedules (TASK-2026-00068) ---------------
     # Igual que los jobs: nada de esto escribe en ``tasks`` ni pasa por el observador
-    # de ERPNext. Un tick de schedule es ejecucion, no un ticket de negocio.
+    # de Jardal ERP. Un tick de schedule es ejecucion, no un ticket de negocio.
 
     async def create_research_schedule(
         self, doc: dict[str, Any]

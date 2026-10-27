@@ -1,10 +1,10 @@
 """First real role skill: operations crear-proyecto (TASK-2026-00214).
 
 The operations agent owns project creation with its skill (recipe, exact
-CLI over ``ops.create_project``, ERPNext-project plus DNS boundary
+CLI over ``ops.create_project``, Jardal ERP-project plus DNS boundary
 tools). A skilled run stages its skill links into the ticket folder and
 mounts the repo read-only; operations also mounts the creation roots
-writable. Agent badges bind to the ERPNext mirror ticket, never to the
+writable. Agent badges bind to the Jardal ERP mirror ticket, never to the
 Mongo uuid (that mint path refused every badged run).
 """
 from __future__ import annotations
@@ -68,7 +68,7 @@ OPERATIONS_BOX = frozenset({
     "openceo_get_ticket",
     "openceo_add_ticket_comment",
     "openceo_attach_ticket_file",
-    "openceo_ensure_erpnext_project",
+    "openceo_ensure_business_project",
     "manage_dns_record",
 })
 
@@ -225,7 +225,7 @@ class OperationsBoxTest(unittest.TestCase):
 
     def test_creation_tools_allowed(self) -> None:
         grant = self._grant(OPERATIONS_BOX)
-        grant.check("openceo_ensure_erpnext_project",
+        grant.check("openceo_ensure_business_project",
                     {"project_key": "demo"})
         grant.check("manage_dns_record", {"hostname": "x.jardal.app"})
 
