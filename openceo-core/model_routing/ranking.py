@@ -1,10 +1,13 @@
 """Per-profile ranking: unification, scoring, retention (TASK-2026-00292).
 
-Pipeline (SPEC §8, §12.2): hard gates BEFORE ordering, weighted
-percentile scoring (§8.3), an experimental bucket for thin evidence,
-top-3 retention until the challenger repeats, and atomic publication
-with provenance (T19). Consumers freeze one document per round and
-never see a mid-round swap (T12).
+Pipeline (SPEC §8, §12.2, as corrected by TASK-2026-00319): capability
+gates BEFORE ordering, weighted percentile scoring (§8.3), an
+experimental bucket listing thin evidence, top-3 retention until the
+challenger repeats, and atomic publication with provenance (T19).
+Benchmarks, serve evidence and quota ORDER the single multi-provider
+pool; no numeric floor or drop excludes a registered live model.
+Consumers freeze one document per round and never see a mid-round
+swap (T12).
 """
 
 from __future__ import annotations
@@ -269,11 +272,17 @@ def _eligible_routes(
     requirements: ProfileRequirements,
     policy: RouterPolicy,
 ) -> tuple[list[Deployment], list[str]]:
+    """Routes registered as free and alive; verification only orders.
+
+    TASK-2026-00319: ``free_offered`` (or legacy ``free_verified``)
+    admits the route. Serve evidence and quota never exclude here;
+    they surface later as ordering signals.
+    """
     routes: list[Deployment] = []
     reasons: list[str] = []
     for deployment in entry.deployments:
-        if not deployment.free_verified:
-            reasons.append(f"{deployment.deployment_id}: not free_verified")
+        if not (deployment.free_offered or deployment.free_verified):
+            reasons.append(f"{deployment.deployment_id}: not registered free")
             continue
         if not deployment.healthy:
             reasons.append(f"{deployment.deployment_id}: not healthy")
@@ -319,14 +328,27 @@ def rank_catalog(
     return RankedCatalog(ranked[0], ranked[1], context_floor)
 
 
+def _verified_count(entry: CatalogEntry) -> int:
+    """Verified routes first: serve evidence and quota order, never exclude."""
+    return sum(1 for route in entry.deployments if route.free_verified)
+
+
 def _rank_with_requirements(
     catalog: CatalogDocument,
     scoring: ResolvedScoring,
     requirements: ProfileRequirements,
     policy: RouterPolicy,
 ) -> tuple[list[RankedEntry], list[ExperimentalEntry]]:
+    """Order every registered live entry; nothing numeric discards.
+
+    TASK-2026-00319: thin-evidence entries are listed under
+    ``experimental`` for transparency AND ranked (low quality sorts
+    them down). Quality floors and max drops survive in provenance
+    only; they no longer exclude.
+    """
     ordered: list[RankedEntry] = []
     experimental: list[ExperimentalEntry] = []
+    verified_of: dict[str, int] = {}
     for entry in catalog.entries:
         routes, _reasons = _eligible_routes(entry, requirements, policy)
         if not routes:
@@ -339,12 +361,10 @@ def _rank_with_requirements(
                 reason=_experimental_reason(count),
                 observations=count,
             ))
-            continue
         quality, coverage, dims = score_dimensions(entry.benchmarks, scoring.weights)
-        if quality < scoring.quality_floor:
-            continue
         sources = sorted({score.source for score in entry.benchmarks.values() if score.source})
         primary, *backups = routes
+        verified_of[entry.canonical_model_id] = _verified_count(entry)
         ordered.append(RankedEntry(
             rank=0,
             canonical_model_id=entry.canonical_model_id,
@@ -360,6 +380,7 @@ def _rank_with_requirements(
         ))
     ordered.sort(key=lambda item: (
         -item.quality,
+        -verified_of.get(item.canonical_model_id, 0),
         _route_key(_route_of(catalog, item.primary.deployment_id)),
         item.canonical_model_id,
     ))
@@ -424,18 +445,17 @@ def fallback_chain(
     *,
     down: Container[str] = (),
 ) -> list[RankedEntry]:
-    """Ordered servable chain within floor and drop (SPEC §8.4; T10)."""
-    scoring = resolve_scoring(ranking.profile, policy)
-    ceiling = ranking.order[0].quality if ranking.order else 0.0
+    """Ordered servable chain with no numeric discard (TASK-2026-00319).
+
+    The published order is the chain: only ``down`` (really dead or
+    already tried) removes an entry. Floors and drops survive in
+    provenance as ordering context, never as gates.
+    """
     chain: list[RankedEntry] = []
     for item in ranking.order:
         routes = [item.primary.deployment_id,
                   *(route.deployment_id for route in item.backups)]
         if item.canonical_model_id in down or all(route in down for route in routes):
-            continue
-        if item.quality < scoring.quality_floor:
-            continue
-        if item.quality < ceiling - scoring.max_quality_drop:
             continue
         chain.append(item)
     return chain
@@ -458,9 +478,13 @@ def explain_model(
             routes = [item.primary.deployment_id,
                       *(route.deployment_id for route in item.backups)]
             if subject in (item.canonical_model_id, *routes):
+                thin = any(exp.canonical_model_id == item.canonical_model_id
+                           for exp in ranking.experimental)
+                verdict = (f"ranked #{item.rank} (thin evidence)"
+                           if thin else f"ranked #{item.rank}")
                 return ExplainedModel(
                     subject=subject, profile=profile,
-                    verdict=f"ranked #{item.rank}",
+                    verdict=verdict,
                     rank=item.rank, quality=item.quality,
                     reasons=(f"primary route {item.primary.deployment_id} via "
                              f"{item.primary.provider}; {len(item.backups)} backup(s)",),
@@ -479,17 +503,12 @@ def explain_model(
         _routes, reasons = _eligible_routes(entry, requirements, active)
         scoring = resolve_scoring(profile, active)
         count = len(entry.benchmarks)
+        quality, _coverage, _dims = score_dimensions(entry.benchmarks, scoring.weights)
         if count < router_benchmarks.EXPERIMENTAL_MIN_OBSERVATIONS:
             return ExplainedModel(
-                subject=subject, profile=profile, verdict="experimental",
-                reasons=(_experimental_reason(count),),
-            )
-        quality, _coverage, _dims = score_dimensions(entry.benchmarks, scoring.weights)
-        if quality < scoring.quality_floor:
-            return ExplainedModel(
-                subject=subject, profile=profile, verdict="excluded",
+                subject=subject, profile=profile, verdict="ranked (thin evidence)",
                 quality=quality,
-                reasons=(f"quality {quality:.3f} below floor {scoring.quality_floor:.2f}",),
+                reasons=(_experimental_reason(count),),
             )
         return ExplainedModel(
             subject=subject, profile=profile, verdict="excluded",

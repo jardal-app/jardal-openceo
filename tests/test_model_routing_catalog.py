@@ -97,17 +97,23 @@ def test_free_verified_never_defaults_true():
 
 
 def test_usability_matrix():
+    # TASK-2026-00319: registration decides, signals only order. Unknown
+    # prices, missing serve evidence and exhausted quota stay usable;
+    # only paywalls and non-zero prices keep a deployment out.
     policy = router_models.RouterPolicy()
     assert _usability(_deployment()) == "usable"
     assert _usability(_deployment(free_verified=False)) == "unverified"
-    assert _usability(_deployment(input_price_usd=None)) == "unknown_price"
+    assert _usability(_deployment(free_offered=True, free_verified=False)) == "usable"
+    assert _usability(_deployment(input_price_usd=None)) == "usable"
     assert _usability(_deployment(output_price_usd=0.5)) == "paid"
     assert _usability(_deployment(requires_payment_method=True)) == "paywalled"
     assert _usability(_deployment(stale=True)) == "usable"
     open_policy = router_models.RouterPolicy(allow_unknown_price=True)
     assert router_models.usability(_deployment(input_price_usd=None), open_policy) == "usable"
     assert router_models.is_usable(_deployment(), policy) is True
-    assert router_models.is_usable(_deployment(input_price_usd=None), policy) is False
+    assert router_models.is_usable(_deployment(input_price_usd=None), policy) is True
+    assert router_models.is_usable(
+        _deployment(free_offered=False, free_verified=False), policy) is False
 
 
 def _usability(deployment):

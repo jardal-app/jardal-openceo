@@ -493,13 +493,17 @@ def test_list_eligible_models_filters_every_gate(store):
         _entry("famd", "canon-d", [_deployment("dep-notools", "groq")]),
     ])
     store.set_cooldown("dep-good", "flaky", seconds=600)
-    assert list_eligible_models("free-review", catalog, store) == []
+    # TASK-2026-00319: missing verification orders, never excludes;
+    # cooldowns, death and capability gates still filter.
+    assert [item.deployment_id for item in
+            list_eligible_models("free-review", catalog, store)] == ["dep-unverified"]
     fresh = router_availability.AvailabilityStore(store._path.parent / "fresh.sqlite")
     try:
         eligible = list_eligible_models("free-review", catalog, fresh)
-        assert [item.deployment_id for item in eligible] == ["dep-good"]
+        assert [item.deployment_id for item in eligible] == ["dep-good", "dep-unverified"]
         general = list_eligible_models("free-general", catalog, fresh)
-        assert [item.deployment_id for item in general] == ["dep-good", "dep-notools"]
+        assert [item.deployment_id for item in general] == [
+            "dep-good", "dep-unverified", "dep-notools"]
     finally:
         fresh.close()
 

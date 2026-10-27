@@ -230,16 +230,15 @@ class SnapshotTests(unittest.TestCase):
 
 
 class CandidatesTests(unittest.TestCase):
-    def test_order_and_opencode_routes(self):
+    def test_order_keeps_ranking_across_providers(self):
+        # TASK-2026-00319: single multi-provider pool in ranking order.
         candidates = _candidates_abc()
         self.assertEqual(
             [item.deployment_id for item in candidates],
             ["opencode/model-a-free", "opencode/model-b-free",
              "opencode/model-c-free"])
-        self.assertTrue(
-            all(item.provider == "opencode" for item in candidates))
 
-    def test_opencode_backup_serves(self):
+    def test_primary_then_backup_are_failover_entries(self):
         from model_routing.models import ProfileRanking
         order = [_entry(1, "org/model-x", "xray", "groq/model-x",
                         provider="groq", quality=0.9,
@@ -247,18 +246,21 @@ class CandidatesTests(unittest.TestCase):
         ranking = ProfileRanking.model_validate(
             _rankings_doc(order)["profiles"]["free-review"])
         candidates = wiring.review_candidates(ranking)
-        self.assertEqual(len(candidates), 1)
-        self.assertEqual(candidates[0].deployment_id, "opencode/model-x-free")
+        self.assertEqual(
+            [item.deployment_id for item in candidates],
+            ["groq/model-x", "opencode/model-x-free"])
 
-    def test_no_opencode_route_skipped(self):
+    def test_non_opencode_primary_serves_first(self):
         from model_routing.models import ProfileRanking
         order = [_entry(1, "org/model-x", "xray", "groq/model-x",
                         provider="groq", quality=0.9)]
         ranking = ProfileRanking.model_validate(
             _rankings_doc(order)["profiles"]["free-review"])
-        self.assertEqual(wiring.review_candidates(ranking), [])
+        candidates = wiring.review_candidates(ranking)
+        self.assertEqual(
+            [item.deployment_id for item in candidates], ["groq/model-x"])
 
-    def test_unverified_families_skipped(self):
+    def test_every_family_serves_in_order(self):
         from model_routing.models import ProfileRanking
         order = [
             _entry(1, "org/model-x", "anonymous", "opencode/model-x-free",
@@ -271,9 +273,11 @@ class CandidatesTests(unittest.TestCase):
         ranking = ProfileRanking.model_validate(
             _rankings_doc(order)["profiles"]["free-review"])
         candidates = wiring.review_candidates(ranking)
-        self.assertEqual([item.family_id for item in candidates], ["zed"])
+        self.assertEqual(
+            [item.family_id for item in candidates],
+            ["anonymous", "unknown-family", "zed"])
 
-    def test_floor_and_drop_applied(self):
+    def test_no_floor_or_drop(self):
         from model_routing.models import ProfileRanking
         order = [
             _entry(1, "org/model-a", "alpha", "opencode/model-a-free",
@@ -284,21 +288,22 @@ class CandidatesTests(unittest.TestCase):
         ranking = ProfileRanking.model_validate(
             _rankings_doc(order)["profiles"]["free-review"])
         candidates = wiring.review_candidates(ranking)
-        self.assertEqual([item.family_id for item in candidates], ["alpha"])
+        self.assertEqual(
+            [item.family_id for item in candidates], ["alpha", "beta"])
 
-    def test_same_canonical_collapses_to_first(self):
+    def test_same_canonical_yields_one_entry_per_route(self):
         from model_routing.models import ProfileRanking
         order = [
             _entry(1, "org/model-a", "alpha", "opencode/model-a-free",
-                   quality=0.90),
-            _entry(2, "org/model-a", "alpha", "opencode/model-a-alt",
-                   quality=0.85),
+                   quality=0.90,
+                   backups=[("opencode/model-a-alt", "opencode")]),
         ]
         ranking = ProfileRanking.model_validate(
             _rankings_doc(order)["profiles"]["free-review"])
         candidates = wiring.review_candidates(ranking)
-        self.assertEqual(len(candidates), 1)
-        self.assertEqual(candidates[0].deployment_id, "opencode/model-a-free")
+        self.assertEqual(
+            [item.deployment_id for item in candidates],
+            ["opencode/model-a-free", "opencode/model-a-alt"])
 
 
 class ExclusionsTests(unittest.TestCase):

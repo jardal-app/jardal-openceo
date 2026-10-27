@@ -54,23 +54,25 @@ next refresh (the reproducible local evaluation of SPEC §8.3); the
 previous top-3 keeps serving meanwhile. Entries that left the eligible
 set drop from retention with a recorded reason.
 
-## Gates, weights and floors
+## Gates, weights and floors (rank-no-discard, TASK-2026-00319)
 
-Hard gates run BEFORE ordering: `free_verified`, `healthy`, tools,
-context, public confidentiality, and known TPM/RPM/RPD capacity (floors
-unset until §5 limit sources are wired; unknown then fails closed).
-Scores are SPEC §8.3 weights over 0..1 percentiles times coverage;
-floors are the §18 minima (review 0.65, research 0.60, general 0.45);
-drops are an initial hypothesis (0.15/0.20/0.25). Research prefers
-128K context and falls back to 64K when nothing qualifies, recording
-the applied floor. Policy `profiles:` overrides merge per field.
+Hard gates run BEFORE ordering: registration as free (`free_offered`),
+`healthy` (registered and alive), tools, context, public
+confidentiality, and known TPM/RPM/RPD capacity. Nothing numeric
+discards: quality floors (review 0.65, research 0.60, general 0.45)
+and max drops (0.15/0.20/0.25) survive in provenance as ordering
+context only. Scores are SPEC §8.3 weights over 0..1 percentiles
+times coverage; thin-evidence entries rank low AND stay listed as
+experimental. Research prefers 128K context and falls back to 64K
+when nothing qualifies. Policy `profiles:` overrides merge per field.
 
-## Native serve evidence (TASK-2026-00315)
+## Native serve evidence (TASK-2026-00315, ordering-only since TASK-2026-00319)
 
-OpenCode Free only serves from the native CLI, so a group A
-deployment verifies only with fresh serve evidence: proof the model
-served natively at zero cost within the last 7 days
-(`SERVE_EVIDENCE_TTL` in `sources.py`).
+OpenCode Free only serves from the native CLI. Fresh serve evidence
+(proof the model served natively at zero cost within the last 7 days,
+`SERVE_EVIDENCE_TTL` in `sources.py`) no longer gates group A: a
+listed free deployment is usable with or without it, and verified
+routes sort ahead as an ordering signal.
 
 Producer (`model_routing/serve_evidence.py`, state file
 `~/.local/state/free-router/serve-evidence.json`,
@@ -97,7 +99,8 @@ a dev state file; they never verify because they are not offered.
 - `tools` comes from provider-declared metadata (only OpenRouter
   publishes it) or probes; other providers stay out of review/research
   until probed. Declared support gates the ranking; probes verify
-  reliability. Catalog `healthy` means listed-now plus verified-free;
+  reliability. Catalog `healthy` means listed-now plus registered-free
+(`free_offered`; TASK-2026-00319), verification only orders;
   transient serving state lives in the availability store.
 - Rankings assume public content: every manual terms record allows only
   `public` today, so routing non-public content to free tiers stays

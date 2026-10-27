@@ -305,6 +305,7 @@ def test_run_update_alerts_on_failure_and_empty_catalog(tmp_path):
         router_acceptance.battery_catalog().model_dump())
     for entry in empty.entries:
         for route in entry.deployments:
+            route.free_offered = False
             route.free_verified = False
     publish_catalog(empty, config)
     ok_report = router_refresh.RefreshReport(
@@ -457,7 +458,9 @@ def test_cli_errors_state_dir(tmp_path, capsys):
     assert "autorun=false" in capsys.readouterr().out
 
 
-def test_no_free_models_alert_uses_configured_policy(tmp_path):
+def test_no_free_models_alert_ignores_unknown_price_policy(tmp_path):
+    # TASK-2026-00319: unknown prices order, never exclude, so the
+    # no_free_models alert never fires for them whatever the policy says.
     config = tmp_path / "config"
     state = tmp_path / "state"
     config.mkdir()
@@ -479,7 +482,7 @@ def test_no_free_models_alert_uses_configured_policy(tmp_path):
     code, _detail = router_refresh.run_update(
         "providers", config, state, update=lambda: ok_report)
     assert code == 0
-    assert len(router_alerts.list_alerts(state, kind="no_free_models")) == 1
+    assert router_alerts.list_alerts(state, kind="no_free_models") == []
 
 
 def test_drain_logs_corrupt_payloads(tmp_path, caplog):

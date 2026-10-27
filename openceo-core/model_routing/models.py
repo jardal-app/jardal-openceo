@@ -292,12 +292,17 @@ class ProfileScoring(BaseModel):
 
 
 class RouterPolicy(BaseModel):
-    """Approved persistent rules; SPEC §18 subset for the catalog stage."""
+    """Approved persistent rules; SPEC §18 subset for the catalog stage.
+
+    TASK-2026-00319: the order is decided by the per-task ranking, never
+    by the provider. ``best_global`` keeps ranking order; ``native_first``
+    stays only as an explicit opt-in regroup.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     policy_version: int = POLICY_SCHEMA_VERSION
-    selection_policy: SelectionPolicy = "native_first"
+    selection_policy: SelectionPolicy = "best_global"
     strict_zero_cost: bool = True
     allow_paid_fallback: bool = False
     allow_unknown_price: bool = False
@@ -380,19 +385,20 @@ Usability = Literal["usable", "unverified", "unknown_price", "paid", "paywalled"
 def usability(deployment: Deployment, policy: RouterPolicy) -> Usability:
     """Catalog-level gate (SPEC §5, §12.2, §14.2; T11 catalog part).
 
-    Unknown or changed prices (demoted to unverified at publish time)
-    keep the deployment out of the usable set; staleness is
-    informational so a failed source never empties the catalog.
+    TASK-2026-00319: registration decides, signals only order. A
+    registered free deployment (``free_offered`` or ``free_verified``)
+    is usable even with unknown prices, no serve evidence, or an
+    exhausted quota: those signals order the ranking, they never
+    exclude. Only a paywall or a non-zero price (not free at all)
+    keeps a deployment out; staleness stays informational.
     """
-    if not deployment.free_verified:
-        return "unverified"
     if deployment.requires_payment_method:
         return "paywalled"
     prices = (deployment.input_price_usd, deployment.output_price_usd)
-    if any(price is None for price in prices) and not policy.allow_unknown_price:
-        return "unknown_price"
-    if any(price not in (None, 0) for price in prices):
+    if any(price is not None and price != 0 for price in prices):
         return "paid"
+    if not (deployment.free_offered or deployment.free_verified):
+        return "unverified"
     return "usable"
 
 

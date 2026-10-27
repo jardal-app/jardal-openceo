@@ -309,42 +309,28 @@ def research_candidates(
     catalog: CatalogDocument | None = None,
     requirements: ProfileRequirements | None = None,
 ) -> list[Candidate]:
-    """Ranked entries servable through the ``opencode`` CLI, in order.
+    """Single multi-provider pool in ranking order (TASK-2026-00319).
 
-    Floor and drop come from :func:`fallback_chain` (SPEC §8.4).
-    Same canonical model twice collapses to its first occurrence:
-    backups are not opinions (T05). Unknown families stay eligible:
-    research needs one working model, not a verifiable quorum
-    (unlike reviews, SPEC §11.2). With a catalog, entries also
-    clear the context and tools gates before they can serve.
+    Every ranked route is its own failover entry: the primary first,
+    then each backup, preserving the ranking order. Unknown families
+    stay eligible: research needs one working model. With a catalog,
+    each route still clears the context and tools gates (real
+    inability to serve) before it can serve.
     """
     candidates: list[Candidate] = []
-    seen_canonicals: set[str] = set()
     for item in fallback_chain(ranking, policy):
-        if item.canonical_model_id in seen_canonicals:
-            continue
-        route = None
-        if item.primary.provider == "opencode":
-            route = item.primary.deployment_id
-        else:
-            for backup in item.backups:
-                if backup.provider == "opencode":
-                    route = backup.deployment_id
-                    break
-        if route is None:
-            continue
-        candidate = Candidate(
-            deployment_id=route, family_id=item.family_id,
-            canonical_model_id=item.canonical_model_id,
-            provider="opencode", quality=item.quality)
-        if catalog is not None:
-            gates = requirements or ProfileRequirements(
-                needs_tools=True, min_context_tokens=65536)
-            fits, _reason = fit_candidate(candidate, catalog, gates)
-            if not fits:
-                continue
-        seen_canonicals.add(item.canonical_model_id)
-        candidates.append(candidate)
+        for route in (item.primary, *item.backups):
+            candidate = Candidate(
+                deployment_id=route.deployment_id, family_id=item.family_id,
+                canonical_model_id=item.canonical_model_id,
+                provider=route.provider, quality=item.quality)
+            if catalog is not None:
+                gates = requirements or ProfileRequirements(
+                    needs_tools=True, min_context_tokens=65536)
+                fits, _reason = fit_candidate(candidate, catalog, gates)
+                if not fits:
+                    continue
+            candidates.append(candidate)
     return candidates
 
 
