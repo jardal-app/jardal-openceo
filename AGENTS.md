@@ -67,6 +67,7 @@ scripts/openceo-core-host.sh restart|status
   any work on a company project/repo goes to Jardal ERP first.
 - No secrets, credentials, or personal data in notes or temp docs.
 - Conventions over configuration: mirror sibling code, reuse its helpers.
+- Work rules live in the vault practices/ index (CLAUDE.md §1); zone rules in `.claude/rules/`.
 - Owner rule (2026-10-14; current epic TASK-2026-00248): validation uses
   only simple, targeted logic/contract/communication tests with mocks,
   simulated executors/CLIs, or non-generative echo/help/version checks.
