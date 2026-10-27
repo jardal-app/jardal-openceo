@@ -43,7 +43,7 @@ python -m playwright install chromium
 ## 3) Ejecutar API (host mode, instancia única)
 
 ```bash
-scripts/openceo-core-host.sh start    # o restart; nunca `python main.py` directo (CLAUDE.md §4)
+scripts/openceo-core-host.sh start    # o restart; nunca `python main.py` directo (CLAUDE.md §3)
 scripts/openceo-core-host.sh status
 ```
 

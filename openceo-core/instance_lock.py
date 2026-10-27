@@ -1,4 +1,4 @@
-"""Single-instance lock for the host service (see CLAUDE.md §4).
+"""Single-instance lock for the host service (see CLAUDE.md §3).
 
 Exactly one openceo-core may run per host: lifespan startup has
 deployment-wide side effects (interrupted-task marking, tmux reconcile,
