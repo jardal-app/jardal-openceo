@@ -250,10 +250,11 @@ class RankingTests(unittest.TestCase):
     def test_loaded_reserves_follow_owner_ranking_and_remain_out_of_initial_round(self):
         config = ConfigLoader(Settings(_env_file=None)).load_project(None)["review"]
         reserves = [entry for entry in config["reviewers"] if entry.get("reserve_only")]
-        self.assertEqual(len(reserves), 9)  # ultra-free removed 2026-10-26: dead ID
+        self.assertEqual(len(reserves), 7)  # minimax+longcat removed 2026-10-27: dead IDs
         self.assertEqual([entry["model"] for entry in reserves[:3]],
-                         ["opencode/deepseek-v4.1-flash-free", "opencode/minimax-m3.1-flash-free",
-                          "opencode/mimo-v2.6-flash-free"])
+                         ["opencode/deepseek-v4.1-flash-free",
+                          "opencode/mimo-v2.6-flash-free",
+                          "opencode/glm-5.3-flash-free"])
         self.assertTrue(all(entry["model"].endswith("-free") or entry["model"] == "opencode/big-pickle"
                             for entry in reserves))
         self.assertEqual({entry["family"] for entry in reserves if "nemotron" in entry["model"]},
