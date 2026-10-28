@@ -1630,6 +1630,120 @@ class ConfirmApplyTests(ConfirmApplyCase, unittest.IsolatedAsyncioTestCase):
         self.assertIn("origin-1/deploy", text)
         self.assertIn("cuesta mucho", text)
 
+    async def test_collect_filters_foreign_project(self) -> None:
+        from orchestration import knowledge_confirm as kc
+
+        self._queue("origin-1", "deploy")
+        self._queue("origin-9", "foreign",
+                    target="projects/other/practices/foreign.md")
+        scoped = kc.collect_pending_confirmations(
+            self.base, CONFIRM_PROJECT)
+        self.assertEqual([(p.origin, p.name) for p in scoped],
+                         [("origin-1", "deploy")])
+        unscoped = kc.collect_pending_confirmations(self.base)
+        self.assertEqual(len(unscoped), 2)
+
+    async def test_approve_keeps_foreign_proposal(self) -> None:
+        from orchestration import knowledge_confirm as kc
+        from orchestration.agent_sandbox import ticket_dir
+
+        self._queue("origin-1", "deploy")
+        foreign = self._queue("origin-9", "foreign",
+                              target="projects/other/practices/foreign.md")
+        pending = kc.collect_pending_confirmations(self.base)
+        items = kc.confirm_items(kc.build_confirm_question(
+            pending, project="p")["params"]["owner_question"])
+        outcome = await kc.apply_approved_proposals(
+            items, config=self._config(), base_dir=self.base)
+        self.assertEqual(outcome.published, ["origin-1/deploy"])
+        self.assertEqual(outcome.skipped_foreign, ["origin-9/foreign"])
+        self.assertTrue(foreign.is_file())
+
+    async def test_same_name_across_origins(self) -> None:
+        from orchestration import knowledge_confirm as kc
+        from orchestration.agent_sandbox import ticket_dir
+
+        self._queue("origin-1", "deploy")
+        self._queue("origin-2", "deploy",
+                    target=f"{CONFIRM_PROJECT}/practices/deploy2.md")
+        pending = kc.collect_pending_confirmations(self.base)
+        items = kc.confirm_items(kc.build_confirm_question(
+            pending, project="p")["params"]["owner_question"])
+        outcome = await kc.apply_approved_proposals(
+            items, config=self._config(), base_dir=self.base)
+        self.assertEqual(sorted(outcome.published),
+                         ["origin-1/deploy", "origin-2/deploy"])
+        self.assertEqual(outcome.rejected, {})
+        for origin in ("origin-1", "origin-2"):
+            self.assertFalse((ticket_dir(origin, base_dir=self.base)
+                              / "knowledge_confirm_queue/deploy.yaml"
+                              ).exists())
+
+    async def test_same_name_failure_only_rejects_its_origin(self) -> None:
+        from orchestration import knowledge_confirm as kc
+
+        self._queue("origin-1", "deploy")
+        self._queue("origin-2", "deploy",
+                    target=f"{CONFIRM_PROJECT}/practices/deploy2.md",
+                    action="update")
+        pending = kc.collect_pending_confirmations(self.base)
+        items = kc.confirm_items(kc.build_confirm_question(
+            pending, project="p")["params"]["owner_question"])
+        outcome = await kc.apply_approved_proposals(
+            items, config=self._config(), base_dir=self.base)
+        self.assertEqual(outcome.published, ["origin-1/deploy"])
+        self.assertIn("origin-2/deploy", outcome.rejected)
+        self.assertIn("missing", outcome.rejected["origin-2/deploy"])
+
+    async def test_yml_suffix_applies(self) -> None:
+        from orchestration import knowledge_confirm as kc
+        from orchestration.agent_sandbox import ticket_dir
+
+        folder = (ticket_dir("origin-1", base_dir=self.base)
+                  / "knowledge_confirm_queue")
+        folder.mkdir(parents=True, exist_ok=True)
+        legacy = folder / "legacy.yml"
+        legacy.write_text(self._yaml.safe_dump(
+            _confirm_proposal("legacy")), encoding="utf-8")
+        pending = kc.collect_pending_confirmations(self.base)
+        self.assertEqual([(p.origin, p.name) for p in pending],
+                         [("origin-1", "legacy")])
+        items = kc.confirm_items(kc.build_confirm_question(
+            pending, project="p")["params"]["owner_question"])
+        outcome = await kc.apply_approved_proposals(
+            items, config=self._config(), base_dir=self.base)
+        self.assertEqual(outcome.published, ["origin-1/legacy"])
+        self.assertFalse(legacy.exists())
+        self.assertTrue((self.vault_dir / CONFIRM_PROJECT
+                         / "practices/legacy.md").is_file())
+
+    async def test_missing_file_reported(self) -> None:
+        from orchestration import knowledge_confirm as kc
+
+        self._queue("origin-1", "deploy")
+        items = await self._items()
+        (self.base / "origin-1"
+         / "knowledge_confirm_queue/deploy.yaml").unlink()
+        outcome = await kc.apply_approved_proposals(
+            items, config=self._config(), base_dir=self.base)
+        self.assertEqual(outcome.published, [])
+        self.assertEqual(outcome.missing, ["origin-1/deploy"])
+        text = kc.format_confirm_comment(outcome, approved=True)
+        self.assertIn("origin-1/deploy", text)
+
+    def test_question_shows_excerpt(self) -> None:
+        from pathlib import Path as _Path
+
+        from orchestration import knowledge_confirm as kc
+
+        pending = [kc.PendingConfirm(
+            "o1", "rules", "t/r.md", "a" * 64, _Path("/tmp/r.yaml"),
+            excerpt="Deploy only tagged releases.",
+            proposal_class="normative")]
+        parts = kc.confirm_question_parts(pending)
+        self.assertIn("Deploy only tagged releases.", parts["question"])
+        self.assertIn("[normative]", parts["question"])
+
 
 class ConfirmServiceTests(ConfirmApplyCase,
                           unittest.IsolatedAsyncioTestCase):
@@ -1758,6 +1872,79 @@ class ConfirmServiceTests(ConfirmApplyCase,
         self.assertEqual(question["status"], "waiting")
         block = (question.get("params") or {}).get("owner_question") or {}
         self.assertNotIn("decision", block)
+
+    async def test_deny_without_mapping_discards_and_comments_origin(
+            self) -> None:
+        from orchestration import knowledge_confirm as kc
+
+        self._queue("origin-1", "deploy")
+        pending = kc.collect_pending_confirmations(self.base)
+        parts = kc.confirm_question_parts(pending)
+        repo = _SvcRepo()
+        repo.tasks["origin-1"] = _svc_task(
+            "origin-1",
+            params={"_mirrors": {"business": {"name": "TASK-2026-00997"}}})
+        repo.tasks["q1"] = self._confirm_task(
+            "q1", "jardal-openceo", dict(parts["checkpoint"]))
+        service = self._service(repo)
+        service._config_loader = SimpleNamespace(
+            load_project=lambda name: {})
+        calls: list[tuple[str, str]] = []
+
+        async def fake_comment(name: str, text: str) -> None:
+            calls.append((name, text))
+
+        service._business = SimpleNamespace(  # type: ignore[attr-defined]
+            is_enabled=True, add_comment=fake_comment)
+        service.set_dispatcher_wake(lambda: None)
+        result = await service.apply_owner_decision(
+            "q1", approve=False, actor_id="owner", comment="cuesta mucho")
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["route"], "owner_question_deny")
+        self.assertTrue(any(
+            name == "TASK-2026-00997" and "cuesta mucho" in text
+            for name, text in calls))
+
+    async def test_sync_groups_only_own_project(self) -> None:
+        from orchestration import knowledge_confirm as kc
+        from orchestration.agent_sandbox import ticket_dir
+
+        self._queue("origin-1", "deploy")
+        self._queue("origin-9", "foreign",
+                    target="projects/other/practices/foreign.md")
+        repo = _SvcRepo()
+        service = self._service(repo)
+        seen: list[Any] = []
+
+        async def fake_create(payload: Any) -> dict[str, Any]:
+            seen.append(payload)
+            return {"task_id": "q1", "params": payload.params}
+
+        service.create_task = fake_create  # type: ignore[method-assign]
+        await service._sync_confirm_question("jardal-openceo")
+        self.assertEqual(len(seen), 1)
+        items = kc.confirm_items(
+            (seen[0].params or {})["owner_question"])
+        self.assertEqual([(i["origin"], i["name"]) for i in items],
+                         [("origin-1", "deploy")])
+        self.assertTrue((ticket_dir("origin-9", base_dir=self.base)
+                         / "knowledge_confirm_queue/foreign.yaml").exists())
+
+    async def test_resync_same_set_keeps_source_id(self) -> None:
+        self._queue("origin-1", "deploy")
+        repo = _SvcRepo()
+        service = self._service(repo)
+        seen: list[Any] = []
+
+        async def fake_create(payload: Any) -> dict[str, Any]:
+            seen.append(payload)
+            return {"task_id": f"q{len(seen)}", "params": payload.params}
+
+        service.create_task = fake_create  # type: ignore[method-assign]
+        await service._sync_confirm_question("jardal-openceo")
+        await service._sync_confirm_question("jardal-openceo")
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[0].source_id, seen[1].source_id)
 
 
 if __name__ == "__main__":

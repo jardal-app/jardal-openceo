@@ -4551,8 +4551,11 @@ class TaskService:
         """
         try:
             base = self._crystallization_drafts_base()
+            prefix = knowledge_target_prefix(
+                self._lock_project_config(project))
             pending = await asyncio.to_thread(
-                knowledge_confirm_mod.collect_pending_confirmations, base)
+                knowledge_confirm_mod.collect_pending_confirmations,
+                base, prefix or None)
             if not pending:
                 return
             parts = knowledge_confirm_mod.confirm_question_parts(pending)
@@ -4577,20 +4580,21 @@ class TaskService:
         Approve publishes exactly the shown bytes (hash-bound; changed
         items are skipped with the proposal kept); deny discards every
         queued item with the reason commented on each origin ticket.
-        Raises OwnerQuestionSkipped when the vault wiring is missing so
-        the question stays open for a retry. Returns the answer summary.
+        Only approve needs the vault wiring: without it approve raises
+        OwnerQuestionSkipped so the question stays open, while deny still
+        discards. Returns the answer summary.
         """
         items = knowledge_confirm_mod.confirm_items(block)
         project = task.get("project")
         question_id = str(task.get("task_id") or "")
         mirror = mirror_ticket(task)
-        config = self._knowledge_publish_config(
-            project, str(mirror or "").strip() or question_id)
-        if config is None:
-            raise OwnerQuestionSkipped(
-                "cannot apply: the project has no vault mapping")
         base = self._crystallization_drafts_base()
         if approve:
+            config = self._knowledge_publish_config(
+                project, str(mirror or "").strip() or question_id)
+            if config is None:
+                raise OwnerQuestionSkipped(
+                    "cannot apply: the project has no vault mapping")
             outcome = await knowledge_confirm_mod.apply_approved_proposals(
                 items, config=config, base_dir=base)
             return knowledge_confirm_mod.format_confirm_comment(
@@ -5665,11 +5669,8 @@ class TaskService:
             )
         if kind == "question" and knowledge_confirm_mod.is_confirm_question(
                 block):
-            # 2.5 confirmation block (TASK-2026-00332): publish or
-            # discard first (may raise OwnerQuestionSkipped so the
-            # question stays open for a retry), then record + route
-            # below with the confirm summary. The channel takes one
-            # decision per question, so the block is all-or-nothing.
+            # 2.5 block (TASK-2026-00332): publish or discard first,
+            # then record + route below with the confirm summary.
             confirm_summary = await self._apply_knowledge_confirm(
                 task, block, approve=approve, comment=comment)
         record = owner_answer_record(

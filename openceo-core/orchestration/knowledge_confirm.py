@@ -78,6 +78,8 @@ class PendingConfirm:
     target: str
     sha256: str
     path: Path
+    excerpt: str = ""
+    proposal_class: str = ""
 
 
 @dataclass
@@ -86,15 +88,27 @@ class ConfirmOutcome:
 
     published: list[str] = field(default_factory=list)
     skipped_changed: list[str] = field(default_factory=list)
+    skipped_foreign: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
     deferred: dict[str, str] = field(default_factory=dict)
     rejected: dict[str, str] = field(default_factory=dict)
 
 
+def _default_base() -> Path:
+    return ticket_dir("_probe").parent
+
+
+def _within_prefix(target: str, prefix: str) -> bool:
+    clean = prefix.strip().strip("/")
+    return bool(clean) and (
+        target == clean or target.startswith(clean + "/"))
+
+
 def _queue_files(base_dir: Path | None) -> list[tuple[str, Path]]:
-    base = Path(base_dir) if base_dir is not None else None
+    base = Path(base_dir) if base_dir is not None else _default_base()
     try:
         roots = sorted(
-            entry for entry in (base.iterdir() if base is not None else [])
+            entry for entry in base.iterdir()
             if not entry.name.startswith(".") and entry.is_dir()
             and not entry.is_symlink())
     except OSError:
@@ -117,14 +131,19 @@ def _queue_files(base_dir: Path | None) -> list[tuple[str, Path]]:
 
 
 def collect_pending_confirmations(
-        base_dir: str | Path | None) -> list[PendingConfirm]:
-    """Every queued proposal under the ticket base, oldest file first.
+        base_dir: str | Path | None,
+        project_prefix: str | None = None) -> list[PendingConfirm]:
+    """Queued proposals under the ticket base for one project.
 
-    Never raises: unreadable or oversized files are skipped here and
-    rejected with a reason at apply time, so one bad file cannot hide
-    the rest of the block.
+    With a prefix, only proposals whose target falls inside it are
+    grouped: other projects' proposals stay queued for their own round,
+    so one block never publishes or deletes foreign files. Items with
+    no parseable target cannot be attributed and stay in the block, so
+    the apply step rejects them with a recorded reason. Never raises:
+    unreadable or oversized files are skipped here and kept queued.
     """
-    base = Path(base_dir) if base_dir is not None else None
+    base = Path(base_dir) if base_dir is not None else _default_base()
+    prefix = str(project_prefix or "").strip().strip("/")
     pending: list[PendingConfirm] = []
     for origin, entry in _queue_files(base):
         try:
@@ -138,14 +157,22 @@ def collect_pending_confirmations(
         except (UnicodeDecodeError, yaml.YAMLError):
             data = None
         target = ""
+        proposal_class = ""
+        excerpt = ""
         if isinstance(data, dict):
             target = str(data.get("target") or "")
+            proposal_class = str(data.get("class") or "")
+            excerpt = str(data.get("content") or "")[:EXCERPT_CHARS]
+        if prefix and target and not _within_prefix(target, prefix):
+            continue
         pending.append(PendingConfirm(
             origin=origin,
             name=entry.stem,
             target=target,
             sha256=hashlib.sha256(blob).hexdigest(),
             path=entry,
+            excerpt=excerpt,
+            proposal_class=proposal_class,
         ))
     return pending
 
@@ -174,9 +201,13 @@ def confirm_question_parts(
         "",
     ]
     for item in pending:
-        lines.append(
-            f"- {item.origin}/{item.name}: {item.target or '(sin destino)'} "
-            f"(sha256 {item.sha256[:16]}...)")
+        label = f"- {item.origin}/{item.name}: {item.target or '(sin destino)'}"
+        if item.proposal_class:
+            label += f" [{item.proposal_class}]"
+        label += f" (sha256 {item.sha256[:16]}...)"
+        lines.append(label)
+        if item.excerpt:
+            lines.append(f"    {item.excerpt}")
     items = [{"origin": item.origin, "name": item.name,
               "target": item.target, "sha256": item.sha256}
              for item in pending]
@@ -270,6 +301,22 @@ def _load_queued(path: Path) -> tuple[KnowledgeProposal, bytes] | str:
         return _schema_reason(exc)
 
 
+def _queued_path(
+        base: Path | None, origin: str, name: str) -> Path | None:
+    try:
+        folder = ticket_dir(origin, base_dir=base) / CONFIRM_QUEUE_DIRNAME
+    except ValueError:
+        return None
+    for suffix in PROPOSAL_FILENAME_SUFFIXES:
+        candidate = folder / f"{name}{suffix}"
+        try:
+            if candidate.is_file() and not candidate.is_symlink():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
 async def apply_approved_proposals(
         items: list[dict[str, Any]], *,
         config: PublishConfig,
@@ -277,29 +324,31 @@ async def apply_approved_proposals(
     """Publish exactly the shown bytes (2.5 approve path).
 
     An item whose queued bytes no longer match the approved sha256 is
-    skipped with its file kept: the approval no longer covers it. Valid
-    but unpublishable states (changed base version, dirty note, busy
-    vault) defer with the proposal kept; permanent failures reject with
-    the reason. Never raises for proposal failures.
+    skipped with its file kept: the approval no longer covers it. Items
+    outside this block's project are skipped with the file kept, so a
+    block never deletes foreign proposals. Gone files are reported, not
+    silent. Never raises for proposal failures.
     """
     from orchestration.knowledge_proposals import CollectedProposal
 
     outcome = ConfirmOutcome()
-    base = Path(base_dir) if base_dir is not None else None
+    base = Path(base_dir) if base_dir is not None else _default_base()
+    prefix = str(config.project or "").strip().strip("/")
     ready: list[CollectedProposal] = []
     for item in items:
-        try:
-            path = ticket_dir(item["origin"], base_dir=base) \
-                / CONFIRM_QUEUE_DIRNAME / f"{item['name']}.yaml"
-        except ValueError:
-            outcome.rejected[f"{item['origin']}/{item['name']}"] = (
-                "invalid origin ticket id")
-            continue
-        if not path.is_file() or path.is_symlink():
+        key = f"{item['origin']}/{item['name']}"
+        path = _queued_path(base, item["origin"], item["name"])
+        if path is None:
+            try:
+                ticket_dir(item["origin"], base_dir=base)
+            except ValueError:
+                outcome.rejected[key] = "invalid origin ticket id"
+            else:
+                outcome.missing.append(key)
             continue
         loaded = _load_queued(path)
         if isinstance(loaded, str):
-            outcome.rejected[f"{item['origin']}/{item['name']}"] = loaded
+            outcome.rejected[key] = loaded
             try:
                 path.unlink()
             except OSError:
@@ -307,10 +356,13 @@ async def apply_approved_proposals(
             continue
         _, blob = loaded
         if hashlib.sha256(blob).hexdigest() != item["sha256"]:
-            outcome.skipped_changed.append(
-                f"{item['origin']}/{item['name']}")
+            outcome.skipped_changed.append(key)
             continue
         proposal, _ = loaded
+        if (prefix and proposal.target
+                and not _within_prefix(proposal.target, prefix)):
+            outcome.skipped_foreign.append(key)
+            continue
         ready.append(CollectedProposal(
             name=item["name"], source=path, target=proposal.target,
             action=proposal.action,
@@ -322,32 +374,43 @@ async def apply_approved_proposals(
                       if entry.ticket or entry.commit or entry.path],
             content=proposal.content,
         ))
-    published, stayed = await asyncio.to_thread(
+    published, deferred, rejected = await asyncio.to_thread(
         publish_approved, ready, config)
+    published_set = set(published)
+    by_target: dict[str, list[CollectedProposal]] = {}
     for entry in ready:
-        key = f"{entry.source.parent.parent.name}/{entry.name}"
-        if entry.name in published:
-            outcome.published.append(key)
+        by_target.setdefault(entry.target, []).append(entry)
+    for target, entries in by_target.items():
+        if target in published_set:
+            first, rest = entries[0], entries[1:]
+            outcome.published.append(
+                f"{first.source.parent.parent.name}/{first.name}")
             try:
-                if entry.source.is_file():
-                    entry.source.unlink()
+                if first.source.is_file():
+                    first.source.unlink()
             except OSError:
                 pass
-        else:
-            reason = stayed.get(entry.name, "vault unavailable; retry later")
-            transient = (
-                reason.startswith("note version changed")
-                or "uncommitted" in reason or "busy" in reason
-                or "unavailable" in reason or "retry later" in reason)
-            if transient:
-                outcome.deferred[key] = reason
-            else:
-                outcome.rejected[key] = reason
+            for entry in rest:
+                key = f"{entry.source.parent.parent.name}/{entry.name}"
+                outcome.deferred[key] = (
+                    "same note published once in this round; kept")
+        elif target in deferred:
+            for entry in entries:
+                key = f"{entry.source.parent.parent.name}/{entry.name}"
+                outcome.deferred[key] = deferred[target]
+        elif target in rejected:
+            for entry in entries:
+                key = f"{entry.source.parent.parent.name}/{entry.name}"
+                outcome.rejected[key] = rejected[target]
                 try:
                     if entry.source.is_file():
                         entry.source.unlink()
                 except OSError:
                     pass
+        else:
+            for entry in entries:
+                key = f"{entry.source.parent.parent.name}/{entry.name}"
+                outcome.deferred[key] = "vault unavailable; retry later"
     return outcome
 
 
@@ -359,17 +422,14 @@ def apply_denied_proposals(
     Returns origin -> discarded names for per-ticket reason comments.
     Best-effort file removal: a failure is reported, never raised.
     """
-    base = Path(base_dir) if base_dir is not None else None
+    base = Path(base_dir) if base_dir is not None else _default_base()
     discarded: dict[str, list[str]] = {}
     for item in items:
-        try:
-            path = ticket_dir(item["origin"], base_dir=base) \
-                / CONFIRM_QUEUE_DIRNAME / f"{item['name']}.yaml"
-        except ValueError:
+        path = _queued_path(base, item["origin"], item["name"])
+        if path is None:
             continue
         try:
-            if path.is_file() and not path.is_symlink():
-                path.unlink()
+            path.unlink()
         except OSError:
             continue
         discarded.setdefault(item["origin"], []).append(item["name"])
@@ -385,6 +445,8 @@ def format_confirm_comment(
     lines = [f"Confirmación en bloque (2.5): bloque {verdict}: "
              f"{len(outcome.published)} publicadas, "
              f"{len(outcome.skipped_changed)} omitidas por cambio, "
+             f"{len(outcome.skipped_foreign)} de otro proyecto, "
+             f"{len(outcome.missing)} ya consumidas, "
              f"{len(outcome.deferred)} diferidas, "
              f"{len(outcome.rejected)} rechazadas."]
     if outcome.published:
@@ -395,6 +457,13 @@ def format_confirm_comment(
                      "la aprobación ya no vale (siguen en cola):")
         lines.extend(f"- {name}"
                      for name in sorted(outcome.skipped_changed))
+    if outcome.skipped_foreign:
+        lines.append("De otro proyecto (siguen en cola para su ronda):")
+        lines.extend(f"- {name}"
+                     for name in sorted(outcome.skipped_foreign))
+    if outcome.missing:
+        lines.append("Ya consumidas en otra ronda (sin acción):")
+        lines.extend(f"- {name}" for name in sorted(outcome.missing))
     if outcome.deferred:
         lines.append("Diferidas, propuesta conservada:")
         lines.extend(f"- {name}: {reason}"

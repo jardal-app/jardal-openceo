@@ -435,47 +435,52 @@ def publish_collected(
 def publish_approved(
     valid: list[CollectedProposal],
     config: PublishConfig,
-) -> tuple[list[str], dict[str, str]]:
+) -> tuple[list[str], dict[str, str], dict[str, str]]:
     """Publish Owner-approved queued proposals (2.5 approve path, D7).
 
     Unlike :func:`publish_collected`, normative content publishes: the
-    Owner approved exactly the shown bytes. Returns (published names,
-    stayed mapping name -> reason) for the caller to consume or keep
-    the queue files. Never raises for proposal failures; infrastructure
+    Owner approved exactly the shown bytes. Returns (published targets,
+    deferred mapping target -> reason, rejected mapping target -> reason)
+    keyed by target, so same-named proposals from different origins never
+    collide. The fate comes from :func:`_publish_one` directly, never from
+    matching free text. Never raises for proposal failures; infrastructure
     errors defer with the proposal kept.
     """
     published: list[str] = []
-    stayed: dict[str, str] = {}
+    deferred: dict[str, str] = {}
+    rejected: dict[str, str] = {}
     if not valid:
-        return published, stayed
+        return published, deferred, rejected
     handle = _lock_if_free(config.vault_repo)
     if handle is None:
         for item in valid:
-            stayed[item.name] = "vault git unavailable; retry later"
-        return published, stayed
+            deferred[item.target] = "vault git unavailable; retry later"
+        return published, deferred, rejected
     if handle == "busy":
         for item in valid:
-            stayed[item.name] = (
+            deferred[item.target] = (
                 "vault busy (backup or another publish); retry later")
-        return published, stayed
+        return published, deferred, rejected
     try:
         for item in valid:
             problem = _target_usable(item.target, config.project)
             if problem is not None:
-                stayed[item.name] = problem
+                rejected[item.target] = problem
                 continue
             if _secret_hit(item.content) is not None:
-                stayed[item.name] = _secret_hit(item.content) or ""
+                rejected[item.target] = _secret_hit(item.content) or ""
                 continue
-            _fate, detail, _blob = _publish_one(
+            fate, detail, _blob = _publish_one(
                 item, config, None, False, "")
-            if _fate == "published":
-                published.append(item.name)
+            if fate == "published":
+                published.append(item.target)
+            elif fate == "rejected":
+                rejected[item.target] = detail or "not published"
             else:
-                stayed[item.name] = detail or "not published; retry later"
+                deferred[item.target] = detail or "retry later"
     finally:
         _unlock(handle)
-    return published, stayed
+    return published, deferred, rejected
 
 
 def format_publish_comment(
