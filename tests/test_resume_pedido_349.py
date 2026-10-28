@@ -1,11 +1,11 @@
 """Resume helper for a terminally failed pedido (TASK-2026-00349, F4).
 
-Contract fixed here: ``resume_failed_pedido`` resets the planner
+Contract fixed here: ``resume_failed_pedido`` requeues a FAILED
+pedido to ``queued`` (so the dispatcher admits it), resets the planner
 bookkeeping (``planner_attempts``/``planner_last_invalid``) and clears
-the error/waiting markers of a FAILED pedido, then advances the CEO
-trigger to now so the next review replans it. Refusals (unknown
-ticket, decided work, non-failed status, missing trigger) and
-``dry_run`` write nothing.
+the error/waiting markers, then advances the CEO trigger to now so the
+next review replans it. Refusals (unknown ticket, decided work,
+non-failed status, missing trigger) and ``dry_run`` write nothing.
 
 No network, no CLI, no LLM. Repositories are faked.
 """
@@ -46,14 +46,20 @@ def _failed_pedido(**overrides: Any) -> dict[str, Any]:
     return task
 
 
+_MISSING: Any = object()
+
+
 class _FakeRepo:
     def __init__(self, task: dict[str, Any] | None,
-                 trigger: dict[str, Any] | None = None) -> None:
+                 trigger: Any = _MISSING) -> None:
         self.task = dict(task) if task else None
-        self.trigger = dict(trigger) if trigger else {
-            "next_scheduled_at": datetime(2026, 11, 4, tzinfo=timezone.utc),
-            "pending_reasons": [],
-        }
+        if trigger is _MISSING:
+            trigger = {
+                "next_scheduled_at": datetime(2026, 11, 4,
+                                              tzinfo=timezone.utc),
+                "pending_reasons": [],
+            }
+        self.trigger = dict(trigger) if trigger is not None else None
         self.patches: list = []
         self.saves: list = []
 
@@ -90,6 +96,8 @@ class ResumeFailedPedidoTests(unittest.IsolatedAsyncioTestCase):
                          ["planner_attempts", "planner_last_invalid"])
         self.assertIsNone(report["verified_attempts"])
         self.assertEqual(repo.task["params"], {"shop": "keep-me"})
+        self.assertEqual(repo.task["status"], TaskStatus.QUEUED.value)
+        self.assertEqual(report["verified_status"], TaskStatus.QUEUED.value)
         self.assertIsNone(repo.task["error"])
         self.assertEqual(repo.saves[-1]["next_scheduled_at"], _NOW)
 
@@ -136,7 +144,6 @@ class ResumeFailedPedidoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_refuses_missing_trigger_without_writes(self) -> None:
         repo = _FakeRepo(_failed_pedido(), trigger=None)
-        repo.trigger = None
 
         report = await resume_failed_pedido(repo, "pedido-344", now=_NOW)
 

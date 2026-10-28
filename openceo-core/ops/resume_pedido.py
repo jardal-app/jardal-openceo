@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from objectives.pedido import is_pedido
+from state import TaskStatus
 
 #: Planner bookkeeping cleared on resume; anything else in ``params``
 #: survives untouched.
@@ -43,8 +44,10 @@ async def resume_failed_pedido(
 ) -> dict[str, Any]:
     """Reset one FAILED pedido for replanning and advance the CEO trigger.
 
-    Returns a report dict with ``ok`` plus what changed. Refusals
-    (unknown ticket, not a pedido, not failed, trigger missing) return
+    The ticket goes back to ``queued`` so the dispatcher admits it;
+    without that it would stall in ``failed`` forever. Returns a
+    report dict with ``ok`` plus what changed. Refusals (unknown
+    ticket, not a pedido, not failed, trigger missing) return
     ``ok: False`` with a ``reason`` and write nothing. ``dry_run``
     computes the report without writing anything.
     """
@@ -72,6 +75,7 @@ async def resume_failed_pedido(
         params.pop(key, None)
     patch = {
         "params": params,
+        "status": TaskStatus.QUEUED.value,
         "error": None,
         "waiting_reason": None,
         "resume_at": None,
@@ -91,6 +95,11 @@ async def resume_failed_pedido(
     await repo.patch_task(task_id, patch)
     await repo.save_ceo_trigger(trigger_doc)
     reread = await repo.get_task(task_id)
-    report["verified_attempts"] = (reread.get("params") or {}).get(
-        "planner_attempts") if isinstance(reread, Mapping) else None
+    if isinstance(reread, Mapping):
+        report["verified_attempts"] = (reread.get("params") or {}).get(
+            "planner_attempts")
+        report["verified_status"] = reread.get("status")
+    else:
+        report["verified_attempts"] = None
+        report["verified_status"] = None
     return report
