@@ -3977,6 +3977,8 @@ class TaskService:
         self, task_id: str, detail: str,
     ) -> dict[str, Any]:
         """Fail a pedido whose planning cannot proceed. Mirrors a run crash."""
+        previous = await self._repo.get_task(task_id)
+        previous_status = str((previous or {}).get("status") or "")
         failed = await self._repo.patch_task(task_id, {
             "status": TaskStatus.FAILED.value,
             "error": detail[:500],
@@ -3988,6 +3990,10 @@ class TaskService:
             await self._hub.broadcast("task_updated", failed)
             asyncio.create_task(self._fire_notion_sync_back(failed, "failed"))
             asyncio.create_task(self._revoke_ticket_badges(failed))
+            # Solo en la transicion a terminal (funnel update_task):
+            # un reintento sobre un pedido ya fallado no reavisa al CEO.
+            if previous_status not in _TERMINAL_TASK_STATUSES:
+                self._wake_ceo_incident(failed)
         try:
             await self.comment_on_ticket(task_id, detail[:500])
         except Exception:
