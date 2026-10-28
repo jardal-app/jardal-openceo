@@ -747,6 +747,14 @@ def _read_text(path: Path) -> str:
         return ""
 
 
+def _missing_decision_error(execution: Any) -> str:
+    base = f"no {CEO_DECISION_FILE}"
+    if getattr(execution, "returncode", 0):
+        tail = str(getattr(execution, "output_tail", "") or "")[-500:]
+        return f"{base} (ceo process failed ({execution.returncode}): {tail})"
+    return base
+
+
 def _validation_context(env: CEOEnv, signals: CEOSignals) -> CEOValidationContext:
     return CEOValidationContext(
         mandate=env.mandate,
@@ -1174,7 +1182,7 @@ async def run_review(
         except OSError:
             pass
         try:
-            await env.executor.run(
+            execution = await env.executor.run(
                 CEO_EXECUTOR_ROLE, current_prompt, env.repo_root,
                 timeout_s,
             )
@@ -1185,7 +1193,7 @@ async def run_review(
             continue
         text = _read_text(target)
         if not text:
-            errors = [f"no {CEO_DECISION_FILE}"]
+            errors = [_missing_decision_error(execution)]
         else:
             try:
                 candidate = models_mod.parse_ceo_decision(text)
