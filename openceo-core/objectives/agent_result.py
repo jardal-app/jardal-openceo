@@ -149,7 +149,7 @@ def scheduled_resume(verdict: AgentResult, now: datetime | None = None) -> datet
 def scheduled_wait_declines(params: Any) -> int:
     try:
         return max(0, int((params or {}).get(SCHEDULED_WAIT_COUNT_KEY) or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, AttributeError):
         return 0
 
 _FENCE_RE = re.compile(r"```agent-result\s*\n(.*?)\n```", re.DOTALL)

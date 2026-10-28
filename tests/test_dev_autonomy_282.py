@@ -408,6 +408,16 @@ def test_scheduled_wait_cap_escalates_after_three_declines():
     assert output.params["scheduled_wait_count"] == SCHEDULED_WAIT_MAX_DECLINES
 
 
+def test_scheduled_wait_declines_tolerates_non_dict_params():
+    from objectives.agent_result import scheduled_wait_declines
+    assert scheduled_wait_declines(None) == 0
+    assert scheduled_wait_declines({}) == 0
+    assert scheduled_wait_declines({"scheduled_wait_count": 2}) == 2
+    assert scheduled_wait_declines("str") == 0
+    assert scheduled_wait_declines([1]) == 0
+    assert scheduled_wait_declines(123) == 0
+
+
 def test_scheduled_wait_count_resets_on_terminal_verdict():
     dev = manager()
     output = dev._return_agent_verdict(

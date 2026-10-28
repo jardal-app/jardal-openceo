@@ -557,6 +557,7 @@ class DevSessionManager:
         output.params = dict(output.params if output.params is not None else task.get("params") or {})
         output.params.pop("dev_checkpoint", None)
         output.params.pop("agent_result", None)
+        output.params.pop(SCHEDULED_WAIT_COUNT_KEY, None)
         if code_result.agent_result is not None:
             output.params["agent_result"] = code_result.agent_result
         if code_result.executor_link:
