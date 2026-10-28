@@ -171,7 +171,7 @@ class FakeClient:
 
 
 def _adapter(client: FakeClient) -> JardalERPTicketAdapter:
-    settings = SimpleNamespace(ERPNEXT_TICKETS_PROJECT_COMPANY="Jardal")
+    settings = SimpleNamespace(JARDAL_ERP_TICKETS_PROJECT_COMPANY="Jardal")
     return JardalERPTicketAdapter(settings, client=client)  # type: ignore[arg-type]
 
 

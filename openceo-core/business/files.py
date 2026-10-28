@@ -8,9 +8,9 @@ from tools.jardal_erp_tickets import AttachmentRejected, assert_attachment_name_
 def read_attachment(settings: Any, *, source_path: str | None, content_base64: str | None, file_name: str | None) -> tuple[bytes, str]:
     if bool(source_path) == bool(content_base64):
         raise AttachmentRejected("Da exactamente una fuente de archivo.", status="invalid_input")
-    limit = int(getattr(settings, "ERPNEXT_ATTACHMENT_MAX_BYTES", 10 * 1024 * 1024))
+    limit = int(getattr(settings, "JARDAL_ERP_ATTACHMENT_MAX_BYTES", 10 * 1024 * 1024))
     if source_path:
-        roots = str(getattr(settings, "ERPNEXT_ATTACHMENT_ALLOWED_ROOTS", "")).split(",")
+        roots = str(getattr(settings, "JARDAL_ERP_ATTACHMENT_ALLOWED_ROOTS", "")).split(",")
         path = resolve_attachment_path(source_path, [root.strip() for root in roots if root.strip()])
         if path.stat().st_size > limit:
             raise AttachmentRejected("El archivo supera el límite permitido.", status="too_large")

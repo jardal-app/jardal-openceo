@@ -197,7 +197,7 @@ def make_service(adapter=None, repo=None):
     service._settings = SimpleNamespace(
         TASK_AUTORUN=False,
         HORIZON_PERSONAL_MIRROR_ENABLED=False,
-        ERPNEXT_SITE_TIMEZONE=ZONE,
+        JARDAL_ERP_SITE_TIMEZONE=ZONE,
     )
     service._business = adapter
     service._repo = repo

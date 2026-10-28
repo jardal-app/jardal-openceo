@@ -163,7 +163,7 @@ _NOTION_MIRROR_EVENT_KEY = "notion_mirror_created"
 #: arranque (el dispatcher y el reconcile deciden por `_mirrors`, no por este campo).
 JARDAL_ERP_PENDING_REASON = "jardal_erp_pending"
 #: Alias depreciado (una version): no escribir codigo nuevo con este nombre.
-ERPNEXT_PENDING_REASON = "erpnext_pending"
+ERP_PENDING_REASON = "erpnext_pending"
 
 
 # Estados que cierran un ticket. Horizon reacciona a la transicion hacia uno de
@@ -338,7 +338,6 @@ class TaskService:
         self._workflow_service = workflow_service
         # `erpnext` es alias depreciado (TASK-2026-00318, una version).
         self._business = business if business is not None else erpnext
-        self._erpnext = self._business
         # Optional project.yaml reader (autonomy F4 TASK-2026-00118): the
         # default phase template skips human QA unless the project policy
         # demands it. Tests build TaskService without it; every use
@@ -3095,7 +3094,7 @@ class TaskService:
 
     def _site_zone_name(self) -> str | None:
         settings = getattr(self, "_settings", None)
-        return getattr(settings, "ERPNEXT_SITE_TIMEZONE", None)
+        return getattr(settings, "JARDAL_ERP_SITE_TIMEZONE", None)
 
     @staticmethod
     def _visibility_mirror(execution: dict[str, Any] | None) -> dict[str, Any]:

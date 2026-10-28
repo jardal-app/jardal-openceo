@@ -497,15 +497,15 @@ class JardalERPTicketAdapter:
     def __init__(self, settings: Settings, *, client: JardalERPClient | None = None) -> None:
         self._settings = settings
         self._client = client or JardalERPClient(settings)
-        self._company = (settings.ERPNEXT_TICKETS_PROJECT_COMPANY or "Jardal").strip()
+        self._company = (settings.JARDAL_ERP_TICKETS_PROJECT_COMPANY or "Jardal").strip()
         self._projects_cache: dict[str, str] = {}
         self._task_types: frozenset[str] | None = None
         # `getattr` con default porque los tests construyen el adapter con un
         # `SimpleNamespace` minimo; un campo nuevo no debe romperlos.
-        roots = str(getattr(settings, "ERPNEXT_ATTACHMENT_ALLOWED_ROOTS", "") or "").strip()
+        roots = str(getattr(settings, "JARDAL_ERP_ATTACHMENT_ALLOWED_ROOTS", "") or "").strip()
         self._attachment_roots = [root.strip() for root in roots.split(",") if root.strip()]
         self._attachment_max_bytes = int(
-            getattr(settings, "ERPNEXT_ATTACHMENT_MAX_BYTES", 0) or 10 * 1024 * 1024
+            getattr(settings, "JARDAL_ERP_ATTACHMENT_MAX_BYTES", 0) or 10 * 1024 * 1024
         )
         self._base_url = str(getattr(settings, "ERPNEXT_URL", "") or "").strip().rstrip("/")
         self._author = str(getattr(settings, "ERPNEXT_USER", "") or "").strip()
@@ -1635,9 +1635,3 @@ class JardalERPTicketAdapter:
             attempts=1,  # borrar ya lo hizo: un reintento informaria un falso fallo
         )
         return {"ok": True, "deleted": str(row.get("name")), "file_name": row.get("file_name")}
-
-
-#: Aliases depreciados (TASK-2026-00318, una version). Importar desde
-#: `tools.jardal_erp_tickets` con los nombres `JardalERP*`.
-ERPNextTicketAdapter = JardalERPTicketAdapter
-resolve_erpnext_status = resolve_jardal_erp_status

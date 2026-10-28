@@ -1,6 +1,6 @@
 ---
 name: crear-proyecto
-description: "Creates a company project end to end (ERPNext identity, git repo, validated project.yaml, vault hub, DNS for web projects). Use when the ticket asks for a new company project."
+description: "Creates a company project end to end (Jardal ERP identity, git repo, validated project.yaml, vault hub, DNS for web projects). Use when the ticket asks for a new company project."
 status: activa
 ticket: TASK-2026-00214
 date: 2026-10-12
@@ -14,7 +14,7 @@ inputs:
   - is_web
   - hostname
 outputs:
-  - erpnext_project
+  - business_project
   - git_repo
   - project_config
   - vault_hub
@@ -58,8 +58,8 @@ $CLI roots
 
 ## Steps
 
-1. ERPNext identity (boundary tool, holds the business record):
-   `openceo_ensure_erpnext_project(project_key, display_name)`.
+1. Jardal ERP identity (boundary tool, holds the business record):
+   `openceo_ensure_business_project(project_key, display_name)`.
 2. Local repo, one recipe line (`REPOS` from Setup):
    `mkdir -p $REPOS/<repo> && { test -e $REPOS/<repo>/.git || git -C $REPOS/<repo> init -b main -q; } && (git -C $REPOS/<repo> remote add origin <remote_url> 2>/dev/null || git -C $REPOS/<repo> remote set-url origin <remote_url>)`.
 3. Templates (exact script, never by hand):
@@ -76,7 +76,7 @@ Keep the JSON outputs: they are the run evidence.
 
 ## Verify
 
-- ERPNext `Project` exists for the key.
+- Jardal ERP `Project` exists for the key.
 - The repo has the conventional remote and the initial commit.
 - `projects/<key>/project.yaml` exists and validates clean.
 - The vault hub and its own `README.md` line exist.

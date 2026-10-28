@@ -29,7 +29,7 @@ REPO_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_DIR / "openceo-core"))
 
 from settings import get_settings  # noqa: E402
-from tools.erpnext_tickets import ERPNextTicketAdapter  # noqa: E402
+from tools.jardal_erp_tickets import JardalERPTicketAdapter  # noqa: E402
 
 PROJECT = "jardal-openceo"
 
@@ -156,7 +156,7 @@ ITEMS: list[tuple[str, str, str, str, str]] = [
 
 async def migrate(*, dry_run: bool) -> int:
     settings = get_settings()
-    adapter = ERPNextTicketAdapter(settings)
+    adapter = JardalERPTicketAdapter(settings)
 
     if not adapter.is_enabled:
         print("ERPNEXT_TICKETS_ENABLED=false. Activalo antes de migrar.")

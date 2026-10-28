@@ -1,6 +1,6 @@
 ---
 name: registrar-gasto
-description: "Records an occasional expense already incurred as an idempotent ERPNext Journal Entry. Use when the ticket asks to record a gasto with its amount."
+description: "Records an occasional expense already incurred as an idempotent Jardal ERP Journal Entry. Use when the ticket asks to record a gasto with its amount."
 status: activa
 ticket: TASK-2026-00221
 date: 2026-10-13

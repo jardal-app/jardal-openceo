@@ -29,8 +29,8 @@ CHILD_ENV_ALLOWLIST = frozenset({
 # providers. The overlay is exempt: explicit config is operator intent.
 _SECRET_ENV_PREFIXES = (
     "ANTHROPIC_", "AWS_", "BRAVE_", "CLOUDFLARE_", "DEEPSEEK_",
-    "ERPNEXT_", "FIRECRAWL_", "GROQ_", "JWT_", "MCP_", "META_",
-    "MONGODB_", "N8N_", "NOTION_", "OPENCEO_", "OPENCODE_",
+    "ERPNEXT_", "FIRECRAWL_", "GROQ_", "JARDAL_ERP_", "JWT_", "MCP_",
+    "META_", "MONGODB_", "N8N_", "NOTION_", "OPENCEO_", "OPENCODE_",
     "OPENWEBUI_", "R2_", "RESEARCH_", "SERPER_", "SMTP_",
 )
 _SECRET_ENV_SUFFIXES = (

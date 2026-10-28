@@ -72,7 +72,7 @@ class JardalERPWork:
     def __init__(self, settings: Any, *, client: JardalERPClient | None = None) -> None:
         self.client = client or JardalERPClient(settings)
         self._settings = settings
-        self._zone = ZoneInfo(str(getattr(settings, "ERPNEXT_SITE_TIMEZONE", "UTC")))
+        self._zone = ZoneInfo(str(getattr(settings, "JARDAL_ERP_SITE_TIMEZONE", "UTC")))
 
     def _view(self, row: dict[str, Any], detail: dict[str, Any] | None = None) -> dict[str, Any]:
         return task_view(row, detail, zone=self._zone)

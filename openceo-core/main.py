@@ -119,7 +119,7 @@ from orchestration.generic_agent import GenericAgentWiring
 from task_service import TaskService
 from tools.notion import NotionTicketManager
 from business.provider import build_business_work
-from business.webhooks import require_legacy_webhook
+from business.webhooks import require_erp_webhook
 from workflow_service import WorkflowService
 
 logger = logging.getLogger(__name__)
@@ -1147,7 +1147,6 @@ async def get_mission(
     return doc
 
 
-@app.post("/api/integrations/erpnext/task")
 @app.post("/api/integrations/jardal-erp/task")
 async def jardal_erp_task_webhook(
     payload: dict = Body(...),
@@ -1161,10 +1160,10 @@ async def jardal_erp_task_webhook(
     contrato exige que la actividad humana llegue por eventos explicitos.
 
     No usa sesion de usuario (quien llama es Jardal ERP): se autentica con el secreto
-    compartido `ERPNEXT_WEBHOOK_SECRET` (alias depreciado, TASK-2026-00318).
-    La ruta `/api/integrations/erpnext/task` queda como alias de la canonica.
+    compartido `JARDAL_ERP_WEBHOOK_SECRET`. La ruta legacy
+    `/api/integrations/erpnext/task` se retiro en TASK-2026-00267.
     """
-    require_legacy_webhook(settings, business_adapter.provider, x_openceo_secret)
+    require_erp_webhook(settings, business_adapter.provider, x_openceo_secret)
 
     # Frappe manda el documento anidado en `doc`; se acepta tambien plano para poder
     # probar el endpoint a mano y sobrevivir a cambios del formato del webhook.

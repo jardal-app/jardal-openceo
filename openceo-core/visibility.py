@@ -28,7 +28,7 @@ SITE_DATE_FORMAT = "%Y-%m-%d"
 
 #: Zona del sitio cuando nadie la configura. UTC-4 fijo, coherente con todos
 #: los pares creation/created_at observados (2026-09-28 a 2026-10-07).
-#: `ERPNEXT_SITE_TIMEZONE` la sustituye; ver `settings.py`.
+#: `JARDAL_ERP_SITE_TIMEZONE` la sustituye; ver `settings.py`.
 DEFAULT_SITE_TIMEZONE = "America/Caracas"
 
 #: Duración estimada por tier cuando no hay historial (días naturales).

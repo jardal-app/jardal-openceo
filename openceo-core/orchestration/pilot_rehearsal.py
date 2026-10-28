@@ -73,8 +73,7 @@ REHEARSAL_MIRROR = "TASK-2026-09999"
 #: neither in the child env nor in any run artifact.
 SECRET_SENTINELS = {
     "CLOUDFLARE_API_TOKEN": "rehearsal-sentinel-cf-token-00234",
-    "ERPNEXT_API_KEY": "rehearsal-sentinel-erpnext-key-00234",
-    "ERPNEXT_API_SECRET": "rehearsal-sentinel-erpnext-secret-00234",
+    "JARDAL_ERP_SERVICE_TOKEN": "rehearsal-sentinel-erp-token-00234",
     "DEEPSEEK_API_KEY": "rehearsal-sentinel-deepseek-key-00234",
 }
 

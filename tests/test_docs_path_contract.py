@@ -154,7 +154,7 @@ class ShorthandRootsTest(unittest.TestCase):
     def test_shorthands_resolve(self):
         cases = {
             "horizon/cockpit.py": "openceo-core/horizon/cockpit.py",
-            "tools/erpnext_tickets.py": "openceo-core/tools/erpnext_tickets.py",
+            "tools/jardal_erp_tickets.py": "openceo-core/tools/jardal_erp_tickets.py",
             "db/mongo.py": "openceo-core/db/mongo.py",
             # TASK-2026-00119 added openceo-core/ceo/: bare "ceo" is
             # ambiguous (and never a real citation — cited_path needs

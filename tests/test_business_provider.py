@@ -14,7 +14,7 @@ from business.http import JardalERPClient
 from business.links import business_link
 from business.provider import build_business_work
 from business.work import JardalERPWork, task_view
-from business.webhooks import require_legacy_webhook
+from business.webhooks import require_erp_webhook
 from business.migration import backfill_business_links
 from objectives.engine import erp_group_name
 from objectives.missions import _erp_group_name
@@ -24,7 +24,7 @@ from task_service import TaskService
 def settings(**changes):
     return SimpleNamespace(BUSINESS_PROVIDER="jardal_erp", JARDAL_ERP_URL="http://127.0.0.1:31874",
         JARDAL_ERP_SERVICE_TOKEN="synthetic-service-token", JARDAL_ERP_WORKSPACE_ID="synthetic-workspace",
-        ERPNEXT_TIMEOUT_SECONDS=1, ERPNEXT_CONNECT_TIMEOUT_SECONDS=1, **changes)
+        JARDAL_ERP_TIMEOUT_SECONDS=1, JARDAL_ERP_CONNECT_TIMEOUT_SECONDS=1, **changes)
 
 
 ROW = {"id": "00000000-0000-0000-0000-000000000001", "businessReference": "TASK-2026-99999",
@@ -96,6 +96,9 @@ def test_unavailable_does_not_fall_back_to_another_business_provider():
 def test_missing_configuration_and_unknown_provider_fail_closed():
     value = settings()
     value.BUSINESS_PROVIDER = "mongo"
+    with pytest.raises(ValueError):
+        build_business_work(value)
+    value.BUSINESS_PROVIDER = "erpnext"
     with pytest.raises(ValueError):
         build_business_work(value)
     value.BUSINESS_PROVIDER = "jardal_erp"
@@ -191,7 +194,7 @@ def test_real_status_worker_supplies_erp_transition_evidence(status, extra, targ
         client = JardalERPClient(settings(), transport=httpx.MockTransport(handle))
         service = TaskService.__new__(TaskService)
         service._business = JardalERPWork(settings(), client=client)
-        service._settings = SimpleNamespace(ERPNEXT_SITE_TIMEZONE="UTC")
+        service._settings = SimpleNamespace(JARDAL_ERP_SITE_TIMEZONE="UTC")
         task = {"task_id": "synthetic", "status": status, "params": {"_mirrors": {"business": {"provider": "jardal_erp", "name": ROW["businessReference"]}}}, **extra}
         service._repo = SimpleNamespace(get_task=AsyncMock(return_value=task), patch_task=AsyncMock())
         service._enqueue_visibility = lambda *args: None
@@ -283,20 +286,20 @@ def test_history_uses_actual_dates_and_retains_original_plan():
     assert view["exp_start_date"] is None and view["exp_end_date"] is None
 
 
-def test_legacy_webhook_rejects_valid_secret_after_authority_switch():
+def test_erp_webhook_accepts_only_jardal_erp_provider():
     from fastapi import FastAPI, Header
     async def run():
         app = FastAPI()
-        context = SimpleNamespace(provider="erpnext", writes=0)
+        context = SimpleNamespace(provider="jardal_erp", writes=0)
         @app.post('/api/integrations/jardal_erp/task')
         async def receive(x_openceo_secret: str | None = Header(default=None)):
-            require_legacy_webhook(SimpleNamespace(ERPNEXT_WEBHOOK_SECRET="synthetic"), context.provider, x_openceo_secret)
+            require_erp_webhook(SimpleNamespace(JARDAL_ERP_WEBHOOK_SECRET="synthetic"), context.provider, x_openceo_secret)
             context.writes += 1
             return {"ok": True}
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             headers = {"X-OpenCEO-Secret": "synthetic"}
             assert (await client.post('/api/integrations/jardal_erp/task', headers=headers)).status_code == 200
-            context.provider = "jardal_erp"
+            context.provider = "mongo"
             assert (await client.post('/api/integrations/jardal_erp/task', headers=headers)).status_code == 409
             assert context.writes == 1
     asyncio.run(run())

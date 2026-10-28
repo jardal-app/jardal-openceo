@@ -37,8 +37,8 @@ def settings(**changes):
         JARDAL_ERP_WEBHOOK_SECRET="synthetic-webhook-secret",
         JARDAL_ERP_OPENCEO_USER="openceo@jardal.app",
         ROLLUP_PROVIDER="core",
-        ERPNEXT_TIMEOUT_SECONDS=1,
-        ERPNEXT_CONNECT_TIMEOUT_SECONDS=1,
+        JARDAL_ERP_TIMEOUT_SECONDS=1,
+        JARDAL_ERP_CONNECT_TIMEOUT_SECONDS=1,
     )
     base.update(changes)
     return SimpleNamespace(**base)

@@ -41,5 +41,5 @@ dedicated reader. Never creates or edits documents.
 
 ## Errors
 
-- ERPNext unreachable: report it, never invent figures.
+- Jardal ERP unreachable: report it, never invent figures.
 - MCP failures: report which tool failed and its error.

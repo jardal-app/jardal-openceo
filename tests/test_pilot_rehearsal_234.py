@@ -138,7 +138,7 @@ class PilotRehearsalTests(unittest.TestCase):
 
     def test_no_service_secrets_leak(self) -> None:
         secrets = self.evidence.secrets
-        self.assertEqual(secrets["env_vars_checked"], 4)
+        self.assertEqual(secrets["env_vars_checked"], 3)
         self.assertEqual(secrets["env_leaked"], [])
         self.assertEqual(secrets["files_leaked"], [])
 

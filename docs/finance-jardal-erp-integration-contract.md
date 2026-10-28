@@ -365,7 +365,7 @@ Variables sugeridas en `.env.finance.local`:
 ERPNEXT_BASE_URL=
 ERPNEXT_API_KEY=
 ERPNEXT_API_SECRET=
-ERPNEXT_TIMEOUT_SECONDS=
+JARDAL_ERP_TIMEOUT_SECONDS=
 ```
 
 El usuario API debe:
