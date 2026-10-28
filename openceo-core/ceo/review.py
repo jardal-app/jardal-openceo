@@ -751,7 +751,9 @@ def _missing_decision_error(execution: Any) -> str:
     base = f"no {CEO_DECISION_FILE}"
     if getattr(execution, "returncode", 0):
         tail = str(getattr(execution, "output_tail", "") or "")[-500:]
-        return f"{base} (ceo process failed ({execution.returncode}): {tail})"
+        if tail:
+            return f"{base} (ceo process failed ({execution.returncode}): {tail})"
+        return f"{base} (ceo process failed ({execution.returncode}))"
     return base
 
 
