@@ -4347,7 +4347,9 @@ class TaskService:
                         str(graph_out.get("selected_agent") or ""),
                         updated,
                         verified=(final_status
-                                  == TaskStatus.COMPLETED.value)))
+                                  == TaskStatus.COMPLETED.value
+                                  and not task_needs_human_review(
+                                      updated))))
                 if final_status in {TaskStatus.COMPLETED.value,
                                     TaskStatus.FAILED.value} \
                         and has_knowledge_proposals(
@@ -4441,9 +4443,10 @@ class TaskService:
         Drafts the agent left in its ticket folder become versioned
         role skills through the deterministic save gate. A draft
         promotes only on a verified close (D9, TASK-2026-00333):
-        callers pass ``verified`` from the terminal status. Never
-        raises, never touches the ticket outcome: failures land in
-        the outcome comment at most.
+        callers pass ``verified`` from the terminal status, excluding
+        closes still pending human or QA review. Never raises, never
+        touches the ticket outcome: failures land in the outcome
+        comment at most.
         """
         try:
             mirror = mirror_ticket(ticket)

@@ -120,7 +120,8 @@ of the same thing fuse into one. Never write outside `{DRAFTS_DIRNAME}/` for thi
 the orchestrator promotes drafts to skills — everything new enters as a draft \
 (`borrador`), and a draft becomes a skill (`activa`) only when another ticket \
 reuses it and closes with a verified result. A failed close may leave a draft \
-but never promotes it. A draft with external content needs an independent \
+but never promotes it. A draft with external content (declare \
+`external: true` in the SKILL.md header) needs an independent \
 review approval before promotion.\
 """
 
@@ -647,6 +648,9 @@ def _declares_external(header: Mapping[str, Any]) -> bool:
     """
     if header.get("external") is True:
         return True
+    external = header.get("external")
+    if isinstance(external, str) and external.strip().lower() == "true":
+        return True
     for key in ("origin", "source"):
         value = header.get(key)
         if isinstance(value, str) and value.strip().lower() == "external":
@@ -669,35 +673,31 @@ def _draft_header(draft: CollectedDraft) -> dict[str, Any]:
     return _read_header(draft.source / "SKILL.md")
 
 
-def _needs_external_review(config: SaveStepConfig, worktree: Path,
-                           card: AgentCard,
-                           draft: CollectedDraft) -> bool:
-    """True when D9 holds a promotion for independent review."""
-    if draft.name in set(config.external_approved):
-        return False
-    stored = _read_header(worktree / card.skills_dir / draft.name
-                          / "SKILL.md")
-    return _declares_external(stored) or _declares_external(
-        _draft_header(draft))
-
-
-def _external_cleared(config: SaveStepConfig, worktree: Path,
-                      card: AgentCard, draft: CollectedDraft) -> bool:
-    """Promotion proceeds unless D9 holds it for independent review."""
-    return not _needs_external_review(config, worktree, card, draft)
-
-
 def _apply_draft(config: SaveStepConfig, outcome: SaveOutcome,
                  current: dict[str, Any], draft: CollectedDraft,
                  card: AgentCard, worktree: Path, today: date) -> None:
     existing = current.get(draft.name)
+    skill_rel = f"{card.skills_dir}/{draft.name}"
+    target = worktree / skill_rel
+    stored_header = _read_header(target / "SKILL.md")
+    stored_external = _declares_external(stored_header)
+    incoming_external = _declares_external(_draft_header(draft))
+    approved = draft.name in set(config.external_approved)
+    needs_review = not approved and (stored_external or incoming_external)
+    carried: dict[str, Any] = {}
+    if stored_external and not incoming_external:
+        for key in ("external", "origin", "source"):
+            if key in stored_header:
+                carried[key] = stored_header[key]
+    blocked_hold = False
+    demoted_hold = False
     if existing is None:
         decision, status = "created", "borrador"
         keep_ticket, keep_day = config.ticket, today
     elif (existing.status == "borrador"
             and existing.ticket != config.ticket
             and config.verified
-            and _external_cleared(config, worktree, card, draft)):
+            and not needs_review):
         decision, status = "promoted", "activa"
         keep_ticket, keep_day = existing.ticket, existing.date
     else:
@@ -706,11 +706,11 @@ def _apply_draft(config: SaveStepConfig, outcome: SaveOutcome,
         keep_ticket, keep_day = existing.ticket, existing.date
         if (existing.status == "borrador"
                 and existing.ticket != config.ticket
-                and _needs_external_review(config, worktree, card,
-                                           draft)):
-            outcome.awaiting_review.append(draft.name)
-    skill_rel = f"{card.skills_dir}/{draft.name}"
-    target = worktree / skill_rel
+                and needs_review):
+            blocked_hold = True
+        elif existing.status == "activa" and needs_review:
+            status = "borrador"
+            demoted_hold = True
     if target.is_symlink() or target.is_file():
         target.unlink()
     elif target.is_dir():
@@ -721,7 +721,7 @@ def _apply_draft(config: SaveStepConfig, outcome: SaveOutcome,
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, dest)
     _stamp_header(target / "SKILL.md", draft.name, draft.description,
-                  status, keep_ticket, keep_day)
+                  status, keep_ticket, keep_day, carried=carried)
     if existing is not None and not _tree_changed(worktree, skill_rel):
         outcome.unchanged.append(draft.name)
         return
@@ -750,13 +750,20 @@ def _apply_draft(config: SaveStepConfig, outcome: SaveOutcome,
             _rollback(worktree, skill_rel, target, existing is not None)
             outcome.discarded[draft.name] = f"skill tests: {reason}"
             return
+    if demoted_hold or (blocked_hold and config.verified):
+        outcome.awaiting_review.append(draft.name)
     getattr(outcome, decision).append(draft.name)
     current[draft.name] = parsed
 
 
 def _stamp_header(skill_md: Path, name: str, description: str,
-                  status: str, ticket: str, day: date) -> None:
-    """Rewrite the header with the gate stamp, preserving body bytes."""
+                  status: str, ticket: str, day: date,
+                  carried: Mapping[str, Any] | None = None) -> None:
+    """Rewrite the header with the gate stamp, preserving body bytes.
+
+    ``carried`` restores stored marker keys the incoming draft omitted
+    (D9: the external flag survives updates until review approves).
+    """
     split = _split_frontmatter(skill_md.read_text(encoding="utf-8"))
     if isinstance(split, str):
         raise _Defer(f"draft {name} turned unreadable: {split}")
@@ -767,6 +774,8 @@ def _stamp_header(skill_md: Path, name: str, description: str,
     for key in sorted(header):
         if key not in ordered:
             ordered[key] = header[key]
+    for key, value in (carried or {}).items():
+        ordered.setdefault(key, value)
     skill_md.write_text(
         "---\n" + yaml.safe_dump(ordered, sort_keys=False,
                                  allow_unicode=True) + "---\n" + body,
