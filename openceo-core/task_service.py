@@ -29,6 +29,8 @@ from company_mandate import (
 )
 from db.mongo import MongoRepository
 from events import RealtimeHub
+import delegation as delegation_mod
+import external_read as external_read_mod
 import external_send as external_send_mod
 from orchestration.precedents import default_store_path
 from catalog import load_role_skills
@@ -119,6 +121,7 @@ from tool_locks import (
     LOCK_WAITING_PREFIX,
     ToolLockError,
     action_fingerprint,
+    check_delegated_action,
     check_dns_delete_lock,
     check_email_lock,
     check_payment_lock,
@@ -5483,6 +5486,133 @@ class TaskService:
             origin_title=str(origin.get("title") or "") if origin else None,
         )
 
+    async def tool_delegated_external(
+        self,
+        *,
+        channel: str,
+        operation: str,
+        target: str,
+        detail: str = "",
+        project: str | None = None,
+        origin_task_id: str | None = None,
+        ticket: str | None = None,
+    ) -> dict[str, Any]:
+        """Gated non-message external action with Owner delegation (TASK-2026-00340).
+
+        D12: anything outside a delegation confirms through a ``lock``
+        question; a stored Owner grant for the (project, channel)
+        pair executes at once without asking. Messages on behalf of
+        the Owner always confirm — even with a delegation — and read
+        operations are refused here (they need no confirmation).
+        Approvals execute the stored params exactly once; re-runs
+        replay its outcome. No precedent ever grants a delegation.
+        """
+        clean_channel = str(channel or "").strip().lower()
+        if clean_channel not in external_send_mod.EXTERNAL_TOOLS:
+            return {
+                "ok": False,
+                "status": "invalid_input",
+                "tool": clean_channel or "external",
+                "reason": f"unknown external channel {channel!r}.",
+            }
+        try:
+            action = delegation_mod.delegated_action(
+                clean_channel, operation, target, detail)
+        except delegation_mod.DelegationError as exc:
+            return {
+                "ok": False,
+                "status": "invalid_input",
+                "tool": clean_channel,
+                "reason": str(exc),
+            }
+        try:
+            if external_read_mod.is_read_operation(
+                    clean_channel, action["operation"]):
+                return {
+                    "ok": False,
+                    "status": "invalid_input",
+                    "tool": action["tool"],
+                    "reason": "read operations need no confirmation.",
+                }
+        except external_read_mod.ExternalReadError as exc:
+            return {
+                "ok": False,
+                "status": "invalid_input",
+                "tool": action["tool"],
+                "reason": str(exc),
+            }
+        origin = await self._resolve_lock_origin(
+            origin_task_id=origin_task_id, ticket=ticket)
+        named = str(origin_task_id or "").strip() \
+            or str(ticket or "").strip()
+        if named and origin is None:
+            return {
+                "ok": False,
+                "status": "invalid_input",
+                "tool": action["tool"],
+                "reason": f"origin not found: {named}.",
+            }
+        project_name = (str(project or "").strip()
+                        or str((origin or {}).get("project") or "").strip()
+                        or "")
+        if delegation_mod.is_message_operation(action["operation"]):
+            decision = {
+                "escalate": True,
+                "delegated": False,
+                "category": clean_channel,
+                "project": project_name,
+                "reason": "messages on behalf of the owner always confirm",
+                "human_action": (
+                    f"Autoriza el mensaje por {clean_channel} a "
+                    f"{action['target']} "
+                    "(los mensajes siempre confirman)."),
+            }
+        else:
+            decision = check_delegated_action(
+                project=project_name, category=clean_channel)
+        if not decision.get("escalate"):
+            try:
+                outcome = await asyncio.to_thread(
+                    delegation_mod.execute_delegated_action, dict(action))
+            except delegation_mod.DelegationError as exc:
+                return {
+                    "ok": False,
+                    "status": "misconfigured",
+                    "tool": action["tool"],
+                    "delegated": True,
+                    "reason": str(exc),
+                }
+            return {
+                "ok": True,
+                "status": "executed",
+                "tool": action["tool"],
+                "delegated": True,
+                "outcome": outcome,
+            }
+        fingerprint = delegation_mod.delegated_fingerprint(
+            action["channel"], action["operation"],
+            action["target"], action["detail"])
+        return await self.request_tool_lock(
+            tool=action["tool"],
+            name=f"{action['channel']}_{action['operation']}",
+            question=(f"Accion externa {action['channel']}: "
+                      f"{action['operation']} en {action['target']}?")[:200],
+            action=action,
+            fingerprint=fingerprint,
+            decision=decision,
+            describe={
+                "channel": action["channel"],
+                "operation": action["operation"],
+                "target": action["target"],
+                "detail": action["detail"] or "-",
+            },
+            context=f"Motivo: {decision.get('reason')}",
+            project=project_name or "",
+            origin_task_id=str(origin.get("task_id") or "")
+            if origin is not None else None,
+            origin_title=str(origin.get("title") or "") if origin else None,
+        )
+
     async def apply_owner_decision(
         self,
         task_id: str,
@@ -6259,6 +6389,9 @@ class TaskService:
         if tool in external_send_mod.EXTERNAL_TOOLS:
             return await asyncio.to_thread(
                 external_send_mod.execute_external_send, dict(action))
+        if tool.startswith("delegated:"):
+            return await asyncio.to_thread(
+                delegation_mod.execute_delegated_action, dict(action))
         raise ToolLockError(f"unknown locked tool {tool!r}")
 
     async def _signal_orphan_spend_approval(

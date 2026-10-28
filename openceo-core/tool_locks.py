@@ -18,6 +18,7 @@ from typing import Any, Mapping, Sequence
 
 from company_mandate import OwnerAction, requires_owner
 from owner_channel import build_owner_question, owner_question_block
+import delegation as delegation_mod
 
 __all__ = [
     "LOCK_QUESTION_KIND",
@@ -26,6 +27,7 @@ __all__ = [
     "PENDING_STATUS",
     "ToolLockError",
     "action_fingerprint",
+    "check_delegated_action",
     "check_dns_delete_lock",
     "check_email_lock",
     "check_payment_lock",
@@ -344,3 +346,43 @@ def pending_lock_result(
 def is_lock_pending(result: Any) -> bool:
     """True when a tool result is a lock hold. Pure."""
     return isinstance(result, dict) and result.get("status") == PENDING_STATUS
+
+
+def check_delegated_action(
+    *,
+    project: str,
+    category: str,
+) -> dict[str, Any]:
+    """Decide whether a non-message external action needs the Owner. Pure.
+
+    A stored Owner grant for the (project, category) pair runs without
+    asking; anything else escalates with the exact human action. The
+    grant itself is recorded by ``delegation.grant_delegation`` with
+    its evidence — this check only reads it, so no learning path can
+    widen a delegation through here. Message tools never call this:
+    they always escalate on their own path.
+    """
+    clean_category = str(category or "").strip().lower()
+    clean_project = str(project or "").strip()
+    if delegation_mod.is_delegated(
+            project=clean_project, category=clean_category):
+        return {
+            "escalate": False,
+            "delegated": True,
+            "category": clean_category,
+            "project": clean_project,
+            "reason": "owner delegation covers this category",
+            "human_action": None,
+        }
+    return {
+        "escalate": True,
+        "delegated": False,
+        "category": clean_category or "external",
+        "project": clean_project,
+        "reason": "no owner delegation covers this category",
+        "human_action": (
+            f"Autoriza la accion externa de {clean_category or 'external'} "
+            f"en {clean_project or 'este proyecto'} "
+            "(o delega la categoria con evidencia)."
+        ),
+    }
