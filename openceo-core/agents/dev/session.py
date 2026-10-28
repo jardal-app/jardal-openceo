@@ -37,7 +37,10 @@ from objectives.ticket_cost import COST_RUNS_KEY
 from objectives import ticket_cost as cost_mod
 from orchestration.inbox import InMemoryInboxStore, MongoInboxStore
 from orchestration.knowledge import detect_prompt_lang, with_preamble
-from orchestration.knowledge_proposals import KNOWLEDGE_PROPOSAL_PROMPT
+from orchestration.knowledge_proposals import (
+    knowledge_target_prefix,
+    proposal_prompt_for,
+)
 from orchestration.live import (TIMEOUT_RETURNCODE, AllowAllQuota,
                                 ProcessExecutor, RateMonitorQuota, _reviewer_output)
 from orchestration.provider_recovery import (
@@ -2880,7 +2883,12 @@ class DevSessionManager:
                 "REVIEW_LINKS_END",
             ]
         )
-        lines.extend(["", AGENT_RESULT_PROMPT, "", KNOWLEDGE_PROPOSAL_PROMPT])
+        knowledge_prefix = knowledge_target_prefix(config)
+        if knowledge_prefix:
+            lines.extend(["", proposal_prompt_for(
+                str(task.get("task_id") or ""),
+                project_prefix=knowledge_prefix)])
+        lines.extend(["", AGENT_RESULT_PROMPT])
 
         vault_index = _dev_vault_index(config)
         if vault_index:

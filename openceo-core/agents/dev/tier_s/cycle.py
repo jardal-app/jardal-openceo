@@ -44,7 +44,10 @@ from orchestration.provider_recovery import transient_provider_error
 from orchestration import findings as findings_mod
 from orchestration import inbox as inbox_mod
 from orchestration import knowledge as knowledge_mod
-from orchestration.knowledge_proposals import KNOWLEDGE_PROPOSAL_PROMPT
+from orchestration.knowledge_proposals import (
+    knowledge_target_prefix,
+    proposal_prompt_for,
+)
 from orchestration import review as review_mod
 from orchestration.live import (
     TIMEOUT_RETURNCODE,
@@ -163,6 +166,7 @@ class _Ctx:
     parked_outcome: CycleOutcome | None = None
     pool_resume_at: str | None = None
     vault_index: str = ""
+    knowledge_prefix: str = ""
 
 
 def _utcnow_iso() -> str:
@@ -421,6 +425,7 @@ class TierSCycle:
             "auto_merge": bool(dev.get("auto_merge", True)),
             "base_branch": base_branch,
             "budget_exclude": list(dev.get("budget_exclude", []) or []),
+            "knowledge_prefix": knowledge_target_prefix(cfg),
         }
 
     # -- main entry ------------------------------------------------------
@@ -463,6 +468,8 @@ class TierSCycle:
             inbox_rule=dict(cycle_cfg.get("inbox_rule", {}) or {}),
             fix_tiers=dict(cycle_cfg.get("fix_tiers", {}) or {}),
             vault_index=str(cycle_cfg.get("vault_index", "") or ""),
+            knowledge_prefix=str(cycle_cfg.get("knowledge_prefix", "")
+                                 or ""),
         )
         if resume is not None:
             self._restore_checkpoint(ctx, resume)
@@ -2510,6 +2517,11 @@ class TierSCycle:
                           for item in plan.files)
         steps = "\n".join(f"{num}. {step}"
                           for num, step in enumerate(plan.steps, 1))
+        knowledge_prompt = ""
+        if getattr(ctx, "knowledge_prefix", ""):
+            knowledge_prompt = proposal_prompt_for(
+                str((ctx.ticket or {}).get("task_id") or ""),
+                project_prefix=str(ctx.knowledge_prefix)) + "\n"
         body = (
             f"Implement ticket {ctx.ref} from .openceo/PLAN.md + "
             ".openceo/PLAN_RESPONSE.md.\n"
@@ -2518,7 +2530,7 @@ class TierSCycle:
             "work uncommitted; the orchestrator integrates it.\n"
             "Write .openceo/HANDOFF.md (§16.6, executor sections ≤300 words) "
             f"and emit {SIGNALS['build_done']} in .openceo/status.\n"
-            f"{KNOWLEDGE_PROPOSAL_PROMPT}\n"
+            f"{knowledge_prompt}"
             f"Previous checkpoint (recheck; never repeat confirmed effects):\n{TierSCycle._read_artifact(ctx, 'WAIT.md')}\n"
             + AGENT_RESULT_PROMPT
         )
