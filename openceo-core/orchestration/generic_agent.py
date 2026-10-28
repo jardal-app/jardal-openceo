@@ -59,6 +59,7 @@ from objectives.agent_result import (
 from objectives import ticket_cost as cost_mod
 from orchestration.agent_sandbox import ensure_ticket_dir
 from orchestration.crystallization import CRYSTALLIZATION_PROMPT
+from orchestration.knowledge_proposals import KNOWLEDGE_PROPOSAL_PROMPT
 from orchestration.engines import (
     ATTEMPT_PARAMS_KEY,
     ENGINE_ACCOUNT_PARAMS_KEY,
@@ -311,7 +312,8 @@ def build_agent_prompt(
                 f"Required evidence: {', '.join(skill_evidence)} — "
                 "include it in your evidencia.")
         lines.extend(declared)
-    lines.extend(["", CRYSTALLIZATION_PROMPT, "", AGENT_RESULT_PROMPT])
+    lines.extend(["", CRYSTALLIZATION_PROMPT, "", KNOWLEDGE_PROPOSAL_PROMPT,
+                    "", AGENT_RESULT_PROMPT])
     return "\n".join(lines)
 
 

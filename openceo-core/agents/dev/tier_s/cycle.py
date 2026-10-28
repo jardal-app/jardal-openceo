@@ -44,6 +44,7 @@ from orchestration.provider_recovery import transient_provider_error
 from orchestration import findings as findings_mod
 from orchestration import inbox as inbox_mod
 from orchestration import knowledge as knowledge_mod
+from orchestration.knowledge_proposals import KNOWLEDGE_PROPOSAL_PROMPT
 from orchestration import review as review_mod
 from orchestration.live import (
     TIMEOUT_RETURNCODE,
@@ -2517,6 +2518,7 @@ class TierSCycle:
             "work uncommitted; the orchestrator integrates it.\n"
             "Write .openceo/HANDOFF.md (§16.6, executor sections ≤300 words) "
             f"and emit {SIGNALS['build_done']} in .openceo/status.\n"
+            f"{KNOWLEDGE_PROPOSAL_PROMPT}\n"
             f"Previous checkpoint (recheck; never repeat confirmed effects):\n{TierSCycle._read_artifact(ctx, 'WAIT.md')}\n"
             + AGENT_RESULT_PROMPT
         )
