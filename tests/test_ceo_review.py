@@ -987,6 +987,41 @@ class ReviewFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ceo run failed", outcome["reason"])
         self.assertEqual(len(calls["published"]), 1)
 
+    async def test_missing_decision_keeps_executor_cause(self) -> None:
+        repo = _scratch_repo(self)
+
+        class _FailedSilent:
+            def __init__(self) -> None:
+                self.runs = 0
+
+            async def run(self, role: str, prompt: str, workdir: Path,
+                          timeout_s: int) -> Any:
+                del role, prompt, workdir, timeout_s
+                self.runs += 1
+                return SimpleNamespace(
+                    returncode=1,
+                    output_tail="muse: pinned 1.4.13, installed 1.4.14",
+                )
+
+            async def cleanup(self, role: str) -> None:
+                del role
+
+        executor = _FailedSilent()
+        env, calls = _make_env(self, repo, executor=executor)
+
+        outcome = await run_review(env, kind="scheduled", reasons=[])
+
+        self.assertFalse(outcome["ok"])
+        self.assertEqual(outcome["action"], "rejected")
+        self.assertEqual(executor.runs, 2)
+        record = calls["published"][0]
+        self.assertIsNone(record["decision"])
+        self.assertEqual(len(record["errors"]), 1)
+        self.assertIn("no CEO_DECISION.json", record["errors"][0])
+        self.assertIn("(1)", record["errors"][0])
+        self.assertIn("pinned 1.4.13", record["errors"][0])
+        self.assertIn("pinned 1.4.13", outcome["reason"])
+
     async def test_unknown_kind_is_a_programmer_error(self) -> None:
         repo = _scratch_repo(self)
         env, _ = _make_env(self, repo)
