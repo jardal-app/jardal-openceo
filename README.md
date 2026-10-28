@@ -2,7 +2,7 @@
 
 OpenCEO coordina agentes de IA, sesiones de desarrollo, colas y workflows. Es el plano de control de la ejecucion: recibe trabajo por chat, voz, dashboard o MCP, lo enruta y conserva su estado operativo. El backend combina FastAPI, LangGraph y MongoDB; la app de voz usa LiveKit y el dashboard usa React.
 
-La direccion de arquitectura asigna el trabajo empresarial y la contabilidad a Jardal ERP, el estado de ejecucion a OpenCEO/MongoDB, el codigo y la configuracion a Git, y el conocimiento de ingenieria al vault de Obsidian. **Esa separacion describe el objetivo de integracion; no implica que el runtime actual ya este conectado a Jardal ERP.** Para saber que funciona hoy, consultar [STATUS.md](STATUS.md) y el codigo.
+La direccion de arquitectura asigna el trabajo empresarial y la contabilidad a Jardal ERP, el estado de ejecucion a OpenCEO/MongoDB, el codigo y la configuracion a Git, y el conocimiento de ingenieria al vault del llm wiki. **Esa separacion describe el objetivo de integracion; no implica que el runtime actual ya este conectado a Jardal ERP.** Para saber que funciona hoy, consultar [STATUS.md](STATUS.md) y el codigo.
 
 ## Orientacion rapida
 

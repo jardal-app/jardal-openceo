@@ -3,7 +3,7 @@
 Guía y contrato de arquitectura para agentes y desarrolladores de OpenCEO.
 
 **Vault de este proyecto**: `projects/jardal/jardal-openceo` dentro de
-`/home/develop/development/Jardal/jardal-knowledge/vault/` (usar el skill `obsidian-vault-links`).
+`/home/develop/development/Jardal/jardal-knowledge/vault/` (usar el skill `llm-vault-links`).
 Trabajo temporal de tickets: `docs/work/TASK-2026-000NN-tema.md`.
 
 Operativa del repo (F7a): `AGENTS.md` — los CLI del roster lo leen directo; las sesiones del Owner leen este archivo, que lo importa en §8.

@@ -166,7 +166,7 @@ def _run_checker(config: PublishConfig, target: str) -> tuple[bool, str]:
     checker = config.checker
     if checker is None:
         candidate = (config.vault_dir.parent / ".agents" / "skills"
-                     / "obsidian-vault-links" / "scripts" / "vault_check.py")
+                     / "llm-vault-links" / "scripts" / "vault_check.py")
         checker = candidate if candidate.is_file() else None
     if checker is None:
         return False, "vault_check.py not found beside the vault"
