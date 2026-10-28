@@ -5467,9 +5467,8 @@ class TaskService:
         return await self.request_tool_lock(
             tool=action["tool"],
             name=f"{action['tool']}_send",
-            question=(
-                f"Enviar por {action['tool']} "
-                f"a {action['destination']}?"[:200]),
+            question=external_send_mod.external_send_question(
+                action["tool"], action["destination"]),
             action=action,
             fingerprint=fingerprint,
             decision=decision,

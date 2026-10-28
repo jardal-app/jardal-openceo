@@ -35,6 +35,7 @@ __all__ = [
     "check_external_send_lock",
     "external_send_action",
     "external_send_fingerprint",
+    "external_send_question",
     "external_send_question_spec",
     "external_scope",
     "execute_external_send",
@@ -167,6 +168,13 @@ def external_send_fingerprint(
     return action_fingerprint(action)
 
 
+def external_send_question(tool: str, destination: str) -> str:
+    """Short Owner lock question for an external send. Pure."""
+    clean_tool = _clean_tool(tool)
+    clean_destination = _clean_destination(destination)
+    return f"Enviar por {clean_tool} a {clean_destination}?"[:200]
+
+
 def external_send_question_spec(
     *,
     tool: str,
@@ -188,7 +196,7 @@ def external_send_question_spec(
     return lock_question_spec(
         tool=clean_tool,
         name=f"{clean_tool}_send",
-        question=f"Enviar por {clean_tool} a {clean_destination}?"[:200],
+        question=external_send_question(clean_tool, clean_destination),
         action=external_send_action(
             clean_tool, clean_destination, clean_text),
         fingerprint=fingerprint,
