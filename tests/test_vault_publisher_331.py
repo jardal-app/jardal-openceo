@@ -375,6 +375,106 @@ class PublisherCase(unittest.TestCase):
         self.assertEqual(client.comments, [])
         self.assertIsNone(vp.format_publish_comment(outcome, {}))
 
+    def test_create_over_untracked_note_defers(self) -> None:
+        note = self._note()
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text("Another session draft.\n", encoding="utf-8")
+        self._write()
+        outcome = self._run()
+        self.assertEqual(outcome.published, [])
+        self.assertIn("retries", outcome.deferred)
+        self.assertIn("uncommitted", outcome.deferred["retries"])
+        self.assertEqual(note.read_text(encoding="utf-8"),
+                         "Another session draft.\n")
+
+    def test_symlink_target_rejected(self) -> None:
+        note = self._note()
+        note.parent.mkdir(parents=True, exist_ok=True)
+        outside = self.root / "outside.md"
+        outside.write_text("Outside.\n", encoding="utf-8")
+        try:
+            note.symlink_to(outside)
+        except OSError:
+            self.skipTest("symlinks unavailable")
+        self._write()
+        outcome = self._run()
+        self.assertEqual(outcome.published, [])
+        self.assertIn("retries", outcome.rejected)
+        self.assertIn("symlink", outcome.rejected["retries"])
+        self.assertEqual(outside.read_text(encoding="utf-8"), "Outside.\n")
+
+    def test_checker_infra_defers_and_keeps(self) -> None:
+        self._write()
+        config = self._config(checker=Path("/nonexistent/vault_check.py"))
+        outcome = asyncio.run(vp.publish_after_close(
+            TICKET, config=config, base_dir=self.base,
+            ticket_exists=_yes, comment=StubTicketClient().comment))
+        self.assertEqual(outcome.published, [])
+        self.assertIn("retries", outcome.deferred)
+        self.assertIn("unavailable", outcome.deferred["retries"])
+        proposals = ticket_dir(TICKET, base_dir=self.base)
+        self.assertTrue(
+            (proposals / "knowledge_proposals/retries.yaml").exists())
+        self.assertFalse(self._note().exists())
+
+    def test_identical_update_publishes_idempotent(self) -> None:
+        note = self._note()
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text(NOTE, encoding="utf-8")
+        self._git(self.vault_repo, "add", "--all")
+        self._git(self.vault_repo, "commit", "--quiet", "-m", "Seed note")
+        head_before = self._git(
+            self.vault_repo, "rev-parse", "HEAD").stdout.strip()
+        base = self._git(self.vault_repo, "log", "-1", "--format=%H", "--",
+                         f"vault/{PROJECT}/practices/retries.md").stdout.strip()
+        self._write(action="update", base_version=base,
+                    **{"class": "descriptive"})
+        outcome = self._run()
+        self.assertEqual(outcome.published, ["retries"])
+        self.assertEqual(self._git(
+            self.vault_repo, "rev-parse", "HEAD").stdout.strip(), head_before)
+        self.assertEqual(note.read_text(encoding="utf-8"), NOTE)
+
+    def test_normative_mandate_flags_owner_approval(self) -> None:
+        content = NOTE + "\nNew mandate obligation for agents.\n"
+        self._write(content=content, **{"class": "normative"})
+        outcome = self._run()
+        self.assertEqual(outcome.queued, ["retries"])
+        self.assertIn("express Owner approval",
+                      self._client.comments[0][1])
+
+    def test_files_consumed_without_comment_callback(self) -> None:
+        self._write()
+        self._write("rules.yaml", target=f"{PROJECT}/practices/rules.md",
+                    **{"class": "normative"})
+        outcome = asyncio.run(vp.publish_after_close(
+            TICKET, config=self._config(), base_dir=self.base,
+            ticket_exists=_yes, comment=None))
+        self.assertEqual(outcome.published, ["retries"])
+        self.assertEqual(outcome.queued, ["rules"])
+        folder = ticket_dir(TICKET, base_dir=self.base)
+        self.assertFalse((folder / "knowledge_proposals/retries.yaml").exists())
+        self.assertFalse((folder / "knowledge_proposals/rules.yaml").exists())
+        self.assertTrue(
+            (folder / "knowledge_confirm_queue/rules.yaml").is_file())
+
+    def test_target_guard_direct(self) -> None:
+        self.assertIsNone(vp._target_usable(f"{PROJECT}/practices/a.md", PROJECT))
+        self.assertIsNotNone(vp._target_usable("projects/other/x.md", PROJECT))
+        self.assertIsNotNone(vp._target_usable("/abs/path.md", PROJECT))
+        self.assertIsNotNone(vp._target_usable(f"{PROJECT}/../escape.md", PROJECT))
+        self.assertIsNotNone(vp._target_usable(f"{PROJECT}/CLAUDE.md", PROJECT))
+        self.assertIsNotNone(vp._target_usable(f"{PROJECT}/note.txt", PROJECT))
+
+    def test_mirror_ticket_returns_name_string(self) -> None:
+        from orchestration.crystallization import mirror_ticket
+        mirrored = {"params": {"_mirrors": {"business": {"name": TICKET_REF}}}}
+        name = mirror_ticket(mirrored)
+        self.assertIsInstance(name, str)
+        self.assertEqual(name, TICKET_REF)
+        self.assertEqual(str(name or ""), TICKET_REF)
+        self.assertIsNone(mirror_ticket({"task_id": "x"}))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -104,6 +104,7 @@ class PublishOutcome:
 
     published: list[str] = field(default_factory=list)
     queued: list[str] = field(default_factory=list)
+    queued_reasons: dict[str, str] = field(default_factory=dict)
     deferred: dict[str, str] = field(default_factory=dict)
     rejected: dict[str, str] = field(default_factory=dict)
 
@@ -168,6 +169,8 @@ def _run_checker(config: PublishConfig, target: str) -> tuple[bool, str]:
         checker = candidate if candidate.is_file() else None
     if checker is None:
         return False, "vault_check.py not found beside the vault"
+    if not Path(checker).is_file():
+        return False, f"vault_check.py not found at {checker}"
     try:
         proc = subprocess.run(
             [sys.executable, str(checker), "--vault", str(config.vault_dir),
@@ -255,6 +258,8 @@ def _publish_one(
     rel = _note_rel(vault_repo, note)
     if rel is None:
         return "rejected", f"target {proposal.target!r} escapes the vault checkout", None
+    if note.is_symlink():
+        return "rejected", f"target {proposal.target!r} resolves through a symlink", None
     if evidence_reason is not None:
         return "rejected", evidence_reason, None
     try:
@@ -285,8 +290,7 @@ def _publish_one(
     if dirty:
         return "deferred", "note has uncommitted changes; retry later", None
     if "??" in {line[:2] for line in out.splitlines() if line.strip()}:
-        if proposal.action == "update":
-            return "deferred", "note has uncommitted changes; retry later", None
+        return "deferred", "note has uncommitted changes; retry later", None
     if tracked and proposal.base_version is not None:
         code, current = _git(vault_repo, "log", "-1", "--format=%H", "--", rel,
                              timeout_s=config.git_timeout_s)
@@ -298,6 +302,8 @@ def _publish_one(
             blob = ""
         if proposal.base_version not in {current_commit, blob}:
             return "deferred", "note version changed since the proposal; retry later", None
+    if original is not None and original == proposal.content.encode("utf-8"):
+        return "published", "note already up to date", None
     try:
         note.write_text(proposal.content, encoding="utf-8")
     except OSError as exc:
@@ -305,6 +311,9 @@ def _publish_one(
     ok, tail = _run_checker(config, proposal.target)
     if not ok:
         _restore(note, original)
+        if tail.startswith(("vault_check.py not found",
+                            "vault check unavailable")):
+            return "deferred", f"vault check unavailable ({tail[:150]}); retry later", None
         return "rejected", f"vault check failed for {proposal.target}: {tail[:300]}", None
     if queue_only:
         digest = hashlib.sha256(note.read_bytes()).hexdigest()
@@ -401,7 +410,7 @@ def publish_collected(
                 continue
             queue_only = item.proposal_class == "normative"
             queue_reason = "normative content goes to Owner confirmation (2.5)"
-            if not queue_only and OWNER_APPROVAL_RE.search(item.content):
+            if OWNER_APPROVAL_RE.search(item.content):
                 queue_only = True
                 queue_reason = ("touches permissions, obligations, policies "
                                 "or mandate; needs express Owner approval")
@@ -412,6 +421,7 @@ def publish_collected(
                 outcome.published.append(item.name)
             elif fate == "queued":
                 outcome.queued.append(item.name)
+                outcome.queued_reasons[item.name] = detail
             elif fate == "deferred":
                 outcome.deferred[item.name] = detail
             else:
@@ -439,7 +449,9 @@ def format_publish_comment(
         lines.extend(f"- {name}" for name in sorted(outcome.published))
     if outcome.queued:
         lines.append("Queued for Owner confirmation (2.5):")
-        lines.extend(f"- {name}" for name in sorted(outcome.queued))
+        for name in sorted(outcome.queued):
+            reason = outcome.queued_reasons.get(name, "")
+            lines.append(f"- {name}: {reason}" if reason else f"- {name}")
     if outcome.deferred:
         lines.append("Deferred, proposal kept for retry (close not blocked):")
         lines.extend(f"- {name}: {reason}"
@@ -500,34 +512,35 @@ async def publish_after_close(
         {item.name: None for item in pending})
     outcome.published.extend(published.published)
     outcome.queued.extend(published.queued)
+    outcome.queued_reasons.update(published.queued_reasons)
     outcome.deferred.update(published.deferred)
     outcome.rejected.update(published.rejected)
     outcome.rejected.update({k: v for k, v in evidence.items()
                              if v is not None})
+    queue_dir = ticket_dir(task_id, base_dir=base) / CONFIRM_QUEUE_DIRNAME
+    moved = []
+    for name in outcome.queued:
+        src = next((v.source for v in valid if v.name == name), None)
+        if src is None or not src.is_file():
+            continue
+        try:
+            queue_dir.mkdir(parents=True, exist_ok=True)
+            blob = src.read_bytes()
+            digest = hashlib.sha256(blob).hexdigest()
+            (queue_dir / f"{name}.yaml").write_bytes(blob)
+            src.unlink()
+            moved.append(f"{name} (sha256 {digest[:16]}...)")
+        except OSError:
+            continue
+    for path in [v.source for v in valid
+                 if v.name in outcome.published
+                 or v.name in outcome.rejected]:
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError:
+            pass
     if comment is not None:
-        queue_dir = ticket_dir(task_id, base_dir=base) / CONFIRM_QUEUE_DIRNAME
-        moved = []
-        for name in outcome.queued:
-            src = next((v.source for v in valid if v.name == name), None)
-            if src is None or not src.is_file():
-                continue
-            try:
-                queue_dir.mkdir(parents=True, exist_ok=True)
-                blob = src.read_bytes()
-                digest = hashlib.sha256(blob).hexdigest()
-                (queue_dir / f"{name}.yaml").write_bytes(blob)
-                src.unlink()
-                moved.append(f"{name} (sha256 {digest[:16]}...)")
-            except OSError:
-                continue
-        for path in [v.source for v in valid
-                     if v.name in outcome.published
-                     or v.name in outcome.rejected]:
-            try:
-                if path.is_file():
-                    path.unlink()
-            except OSError:
-                pass
         text = format_publish_comment(outcome, {})
         if moved and text is not None:
             text += "\nQueued files: " + ", ".join(sorted(moved))

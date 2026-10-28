@@ -4349,11 +4349,11 @@ class TaskService:
                         and has_knowledge_proposals(
                             task_id,
                             base_dir=self._crystallization_drafts_base()):
-                    # Knowledge proposal collect (TASK-2026-00330, D7):
-                    # proposals left in the ticket folder are validated
-                    # structurally and the outcome (valid + every reject
-                    # reason) lands on the ticket. Never publishes to the
-                    # vault (2.4) and never touches the ticket outcome.
+                    # Knowledge proposal publish (TASK-2026-00331, D7/D8):
+                    # proposals left in the ticket folder are validated and
+                    # published to the project vault; the outcome (published,
+                    # queued, deferred, every reject reason) lands on the
+                    # ticket. Never touches the ticket outcome.
                     asyncio.create_task(
                         self._collect_knowledge_after_close(
                             task_id, updated))
@@ -4492,8 +4492,11 @@ class TaskService:
                     base_dir=self._crystallization_drafts_base(),
                     comment=self.comment_on_ticket)
                 return
-            mirror = mirror_ticket(ticket or {}) or {}
-            ticket_ref = str(mirror.get("name") or "").strip() or task_id
+            mirror = mirror_ticket(ticket or {})
+            ticket_ref = str(mirror or "").strip() or task_id
+            repos = (project_config.get("project") or {}).get("repos") or []
+            first = repos[0] if repos and isinstance(repos[0], dict) else {}
+            repo_dir = str(first.get("local_path") or "").strip()
 
             async def _ticket_exists(name: str) -> bool | None:
                 try:
@@ -4510,8 +4513,9 @@ class TaskService:
                     vault_repo=vault_dir.parent,
                     vault_dir=vault_dir,
                     project=prefix,
-                    evidence_repo=Path(
-                        __file__).resolve().parent.parent),
+                    evidence_repo=Path(repo_dir).expanduser()
+                    if repo_dir and Path(repo_dir).expanduser().is_dir()
+                    else Path(__file__).resolve().parent.parent),
                 base_dir=self._crystallization_drafts_base(),
                 ticket_exists=_ticket_exists,
                 comment=self.comment_on_ticket)
