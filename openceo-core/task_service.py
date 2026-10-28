@@ -4345,7 +4345,9 @@ class TaskService:
                     asyncio.create_task(self._crystallize_after_close(
                         task_id,
                         str(graph_out.get("selected_agent") or ""),
-                        updated))
+                        updated,
+                        verified=(final_status
+                                  == TaskStatus.COMPLETED.value)))
                 if final_status in {TaskStatus.COMPLETED.value,
                                     TaskStatus.FAILED.value} \
                         and has_knowledge_proposals(
@@ -4433,13 +4435,15 @@ class TaskService:
 
     async def _crystallize_after_close(
             self, task_id: str, agent: str,
-            ticket: dict[str, Any]) -> None:
+            ticket: dict[str, Any], verified: bool = False) -> None:
         """Fire-and-forget crystallization save (TASK-2026-00210).
 
         Drafts the agent left in its ticket folder become versioned
-        role skills through the deterministic save gate. Never raises,
-        never touches the ticket outcome: failures land in the outcome
-        comment at most.
+        role skills through the deterministic save gate. A draft
+        promotes only on a verified close (D9, TASK-2026-00333):
+        callers pass ``verified`` from the terminal status. Never
+        raises, never touches the ticket outcome: failures land in
+        the outcome comment at most.
         """
         try:
             mirror = mirror_ticket(ticket)
@@ -4457,7 +4461,8 @@ class TaskService:
                 run_save_step,
                 SaveStepConfig(
                     repo=Path(__file__).resolve().parent.parent,
-                    agent=agent, ticket=mirror, drafts_dir=folder))
+                    agent=agent, ticket=mirror, drafts_dir=folder,
+                    verified=verified))
             if outcome.comment:
                 await self.comment_on_ticket(task_id, outcome.comment)
         except Exception:

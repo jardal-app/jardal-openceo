@@ -309,7 +309,8 @@ class GateTests(unittest.TestCase):
             drafts2 = root / "ticket2" / "skill_drafts"
             write_draft(drafts2, "reuse", body="# Draft v2\n")
             out = crys.run_save_step(run_config(repo, drafts2,
-                                                ticket=OTHER_TICKET))
+                                                ticket=OTHER_TICKET,
+                                                verified=True))
             self.assertEqual(["reuse"], out.promoted)
             stored = origin_file(origin, "skills/alpha/reuse/SKILL.md")
             self.assertIn("status: activa", stored)
@@ -330,6 +331,22 @@ class GateTests(unittest.TestCase):
             stored = origin_file(origin, "skills/alpha/mine/SKILL.md")
             self.assertIn("status: borrador", stored)
             self.assertIn("Draft v2", stored)
+
+    def test_same_ticket_never_promotes_even_when_verified(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin, repo = make_origin(root)
+            drafts = root / "ticket" / "skill_drafts"
+            write_draft(drafts, "mine")
+            crys.run_save_step(run_config(repo, drafts))
+            write_draft(drafts, "mine", body="# Draft v2\n")
+            out = crys.run_save_step(run_config(repo, drafts,
+                                                verified=True))
+            self.assertEqual([], out.promoted)
+            self.assertEqual(["mine"], out.updated)
+            stored = origin_file(origin, "skills/alpha/mine/SKILL.md")
+            self.assertIn("status: borrador", stored)
 
     def test_activa_update_keeps_creation_stamp(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -546,6 +563,106 @@ class GateTests(unittest.TestCase):
                            "ls-tree", "-r", "--name-only", "HEAD")
             self.assertNotIn("__pycache__", tree)
             self.assertNotIn("escape", tree)
+
+
+class VerifiedPromotionTests(unittest.TestCase):
+    """D9 (TASK-2026-00333): promotion needs a verified close.
+
+    A failed close may leave a draft but never promotes it; reuse
+    promotes only with ``verified=True``; external content holds for
+    independent review until named in ``external_approved``.
+    """
+
+    def test_failed_close_leaves_draft_without_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin, repo = make_origin(root)
+            drafts = root / "ticket" / "skill_drafts"
+            write_draft(drafts, "fresh")
+            out = crys.run_save_step(run_config(repo, drafts,
+                                                verified=False))
+            self.assertEqual(["fresh"], out.created)
+            self.assertEqual([], out.promoted)
+            stored = origin_file(origin, "skills/alpha/fresh/SKILL.md")
+            self.assertIn("status: borrador", stored)
+
+    def test_reuse_without_verified_close_stays_borrador(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin, repo = make_origin(root)
+            drafts = root / "ticket" / "skill_drafts"
+            write_draft(drafts, "reuse")
+            crys.run_save_step(run_config(repo, drafts))
+            drafts2 = root / "ticket2" / "skill_drafts"
+            write_draft(drafts2, "reuse", body="# Draft v2\n")
+            out = crys.run_save_step(run_config(repo, drafts2,
+                                                ticket=OTHER_TICKET,
+                                                verified=False))
+            self.assertEqual([], out.promoted)
+            self.assertEqual(["reuse"], out.updated)
+            stored = origin_file(origin, "skills/alpha/reuse/SKILL.md")
+            self.assertIn("status: borrador", stored)
+            self.assertIn(f"ticket: {TICKET}", stored)
+            self.assertIn("Draft v2", stored)
+
+    def test_reuse_with_verified_close_promotes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin, repo = make_origin(root)
+            drafts = root / "ticket" / "skill_drafts"
+            write_draft(drafts, "reuse")
+            crys.run_save_step(run_config(repo, drafts,
+                                          verified=False))
+            drafts2 = root / "ticket2" / "skill_drafts"
+            write_draft(drafts2, "reuse", body="# Draft v2\n")
+            out = crys.run_save_step(run_config(repo, drafts2,
+                                                ticket=OTHER_TICKET,
+                                                verified=True))
+            self.assertEqual(["reuse"], out.promoted)
+            stored = origin_file(origin, "skills/alpha/reuse/SKILL.md")
+            self.assertIn("status: activa", stored)
+
+    def test_external_draft_held_without_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin, repo = make_origin(root)
+            drafts = root / "ticket" / "skill_drafts"
+            write_draft(drafts, "fresh", header=(
+                "name: fresh\ndescription: Drafted work.\n"
+                "external: true\n"))
+            crys.run_save_step(run_config(repo, drafts))
+            drafts2 = root / "ticket2" / "skill_drafts"
+            write_draft(drafts2, "fresh", body="# Draft v2\n")
+            out = crys.run_save_step(run_config(repo, drafts2,
+                                                ticket=OTHER_TICKET,
+                                                verified=True))
+            self.assertEqual([], out.promoted)
+            self.assertIn("fresh", out.awaiting_review)
+            stored = origin_file(origin, "skills/alpha/fresh/SKILL.md")
+            self.assertIn("status: borrador", stored)
+            assert out.comment is not None
+            self.assertIn("fresh", out.comment)
+
+    def test_external_draft_promotes_with_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin, repo = make_origin(root)
+            drafts = root / "ticket" / "skill_drafts"
+            write_draft(drafts, "fresh", header=(
+                "name: fresh\ndescription: Drafted work.\n"
+                "external: true\n"))
+            crys.run_save_step(run_config(repo, drafts))
+            drafts2 = root / "ticket2" / "skill_drafts"
+            write_draft(drafts2, "fresh", header=(
+                "name: fresh\ndescription: Drafted work.\n"
+                "external: true\n"), body="# Draft v2\n")
+            out = crys.run_save_step(run_config(
+                repo, drafts2, ticket=OTHER_TICKET, verified=True,
+                external_approved=("fresh",)))
+            self.assertEqual(["fresh"], out.promoted)
+            self.assertEqual([], out.awaiting_review)
+            stored = origin_file(origin, "skills/alpha/fresh/SKILL.md")
+            self.assertIn("status: activa", stored)
 
 
 class GitTests(unittest.TestCase):

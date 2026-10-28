@@ -12,8 +12,10 @@ Gate rules (code, not model obedience):
 * only the agent's own role: changes land in ``skills/<role>/`` plus the
   role card and profile skill lists, never anywhere else;
 * everything new enters as ``borrador``;
-* a draft promotes to ``activa`` only from a ticket other than the one
-  that created it;
+* a draft promotes to ``activa`` only when another ticket reuses it
+  and closes with an OpenCEO-verified result (D9);
+* a draft declaring external content promotes only with an
+  independent review approval (D9);
 * at most 10 drafts per role; the oldest goes (header date, ticket,
   name — no mtime dependence);
 * every touched skill passes the normative loader plus ``muse skills
@@ -117,7 +119,9 @@ improved full skill dir under `{DRAFTS_DIRNAME}/<same-name>/` instead; two draft
 of the same thing fuse into one. Never write outside `{DRAFTS_DIRNAME}/` for this: \
 the orchestrator promotes drafts to skills — everything new enters as a draft \
 (`borrador`), and a draft becomes a skill (`activa`) only when another ticket \
-reuses it.\
+reuses it and closes with a verified result. A failed close may leave a draft \
+but never promotes it. A draft with external content needs an independent \
+review approval before promotion.\
 """
 
 
@@ -134,12 +138,17 @@ class CollectedDraft:
 class SaveStepConfig:
     """What one save run needs. ``validate``/``run_skill_tests`` default
     to the real ``muse`` gate and the fenced pytest run; tests inject
-    fakes. ``pre_push`` is a test-only seam for the push race."""
+    fakes. ``pre_push`` is a test-only seam for the push race.
+    ``verified`` is True only when the closing ticket ended with an
+    OpenCEO-verified result (D9); ``external_approved`` names the
+    drafts whose external content passed independent review."""
 
     repo: str | Path
     agent: str
     ticket: str
     drafts_dir: str | Path
+    verified: bool = False
+    external_approved: tuple[str, ...] = ()
     lock_path: str | Path | None = None
     remote: str = "origin"
     base_branch: str = "main"
@@ -161,6 +170,7 @@ class SaveOutcome:
     created: list[str] = field(default_factory=list)
     promoted: list[str] = field(default_factory=list)
     updated: list[str] = field(default_factory=list)
+    awaiting_review: list[str] = field(default_factory=list)
     unchanged: list[str] = field(default_factory=list)
     discarded: dict[str, str] = field(default_factory=dict)
     deleted_oldest: list[str] = field(default_factory=list)
@@ -424,6 +434,7 @@ def run_save_step(config: SaveStepConfig) -> SaveOutcome:
                if draft.name in outcome.created
                or draft.name in outcome.promoted
                or draft.name in outcome.updated
+               or draft.name in outcome.awaiting_review
                or draft.name in outcome.unchanged
                or draft.name in outcome.discarded]
     _consume(drafts_dir, handled + list(collect_errors))
@@ -437,6 +448,7 @@ def _deferred(outcome: SaveOutcome, ticket: str,
     outcome.created.clear()
     outcome.promoted.clear()
     outcome.updated.clear()
+    outcome.awaiting_review.clear()
     outcome.unchanged.clear()
     outcome.deleted_oldest.clear()
     outcome.discarded.clear()
@@ -626,6 +638,55 @@ def _profile_rel(worktree: Path, pointed: str) -> str | None:
     return cleaned
 
 
+def _declares_external(header: Mapping[str, Any]) -> bool:
+    """True when a draft header marks its content as external (D9).
+
+    Agent decision: the marker is an explicit header declaration
+    (``external: true`` or ``origin``/``source: external``), never a
+    guessed body scan, so ordinary notes with links stay unaffected.
+    """
+    if header.get("external") is True:
+        return True
+    for key in ("origin", "source"):
+        value = header.get(key)
+        if isinstance(value, str) and value.strip().lower() == "external":
+            return True
+    return False
+
+
+def _read_header(skill_md: Path) -> dict[str, Any]:
+    """Frontmatter of one SKILL.md, empty when unreadable."""
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    split = _split_frontmatter(text)
+    return {} if isinstance(split, str) else dict(split[0])
+
+
+def _draft_header(draft: CollectedDraft) -> dict[str, Any]:
+    """Frontmatter of the incoming draft, empty when unreadable."""
+    return _read_header(draft.source / "SKILL.md")
+
+
+def _needs_external_review(config: SaveStepConfig, worktree: Path,
+                           card: AgentCard,
+                           draft: CollectedDraft) -> bool:
+    """True when D9 holds a promotion for independent review."""
+    if draft.name in set(config.external_approved):
+        return False
+    stored = _read_header(worktree / card.skills_dir / draft.name
+                          / "SKILL.md")
+    return _declares_external(stored) or _declares_external(
+        _draft_header(draft))
+
+
+def _external_cleared(config: SaveStepConfig, worktree: Path,
+                      card: AgentCard, draft: CollectedDraft) -> bool:
+    """Promotion proceeds unless D9 holds it for independent review."""
+    return not _needs_external_review(config, worktree, card, draft)
+
+
 def _apply_draft(config: SaveStepConfig, outcome: SaveOutcome,
                  current: dict[str, Any], draft: CollectedDraft,
                  card: AgentCard, worktree: Path, today: date) -> None:
@@ -633,13 +694,21 @@ def _apply_draft(config: SaveStepConfig, outcome: SaveOutcome,
     if existing is None:
         decision, status = "created", "borrador"
         keep_ticket, keep_day = config.ticket, today
-    elif existing.status == "borrador" and existing.ticket != config.ticket:
+    elif (existing.status == "borrador"
+            and existing.ticket != config.ticket
+            and config.verified
+            and _external_cleared(config, worktree, card, draft)):
         decision, status = "promoted", "activa"
         keep_ticket, keep_day = existing.ticket, existing.date
     else:
         decision = "updated"
         status = existing.status
         keep_ticket, keep_day = existing.ticket, existing.date
+        if (existing.status == "borrador"
+                and existing.ticket != config.ticket
+                and _needs_external_review(config, worktree, card,
+                                           draft)):
+            outcome.awaiting_review.append(draft.name)
     skill_rel = f"{card.skills_dir}/{draft.name}"
     target = worktree / skill_rel
     if target.is_symlink() or target.is_file():
@@ -991,6 +1060,10 @@ def _comment(ticket: str, outcome: SaveOutcome) -> str | None:
         bits.append(f"promoted {', '.join(outcome.promoted)}")
     if outcome.updated:
         bits.append(f"updated {', '.join(outcome.updated)}")
+    if outcome.awaiting_review:
+        bits.append(f"awaiting independent review "
+                    f"(external content): "
+                    f"{', '.join(outcome.awaiting_review)}")
     if outcome.unchanged:
         bits.append(f"already present: {', '.join(outcome.unchanged)}")
     if outcome.deleted_oldest:

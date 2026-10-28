@@ -658,7 +658,7 @@ async def _step_crystallization(config: AcceptanceConfig, run_dir: Path,
     def save(ticket: str) -> Any:
         return run_save_step(SaveStepConfig(
             repo=checkout, agent="finance", ticket=ticket,
-            drafts_dir=drafts,
+            drafts_dir=drafts, verified=True,
             lock_path=run_dir / "crystallization.lock",
             validate=(lambda path: (True, "rehearsal")),
             run_skill_tests=(lambda **kwargs: (True, "rehearsal"))))
