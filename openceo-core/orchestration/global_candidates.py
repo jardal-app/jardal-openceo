@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from orchestration.agent_sandbox import ticket_dir
 
@@ -140,16 +140,20 @@ def _secret_hit(rule: str) -> bool:
     return any(re.search(pattern, rule) for pattern in _SECRET_PATTERNS)
 
 
+def _meets_cross_project_criterion(projects: Sequence[str], owner_approved: bool) -> bool:
+    distinct = {project for project in projects if project}
+    return len(distinct) >= 2 or bool(owner_approved)
+
+
 def eligible_for_global(candidate: GlobalCandidate) -> tuple[bool, str]:
     """Whether the candidate meets the cross-project criterion."""
-    distinct = {project for project in candidate.projects if project}
-    if len(distinct) >= 2:
+    if not _meets_cross_project_criterion(candidate.projects, candidate.owner_approved):
+        return False, (
+            "needs a second project or Owner express approval: "
+            "single-project patterns never go global (D2)")
+    if len({project for project in candidate.projects if project}) >= 2:
         return True, "observed in 2+ distinct projects"
-    if candidate.owner_approved:
-        return True, "Owner express approval recorded"
-    return False, (
-        "needs a second project or Owner express approval: "
-        "single-project patterns never go global (D2)")
+    return True, "Owner express approval recorded"
 
 
 def _check_candidate(data: Any) -> CollectedGlobalCandidate | str:
@@ -257,8 +261,7 @@ def apply_decision(candidate: CollectedGlobalCandidate,
         return "pending", "awaiting Owner confirmation: nothing applies"
     if answer == "deny":
         return "discarded", "Owner denied: candidate discarded with reason"
-    distinct = {project for project in candidate.projects if project}
-    if len(distinct) >= 2 or candidate.owner_approved:
+    if _meets_cross_project_criterion(candidate.projects, candidate.owner_approved):
         return "ready_to_apply", "Owner approved an eligible candidate"
     return ("deferred",
             "Owner approval needs a second project or express approval "

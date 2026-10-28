@@ -119,7 +119,7 @@ class CollectGlobalCandidatesTests(unittest.TestCase):
         self._write("bad.yaml", evidence=[])
         valid, rejected = self._collect()
         text = gc.format_candidate_comment(valid, rejected)
-        assert text is not None
+        self.assertIsNotNone(text)
         self.assertIn("good", text)
         self.assertIn("bad.yaml", text)
         self.assertIn("Owner confirmation", text)
