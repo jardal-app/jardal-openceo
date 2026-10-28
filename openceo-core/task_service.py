@@ -29,6 +29,8 @@ from company_mandate import (
 )
 from db.mongo import MongoRepository
 from events import RealtimeHub
+import external_send as external_send_mod
+from orchestration.precedents import default_store_path
 from catalog import load_role_skills
 from graph import OpenCEOGraph
 from horizon.privacy import is_personal_scope
@@ -5405,6 +5407,83 @@ class TaskService:
             origin_title=str(origin.get("title") or "") if origin else None,
         )
 
+    async def tool_external_send(
+        self,
+        *,
+        channel: str,
+        destination: str,
+        text: str,
+        project: str | None = None,
+        origin_task_id: str | None = None,
+        ticket: str | None = None,
+    ) -> dict[str, Any]:
+        """Gated external send: always through the Owner (TASK-2026-00337).
+
+        MCP, registry and session paths all enter here. An approval
+        executes the stored destination + text exactly once; re-runs
+        replay its outcome. The exact text is fingerprinted: asking
+        again with a changed text raises a new question, never rides
+        the old approval.
+        """
+        try:
+            action = external_send_mod.external_send_action(
+                channel, destination, text)
+        except external_send_mod.ExternalSendError as exc:
+            return {
+                "ok": False,
+                "status": "invalid_input",
+                "tool": str(channel or "").strip().lower() or "external",
+                "reason": str(exc),
+            }
+        origin = await self._resolve_lock_origin(
+            origin_task_id=origin_task_id, ticket=ticket)
+        named = str(origin_task_id or "").strip() \
+            or str(ticket or "").strip()
+        if named and origin is None:
+            return {
+                "ok": False,
+                "status": "invalid_input",
+                "tool": action["tool"],
+                "reason": f"origin not found: {named}.",
+            }
+        project_name = (str(project or "").strip()
+                        or str((origin or {}).get("project") or "").strip()
+                        or None)
+        decision = external_send_mod.check_external_send_lock(
+            tool=action["tool"],
+            destination=action["destination"],
+            text=action["text"],
+            mandate=self._company_mandate(),
+        )
+        if not decision.get("escalate"):
+            return {
+                "ok": False,
+                "status": "refused",
+                "tool": action["tool"],
+                "reason": "External send refused without escalation.",
+            }
+        fingerprint = external_send_mod.external_send_fingerprint(
+            action["tool"], action["destination"], action["text"])
+        return await self.request_tool_lock(
+            tool=action["tool"],
+            name=f"{action['tool']}_send",
+            question=(
+                f"Enviar por {action['tool']} "
+                f"a {action['destination']}?"[:200]),
+            action=action,
+            fingerprint=fingerprint,
+            decision=decision,
+            describe={
+                "destination": action["destination"],
+                "text": action["text"],
+            },
+            context=f"Motivo: {decision.get('reason')}",
+            project=project_name or "",
+            origin_task_id=str(origin.get("task_id") or "")
+            if origin is not None else None,
+            origin_title=str(origin.get("title") or "") if origin else None,
+        )
+
     async def apply_owner_decision(
         self,
         task_id: str,
@@ -6026,6 +6105,9 @@ class TaskService:
         origin the question simply closes after executing or denying.
         """
         question_id = str(question.get("task_id") or "")
+        if str(lock.get("tool") or "") in external_send_mod.EXTERNAL_TOOLS:
+            await self._record_external_precedent(
+                question, lock, approve=approve, record=record)
         if not approve:
             await self._deny_origin_from_question(
                 origin_id, "lock", summary)
@@ -6083,6 +6165,47 @@ class TaskService:
         return await self._resume_origin_from_question(
             origin_id, record, summary)
 
+    async def _record_external_precedent(
+        self,
+        question: dict[str, Any],
+        lock: dict[str, Any],
+        *,
+        approve: bool,
+        record: dict[str, Any],
+    ) -> None:
+        """Log the Owner answer to an external send as a precedent (D10).
+
+        External tools only; never breaks the answer path. The store
+        path is overridable in tests via
+        ``_external_precedent_store_path`` (read with getattr: tests
+        may build TaskService without __init__).
+        """
+        try:
+            tool = str(lock.get("tool") or "")
+            store_path = getattr(
+                self, "_external_precedent_store_path", None)
+            if store_path is None:
+                store_path = default_store_path(
+                    Path(__file__).resolve().parent.parent)
+            block = owner_question_block(question)
+            summary = " ".join(str(question.get("title") or "").split())
+            await asyncio.to_thread(
+                external_send_mod.record_external_answer_in_store,
+                store_path,
+                project=str(question.get("project") or ""),
+                tool=tool,
+                question_task_id=str(question.get("task_id") or ""),
+                question_summary=summary,
+                origin_task_id=str(block.get("origin_task_id") or "") or None,
+                approve=approve,
+                answered_by=str((record or {}).get("by") or "owner"),
+                comment=str((record or {}).get("comment") or ""),
+                decided_at=str((record or {}).get("at") or "") or None,
+            )
+        except Exception:
+            logger.warning("external precedent record failed",
+                           exc_info=True)
+
     async def _record_lock_execution(
         self, question_id: str, outcome: Any
     ) -> None:
@@ -6134,6 +6257,9 @@ class TaskService:
                 self._settings,
                 dict(workflow) if isinstance(workflow, dict) else None,
             )
+        if tool in external_send_mod.EXTERNAL_TOOLS:
+            return await asyncio.to_thread(
+                external_send_mod.execute_external_send, dict(action))
         raise ToolLockError(f"unknown locked tool {tool!r}")
 
     async def _signal_orphan_spend_approval(
