@@ -48,6 +48,7 @@ __all__ = [
     "PublishOutcome",
     "format_publish_comment",
     "publish_after_close",
+    "publish_approved",
     "publish_collected",
 ]
 
@@ -429,6 +430,52 @@ def publish_collected(
     finally:
         _unlock(handle)
     return outcome
+
+
+def publish_approved(
+    valid: list[CollectedProposal],
+    config: PublishConfig,
+) -> tuple[list[str], dict[str, str]]:
+    """Publish Owner-approved queued proposals (2.5 approve path, D7).
+
+    Unlike :func:`publish_collected`, normative content publishes: the
+    Owner approved exactly the shown bytes. Returns (published names,
+    stayed mapping name -> reason) for the caller to consume or keep
+    the queue files. Never raises for proposal failures; infrastructure
+    errors defer with the proposal kept.
+    """
+    published: list[str] = []
+    stayed: dict[str, str] = {}
+    if not valid:
+        return published, stayed
+    handle = _lock_if_free(config.vault_repo)
+    if handle is None:
+        for item in valid:
+            stayed[item.name] = "vault git unavailable; retry later"
+        return published, stayed
+    if handle == "busy":
+        for item in valid:
+            stayed[item.name] = (
+                "vault busy (backup or another publish); retry later")
+        return published, stayed
+    try:
+        for item in valid:
+            problem = _target_usable(item.target, config.project)
+            if problem is not None:
+                stayed[item.name] = problem
+                continue
+            if _secret_hit(item.content) is not None:
+                stayed[item.name] = _secret_hit(item.content) or ""
+                continue
+            _fate, detail, _blob = _publish_one(
+                item, config, None, False, "")
+            if _fate == "published":
+                published.append(item.name)
+            else:
+                stayed[item.name] = detail or "not published; retry later"
+    finally:
+        _unlock(handle)
+    return published, stayed
 
 
 def format_publish_comment(

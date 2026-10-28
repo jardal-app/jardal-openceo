@@ -1346,5 +1346,419 @@ class HookProducerHygieneTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["route"], "owner_question_resume")
 
 
+class KnowledgeConfirmBlockTests(unittest.TestCase):
+    """2.5 grouped block over the owner channel (TASK-2026-00332, D7)."""
+
+    def test_empty_block_raises(self) -> None:
+        from orchestration import knowledge_confirm as kc
+
+        with self.assertRaises(ValueError):
+            kc.build_confirm_question([], project="p")
+
+    def test_source_id_stable_per_set(self) -> None:
+        from orchestration import knowledge_confirm as kc
+
+        first = [kc.PendingConfirm("o1", "a", "t/a.md", "0" * 64,
+                                   Path("/tmp/a.yaml"))]
+        again = [kc.PendingConfirm("o1", "a", "t/a.md", "0" * 64,
+                                   Path("/tmp/a.yaml"))]
+        other = [kc.PendingConfirm("o1", "a", "t/a.md", "1" * 64,
+                                   Path("/tmp/a.yaml"))]
+        self.assertEqual(kc.confirm_source_id("p", first),
+                         kc.confirm_source_id("p", again))
+        self.assertNotEqual(kc.confirm_source_id("p", first),
+                            kc.confirm_source_id("p", other))
+
+    def test_confirm_items_round_trip(self) -> None:
+        from orchestration import knowledge_confirm as kc
+
+        pending = [
+            kc.PendingConfirm("o1", "a", "t/a.md", "0" * 64,
+                              Path("/tmp/a.yaml")),
+            kc.PendingConfirm("o2", "b", "t/b.md", "1" * 64,
+                              Path("/tmp/b.yaml")),
+        ]
+        spec = kc.build_confirm_question(pending, project="p")
+        block = spec["params"]["owner_question"]
+        self.assertEqual(block["kind"], "question")
+        self.assertIsNone(block["origin_task_id"])
+        self.assertTrue(kc.is_confirm_question(block))
+        self.assertTrue(kc.is_confirm_question(
+            {"params": {"owner_question": block}}))
+        self.assertFalse(kc.is_confirm_question({}))
+        self.assertFalse(kc.is_confirm_question(
+            {"params": {"owner_question": {"kind": "question"}}}))
+        items = kc.confirm_items(block)
+        self.assertEqual([(i["origin"], i["name"]) for i in items],
+                         [("o1", "a"), ("o2", "b")])
+        self.assertEqual(items[0]["sha256"], "0" * 64)
+
+    def test_single_question_lists_every_item(self) -> None:
+        from orchestration import knowledge_confirm as kc
+
+        pending = [
+            kc.PendingConfirm("o1", "rules", "t/r.md", "a" * 64,
+                              Path("/tmp/r.yaml")),
+            kc.PendingConfirm("o2", "flow", "t/f.md", "b" * 64,
+                              Path("/tmp/f.yaml")),
+        ]
+        spec = kc.build_confirm_question(pending, project="p")
+        self.assertIn("pregunta-dueno", spec["tags"])
+        self.assertFalse(spec["autorun"])
+        self.assertIn("o1/rules", spec["description"])
+        self.assertIn("o2/flow", spec["description"])
+        self.assertIn("a" * 16, spec["description"])
+        self.assertIn("Aprobar", spec["description"])
+        self.assertTrue(spec["source_id"].startswith("knowledge-confirm:"))
+
+    def test_confirm_question_listed_in_owner_summary(self) -> None:
+        import asyncio
+
+        from horizon.service import HorizonService
+        from orchestration import knowledge_confirm as kc
+        from owner_channel import OWNER_QUESTION_PHASE
+
+        pending = [kc.PendingConfirm("o1", "rules", "t/r.md", "a" * 64,
+                                     Path("/tmp/r.yaml"))]
+        spec = kc.build_confirm_question(pending, project="jardal-openceo")
+        repo = _TrayRepo()
+        repo.tasks["q1"] = _svc_task(
+            "q1", status="waiting", phase=OWNER_QUESTION_PHASE,
+            waiting_reason=f"{OWNER_QUESTION_PHASE}:question",
+            params=spec["params"])
+        settings = SimpleNamespace(
+            HORIZON_OWNER_USER_ID="usr_owner",
+            HORIZON_TIMEZONE="America/La_Paz",
+            HORIZON_CAPACITY_FRACTION=0.70,
+            HORIZON_SOURCE_PATH="",
+        )
+        service = HorizonService(settings, repo)  # type: ignore[arg-type]
+        tray = asyncio.run(service.pending_decisions("usr_owner"))
+        by_id = {i["task_id"]: i
+                 for i in tray["urgent"] + tray["grouped"]}
+        self.assertIn("q1", by_id)
+        self.assertTrue(by_id["q1"]["answerable"])
+
+
+CONFIRM_PROJECT = "projects/org/active"
+CONFIRM_NOTE = ("---\ntype: practice\nproject: active\ndate: 2026-10-28\n---\n\n"
+                "# Deploy rule\n\nDeploy only tagged releases.\n")
+CONFIRM_HUB = ("---\ntype: hub\nproject: active\ndate: 2026-10-28\n---\n\n"
+               "# Active\n\nProject hub.\n")
+CONFIRM_CHECKER = Path(
+    "/home/develop/development/Jardal/jardal-knowledge/.agents/skills"
+    "/obsidian-vault-links/scripts/vault_check.py")
+
+
+def _confirm_proposal(name: str, **overrides: object) -> dict:
+    base: dict = {
+        "target": f"{CONFIRM_PROJECT}/practices/{name}.md",
+        "action": "create",
+        "class": "normative",
+        "base_version": None,
+        "evidence": [{"ticket": "TASK-2026-00997"}],
+        "content": CONFIRM_NOTE,
+    }
+    base.update(overrides)
+    return base
+
+
+class ConfirmApplyCase(unittest.TestCase):
+    def setUp(self) -> None:
+        import shutil
+        import subprocess
+
+        import yaml
+
+        if not CONFIRM_CHECKER.is_file():
+            self.skipTest(f"vault checker not present at {CONFIRM_CHECKER}")
+        self._yaml = yaml
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        env = dict(__import__("os").environ, GIT_CONFIG_NOSYSTEM="1")
+        self._env = env
+        self.vault_repo = self._git_repo("vaultrepo")
+        self.vault_dir = self.vault_repo / "vault"
+        project_dir = self.vault_dir / CONFIRM_PROJECT
+        project_dir.mkdir(parents=True)
+        (project_dir / "active.md").write_text(CONFIRM_HUB, encoding="utf-8")
+        checker_dir = (self.vault_repo / ".agents" / "skills"
+                       / "obsidian-vault-links" / "scripts")
+        checker_dir.mkdir(parents=True)
+        shutil.copyfile(CONFIRM_CHECKER, checker_dir / "vault_check.py")
+        self._git(self.vault_repo, "add", "--all")
+        self._git(self.vault_repo, "commit", "--quiet", "-m", "Baseline")
+        self.base = self.root / "work"
+        self.base.mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _git_repo(self, name: str) -> Path:
+        import subprocess
+
+        repo = self.root / name
+        repo.mkdir()
+        subprocess.run(["git", "init", "--initial-branch=main", str(repo)],
+                       check=True, capture_output=True, env=self._env)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name",
+                        "Confirm Test"], check=True, capture_output=True,
+                       env=self._env)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email",
+                        "confirm@example.invalid"], check=True,
+                       capture_output=True, env=self._env)
+        subprocess.run(["git", "-C", str(repo), "config", "commit.gpgsign",
+                        "false"], check=True, capture_output=True,
+                       env=self._env)
+        return repo
+
+    def _git(self, repo: Path, *args: str):
+        import subprocess
+
+        return subprocess.run(["git", "-C", str(repo), *args],
+                              text=True, capture_output=True, check=True)
+
+    def _config(self):
+        from orchestration.vault_publisher import PublishConfig
+
+        return PublishConfig(
+            ticket_ref="TASK-2026-00332", vault_repo=self.vault_repo,
+            vault_dir=self.vault_dir, project=CONFIRM_PROJECT,
+            evidence_repo=self.root)
+
+    def _queue(self, origin: str, name: str, **overrides: object) -> Path:
+        from orchestration.agent_sandbox import ticket_dir
+
+        folder = (ticket_dir(origin, base_dir=self.base)
+                  / "knowledge_confirm_queue")
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{name}.yaml"
+        path.write_text(self._yaml.safe_dump(_confirm_proposal(name,
+                                                               **overrides)),
+                        encoding="utf-8")
+        return path
+
+    async def _pending(self):
+        import asyncio
+
+        from orchestration import knowledge_confirm as kc
+
+        return await asyncio.to_thread(
+            kc.collect_pending_confirmations, self.base)
+
+    async def _items(self):
+        from orchestration import knowledge_confirm as kc
+
+        pending = await self._pending()
+        spec = kc.build_confirm_question(pending, project="p")
+        return kc.confirm_items(spec["params"]["owner_question"])
+
+
+class ConfirmApplyTests(ConfirmApplyCase, unittest.IsolatedAsyncioTestCase):
+    async def test_approve_publishes_exactly_shown(self) -> None:
+        from orchestration import knowledge_confirm as kc
+
+        self._queue("origin-1", "deploy")
+        self._queue("origin-2", "rollback")
+        pending = kc.collect_pending_confirmations(self.base)
+        self.assertEqual(len(pending), 2)
+        items = kc.confirm_items(kc.build_confirm_question(
+            pending, project="p")["params"]["owner_question"])
+        outcome = await kc.apply_approved_proposals(
+            items, config=self._config(), base_dir=self.base)
+        self.assertEqual(sorted(outcome.published),
+                         ["origin-1/deploy", "origin-2/rollback"])
+        self.assertEqual(outcome.skipped_changed, [])
+        self.assertEqual(outcome.deferred, {})
+        self.assertEqual(outcome.rejected, {})
+        for name in ("deploy", "rollback"):
+            note = (self.vault_dir / CONFIRM_PROJECT
+                    / f"practices/{name}.md")
+            self.assertEqual(note.read_text(encoding="utf-8"), CONFIRM_NOTE)
+
+    async def test_changed_content_not_published(self) -> None:
+        from orchestration import knowledge_confirm as kc
+        from orchestration.agent_sandbox import ticket_dir
+
+        self._queue("origin-1", "deploy")
+        self._queue("origin-2", "rollback")
+        pending = kc.collect_pending_confirmations(self.base)
+        items = kc.confirm_items(kc.build_confirm_question(
+            pending, project="p")["params"]["owner_question"])
+        changed = (ticket_dir("origin-2", base_dir=self.base)
+                   / "knowledge_confirm_queue/rollback.yaml")
+        with changed.open("ab") as handle:
+            handle.write(b"\n# tampered after the question\n")
+        outcome = await kc.apply_approved_proposals(
+            items, config=self._config(), base_dir=self.base)
+        self.assertEqual(outcome.published, ["origin-1/deploy"])
+        self.assertEqual(outcome.skipped_changed, ["origin-2/rollback"])
+        self.assertTrue(changed.is_file())
+        self.assertFalse((self.vault_dir / CONFIRM_PROJECT
+                          / "practices/rollback.md").exists())
+        self.assertIn("ya no vale", kc.format_confirm_comment(
+            outcome, approved=True))
+
+    async def test_deny_discards_with_reason(self) -> None:
+        from orchestration import knowledge_confirm as kc
+        from orchestration.agent_sandbox import ticket_dir
+
+        self._queue("origin-1", "deploy")
+        self._queue("origin-2", "rollback")
+        items = await self._items()
+        discarded = kc.apply_denied_proposals(items, base_dir=self.base)
+        self.assertEqual(discarded,
+                         {"origin-1": ["deploy"], "origin-2": ["rollback"]})
+        for origin, name in (("origin-1", "deploy"),
+                             ("origin-2", "rollback")):
+            self.assertFalse((ticket_dir(origin, base_dir=self.base)
+                              / f"knowledge_confirm_queue/{name}.yaml"
+                              ).exists())
+
+    async def test_deny_comment_names_reason(self) -> None:
+        from orchestration import knowledge_confirm as kc
+
+        self._queue("origin-1", "deploy")
+        items = await self._items()
+        discarded = kc.apply_denied_proposals(items, base_dir=self.base)
+        outcome = kc.ConfirmOutcome(
+            rejected={f"{o}/{n}": "cuesta mucho"
+                      for o, names in discarded.items() for n in names})
+        text = kc.format_confirm_comment(outcome, approved=False,
+                                         owners_reason="cuesta mucho")
+        self.assertIn("denegado", text)
+        self.assertIn("origin-1/deploy", text)
+        self.assertIn("cuesta mucho", text)
+
+
+class ConfirmServiceTests(ConfirmApplyCase,
+                          unittest.IsolatedAsyncioTestCase):
+    def _service(self, repo: _SvcRepo):
+        service = _make_service(repo)
+        service._graph = SimpleNamespace(_generic_wiring=SimpleNamespace(
+            work_base_dir=str(self.base)))
+        service._config_loader = SimpleNamespace(
+            load_project=lambda name: {
+                "dev": {"vault_project": {
+                    "project": CONFIRM_PROJECT,
+                    "dir": str(self.vault_dir)}},
+                "project": {"repos": [{"local_path": str(self.root)}]},
+            })
+        return service
+
+    def _confirm_task(self, task_id: str, project: str,
+                      checkpoint: dict) -> dict:
+        return _svc_task(
+            task_id, project=project, status="waiting",
+            phase="owner_question",
+            waiting_reason="owner_question:question",
+            params={"owner_question": dict(
+                {"kind": "question",
+                 "question": "bloque",
+                 "human_action": "Aprobar o rechazar",
+                 "origin_task_id": None},
+                **{"checkpoint": checkpoint})})
+
+    async def test_sync_creates_single_grouped_question(self) -> None:
+        from orchestration import knowledge_confirm as kc
+
+        self._queue("origin-1", "deploy")
+        self._queue("origin-2", "rollback")
+        repo = _SvcRepo()
+        service = self._service(repo)
+        seen: list[Any] = []
+
+        async def fake_create(payload: Any) -> dict[str, Any]:
+            seen.append(payload)
+            return {"task_id": "q1", "params": payload.params}
+
+        service.create_task = fake_create  # type: ignore[method-assign]
+        await service._sync_confirm_question("jardal-openceo")
+        self.assertEqual(len(seen), 1)
+        payload = seen[0]
+        self.assertFalse(payload.autorun)
+        block = (payload.params or {})["owner_question"]
+        self.assertTrue(kc.is_confirm_question(block))
+        items = kc.confirm_items(block)
+        self.assertEqual(len(items), 2)
+        self.assertTrue(str(payload.source_id).startswith(
+            "knowledge-confirm:"))
+
+    async def test_approve_route_publishes_and_closes(self) -> None:
+        from orchestration import knowledge_confirm as kc
+
+        self._queue("origin-1", "deploy")
+        pending = kc.collect_pending_confirmations(self.base)
+        parts = kc.confirm_question_parts(pending)
+        repo = _SvcRepo()
+        repo.tasks["q1"] = self._confirm_task(
+            "q1", "jardal-openceo", dict(parts["checkpoint"]))
+        service = self._service(repo)
+        service.set_dispatcher_wake(lambda: None)
+        result = await service.apply_owner_decision(
+            "q1", approve=True, actor_id="owner", comment="adelante")
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["route"], "owner_question_close")
+        note = (self.vault_dir / CONFIRM_PROJECT
+                / "practices/deploy.md")
+        self.assertEqual(note.read_text(encoding="utf-8"), CONFIRM_NOTE)
+        question = await repo.get_task("q1")
+        assert question is not None
+        self.assertEqual(question["status"], "completed")
+        block = (question.get("params") or {}).get("owner_question") or {}
+        self.assertEqual(
+            (block.get("decision") or {}).get("decision"), "approved")
+        self.assertIn("Publicadas", result["task"]["last_response_summary"])
+
+    async def test_deny_route_discards_with_reason(self) -> None:
+        from orchestration import knowledge_confirm as kc
+        from orchestration.agent_sandbox import ticket_dir
+
+        self._queue("origin-1", "deploy")
+        pending = kc.collect_pending_confirmations(self.base)
+        parts = kc.confirm_question_parts(pending)
+        repo = _SvcRepo()
+        repo.tasks["q1"] = self._confirm_task(
+            "q1", "jardal-openceo", dict(parts["checkpoint"]))
+        service = self._service(repo)
+        service.set_dispatcher_wake(lambda: None)
+        result = await service.apply_owner_decision(
+            "q1", approve=False, actor_id="owner", comment="cuesta mucho")
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["route"], "owner_question_deny")
+        self.assertFalse((ticket_dir("origin-1", base_dir=self.base)
+                          / "knowledge_confirm_queue/deploy.yaml").exists())
+        question = await repo.get_task("q1")
+        assert question is not None
+        block = (question.get("params") or {}).get("owner_question") or {}
+        self.assertEqual(
+            (block.get("decision") or {}).get("decision"), "denied")
+        self.assertIn("cuesta mucho",
+                      result["task"]["last_response_summary"])
+
+    async def test_approve_without_vault_mapping_stays_open(self) -> None:
+        from owner_channel import OwnerQuestionSkipped
+        from orchestration import knowledge_confirm as kc
+
+        self._queue("origin-1", "deploy")
+        pending = kc.collect_pending_confirmations(self.base)
+        parts = kc.confirm_question_parts(pending)
+        repo = _SvcRepo()
+        repo.tasks["q1"] = self._confirm_task(
+            "q1", "jardal-openceo", dict(parts["checkpoint"]))
+        service = self._service(repo)
+        service._config_loader = SimpleNamespace(
+            load_project=lambda name: {})
+        service.set_dispatcher_wake(lambda: None)
+        with self.assertRaises(OwnerQuestionSkipped):
+            await service.apply_owner_decision(
+                "q1", approve=True, actor_id="owner", comment="adelante")
+        question = await repo.get_task("q1")
+        assert question is not None
+        self.assertEqual(question["status"], "waiting")
+        block = (question.get("params") or {}).get("owner_question") or {}
+        self.assertNotIn("decision", block)
+
+
 if __name__ == "__main__":
     unittest.main()

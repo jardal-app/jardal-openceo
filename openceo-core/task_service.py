@@ -73,9 +73,11 @@ from orchestration.ticket_handoff import (
     TICKET_OUTPUTS_KEY,
     publish_ticket_outputs,
 )
+from orchestration import knowledge_confirm as knowledge_confirm_mod
 from orchestration.vault_publisher import PublishConfig, publish_after_close
 from owner_channel import (
     OWNER_QUESTION_PHASE,
+    OwnerQuestionSkipped,
     build_owner_question,
     build_tool_ticket,
     denied_origin_verdict,
@@ -4462,6 +4464,36 @@ class TaskService:
             logger.warning("Crystallization failed for %s", task_id,
                            exc_info=True)
 
+    def _knowledge_publish_config(
+            self, project: Any,
+            ticket_ref: str) -> PublishConfig | None:
+        """Vault publish wiring for a project, or None without mapping.
+
+        Shared by the close hook (2.4) and the confirmation answer
+        (2.5): same vault dir, same evidence repo fallback.
+        """
+        project_config = self._lock_project_config(project)
+        prefix = knowledge_target_prefix(project_config)
+        vault = ((project_config or {}).get("dev") or {}).get(
+            "vault_project") or {}
+        vault_dir = Path(str(vault.get("dir") or "")).expanduser() \
+            if vault.get("dir") else None
+        vault_project = str(vault.get("project") or "").strip()
+        if (not prefix or vault_dir is None or not vault_dir.is_dir()
+                or not vault_project):
+            return None
+        repos = (project_config.get("project") or {}).get("repos") or []
+        first = repos[0] if repos and isinstance(repos[0], dict) else {}
+        repo_dir = str(first.get("local_path") or "").strip()
+        return PublishConfig(
+            ticket_ref=ticket_ref,
+            vault_repo=vault_dir.parent,
+            vault_dir=vault_dir,
+            project=prefix,
+            evidence_repo=Path(repo_dir).expanduser()
+            if repo_dir and Path(repo_dir).expanduser().is_dir()
+            else Path(__file__).resolve().parent.parent)
+
     async def _collect_knowledge_after_close(
             self, task_id: str,
             ticket: dict[str, Any] | None) -> None:
@@ -4472,31 +4504,23 @@ class TaskService:
         resolving evidence land in the project vault, normative ones
         queue for Owner confirmation (2.5), transient states defer with
         the proposal kept. Without a vault mapping it falls back to the
-        2.3 collect-and-record. Never raises, never touches the ticket
-        outcome.
+        2.3 collect-and-record. A close that queues new items refreshes
+        the single grouped confirmation question (2.5). Never raises,
+        never touches the ticket outcome.
         """
         try:
             project = (ticket or {}).get("project")
-            project_config = self._lock_project_config(project)
-            prefix = knowledge_target_prefix(project_config)
-            vault = ((project_config or {}).get("dev") or {}).get(
-                "vault_project") or {}
-            vault_dir = Path(str(vault.get("dir") or "")).expanduser() \
-                if vault.get("dir") else None
-            vault_project = str(vault.get("project") or "").strip()
-            if (not prefix or vault_dir is None or not vault_dir.is_dir()
-                    or not vault_project):
+            mirror = mirror_ticket(ticket or {})
+            ticket_ref = str(mirror or "").strip() or task_id
+            config = self._knowledge_publish_config(project, ticket_ref)
+            if config is None:
                 await collect_and_comment(
                     task_id,
-                    project_prefix=prefix,
+                    project_prefix=knowledge_target_prefix(
+                        self._lock_project_config(project)),
                     base_dir=self._crystallization_drafts_base(),
                     comment=self.comment_on_ticket)
                 return
-            mirror = mirror_ticket(ticket or {})
-            ticket_ref = str(mirror or "").strip() or task_id
-            repos = (project_config.get("project") or {}).get("repos") or []
-            first = repos[0] if repos and isinstance(repos[0], dict) else {}
-            repo_dir = str(first.get("local_path") or "").strip()
 
             async def _ticket_exists(name: str) -> bool | None:
                 try:
@@ -4506,22 +4530,91 @@ class TaskService:
                     return None
                 return found is not None
 
-            await publish_after_close(
+            outcome = await publish_after_close(
                 task_id,
-                config=PublishConfig(
-                    ticket_ref=ticket_ref,
-                    vault_repo=vault_dir.parent,
-                    vault_dir=vault_dir,
-                    project=prefix,
-                    evidence_repo=Path(repo_dir).expanduser()
-                    if repo_dir and Path(repo_dir).expanduser().is_dir()
-                    else Path(__file__).resolve().parent.parent),
+                config=config,
                 base_dir=self._crystallization_drafts_base(),
                 ticket_exists=_ticket_exists,
                 comment=self.comment_on_ticket)
+            if outcome.queued:
+                await self._sync_confirm_question(project)
         except Exception:
             logger.warning("Knowledge publish failed for %s", task_id,
                            exc_info=True)
+
+    async def _sync_confirm_question(self, project: Any) -> None:
+        """Group every pending confirmation into one question (2.5).
+
+        The pending set's source id keeps the question single per
+        round: the same set never duplicates it, a new queued item
+        opens the next round. Best-effort: failures only warn.
+        """
+        try:
+            base = self._crystallization_drafts_base()
+            pending = await asyncio.to_thread(
+                knowledge_confirm_mod.collect_pending_confirmations, base)
+            if not pending:
+                return
+            parts = knowledge_confirm_mod.confirm_question_parts(pending)
+            await self.create_owner_question(
+                kind="question",
+                question=str(parts["question"]),
+                human_action=str(parts["human_action"]),
+                checkpoint=dict(parts["checkpoint"]),
+                project=str(project or ""),
+                source_id=knowledge_confirm_mod.confirm_source_id(
+                    str(project or ""), pending),
+            )
+        except Exception:
+            logger.warning("Knowledge confirm sync failed for %s", project,
+                           exc_info=True)
+
+    async def _apply_knowledge_confirm(
+            self, task: dict[str, Any], block: dict[str, Any], *,
+            approve: bool, comment: str) -> str:
+        """Apply the Owner's answer to a 2.5 confirmation block (D7).
+
+        Approve publishes exactly the shown bytes (hash-bound; changed
+        items are skipped with the proposal kept); deny discards every
+        queued item with the reason commented on each origin ticket.
+        Raises OwnerQuestionSkipped when the vault wiring is missing so
+        the question stays open for a retry. Returns the answer summary.
+        """
+        items = knowledge_confirm_mod.confirm_items(block)
+        project = task.get("project")
+        question_id = str(task.get("task_id") or "")
+        mirror = mirror_ticket(task)
+        config = self._knowledge_publish_config(
+            project, str(mirror or "").strip() or question_id)
+        if config is None:
+            raise OwnerQuestionSkipped(
+                "cannot apply: the project has no vault mapping")
+        base = self._crystallization_drafts_base()
+        if approve:
+            outcome = await knowledge_confirm_mod.apply_approved_proposals(
+                items, config=config, base_dir=base)
+            return knowledge_confirm_mod.format_confirm_comment(
+                outcome, approved=True, owners_reason=comment)
+        discarded = await asyncio.to_thread(
+            knowledge_confirm_mod.apply_denied_proposals,
+            items, base_dir=base)
+        reason = (comment.strip()
+                  or "rechazado por el dueno (confirmación en bloque)")
+        for origin, names in sorted(discarded.items()):
+            try:
+                await self.comment_on_ticket(
+                    origin,
+                    "Confirmación en bloque (2.5) denegada: "
+                    f"{', '.join(sorted(names))}. Motivo: {reason}"[:2000])
+            except Exception:
+                logger.warning("Knowledge confirm deny comment failed for %s",
+                               origin, exc_info=True)
+        outcome = knowledge_confirm_mod.ConfirmOutcome(
+            rejected={f"{origin}/{name}": reason
+                      for origin, names in discarded.items()
+                      for name in names})
+        return knowledge_confirm_mod.format_confirm_comment(
+            outcome, approved=False, owners_reason=comment)
 
     async def _publish_ticket_outputs(
             self, task_id: str, task: dict[str, Any] | None,
@@ -5531,6 +5624,7 @@ class TaskService:
         origin_id = str(block.get("origin_task_id") or "")
         dev_task_id: str | None = None
         playbook_saved: dict[str, Any] | None = None
+        confirm_summary: str | None = None
         decided_at = datetime.now(timezone.utc).isoformat()
         if kind == "playbook" and approve:
             # The playbook lands in git first (TASK-2026-00217): saving
@@ -5569,13 +5663,25 @@ class TaskService:
             dev_task_id = await self._create_tool_ticket_from_question(
                 task, block
             )
+        if kind == "question" and knowledge_confirm_mod.is_confirm_question(
+                block):
+            # 2.5 confirmation block (TASK-2026-00332): publish or
+            # discard first (may raise OwnerQuestionSkipped so the
+            # question stays open for a retry), then record + route
+            # below with the confirm summary. The channel takes one
+            # decision per question, so the block is all-or-nothing.
+            confirm_summary = await self._apply_knowledge_confirm(
+                task, block, approve=approve, comment=comment)
         record = owner_answer_record(
             approve=approve,
             actor_id=actor_id,
             comment=comment,
             decided_at=decided_at,
         )
-        summary = self._owner_answer_summary(approve, comment)
+        if confirm_summary is None:
+            summary = self._owner_answer_summary(approve, comment)
+        else:
+            summary = confirm_summary
         if kind == "playbook" and approve and playbook_saved:
             summary = (
                 f"Playbook {playbook_saved['name']} aprobado "
