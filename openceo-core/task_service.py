@@ -64,6 +64,11 @@ from orchestration.crystallization import (
     mirror_ticket,
     run_save_step,
 )
+from orchestration.knowledge_proposals import (
+    collect_and_comment,
+    has_proposals as has_knowledge_proposals,
+    knowledge_target_prefix,
+)
 from orchestration.ticket_handoff import (
     TICKET_OUTPUTS_KEY,
     publish_ticket_outputs,
@@ -4338,6 +4343,19 @@ class TaskService:
                         task_id,
                         str(graph_out.get("selected_agent") or ""),
                         updated))
+                if final_status in {TaskStatus.COMPLETED.value,
+                                    TaskStatus.FAILED.value} \
+                        and has_knowledge_proposals(
+                            task_id,
+                            base_dir=self._crystallization_drafts_base()):
+                    # Knowledge proposal collect (TASK-2026-00330, D7):
+                    # proposals left in the ticket folder are validated
+                    # structurally and the outcome (valid + every reject
+                    # reason) lands on the ticket. Never publishes to the
+                    # vault (2.4) and never touches the ticket outcome.
+                    asyncio.create_task(
+                        self._collect_knowledge_after_close(
+                            task_id, updated))
                 if (final_status == TaskStatus.COMPLETED.value
                         and updated.get("objective_id")):
                     # Single post-persist objective close (TASK-2026-00169):
@@ -4441,6 +4459,29 @@ class TaskService:
                 await self.comment_on_ticket(task_id, outcome.comment)
         except Exception:
             logger.warning("Crystallization failed for %s", task_id,
+                           exc_info=True)
+
+    async def _collect_knowledge_after_close(
+            self, task_id: str,
+            ticket: dict[str, Any] | None) -> None:
+        """Fire-and-forget knowledge proposal collect (TASK-2026-00330).
+
+        Validates the proposals left in the ticket folder and records
+        the outcome on the ticket: valid ones stay ready for the 2.4
+        publisher, every rejection carries its reason. Never raises,
+        never publishes, never touches the ticket outcome.
+        """
+        try:
+            project = (ticket or {}).get("project")
+            prefix = knowledge_target_prefix(
+                self._lock_project_config(project))
+            await collect_and_comment(
+                task_id,
+                project_prefix=prefix,
+                base_dir=self._crystallization_drafts_base(),
+                comment=self.comment_on_ticket)
+        except Exception:
+            logger.warning("Knowledge collect failed for %s", task_id,
                            exc_info=True)
 
     async def _publish_ticket_outputs(

@@ -10,6 +10,7 @@ card:
     - branch changes in the ticket worktree
     - hecho / bloqueado / no_aplica verdict with reason
     - pertinent project-vault notes read on demand (from the prompt index) before planning
+    - knowledge proposals left in the ticket folder at close (never the vault), searching first and updating the existing note on the same topic
   never:
     - decide business work
     - change ticket states
