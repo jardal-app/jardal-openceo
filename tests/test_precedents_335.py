@@ -88,7 +88,7 @@ class OutcomeTests(unittest.TestCase):
         stored = store["precedents"][entry.precedent_id]
         self.assertEqual(stored["outcome"], "success")
         self.assertTrue(stored["outcome_at"])
-        self.assertEqual(len(prec.evidenced(store)), 1)
+        self.assertEqual(len(prec.evidenced(store, "jardal-openceo")), 1)
 
     def test_inconclusive_stays_null_and_is_not_evidence(self) -> None:
         store = prec.empty_store()
@@ -99,7 +99,7 @@ class OutcomeTests(unittest.TestCase):
         self.assertEqual(result, {"applied": True, "outcome": None})
         stored = store["precedents"][entry.precedent_id]
         self.assertIsNone(stored["outcome"])
-        self.assertEqual(prec.evidenced(store), [])
+        self.assertEqual(prec.evidenced(store, "jardal-openceo"), [])
 
     def test_unknown_outcome_is_rejected(self) -> None:
         store = prec.empty_store()
@@ -145,6 +145,12 @@ class VerdictTests(unittest.TestCase):
             "abstention")
         self.assertIsNone(prec.outcome_from_verdict("otro", verified=True))
 
+    def test_unverified_block_or_abstention_stays_inconclusive(self) -> None:
+        self.assertIsNone(
+            prec.outcome_from_verdict("bloqueado", verified=False))
+        self.assertIsNone(
+            prec.outcome_from_verdict("no_aplica", verified=False))
+
 
 class CeoTests(unittest.TestCase):
     def test_ceo_review_is_a_precedent_with_later_result(self) -> None:
@@ -183,6 +189,47 @@ class ScopeTests(unittest.TestCase):
         ceo = prec.precedents_for_scope(store, "jardal-openceo", "ceo")
         self.assertEqual(len(dev), 1)
         self.assertEqual(len(ceo), 1)
+
+    def test_evidenced_is_project_isolated(self) -> None:
+        store = prec.empty_store()
+        entry = prec.record_owner_precedent(store, **owner_kwargs())
+        prec.record_owner_precedent(
+            store, **owner_kwargs(project="other", scope="dev"))
+        prec.complete_outcome(
+            store, entry.precedent_id, outcome="success",
+            evidence_ref="TASK-2026-00900")
+        mine = prec.evidenced(store, "jardal-openceo")
+        self.assertEqual([row["precedent_id"] for row in mine],
+                         [entry.precedent_id])
+        self.assertEqual(prec.evidenced(store, "other"), [])
+
+    def test_first_inconclusive_completion_wins(self) -> None:
+        store = prec.empty_store()
+        entry = prec.record_owner_precedent(store, **owner_kwargs())
+        first = prec.complete_outcome(
+            store, entry.precedent_id, outcome=None,
+            evidence_ref="TASK-2026-00900", at="2026-10-28T00:00:00+00:00")
+        second = prec.complete_outcome(
+            store, entry.precedent_id, outcome="success",
+            evidence_ref="TASK-2026-00900")
+        self.assertEqual(first, {"applied": True, "outcome": None})
+        self.assertEqual(
+            second, {"applied": False, "reason": "outcome already recorded"})
+        stored = store["precedents"][entry.precedent_id]
+        self.assertIsNone(stored["outcome"])
+        self.assertEqual(stored["outcome_at"], "2026-10-28T00:00:00+00:00")
+
+    def test_seq_reconciles_with_stored_ids(self) -> None:
+        store = prec.empty_store()
+        entry = prec.record_owner_precedent(store, **owner_kwargs())
+        store["seq"] = 0
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / prec.STORE_FILENAME
+            prec.save_store(store, path)
+            loaded = prec.load_store(path)
+        self.assertEqual(loaded["seq"], 1)
+        again = prec.record_owner_precedent(loaded, **owner_kwargs())
+        self.assertNotEqual(again.precedent_id, entry.precedent_id)
 
     def test_store_round_trip(self) -> None:
         store = prec.empty_store()

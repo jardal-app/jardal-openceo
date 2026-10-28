@@ -4,14 +4,20 @@ D10: OpenCEO links the agent proposal, the Owner response (approved,
 edited with a concrete change, or denied) and the observed result. It
 reuses what is already recorded -- owner questions
 (:mod:`owner_channel`), CEO reviews (``CEODecision``) and ticket
-results -- and stores only references plus dated summaries in Mongo;
-the authority stays in Jardal ERP, Jira or Autotask (tickets are
-never copied here).
+results. Entries hold only references plus dated summaries shaped as
+Mongo documents; the authority stays in Jardal ERP, Jira or Autotask
+(tickets are never copied here).
 
 The result completes by events, never by polling: callers invoke
 :func:`complete_outcome` from the close path once the result is
 verified. An inconclusive result stays ``None`` and never counts as
 evidence. Hits, failures and correct abstentions are all recorded.
+
+Seam note (same as ``skill_metrics`` in 3.2): this step ships the
+pure in-memory core plus the local ``.runtime`` file helpers used by
+tests. No live answer/close path calls it yet; that wiring belongs
+to 3.4 (recall) and 4.1 (external send), which will also bind the
+Mongo collection to this document shape.
 
 No tokens, no ticket outcome changes. Thresholds and the response
 classification below are agent decisions, reopenable by the Owner
@@ -35,6 +41,7 @@ __all__ = [
     "Precedent",
     "classify_response",
     "complete_outcome",
+    "default_store_path",
     "empty_store",
     "evidenced",
     "load_store",
@@ -75,7 +82,10 @@ def classify_response(*, approve: bool, comment: str) -> str:
 
     An approval carrying Owner text counts as edited: the Owner added
     a concrete change on top of the proposal. A bare approval counts
-    as approved. A denial stays denied whatever it says.
+    as approved. A denial stays denied whatever it says. Heuristic and
+    agent decision (TASK-2026-00335): the owner channel records only
+    approved/denied plus a comment, so the edited text itself is kept
+    in ``response_note``; binding the approved text hash is 4.1's job.
     """
     if not approve:
         return "denied"
@@ -87,12 +97,15 @@ def classify_response(*, approve: bool, comment: str) -> str:
 def outcome_from_verdict(resultado: str, *, verified: bool) -> str | None:
     """Map a close verdict to an observed outcome, None when inconclusive.
 
-    Only OpenCEO-verified results count (principle 7): an unverified
-    ``hecho`` stays inconclusive instead of guessing a hit.
+    Only OpenCEO-verified results count (principle 7): anything
+    unverified stays inconclusive, including a declared block or
+    abstention, which may be wrong until the gates confirm it.
     """
     verdict = str(resultado or "").strip().lower()
+    if not verified:
+        return None
     if verdict == "hecho":
-        return "success" if verified else None
+        return "success"
     if verdict == "bloqueado":
         return "failure"
     if verdict == "no_aplica":
@@ -151,8 +164,11 @@ def record_owner_precedent(
 ) -> Precedent:
     """Log one Owner answer as a precedent with references only.
 
-    Raises ``ValueError`` when the question reference or the project
-    is missing: a precedent without its pointers is untraceable.
+    Callers pass short summaries, never ticket bodies; text fields
+    are truncated to :data:`MAX_SUMMARY_CHARS` as a backstop, not as
+    a summarizer. Raises ``ValueError`` when the question reference
+    or the project is missing: a precedent without its pointers is
+    untraceable.
     """
     question = str(question_task_id or "").strip()
     if not question:
@@ -193,7 +209,13 @@ def record_ceo_precedent(
 
     ``do_nothing`` counts as the abstention under study, not as an
     empty review: D11 learns from the times doing nothing was right.
-    The observed result still completes later by event.
+    ``response`` carries the CEO action (``keep_going``, ``escalate``,
+    ...) while ``proposal_kind`` keeps the ``ceo_review:<action>``
+    marker; Owner answers use the approved/edited/denied vocabulary,
+    so consumers always read one scope at a time. ``project`` stays
+    required (D2): company-scope decisions are still filed under the
+    project they were taken for. The observed result still completes
+    later by event.
     """
     review = str(review_id or "").strip()
     if not review:
@@ -227,18 +249,20 @@ def complete_outcome(
     evidence_ref: str,
     at: str | None = None,
 ) -> dict[str, Any]:
-    """Complete the observed result by event. Never raises past the caller.
+    """Complete the observed result by event.
 
     ``outcome=None`` marks the inconclusive close: the entry keeps
     ``outcome=None`` and never counts as evidence. An unknown outcome
     label is rejected with ``ValueError`` (fail-closed: only verified
-    results count, never guesses). The first completion wins: a later
-    event never rewrites an already observed result.
+    results count, never guesses); an unknown precedent id returns
+    ``applied: False`` instead so a close hook never breaks the flow.
+    The first completion wins, conclusive or not: a later event never
+    rewrites an already recorded result.
     """
     entry = store.get("precedents", {}).get(str(precedent_id))
     if not isinstance(entry, dict):
         return {"applied": False, "reason": "unknown precedent"}
-    if entry.get("outcome") is not None:
+    if entry.get("outcome") is not None or entry.get("outcome_at") is not None:
         return {"applied": False, "reason": "outcome already recorded"}
     if outcome is None:
         entry["outcome_at"] = str(at or "").strip() or _now()
@@ -252,33 +276,36 @@ def complete_outcome(
     return {"applied": True, "outcome": outcome}
 
 
+def _ordered(raw: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    items = [(k, v) for k, v in raw.items() if isinstance(v, dict)]
+    return sorted(items, key=lambda kv: (str(kv[1].get("created_at") or ""), kv[0]))
+
+
 def precedents_for_scope(
     store: Mapping[str, Any],
     project: str,
     scope: str,
 ) -> list[dict[str, Any]]:
     """Precedents of one project and scope, oldest first (3.4 builds on this)."""
-    rows = []
     raw = store.get("precedents", {})
     if not isinstance(raw, dict):
         return []
-    for key in sorted(raw):
-        entry = raw[key]
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("project") != project or entry.get("scope") != scope:
-            continue
-        rows.append(dict(entry))
-    return rows
+    return [dict(entry) for _, entry in _ordered(raw)
+            if entry.get("project") == project and entry.get("scope") == scope]
 
 
-def evidenced(store: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Precedents with an observed result; inconclusive ones never count."""
+def evidenced(store: Mapping[str, Any], project: str) -> list[dict[str, Any]]:
+    """Observed results of one project; inconclusive ones never count.
+
+    ``project`` is required (D2): a shared store must never leak one
+    project's evidence into another.
+    """
     raw = store.get("precedents", {})
     if not isinstance(raw, dict):
         return []
-    return [dict(entry) for key, entry in sorted(raw.items())
-            if isinstance(entry, dict) and entry.get("outcome") is not None]
+    return [dict(entry) for _, entry in _ordered(raw)
+            if entry.get("project") == project
+            and entry.get("outcome") is not None]
 
 
 def default_store_path(repo_root: str | Path) -> Path:
@@ -287,7 +314,12 @@ def default_store_path(repo_root: str | Path) -> Path:
 
 
 def load_store(path: str | Path) -> dict[str, Any]:
-    """Read a precedent store; missing or corrupt reads as empty."""
+    """Read a precedent store; missing or corrupt reads as empty.
+
+    The sequence is reconciled with the highest stored id so a
+    hand-edited or migrated file never reuses an id and silently
+    overwrites a precedent.
+    """
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -295,6 +327,18 @@ def load_store(path: str | Path) -> dict[str, Any]:
     if not isinstance(data, dict) or not isinstance(
             data.get("precedents"), dict):
         return empty_store()
+    top = 0
+    for key in data["precedents"]:
+        if isinstance(key, str) and key.startswith("PR-"):
+            try:
+                top = max(top, int(key[3:]))
+            except ValueError:
+                continue
+    try:
+        seq = int(data.get("seq", 0))
+    except (TypeError, ValueError):
+        seq = 0
+    data["seq"] = max(seq, top)
     return data
 
 
