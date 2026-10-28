@@ -98,14 +98,47 @@ class BuildVaultIndexTests(unittest.TestCase):
             (notes / f"note-{num:02d}.md").write_text(
                 f"# Note {num}\n\n" + ("filler line of text. " * 20) + "\n")
         index = build_vault_index(_cfg(self.vault), max_chars=500)
-        self.assertLessEqual(len(index), 500 + 200)
+        self.assertLessEqual(len(index), 500)
         self.assertIn("truncated", index)
         self.assertNotIn("note-29", index)
         self.assertNotIn("filler line of text. " * 20, index)
 
+    def test_cap_strict_at_small_budget(self) -> None:
+        notes = self.vault / "projects/org/active/practices"
+        for num in range(30):
+            (notes / f"note-{num:02d}.md").write_text(
+                f"# Note {num}\n\n" + ("filler line of text. " * 20) + "\n")
+        for budget in (500, 300, 200):
+            index = build_vault_index(_cfg(self.vault), max_chars=budget)
+            self.assertLessEqual(len(index), budget, msg=f"budget={budget}")
+            self.assertIn("truncated", index)
+
     def test_default_cap_holds_realistic_vault(self) -> None:
         index = build_vault_index(_cfg(self.vault))
         self.assertLessEqual(len(index), VAULT_INDEX_MAX_CHARS)
+
+    def test_practices_symlink_dir_is_skipped(self) -> None:
+        import shutil
+        active = self.vault / "projects/org/active"
+        outside = Path(self._tmp.name) / "elsewhere"
+        outside.mkdir()
+        (outside / "foreign.md").write_text(
+            "# Foreign\n\nFOREIGN-ESCAPED-MARKER must stay out.\n")
+        shutil.rmtree(active / "practices")
+        (active / "practices").symlink_to(outside, target_is_directory=True)
+        index = build_vault_index(_cfg(self.vault))
+        self.assertNotIn("FOREIGN-ESCAPED-MARKER", index)
+        self.assertIn("Active hub (active.md)", index)
+
+    def test_run_wiring_key_contract(self) -> None:
+        from agents.dev.session import _dev_vault_index
+        from agents.dev.tier_s import cycle as cycle_mod
+        index = _dev_vault_index(_cfg(self.vault))
+        self.assertTrue(index)
+        cycle_cfg = {**cycle_mod.TierSCycle.config_from_project(
+            _cfg(self.vault)), "vault_index": index}
+        self.assertEqual(
+            str(cycle_cfg.get("vault_index", "") or ""), index)
 
 
 class CodingPromptIndexTests(unittest.TestCase):

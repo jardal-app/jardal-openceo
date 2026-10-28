@@ -70,14 +70,21 @@ def _iter_notes(root: Path) -> list[tuple[str, Path]]:
     candidates = [root / f"{root.name}.md"]
     practices = root / "practices"
     try:
-        if practices.is_dir():
+        # A symlinked practices/ dir would read another folder's notes.
+        if not practices.is_symlink() and practices.is_dir():
             candidates.extend(sorted(practices.glob("*.md")))
     except OSError:
         pass
+    try:
+        resolved_root = root.resolve()
+    except OSError:
+        resolved_root = root
     notes: list[tuple[str, Path]] = []
     for candidate in candidates:
         try:
             if candidate.is_symlink() or not candidate.is_file():
+                continue
+            if resolved_root not in candidate.resolve().parents:
                 continue
         except OSError:
             continue
@@ -121,11 +128,17 @@ def build_vault_index(
     body = header + "\n" + "\n".join(entries)
     if len(body) <= max_chars:
         return body
+    notice = (f"...(index truncated to {max_chars} chars: "
+              "detail not loaded; read notes on demand)")
+    allowed = max_chars - len(notice)
+    if allowed <= 0:
+        return notice[:max_chars]
     truncated = header + "\n"
-    for entry in entries:
-        if len(truncated) + len(entry) + 1 > max_chars:
-            break
-        truncated += entry + "\n"
-    truncated += (f"...(index truncated to {max_chars} chars: "
-                  "detail not loaded; read notes on demand)")
-    return truncated
+    if len(truncated) > allowed:
+        truncated = truncated[:allowed]
+    else:
+        for entry in entries:
+            if len(truncated) + len(entry) + 1 > allowed:
+                break
+            truncated += entry + "\n"
+    return truncated + notice
