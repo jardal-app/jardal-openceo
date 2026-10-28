@@ -247,7 +247,7 @@ class TranslatorTests(unittest.TestCase):
 
     def test_check_pinned_version_ok_and_drift(self) -> None:
         proc = MagicMock(returncode=0,
-                         stdout=f"Muse Code 1.4.13 ({MUSE_PINNED_VERSION})\n")
+                         stdout=f"Muse Code 1.4.14 ({MUSE_PINNED_VERSION})\n")
         with patch("orchestration.role_muse.subprocess.run",
                    return_value=proc) as runner:
             out = check_pinned_version("/bin/muse")
