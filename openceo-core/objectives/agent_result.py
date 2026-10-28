@@ -24,13 +24,25 @@ __all__ = [
     "AGENT_RESULT_FENCE",
     "AGENT_RESULT_JSON_SCHEMA",
     "AGENT_RESULT_PROMPT",
+    "SCHEDULED_WAIT_COUNT_KEY",
+    "SCHEDULED_WAIT_MAX_DECLINES",
     "SCHEMA_PATH",
     "AgentOutcome",
     "AgentResult",
     "legacy_blocked_result",
     "parse_agent_result",
     "scheduled_resume",
+    "scheduled_wait_declines",
 ]
+
+#: Params key carrying the consecutive scheduled_wait decline count
+#: (TASK-2026-00350): every re-parked decline increments it, any other
+#: outcome resets it, so a builder that keeps declining cannot loop forever.
+SCHEDULED_WAIT_COUNT_KEY = "scheduled_wait_count"
+
+#: Consecutive scheduled_wait declines before the ticket parks for the
+#: owner instead of re-parking (mirrors the review no-quorum cap of 3).
+SCHEDULED_WAIT_MAX_DECLINES = 3
 
 
 class AgentOutcome(str, Enum):
@@ -132,6 +144,13 @@ def scheduled_resume(verdict: AgentResult, now: datetime | None = None) -> datet
     if verdict.resume_at <= (now or datetime.now(timezone.utc)):
         raise ValueError("resume_at must be in the future; verify the condition now")
     return verdict.resume_at
+
+
+def scheduled_wait_declines(params: Any) -> int:
+    try:
+        return max(0, int((params or {}).get(SCHEDULED_WAIT_COUNT_KEY) or 0))
+    except (TypeError, ValueError, AttributeError):
+        return 0
 
 _FENCE_RE = re.compile(r"```agent-result\s*\n(.*?)\n```", re.DOTALL)
 

@@ -379,6 +379,106 @@ async def test_s_temporarily_cooling_pool_has_a_resume_date(repo):
     assert ctx.pool_resume_at
 
 
+def test_scheduled_wait_cap_escalates_after_three_declines():
+    from objectives.agent_result import SCHEDULED_WAIT_MAX_DECLINES
+    dev = manager()
+    verdict = wait_result().model_dump(mode="json")
+    params: dict = {}
+    for expected in range(1, SCHEDULED_WAIT_MAX_DECLINES):
+        output = dev._return_agent_verdict(
+            {"task_id": "t", "params": params}, CodingTool.TIER_B, None,
+            CodingStepResult(step={"step": "code", "status": "ok"},
+                             prompt="p", summary="wait",
+                             agent_result=dict(verdict)),
+            dict(params))
+        assert output.status == TaskStatus.WAITING
+        assert output.waiting_reason.startswith("scheduled_wait:")
+        assert output.resume_at is not None
+        params = dict(output.params)
+        assert params["scheduled_wait_count"] == expected
+    output = dev._return_agent_verdict(
+        {"task_id": "t", "params": params}, CodingTool.TIER_B, None,
+        CodingStepResult(step={"step": "code", "status": "ok"},
+                         prompt="p", summary="wait",
+                         agent_result=dict(verdict)),
+        dict(params))
+    assert output.status == TaskStatus.WAITING
+    assert output.waiting_reason.startswith("needs_owner: scheduled_wait")
+    assert output.resume_at is None
+    assert output.params["scheduled_wait_count"] == SCHEDULED_WAIT_MAX_DECLINES
+
+
+def test_scheduled_wait_declines_tolerates_non_dict_params():
+    from objectives.agent_result import scheduled_wait_declines
+    assert scheduled_wait_declines(None) == 0
+    assert scheduled_wait_declines({}) == 0
+    assert scheduled_wait_declines({"scheduled_wait_count": 2}) == 2
+    assert scheduled_wait_declines("str") == 0
+    assert scheduled_wait_declines([1]) == 0
+    assert scheduled_wait_declines(123) == 0
+
+
+def test_scheduled_wait_count_resets_on_terminal_verdict():
+    dev = manager()
+    output = dev._return_agent_verdict(
+        {"task_id": "t", "params": {"scheduled_wait_count": 2}},
+        CodingTool.TIER_B, None,
+        CodingStepResult(step={"step": "code", "status": "ok"},
+                         prompt="p", summary="declined",
+                         agent_result={"resultado": "bloqueado",
+                                       "motivo": "sin espera"}),
+        {"scheduled_wait_count": 2})
+    assert output.status == TaskStatus.FAILED
+    assert "scheduled_wait_count" not in (output.params or {})
+
+
+@run_async
+async def test_generic_agent_scheduled_wait_cap_escalates(tmp_path):
+    from objectives.agent_result import SCHEDULED_WAIT_MAX_DECLINES
+    from orchestration.generic_agent import run_generic_agent
+    from test_generic_agent_205 import generic_task, scripted_executor, tiny_catalog, wiring_with
+
+    params: dict = {}
+    for expected in range(1, SCHEDULED_WAIT_MAX_DECLINES):
+        verdict = wait_result()
+        factory, _calls = scripted_executor(
+            ExecResult(0, 1, output_tail=verdict.model_dump_json()))
+        wiring = wiring_with(tmp_path, tiny_catalog({"operations": {"enabled": True}}), factory)
+        output = await run_generic_agent(
+            "operations", generic_task(params=dict(params)), wiring)
+        assert output["status"] == "waiting"
+        assert output["resume_at"] == verdict.resume_at
+        params = dict(output["params"])
+        assert params["scheduled_wait_count"] == expected
+    verdict = wait_result()
+    factory, _calls = scripted_executor(
+        ExecResult(0, 1, output_tail=verdict.model_dump_json()))
+    wiring = wiring_with(tmp_path, tiny_catalog({"operations": {"enabled": True}}), factory)
+    output = await run_generic_agent(
+        "operations", generic_task(params=dict(params)), wiring)
+    assert output["status"] == "waiting"
+    assert "needs_owner: scheduled_wait" in output["waiting_reason"]
+    assert output.get("resume_at") is None
+    assert output["params"]["scheduled_wait_count"] == SCHEDULED_WAIT_MAX_DECLINES
+
+
+@run_async
+async def test_generic_agent_past_resume_stays_rejected(tmp_path):
+    from objectives.agent_result import AgentResult
+    from orchestration.generic_agent import run_generic_agent
+    from test_generic_agent_205 import generic_task, scripted_executor, tiny_catalog, wiring_with
+
+    stale = AgentResult(
+        resultado="bloqueado", motivo="la ventana ya paso",
+        resume_at=datetime.now(timezone.utc) - timedelta(hours=1))
+    factory, _calls = scripted_executor(
+        ExecResult(0, 1, output_tail=stale.model_dump_json()))
+    wiring = wiring_with(tmp_path, tiny_catalog({"operations": {"enabled": True}}), factory)
+    output = await run_generic_agent("operations", generic_task(), wiring)
+    assert output["status"] == "failed"
+    assert output.get("resume_at") is None
+
+
 @run_async
 async def test_s_no_change_close_preserves_review_and_creates_no_empty_commit(repo):
     from test_tier_s_final import HANDOFF_MD

@@ -51,10 +51,13 @@ from catalog import (
 )
 from objectives.agent_result import (
     AGENT_RESULT_PROMPT,
+    SCHEDULED_WAIT_COUNT_KEY,
+    SCHEDULED_WAIT_MAX_DECLINES,
     AgentOutcome,
     AgentResult,
     parse_agent_result,
     scheduled_resume,
+    scheduled_wait_declines,
 )
 from objectives import ticket_cost as cost_mod
 from orchestration.agent_sandbox import ensure_ticket_dir
@@ -712,12 +715,14 @@ async def _run_llm(
                        cost_runs=runs)
     if verdict is None:
         summary = (result.output_tail or "").strip() or "ok"
+        legacy_params = dict(run_params)
+        legacy_params.pop(SCHEDULED_WAIT_COUNT_KEY, None)
         return {
             "selected_agent": agent_name,
             "status": TaskStatus.COMPLETED.value,
             "steps": [_step("generic_agent", "ok",
                             "LLM run completed without a verdict (legacy)")],
-            "params": dict(run_params),
+            "params": legacy_params,
             "last_response_summary": summary[:500],
             "error": None,
             "result_comment": f"{agent_name}: {summary[:500]}",
@@ -729,9 +734,23 @@ async def _run_llm(
         return _failed(agent_name, run_params, "LLM run",
                        error=str(exc), verdict=verdict, cost_runs=runs)
     if resume_at is not None:
+        declines = max(scheduled_wait_declines(task.get("params")),
+                       scheduled_wait_declines(run_params)) + 1
+        waited_params = {**run_params,
+                         "agent_result": verdict.model_dump(mode="json"),
+                         SCHEDULED_WAIT_COUNT_KEY: declines}
+        if declines >= SCHEDULED_WAIT_MAX_DECLINES:
+            reason = (
+                "needs_owner: scheduled_wait declined "
+                f"{declines} times in a row: {verdict.motivo} "
+                f"(last resume_at={resume_at.isoformat()}; no re-park)")
+            out = _waiting(agent_name, reason, waited_params)
+            out.update(last_response_summary=verdict.motivo,
+                       result_comment=f"{agent_name}: {reason}")
+            out[cost_mod.COST_RUNS_KEY] = runs
+            return out
         reason = f"scheduled_wait: {verdict.motivo}"
-        out = _waiting(agent_name, reason, {
-            **run_params, "agent_result": verdict.model_dump(mode="json")})
+        out = _waiting(agent_name, reason, waited_params)
         out.update(resume_at=resume_at, last_response_summary=verdict.motivo,
                    result_comment=f"{agent_name}: {reason}; resume_at={resume_at.isoformat()}")
         out[cost_mod.COST_RUNS_KEY] = runs
@@ -739,6 +758,7 @@ async def _run_llm(
     if verdict.resultado is AgentOutcome.HECHO:
         out_params = {**run_params,
                       "agent_result": verdict.model_dump(mode="json")}
+        out_params.pop(SCHEDULED_WAIT_COUNT_KEY, None)
         return {
             "selected_agent": agent_name,
             "status": TaskStatus.COMPLETED.value,
@@ -760,6 +780,7 @@ def _failed(agent_name: str, params: dict[str, Any], where: str, *,
             cost_runs: list[dict[str, Any]] | None = None,
             ) -> dict[str, Any]:
     out_params = dict(params)
+    out_params.pop(SCHEDULED_WAIT_COUNT_KEY, None)
     if verdict is not None:
         out_params["agent_result"] = verdict.model_dump(mode="json")
     comment = (f"{agent_name}: {verdict.resultado.value}: {verdict.motivo}"
