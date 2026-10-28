@@ -103,6 +103,11 @@ class AuthorityTests(unittest.TestCase):
         self.assertFalse(is_concrete_event("comment"))
         self.assertTrue(is_concrete_event(" Direct_Message "))
 
+    def test_blank_kind_is_not_concrete(self) -> None:
+        self.assertFalse(is_concrete_event(""))
+        self.assertFalse(is_concrete_event("   "))
+        self.assertFalse(is_concrete_event(None))
+
     def test_authorities_read_from_project_config(self) -> None:
         config = {"dev": {"external_learning": {
             "authorities": ["Ada Owner", "Lead Reviewer", "Ada Owner", "  "]}}}
@@ -127,7 +132,8 @@ class AuthorityTests(unittest.TestCase):
 
 class CandidateContentTests(unittest.TestCase):
     def test_candidate_is_normative_with_link_and_no_conversation(self) -> None:
-        body = "Texto secreto de la conversacion que jamas se guarda."
+        import inspect
+
         candidate = build_external_candidate(
             channel="teams", kind="direct_message", author="Lead Reviewer",
             source_id="msg-9", rule=RULE, project=PROJECT,
@@ -136,8 +142,30 @@ class CandidateContentTests(unittest.TestCase):
         self.assertIn("teams:msg-9", candidate["content"])
         self.assertIn(RULE, candidate["content"])
         self.assertIn(ORIGIN, candidate["content"])
-        self.assertNotIn(body, candidate["content"])
         self.assertEqual(candidate["evidence"], [{"ticket": ORIGIN}])
+        params = inspect.signature(build_external_candidate).parameters
+        for forbidden in ("body", "conversation", "text", "message"):
+            self.assertNotIn(forbidden, params)
+
+    def test_frontmatter_project_matches_project_dir(self) -> None:
+        import yaml as _yaml
+
+        candidate = build_external_candidate(
+            channel="jira", kind="ticket_rejected", author="Ada Owner",
+            source_id="PROJ-123", rule=RULE, project=PROJECT,
+            target=TARGET, origin_ticket=ORIGIN)
+        head = candidate["content"].split("---\n")[1]
+        frontmatter = _yaml.safe_load(head)
+        self.assertEqual(frontmatter["type"], "practice")
+        self.assertEqual(frontmatter["project"], Path(PROJECT).name)
+
+    def test_target_outside_practices_fails_closed(self) -> None:
+        with self.assertRaises(ExternalLearningError):
+            build_external_candidate(
+                channel="jira", kind="ticket_reopened", author="Ada Owner",
+                source_id="PROJ-1", rule=RULE, project=PROJECT,
+                target=f"{PROJECT}/notes/fuera-de-practices.md",
+                origin_ticket=ORIGIN)
 
     def test_blank_rule_target_origin_and_action_fail_closed(self) -> None:
         with self.assertRaises(ExternalLearningError):
@@ -207,6 +235,23 @@ class ConfirmationQueueTests(unittest.TestCase):
                 queue_external_candidate(
                     bad, origin=ORIGIN, base_dir=Path(tmp),
                     filename="bad.yaml")
+
+    def test_queued_file_resolves_for_apply(self) -> None:
+        from orchestration import knowledge_confirm as kc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            name = candidate_filename("jira", "PROJ-123", "ticket_rejected")
+            queue_external_candidate(
+                _candidate(), origin=ORIGIN, base_dir=base, filename=name)
+            pending = kc.collect_pending_confirmations(
+                base, project_prefix=PROJECT)
+            self.assertEqual(len(pending), 1)
+            resolved = kc._queued_path(base, pending[0].origin, pending[0].name)
+            self.assertIsNotNone(resolved)
+            assert resolved is not None
+            self.assertTrue(resolved.is_file())
+            self.assertEqual(resolved.name, name)
 
 
 if __name__ == "__main__":

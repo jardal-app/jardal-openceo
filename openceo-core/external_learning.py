@@ -72,9 +72,12 @@ def _clean_kind(kind: str) -> str:
     return clean
 
 
-def is_concrete_event(kind: str) -> bool:
+def is_concrete_event(kind: str | None) -> bool:
     """Tell whether an event kind is concrete enough to teach. Pure."""
-    return _clean_kind(kind) in CONCRETE_EVENT_KINDS
+    clean = str(kind or "").strip().lower()
+    if not clean:
+        return False
+    return clean in CONCRETE_EVENT_KINDS
 
 
 def _clean_person(name: str) -> str:
@@ -161,6 +164,10 @@ def _target_inside_project(target: str, project: str) -> str | None:
     if target != prefix and not target.startswith(prefix + "/"):
         return (f"target {target!r} is outside the ticket project "
                 f"{prefix!r}")
+    rest = target[len(prefix):].lstrip("/")
+    if not rest.startswith("practices/"):
+        return (f"target {target!r} is not inside practices/ "
+                f"of its project")
     return None
 
 
@@ -172,10 +179,12 @@ def _candidate_content(
     source_id: str,
     author: str,
     origin_ticket: str,
+    project_dir: str,
 ) -> str:
     title = " ".join(rule.strip().split())[:80] or "Regla aprendida"
     return (
-        "---\ntype: practice\nproject: external-learning\n"
+        "---\ntype: practice\n"
+        f"project: {project_dir}\n"
         f"date: {date.today().isoformat()}\n---\n\n"
         f"# {title}\n\n{rule.strip()}\n\n"
         f"Fuente: {channel}:{source_id} "
@@ -203,8 +212,10 @@ def build_external_candidate(
     passes the conversation, so no conversation text can be stored. The
     evidence points at the local observing ticket; the external link
     lives in the content as ``Fuente: <channel>:<source_id>``.
+    Authority membership is checked by :func:`evaluate_external_event`;
+    this builder only requires a non-blank author.
     Raises :class:`ExternalLearningError` fail-closed on any invalid
-    input, including generic kinds and unauthorized authors.
+    input, including generic kinds.
     """
     clean_channel = _clean_channel(channel)
     clean_kind = _clean_kind(kind)
@@ -221,9 +232,11 @@ def build_external_candidate(
     if not clean_rule:
         raise ExternalLearningError("a candidate needs its derived rule")
     clean_target = str(target or "").strip()
-    problem = _target_inside_project(clean_target, project)
+    clean_prefix = str(project or "").strip().strip("/")
+    problem = _target_inside_project(clean_target, clean_prefix)
     if problem is not None:
         raise ExternalLearningError(problem)
+    project_dir = Path(clean_prefix).name
     clean_origin = str(origin_ticket or "").strip()
     if not clean_origin:
         raise ExternalLearningError("a candidate needs its origin ticket")
@@ -235,7 +248,7 @@ def build_external_candidate(
     content = _candidate_content(
         rule=clean_rule, channel=clean_channel, kind=clean_kind,
         source_id=clean_source, author=clean_author,
-        origin_ticket=clean_origin)
+        origin_ticket=clean_origin, project_dir=project_dir)
     candidate = {
         "target": clean_target,
         "action": clean_action,
