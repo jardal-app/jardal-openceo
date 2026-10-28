@@ -101,10 +101,13 @@ from .tier_s.stores import (
 )
 from objectives.agent_result import (
     AGENT_RESULT_PROMPT,
+    SCHEDULED_WAIT_COUNT_KEY,
+    SCHEDULED_WAIT_MAX_DECLINES,
     AgentResult,
     SCHEMA_PATH as AGENT_RESULT_SCHEMA_PATH,
     parse_agent_result,
     scheduled_resume,
+    scheduled_wait_declines,
 )
 from .tmux_runtime import TmuxRuntime
 from config_loader import ConfigLoader
@@ -1852,6 +1855,22 @@ class DevSessionManager:
                 status=TaskStatus.FAILED, error=f"invalid scheduled wait: {exc}",
                 params=params, coding_tool=tool)
         if resume_at is not None:
+            declines = max(scheduled_wait_declines(task.get("params")),
+                           scheduled_wait_declines(params_base)) + 1
+            params[SCHEDULED_WAIT_COUNT_KEY] = declines
+            if declines >= SCHEDULED_WAIT_MAX_DECLINES:
+                if branch is not None:
+                    self._save_simple_checkpoint(branch, params)
+                reason = (
+                    "needs_owner: scheduled_wait declined "
+                    f"{declines} times in a row: {verdict['motivo']} "
+                    f"(last resume_at={resume_at.isoformat()}; no re-park)")
+                return DevExecutionOutput(
+                    status=TaskStatus.WAITING, coding_tool=tool,
+                    waiting_reason=reason, params=params,
+                    last_response_summary=reason,
+                    steps=[code_result.step, self._step("scheduled_wait", "waiting", reason)],
+                    cost_runs=([code_result.cost_run] if code_result.cost_run else []))
             if branch is not None:
                 self._save_simple_checkpoint(branch, params)
             reason = f"scheduled_wait: {verdict['motivo']}"
@@ -1880,6 +1899,7 @@ class DevSessionManager:
             params = dict(task.get("params") or {}) \
                 if isinstance(task.get("params"), dict) else {}
         params["agent_result"] = verdict
+        params.pop(SCHEDULED_WAIT_COUNT_KEY, None)
         if code_result.executor_link:
             params["executor_link"] = code_result.executor_link
         return DevExecutionOutput(
