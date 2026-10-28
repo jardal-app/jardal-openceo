@@ -60,6 +60,7 @@ from catalog import (
 )
 from orchestration.agent_sandbox import plan_agent, ticket_dir
 from orchestration.role_muse import badge_ticket_for_task
+from orchestration.skill_metrics import is_full_rewrite
 from research.runtimes.base import IsolationUnavailable
 
 logger = logging.getLogger(__name__)
@@ -115,7 +116,8 @@ lowercase letters/digits/`-`) and a one-line `description`, then the recipe; add
 `scripts/` only where exactness or safe repetition is needed (every script ships \
 its `test_<stem>.py` next to it), `references/` for stable context, and \
 `workflow.yaml` for the exact part. If a skill already covers it, write the \
-improved full skill dir under `{DRAFTS_DIRNAME}/<same-name>/` instead; two drafts \
+improved skill dir with small evidenced changes under `{DRAFTS_DIRNAME}/<same-name>/` \
+instead (never a full rewrite); two drafts \
 of the same thing fuse into one. Never write outside `{DRAFTS_DIRNAME}/` for this: \
 the orchestrator promotes drafts to skills — everything new enters as a draft \
 (`borrador`), and a draft becomes a skill (`activa`) only when another ticket \
@@ -689,6 +691,18 @@ def _apply_draft(config: SaveStepConfig, outcome: SaveOutcome,
         for key in ("external", "origin", "source"):
             if key in stored_header:
                 carried[key] = stored_header[key]
+    if existing is not None and existing.status == "activa":
+        try:
+            old_text = (target / "SKILL.md").read_text(encoding="utf-8")
+            new_text = (draft.source / "SKILL.md").read_text(
+                encoding="utf-8")
+        except OSError:
+            old_text = new_text = ""
+        if old_text and new_text and is_full_rewrite(old_text, new_text):
+            outcome.discarded[draft.name] = (
+                "full rewrite rejected: edit the active skill in small "
+                "evidenced changes instead (D9)")
+            return
     blocked_hold = False
     demoted_hold = False
     if existing is None:
