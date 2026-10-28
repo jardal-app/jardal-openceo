@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Protocol
 
 __all__ = [
+    "IRREVERSIBLE_OPERATION_PREFIXES",
     "MESSAGE_OPERATIONS",
     "DelegatedClient",
     "DelegationError",
@@ -36,6 +37,7 @@ __all__ = [
     "execute_delegated_action",
     "grant_delegation",
     "is_delegated",
+    "is_irreversible_operation",
     "is_message_operation",
     "list_delegations",
     "reset_delegated_clients",
@@ -45,12 +47,30 @@ __all__ = [
 
 #: Operations that count as a message on behalf of the Owner through
 #: the delegated path (D12): they always confirm, even when their
-#: channel and project hold a delegation.
+#: channel and project hold a delegation. Comments and replies in
+#: Jira/Autotask address third parties, so they are messages too.
 MESSAGE_OPERATIONS: tuple[str, ...] = (
     "send",
     "send_message",
     "post_message",
     "post",
+    "add_comment",
+    "comment",
+    "create_comment",
+    "post_comment",
+    "reply",
+    "add_reply",
+    "add_note",
+)
+
+#: Destructive prefixes: an operation starting with one of these is
+#: irreversible (D12, ticket clause 3) and always confirms, even when
+#: its channel and project hold a delegation.
+IRREVERSIBLE_OPERATION_PREFIXES: tuple[str, ...] = (
+    "delete_",
+    "destroy_",
+    "purge_",
+    "drop_",
 )
 
 
@@ -203,6 +223,13 @@ def reset_delegated_clients() -> None:
 def is_message_operation(operation: str) -> bool:
     """Tell whether an operation is a message on behalf of the Owner. Pure."""
     return _clean_operation(operation) in MESSAGE_OPERATIONS
+
+
+def is_irreversible_operation(operation: str) -> bool:
+    """Tell whether an operation is destructive (always confirms). Pure."""
+    clean = _clean_operation(operation)
+    return clean in ("delete", "destroy", "purge", "drop") or clean.startswith(
+        IRREVERSIBLE_OPERATION_PREFIXES)
 
 
 def delegated_action(

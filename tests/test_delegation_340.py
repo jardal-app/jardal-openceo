@@ -19,6 +19,8 @@ from delegation import (  # noqa: E402
     delegation_record,
     grant_delegation,
     is_delegated,
+    is_irreversible_operation,
+    is_message_operation,
     list_delegations,
     reset_delegated_clients,
     reset_delegations,
@@ -118,6 +120,52 @@ class CheckTests(unittest.TestCase):
         self.assertFalse(decision["delegated"])
         self.assertIn("jira", str(decision["human_action"]))
         self.assertIn("jardal-openceo", str(decision["human_action"]))
+
+    def test_comment_counts_as_message(self) -> None:
+        for operation in ("add_comment", "comment", "create_comment",
+                          "post_comment", "reply", "add_reply", "add_note"):
+            with self.subTest(operation=operation):
+                self.assertTrue(is_message_operation(operation))
+        for operation in ("transition_issue", "close_issue", "delete_issue"):
+            with self.subTest(operation=operation):
+                self.assertFalse(is_message_operation(operation))
+
+    def test_destructive_counts_as_irreversible(self) -> None:
+        for operation in ("delete_issue", "delete_project", "purge_tickets",
+                          "destroy", "drop_table"):
+            with self.subTest(operation=operation):
+                self.assertTrue(is_irreversible_operation(operation))
+        for operation in ("transition_issue", "close_issue", "send",
+                          "add_comment", "get_issue"):
+            with self.subTest(operation=operation):
+                self.assertFalse(is_irreversible_operation(operation))
+
+    def test_comment_escalates_despite_grant(self) -> None:
+        grant_delegation(
+            project="jardal-openceo", category="jira", evidence="owner-note-1")
+        decision = check_delegated_action(
+            project="jardal-openceo", category="jira",
+            operation="add_comment")
+        self.assertTrue(decision["escalate"])
+        self.assertFalse(decision["delegated"])
+
+    def test_irreversible_escalates_despite_grant(self) -> None:
+        grant_delegation(
+            project="jardal-openceo", category="jira", evidence="owner-note-1")
+        decision = check_delegated_action(
+            project="jardal-openceo", category="jira",
+            operation="delete_issue")
+        self.assertTrue(decision["escalate"])
+        self.assertFalse(decision["delegated"])
+
+    def test_delegated_write_still_runs(self) -> None:
+        grant_delegation(
+            project="jardal-openceo", category="jira", evidence="owner-note-1")
+        decision = check_delegated_action(
+            project="jardal-openceo", category="jira",
+            operation="transition_issue")
+        self.assertFalse(decision["escalate"])
+        self.assertTrue(decision["delegated"])
 
 
 class FingerprintTests(unittest.TestCase):
@@ -366,6 +414,28 @@ class DelegatedFlowTests(unittest.IsolatedAsyncioTestCase):
         result = await service.tool_delegated_external(
             channel="teams", operation="send", target="canal-general",
             detail="Hola.", project="jardal-openceo")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "pending_approval")
+        self.assertEqual(client.executed, [])
+
+    async def test_comment_operation_asks_despite_delegation(self) -> None:
+        client = SimulatedDelegatedClient()
+        configure_delegated_client("jira", client)
+        grant_delegation(
+            project="jardal-openceo", category="jira", evidence="owner-note-1")
+        service = _ext_service(_ExtRepo())
+        result = await self._request(service, operation="add_comment")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "pending_approval")
+        self.assertEqual(client.executed, [])
+
+    async def test_irreversible_operation_asks_despite_delegation(self) -> None:
+        client = SimulatedDelegatedClient()
+        configure_delegated_client("jira", client)
+        grant_delegation(
+            project="jardal-openceo", category="jira", evidence="owner-note-1")
+        service = _ext_service(_ExtRepo())
+        result = await self._request(service, operation="delete_issue")
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "pending_approval")
         self.assertEqual(client.executed, [])

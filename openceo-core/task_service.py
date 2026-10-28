@@ -5502,8 +5502,9 @@ class TaskService:
         D12: anything outside a delegation confirms through a ``lock``
         question; a stored Owner grant for the (project, channel)
         pair executes at once without asking. Messages on behalf of
-        the Owner always confirm — even with a delegation — and read
-        operations are refused here (they need no confirmation).
+        the Owner and irreversible actions always confirm — even with
+        a delegation — and read operations are refused here (they
+        need no confirmation).
         Approvals execute the stored params exactly once; re-runs
         replay its outcome. No precedent ever grants a delegation.
         """
@@ -5567,9 +5568,23 @@ class TaskService:
                     f"{action['target']} "
                     "(los mensajes siempre confirman)."),
             }
+        elif delegation_mod.is_irreversible_operation(action["operation"]):
+            decision = {
+                "escalate": True,
+                "delegated": False,
+                "category": clean_channel,
+                "project": project_name,
+                "reason": "irreversible actions always confirm",
+                "human_action": (
+                    f"Autoriza la accion irreversible "
+                    f"{action['operation']} por {clean_channel} en "
+                    f"{action['target']} "
+                    "(las irreversibles siempre confirman)."),
+            }
         else:
             decision = check_delegated_action(
-                project=project_name, category=clean_channel)
+                project=project_name, category=clean_channel,
+                operation=action["operation"])
         if not decision.get("escalate"):
             try:
                 outcome = await asyncio.to_thread(

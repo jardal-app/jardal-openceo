@@ -352,18 +352,37 @@ def check_delegated_action(
     *,
     project: str,
     category: str,
+    operation: str = "",
 ) -> dict[str, Any]:
-    """Decide whether a non-message external action needs the Owner. Pure.
+    """Decide whether an external action needs the Owner. Pure.
 
     A stored Owner grant for the (project, category) pair runs without
     asking; anything else escalates with the exact human action. The
     grant itself is recorded by ``delegation.grant_delegation`` with
     its evidence — this check only reads it, so no learning path can
-    widen a delegation through here. Message tools never call this:
-    they always escalate on their own path.
+    widen a delegation through here. Messages on behalf of the Owner
+    and irreversible operations always escalate, even with a grant.
     """
     clean_category = str(category or "").strip().lower()
     clean_project = str(project or "").strip()
+    clean_operation = str(operation or "").strip().lower()
+    if clean_operation and (
+            delegation_mod.is_message_operation(clean_operation)
+            or delegation_mod.is_irreversible_operation(clean_operation)):
+        return {
+            "escalate": True,
+            "delegated": False,
+            "category": clean_category or "external",
+            "project": clean_project,
+            "reason": (
+                "messages on behalf of the owner and irreversible "
+                "actions always confirm"),
+            "human_action": (
+                f"Autoriza la accion {clean_operation} de "
+                f"{clean_category or 'external'} "
+                f"en {clean_project or 'este proyecto'} "
+                "(siempre confirma)."),
+        }
     if delegation_mod.is_delegated(
             project=clean_project, category=clean_category):
         return {
