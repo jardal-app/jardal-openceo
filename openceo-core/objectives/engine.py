@@ -1157,7 +1157,8 @@ def _planner_prompt(
         'capability_gap",',
         '  "state_summary": "<what is resolved and what is next>",',
         '  "information_gaps": [{"gap": "...", "materiality": '
-        '"low|medium|high|critical", "resolution": "..."}],',
+        '"low|medium|high|critical", "resolution": "..."}], '
+        '(materiality is exactly one of the four, e.g. "high"),',
         '  "tickets": [ <1-3, ONLY when active> {',
         '    "local_ref": "<unique short key>", "title": "...",',
         '    "target_agent": "<enabled agent>", "work_type": '
@@ -1887,8 +1888,11 @@ def _pedido_prompt(
         "{",
         '  "objective_status": "active | capability_gap",',
         '  "state_summary": "<the decision in one line>",',
-        '  "information_gaps": [{...}] (capability_gap only: why it '
-        'outgrows one ticket),',
+        '  "information_gaps": [{"gap": "<what is unknown>", '
+        '"materiality": "low|medium|high|critical", "resolution": '
+        '"<how to resolve it>"}] (capability_gap only: why it '
+        'outgrows one ticket; materiality is exactly one of low, '
+        'medium, high, critical, e.g. "high"),',
         '  "tickets": [ <exactly one, ONLY when active> {',
         '    "local_ref": "pedido-1", "title": "...",',
         '    "target_agent": "<enabled agent>", "work_type": "...",',
@@ -2079,6 +2083,7 @@ async def _plan_pedido_inner(
     result: planner_mod.PlannerResult | None = None
     result_path = scratch / PLANNER_RESULT_FILE
     base_prompt = prompt
+    last_invalid_text = ""
     for _attempt in range(2):
         try:
             result_path.unlink()
@@ -2091,6 +2096,7 @@ async def _plan_pedido_inner(
         elif not text:
             errors = [f"no {PLANNER_RESULT_FILE}"]
         else:
+            last_invalid_text = text
             try:
                 candidate = planner_mod.parse_planner_result(text)
             except ValueError as exc:
@@ -2124,6 +2130,13 @@ async def _plan_pedido_inner(
     if errors or result is None:
         params = dict(ticket.get("params") or {})
         params["planner_attempts"] = int(params.get("planner_attempts") or 0) + 1
+        if last_invalid_text.strip():
+            params["planner_last_invalid"] = last_invalid_text[:2000]
+            try:
+                result_path.parent.mkdir(parents=True, exist_ok=True)
+                result_path.write_text(last_invalid_text, encoding="utf-8")
+            except OSError:
+                pass
         await env.patch_task(task_id, {"params": params})
         return {"ok": False, "reason": "planner_error",
                 "detail": f"invalid {PLANNER_RESULT_FILE} after retry: "
@@ -2144,6 +2157,7 @@ async def _plan_pedido_inner(
     params["decided_by"] = "planner"
     params["planner_policy_sha"] = planner_mod.policy_fingerprint(policy_text)
     params.pop("planner_attempts", None)
+    params.pop("planner_last_invalid", None)
     params.pop("agent_result", None)
     if return_from is not None:
         params["returns_from"] = task_id
