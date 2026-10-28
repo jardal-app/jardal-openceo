@@ -4,7 +4,8 @@ D10/D11: when Dev proposes, or the CEO reviews, OpenCEO recalls up to
 :data:`MAX_RECALL` similar past cases from the same project (Dev) or
 the same scope (CEO), failures and correct abstentions included.
 Recalled cases are information, never a threshold: nothing here
-passes, blocks or scores a proposal; callers present the lines from
+passes, blocks or gates a proposal (the overlap score only orders
+candidates); callers present the lines from
 :func:`format_recall_lines` verbatim.
 
 D11 rules enforced in code, not in prose:
@@ -65,7 +66,7 @@ NO_CAUSALITY_NOTE = (
     "after a decision is not evidence that the decision caused it."
 )
 
-_WORD = re.compile(r"[a-z0-9áéíóúñü]+", re.IGNORECASE)
+_WORD = re.compile(r"[a-z0-9à-öø-ÿ]+", re.IGNORECASE)
 
 
 def _words(text: Any) -> set[str]:
@@ -220,9 +221,13 @@ def format_recall_lines(cases: Sequence[Mapping[str, Any]]) -> list[str]:
     ]
     for entry in cases or []:
         outcome = entry.get("outcome")
-        lines.append(
+        line = (
             f"- {entry.get('precedent_id')}: "
             f"{entry.get('proposal_summary')} -> "
             f"{entry.get('response')} / {outcome}"
         )
+        note = str(entry.get("response_note") or "").strip()
+        if note:
+            line += f" (note: {note})"
+        lines.append(line)
     return lines
