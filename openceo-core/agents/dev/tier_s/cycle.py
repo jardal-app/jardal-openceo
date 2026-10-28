@@ -161,6 +161,7 @@ class _Ctx:
     provider_parks: int = 0
     parked_outcome: CycleOutcome | None = None
     pool_resume_at: str | None = None
+    vault_index: str = ""
 
 
 def _utcnow_iso() -> str:
@@ -460,6 +461,7 @@ class TierSCycle:
                         **dict(cycle_cfg.get("review", {}) or {})},
             inbox_rule=dict(cycle_cfg.get("inbox_rule", {}) or {}),
             fix_tiers=dict(cycle_cfg.get("fix_tiers", {}) or {}),
+            vault_index=str(cycle_cfg.get("vault_index", "") or ""),
         )
         if resume is not None:
             self._restore_checkpoint(ctx, resume)
@@ -2467,6 +2469,11 @@ class TierSCycle:
             "Decide open questions yourself and record them in DECISIONS; only "
             "use [OWNER] when the ticket explicitly marks a decision so."
         )
+        vault_index = getattr(ctx, "vault_index", "")
+        if vault_index:
+            body += ("\n" + vault_index + "\nRead the pertinent notes "
+                     "before planning: they are in the read-only project "
+                     "folder, on demand.")
         return knowledge_mod.with_preamble(body, ctx.repo, "en")
 
     def _plan_review_prompt(self, ctx: _Ctx, plan: Plan) -> str:
@@ -2513,4 +2520,9 @@ class TierSCycle:
             f"Previous checkpoint (recheck; never repeat confirmed effects):\n{TierSCycle._read_artifact(ctx, 'WAIT.md')}\n"
             + AGENT_RESULT_PROMPT
         )
+        vault_index = getattr(ctx, "vault_index", "")
+        if vault_index:
+            body += ("\n" + vault_index + "\nRead the pertinent notes "
+                     "before implementing: they are in the read-only project "
+                     "folder, on demand.")
         return knowledge_mod.with_preamble(body, ctx.repo, "en")

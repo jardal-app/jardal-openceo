@@ -9,6 +9,7 @@ card:
   delivers:
     - branch changes in the ticket worktree
     - hecho / bloqueado / no_aplica verdict with reason
+    - pertinent project-vault notes read on demand (from the prompt index) before planning
   never:
     - decide business work
     - change ticket states
