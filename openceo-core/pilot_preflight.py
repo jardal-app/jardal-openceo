@@ -46,9 +46,8 @@ _OUT_OF_BOX_TOOL = "openceo_send_email"
 
 #: Credentials the pilot needs. Presence only: values never surface.
 REQUIRED_CREDENTIALS = (
-    "ERPNEXT_URL",
-    "ERPNEXT_API_KEY",
-    "ERPNEXT_API_SECRET",
+    "JARDAL_ERP_URL",
+    "JARDAL_ERP_SERVICE_TOKEN",
     "CLOUDFLARE_API_TOKEN",
     "MONGODB_URL",
 )

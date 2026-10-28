@@ -100,10 +100,10 @@ Si dices una frase entrecortada o confusa por ruido ambiente:
 
 ---
 
-## 6b. Registro de gastos por voz (Finanzas → ERPNext)
+## 6b. Registro de gastos por voz (Finanzas → Jardal ERP)
 
 Hablas con el **CEO** y el CEO deriva a **Finanzas** (no necesitas `@finance`;
-queda como atajo). Cada gasto se registra directo en ERPNext como asiento
+queda como atajo). Cada gasto se registra directo en Jardal ERP como asiento
 idempotente: **ningún gasto crea un ticket** y puedes apagar la app después.
 
 | Di por voz | Qué se registra |

@@ -37,7 +37,7 @@ local.properties
 !**/.env.example
 !**/.env.finance.local.example
 !**/.env.free-router.local.example
-# Credenciales del desk de ERPNext que el dueño dejó en la raíz para los agentes.
+# Credenciales del desk de Jardal ERP que el dueño dejó en la raíz para los agentes.
 user_pass.md
 
 # Certificates / keys
@@ -52,7 +52,7 @@ acme.json
 *.log
 tmp/
 
-# Trabajo temporal por ticket (no versionar: se destila a ERPNext/vault y se retira)
+# Trabajo temporal por ticket (no versionar: se destila a Jardal ERP/vault y se retira)
 docs/work/
 docs/reviews/
 

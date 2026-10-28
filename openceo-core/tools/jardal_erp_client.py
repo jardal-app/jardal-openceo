@@ -134,8 +134,8 @@ class JardalERPClient:
         self._api_key = (settings.ERPNEXT_API_KEY or "").strip()
         self._api_secret = (settings.ERPNEXT_API_SECRET or "").strip()
         self._timeout = httpx.Timeout(
-            float(settings.ERPNEXT_TIMEOUT_SECONDS or _DEFAULT_TIMEOUT_SECONDS),
-            connect=float(settings.ERPNEXT_CONNECT_TIMEOUT_SECONDS or _DEFAULT_CONNECT_TIMEOUT_SECONDS),
+            float(settings.JARDAL_ERP_TIMEOUT_SECONDS or _DEFAULT_TIMEOUT_SECONDS),
+            connect=float(settings.JARDAL_ERP_CONNECT_TIMEOUT_SECONDS or _DEFAULT_CONNECT_TIMEOUT_SECONDS),
         )
         self._http: httpx.AsyncClient | None = None
 
@@ -454,15 +454,3 @@ class JardalERPClient:
             parts.append(f"HTTP {response.status_code}")
         joined = " - ".join(parts)
         return f"Error de Jardal ERP ({response.status_code}): {joined[:600]}"
-
-
-#: Aliases depreciados (TASK-2026-00318, una version). Importar desde
-#: `tools.jardal_erp_client` con los nombres `JardalERP*`.
-ERPNextError = JardalERPError
-ERPNextUnavailable = JardalERPUnavailable
-ERPNextValidationError = JardalERPValidationError
-ERPNextPermissionError = JardalERPPermissionError
-ERPNextDuplicateError = JardalERPDuplicateError
-ERPNextDependencyBlockedError = JardalERPDependencyBlockedError
-ERPNextDateBoundError = JardalERPDateBoundError
-ERPNextClient = JardalERPClient

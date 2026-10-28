@@ -515,10 +515,7 @@ class MongoRepository:
         return await self.get_task(doc["task_id"])
 
     async def assert_business_authority(self, provider: str) -> None:
-        if provider == "erpnext":
-            mismatch = {"params._mirrors.business.provider": {"$exists": True, "$ne": "erpnext"}}
-        else:
-            mismatch = {"params._mirrors.business.provider": {"$exists": True, "$ne": provider}}
+        mismatch = {"params._mirrors.business.provider": {"$exists": True, "$ne": provider}}
         row = await self.tasks.find_one({**mismatch, **mirror_exclusion_filter()}, {"_id": 1})
         if row:
             raise RuntimeError("Business authority mismatch: complete and verify the directed link migration before startup.")

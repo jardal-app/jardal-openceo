@@ -252,9 +252,8 @@ class DefaultPortTests(unittest.TestCase):
 
 class CredentialsTests(unittest.TestCase):
     _FULL = {
-        "ERPNEXT_URL": "https://erp.example",
-        "ERPNEXT_API_KEY": "k",
-        "ERPNEXT_API_SECRET": "s",
+        "JARDAL_ERP_URL": "https://erp.example",
+        "JARDAL_ERP_SERVICE_TOKEN": "s",
         "CLOUDFLARE_API_TOKEN": "t",
         "MONGODB_URL": "mongodb://x",
     }
@@ -269,11 +268,11 @@ class CredentialsTests(unittest.TestCase):
     def test_missing_named_exact(self) -> None:
         dotenv = dict(self._FULL)
         del dotenv["CLOUDFLARE_API_TOKEN"]
-        dotenv["ERPNEXT_API_SECRET"] = "  "
+        dotenv["JARDAL_ERP_SERVICE_TOKEN"] = "  "
         check = check_credentials(dotenv=dotenv)
         self.assertFalse(check.ok)
         self.assertIn("CLOUDFLARE_API_TOKEN", check.detail)
-        self.assertIn("ERPNEXT_API_SECRET", check.detail)
+        self.assertIn("JARDAL_ERP_SERVICE_TOKEN", check.detail)
 
     def test_values_never_surface(self) -> None:
         dotenv = {name: f"sentinel-{name.lower()}-234-xyz"

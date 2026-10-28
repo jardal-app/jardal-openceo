@@ -1,8 +1,8 @@
 # Business provider v1
 
-TASK-2026-00260 introduces the HTTP business boundary without changing production authority. ERPNext remains the default provider. Finance, identity, approval events and personal persistence are separate domain consumers; declaring their ports does not implement their integrations.
+TASK-2026-00260 introduces the HTTP business boundary without changing production authority. Since TASK-2026-00267 the default and only provider is `jardal_erp`. Finance, identity, approval events and personal persistence are separate domain consumers; declaring their ports does not implement their integrations.
 
-`business.provider.build_business_work` binds `BusinessWork` to either the existing ERPNext adapter or `business.work.JardalERPWork`. `business.errors` owns error types; ERPNext exports compatibility aliases. MCP capability names and TASK references remain unchanged. No failure selects another provider or creates an execution that may run without its business registration.
+`business.provider.build_business_work` binds `BusinessWork` to `business.work.JardalERPWork` (manifest required); any other `BUSINESS_PROVIDER` value is rejected. `business.errors` owns error types. MCP capability names and TASK references remain unchanged. No failure selects another provider or creates an execution that may run without its business registration.
 
 ## Wire and compatibility
 
@@ -14,19 +14,19 @@ Transient transport/5xx failures retry the identical command and key. Access and
 
 Transitions carry reason, evidence or the exact human action, plus expected version. Automatic status propagation may reread after an unrelated version change; a changed business state is not overwritten. An unresolved conflict retains the pending intention. Dependencies and open children prevent completion. Execution status and business status retain separate vocabularies.
 
-ISO timestamps are converted to the existing visibility consumer's site time format. Active/closed work projects actual starts, and closed work projects actual ends; original planned timestamps remain separate. Unknown actual dates remain null; the ERPNext repair path does not synthesize facts or overwrite plans for Jardal work. Group rollups compare and write planned spans explicitly, while history uses actual dates. Group progress supports two decimal places. Core retains rollup authority until TASK-2026-00262 verifies the ERP calculation and switches that consumer.
+ISO timestamps are converted to the existing visibility consumer's site time format. Active/closed work projects actual starts, and closed work projects actual ends; original planned timestamps remain separate. Unknown actual dates remain null; readers never synthesize facts or overwrite plans from legacy mirrors. Group rollups compare and write planned spans explicitly, while history uses actual dates. Group progress supports two decimal places. Core retains rollup authority until TASK-2026-00262 verifies the ERP calculation and switches that consumer.
 
 Comments and private attachments use closed operations, version checks and idempotency. Only the author may edit/delete a comment. Binary reads remain authenticated; attachment creation validates names, size and content. ERP stores blobs under its private `FILE_STORAGE_ROOT`; backing up SQL alone cannot recover attachments.
 
 ## Link migration and activation
 
-New writes set `params._mirrors.business` with provider, TASK/source reference and business UUID. ERPNext writes also retain its legacy mirror for compatibility. Explicit readers in the dispatcher, objective/mission engine, CEO, Horizon, reporting and MCP badges prefer the canonical link and read legacy links only when necessary. Mongo lookup never matches an obsolete legacy TASK when a canonical link exists.
+New writes set `params._mirrors.business` with provider, TASK/source reference and business UUID. Adapters still reporting the retired `erpnext` provider value keep their legacy-mirror duplicate write (frozen compat, pinned by tests); nothing in production reports it since the cutover. Explicit readers in the dispatcher, objective/mission engine, CEO, Horizon, reporting and MCP badges prefer the canonical link and read legacy links only when necessary. Mongo lookup never matches an obsolete legacy TASK when a canonical link exists.
 
 `business.migration.backfill_business_links(repo, adapter, task_ids)` accepts an explicit bounded list. It verifies source ref, unchanged TASK, project and execution identity, writes the canonical link, rereads each write and preserves the old mirror. It rejects personal records; it never invents business tickets or discovers records by sweeping.
 
 Selecting `BUSINESS_PROVIDER=jardal_erp` requires `JARDAL_ERP_URL`, `JARDAL_ERP_SERVICE_TOKEN`, `JARDAL_ERP_WORKSPACE_ID` and a `BUSINESS_AUTHORITY_FILE`. The private authority manifest must identify schema v1, provider, workspace, origin, Mongo execution database and state `ready`. TASK-2026-00266 must produce it only after migration, reconciliation and recovery gates; the contract smoke does not create one. Startup additionally refuses inconsistent Mongo business links before starting recovery, workers or schedulers.
 
-After activation, the ERPNext webhook rejects even a valid legacy secret. The service callback also checks event source before lookup, runtime mutation or visibility enqueueing. ERPNext remains operational until the actual domain cutover; its code and credentials are not removed by this change.
+The legacy `/api/integrations/erpnext/task` alias and its secret were removed in TASK-2026-00267 after zero post-cutover traffic was demonstrated in the service log. The service callback also checks event source before lookup, runtime mutation or visibility enqueueing.
 
 ## Verification
 

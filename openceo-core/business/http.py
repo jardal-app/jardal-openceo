@@ -34,7 +34,7 @@ class JardalERPClient:
         self.workspace_id = str(settings.JARDAL_ERP_WORKSPACE_ID)
         self._http = httpx.AsyncClient(
             transport=transport,
-            timeout=httpx.Timeout(float(settings.ERPNEXT_TIMEOUT_SECONDS), connect=float(settings.ERPNEXT_CONNECT_TIMEOUT_SECONDS)),
+            timeout=httpx.Timeout(float(settings.JARDAL_ERP_TIMEOUT_SECONDS), connect=float(settings.JARDAL_ERP_CONNECT_TIMEOUT_SECONDS)),
             follow_redirects=False,
         )
 

@@ -9,7 +9,7 @@
 
 - Es la referencia para todo cambio en la memoria y el aprendizaje de los agentes. Complementa `docs/ARCHITECTURE_REFERENCE_2026.md`, la sección «Vault y mantenimiento del conocimiento» de `jardal-knowledge/README.md`, el skill `llm-vault-links` (`jardal-knowledge/.agents/skills/llm-vault-links/SKILL.md`) y —fuera de estas fases— el documento del ERP (D14, etapa 5). No modifica los ADR aprobados del ERP.
 - Lo que este documento describe como existente procede de esa documentación y **no está auditado en código**. Antes de crear tickets de implementación se verifica contra el código y los tests (paso 1.1).
-- No es un backlog. Los tickets se registran en ERPNext y citan la decisión que implementan (D1–D14).
+- No es un backlog. Los tickets se registran en Jardal ERP y citan la decisión que implementan (D1–D14).
 - Una decisión solo cambia con una decisión nueva del Owner, basada en un problema observado o en una medición.
 
 ## 1. Objetivo
@@ -63,7 +63,7 @@ La columna «Origen» indica la sección o el ticket de la documentación de ref
 | Handoff entre tickets | Solo desde los predecesores directos | Cubierto por los precedentes | 00211 |
 | Memoria automática de Claude Code | Activada por defecto en sesiones locales; estado real desconocido | Comprobar, migrar y desactivar (D5) | Documentación de Claude Code |
 | Sección «Engineering Knowledge and Code Context» | Alineada con el skill (paso 1.3, TASK-2026-00324) | — | `docs/ARCHITECTURE_REFERENCE_2026.md` |
-| Insignias de agente | Se atan al nombre del ticket en ERPNext | Aceptar referencias externas si se ejecutan tickets de Jira o Autotask en autónomo (D13) | 00214 |
+| Insignias de agente | Se atan al nombre del ticket en Jardal ERP | Aceptar referencias externas si se ejecutan tickets de Jira o Autotask en autónomo (D13) | 00214 |
 
 ## 5. Decisiones
 
@@ -172,7 +172,7 @@ content: |
 **D10. Precedentes.** OpenCEO enlaza la propuesta del agente, la respuesta del Owner (aprobó, editó con un cambio concreto o rechazó) y el resultado observado.
 
 - Reutiliza lo que ya registra: preguntas al Owner, revisiones del CEO y resultados de tickets.
-- Mongo guarda referencias y resúmenes fechados; la autoridad sigue en ERPNext, Jira o Autotask.
+- Mongo guarda referencias y resúmenes fechados; la autoridad sigue en Jardal ERP, Jira o Autotask.
 - «Verificado» se refiere al resultado, no al acierto: se recuperan aciertos, fracasos y abstenciones correctas.
 - Un resultado inconcluso queda en `null` y no cuenta como evidencia.
 - Al proponer se recuperan hasta 3 casos parecidos del mismo proyecto (Dev) o del mismo ámbito (CEO), como información y no como umbral.
@@ -223,7 +223,7 @@ content: |
 
 ## 7. Plan de implementación
 
-Las fases no bloquean el desarrollo comercial de Jardal ERP. Cada paso se registra como ticket en ERPNext con sus dependencias, criterios de aceptación y pruebas.
+Las fases no bloquean el desarrollo comercial de Jardal ERP. Cada paso se registra como ticket en Jardal ERP con sus dependencias, criterios de aceptación y pruebas.
 
 ### Fase 1 — Alinear lo que existe
 

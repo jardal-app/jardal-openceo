@@ -101,7 +101,7 @@ class FakeClient:
 
 
 def make_adapter(client):
-    settings = SimpleNamespace(ERPNEXT_TICKETS_PROJECT_COMPANY="Jardal")
+    settings = SimpleNamespace(JARDAL_ERP_TICKETS_PROJECT_COMPANY="Jardal")
     return JardalERPTicketAdapter(settings, client=client)  # type: ignore[arg-type]
 
 
@@ -250,7 +250,7 @@ def make_service(adapter=None, repo=None, *, queue=True):
     service._settings = SimpleNamespace(
         TASK_AUTORUN=False,
         HORIZON_PERSONAL_MIRROR_ENABLED=False,
-        ERPNEXT_SITE_TIMEZONE="America/Caracas",
+        JARDAL_ERP_SITE_TIMEZONE="America/Caracas",
     )
     service._business = adapter
     service._repo = repo

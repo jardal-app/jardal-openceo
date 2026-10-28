@@ -42,5 +42,5 @@ target = 10%; deterministic `Decimal` arithmetic.
 
 ## Errors
 
-- ERPNext unreachable: report it, never invent figures.
+- Jardal ERP unreachable: report it, never invent figures.
 - MCP failures: report which tool failed and its error.

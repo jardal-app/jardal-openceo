@@ -50,6 +50,7 @@ _DENIED_ENV_PREFIXES = (
     "DEEPSEEK_",
     "ERPNEXT_",
     "GROQ_",
+    "JARDAL_ERP_",
     "JWT_",
     "MCP_",
     "MONGODB_",

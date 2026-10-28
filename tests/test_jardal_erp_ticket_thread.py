@@ -126,11 +126,11 @@ class RecordingClient:
 
 def make_adapter(client: RecordingClient, *, root: str, max_bytes: int = 1024) -> JardalERPTicketAdapter:
     settings = SimpleNamespace(
-        ERPNEXT_TICKETS_PROJECT_COMPANY="Jardal",
+        JARDAL_ERP_TICKETS_PROJECT_COMPANY="Jardal",
         ERPNEXT_URL="https://erp.test",
         ERPNEXT_USER=API_USER,
-        ERPNEXT_ATTACHMENT_ALLOWED_ROOTS=root,
-        ERPNEXT_ATTACHMENT_MAX_BYTES=max_bytes,
+        JARDAL_ERP_ATTACHMENT_ALLOWED_ROOTS=root,
+        JARDAL_ERP_ATTACHMENT_MAX_BYTES=max_bytes,
     )
     return JardalERPTicketAdapter(settings, client=client)  # type: ignore[arg-type]
 
@@ -881,7 +881,7 @@ NEW_TOOLS = (
 class McpSurfaceTests(unittest.TestCase):
     def _register(self, adapter):
         server = FakeMCPServer()
-        settings = SimpleNamespace(ERPNEXT_ATTACHMENT_ALLOWED_ROOTS="/tmp", ERPNEXT_ATTACHMENT_MAX_BYTES=1024)
+        settings = SimpleNamespace(JARDAL_ERP_ATTACHMENT_ALLOWED_ROOTS="/tmp", JARDAL_ERP_ATTACHMENT_MAX_BYTES=1024)
         names = mcp_server._register_openceo_tools(server, settings, None, adapter)
         return server, names
 

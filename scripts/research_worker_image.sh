@@ -6,7 +6,7 @@
 #   2. Crea la red dedicada del worker (no la del host) con una subred conocida.
 #   3. Imprime la regla de UFW que hay que anadir para que el worker alcance el broker
 #      en el puerto del servicio; **no la aplica** (cambiar el cortafuegos del host es
-#      una decision de despliegue, como la regla de ERPNext).
+#      una decision de despliegue, como la regla de Jardal ERP).
 #
 # Uso:
 #   scripts/research_worker_image.sh            # construye imagen + red

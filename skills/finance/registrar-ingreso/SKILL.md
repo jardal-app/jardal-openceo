@@ -1,6 +1,6 @@
 ---
 name: registrar-ingreso
-description: "Records already-collected income as an idempotent ERPNext Journal Entry. Use when the ticket asks to record an ingreso with its amount."
+description: "Records already-collected income as an idempotent Jardal ERP Journal Entry. Use when the ticket asks to record an ingreso with its amount."
 status: activa
 ticket: TASK-2026-00221
 date: 2026-10-13

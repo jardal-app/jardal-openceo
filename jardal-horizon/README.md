@@ -707,7 +707,7 @@ architecture:
   personal_planning_module: horizon
   orchestration_store: mongodb
   financial_records_owner: external_financial_system
-  financial_system_selection: erpnext
+  financial_system_selection: ERP
   personal_scope_requires_access_control: true
   personal_external_mirror_default: disabled
 planning:

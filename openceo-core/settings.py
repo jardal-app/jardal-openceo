@@ -98,9 +98,9 @@ class Settings(BaseSettings):
     # de los tickets, asi que un modo que los cree solo en Mongo produciria tickets que el
     # sistema de negocio nunca vera, y la reconciliacion no los recupera. La resiliencia
     # ante un Jardal ERP caido la da la marca `jardal_erp_pending`, no un interruptor.
-    # El valor "erpnext" es alias depreciado (una version) del canonico "jardal_erp"
-    # para el adapter Frappe sin manifiesto (TASK-2026-00318).
-    BUSINESS_PROVIDER: str = "erpnext"
+    # Solo "jardal_erp" (adapter con manifiesto). El valor "erpnext" se retiro
+    # en TASK-2026-00267: `build_business_work` lo rechaza.
+    BUSINESS_PROVIDER: str = "jardal_erp"
     BUSINESS_AUTHORITY_FILE: str = ""
     JARDAL_ERP_URL: str = ""
     JARDAL_ERP_SERVICE_TOKEN: str = ""
@@ -115,34 +115,33 @@ class Settings(BaseSettings):
     JARDAL_ERP_WEBHOOK_SECRET: str = ""
     JARDAL_ERP_OPENCEO_USER: str = "openceo@jardal.app"
     ROLLUP_PROVIDER: str = "core"
-    # Finanzas (00263): "erpnext" == adapter Frappe (DocTypes, defecto; alias
-    # depreciado una version) o "jardal_erp" (contrato financiero, exige manifiesto
-    # de autoridad listo como identidad/eventos) (TASK-2026-00318).
+    # Finanzas (00263): "erpnext" == adapter Frappe (DocTypes, defecto) o
+    # "jardal_erp" (contrato financiero, exige manifiesto de autoridad listo
+    # como identidad/eventos). 00267 conserva el defecto hasta verificar el
+    # contrato financiero contra el ERP vivo.
     FINANCE_PROVIDER: str = "erpnext"
     # Horizon personal (00264): "mongo" (defecto) o "jardal_erp" (dominio
     # privado ERP para objetivos/capturas; exige manifiesto + identidad
     # federada, pues cada llamada usa la sesión del usuario).
     HORIZON_STORE: str = "mongo"
 
-    # Nombres ERPNEXT_*: alias depreciados (una version) del adapter Frappe de
-    # Jardal ERP (TASK-2026-00318).
+    # Credenciales del adapter Frappe legado (solo finance: FINANCE_PROVIDER).
+    # 00267 las conserva; todo lo demas usa JARDAL_ERP_*.
     ERPNEXT_URL: str = ""
     ERPNEXT_USER: str = ""
     ERPNEXT_API_KEY: str = ""
     ERPNEXT_API_SECRET: str = ""
-    ERPNEXT_TIMEOUT_SECONDS: float = 5.0
-    ERPNEXT_CONNECT_TIMEOUT_SECONDS: float = 2.0
-    ERPNEXT_TICKETS_PROJECT_COMPANY: str = "Jardal"
-    # Secreto compartido que Jardal ERP debe enviar en sus webhooks de vuelta (camino inverso).
-    ERPNEXT_WEBHOOK_SECRET: str = ""
+    JARDAL_ERP_TIMEOUT_SECONDS: float = 5.0
+    JARDAL_ERP_CONNECT_TIMEOUT_SECONDS: float = 2.0
+    JARDAL_ERP_TICKETS_PROJECT_COMPANY: str = "Jardal"
     # Zona IANA del sitio Jardal ERP (`exp_*` son naive en hora local). Defecto
     # verificado en vivo (00147): UTC-4 fijo en toda la ventana observada.
-    ERPNEXT_SITE_TIMEZONE: str = "America/Caracas"
+    JARDAL_ERP_SITE_TIMEZONE: str = "America/Caracas"
     # Adjuntos de tickets (TASK-2026-00079). Dos limites, uno por lado:
     # los bytes que aceptamos subir y las raices locales de las que se puede leer un
     # archivo. La raiz es el "alcance autorizado" del ticket: fuera de ella, se rechaza.
-    ERPNEXT_ATTACHMENT_MAX_BYTES: int = 10 * 1024 * 1024
-    ERPNEXT_ATTACHMENT_ALLOWED_ROOTS: str = "/home/develop/development/Jardal"
+    JARDAL_ERP_ATTACHMENT_MAX_BYTES: int = 10 * 1024 * 1024
+    JARDAL_ERP_ATTACHMENT_ALLOWED_ROOTS: str = "/home/develop/development/Jardal"
 
     # Shared infrastructure tools
     CLOUDFLARE_API_TOKEN: str = ""

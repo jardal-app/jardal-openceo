@@ -27,13 +27,13 @@ def settings(**changes):
     base = dict(
         HORIZON_STORE="mongo",
         IDENTITY_PROVIDER="local",
-        BUSINESS_PROVIDER="erpnext",
+        BUSINESS_PROVIDER="jardal_erp",
         BUSINESS_AUTHORITY_FILE="",
         JARDAL_ERP_URL="http://127.0.0.1:31874",
         JARDAL_ERP_SERVICE_TOKEN="synthetic-service-token",
         JARDAL_ERP_WORKSPACE_ID="synthetic-workspace",
-        ERPNEXT_TIMEOUT_SECONDS=1,
-        ERPNEXT_CONNECT_TIMEOUT_SECONDS=1,
+        JARDAL_ERP_TIMEOUT_SECONDS=1,
+        JARDAL_ERP_CONNECT_TIMEOUT_SECONDS=1,
         MONGODB_DATABASE="synthetic_exec_db",
     )
     base.update(changes)

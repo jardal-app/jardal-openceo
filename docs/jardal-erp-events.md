@@ -2,8 +2,9 @@
 
 TASK-2026-00262 connects execution and business decisions with Jardal ERP.
 Business owns decisions and group progress; Core owns gates and runs. The
-bridge operates only with provider `jardal_erp`; the ERPNext inverse webhook
-and its HITL scope (TASK-2026-00133) stay untouched.
+bridge operates only with provider `jardal_erp`; the legacy ERPNext inverse
+webhook alias was removed in TASK-2026-00267 and its HITL scope
+(TASK-2026-00133) stays untouched.
 
 Inbound (`POST /api/integrations/jardal-erp/events`, secret
 `JARDAL_ERP_WEBHOOK_SECRET`, 409 unless provider is jardal_erp) accepts a
