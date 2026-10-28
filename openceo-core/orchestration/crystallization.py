@@ -60,6 +60,7 @@ from catalog import (
 )
 from orchestration.agent_sandbox import plan_agent, ticket_dir
 from orchestration.role_muse import badge_ticket_for_task
+from orchestration.skill_metrics import is_full_rewrite
 from research.runtimes.base import IsolationUnavailable
 
 logger = logging.getLogger(__name__)
@@ -689,6 +690,18 @@ def _apply_draft(config: SaveStepConfig, outcome: SaveOutcome,
         for key in ("external", "origin", "source"):
             if key in stored_header:
                 carried[key] = stored_header[key]
+    if existing is not None and existing.status == "activa":
+        try:
+            old_text = (target / "SKILL.md").read_text(encoding="utf-8")
+            new_text = (draft.source / "SKILL.md").read_text(
+                encoding="utf-8")
+        except OSError:
+            old_text = new_text = ""
+        if old_text and new_text and is_full_rewrite(old_text, new_text):
+            outcome.discarded[draft.name] = (
+                "full rewrite rejected: edit the active skill in small "
+                "evidenced changes instead (D9)")
+            return
     blocked_hold = False
     demoted_hold = False
     if existing is None:

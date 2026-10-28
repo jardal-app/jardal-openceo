@@ -761,17 +761,25 @@ def sync_skill_links(
 
 def skills_index_for_planner(
     by_agent: Mapping[str, Collection[RoleSkill]],
+    metrics: Mapping[str, str] | None = None,
 ) -> str:
     """Name + description + status per skill, for the planner prompt.
 
     Agents without skills are omitted; no skills at all renders empty
-    (the prompt carries no block then).
+    (the prompt carries no block then). ``metrics`` maps
+    ``"role/name"`` to a short visible annotation (TASK-2026-00334);
+    omitted means no annotation, so existing callers render as before.
     """
     lines = []
     for agent in sorted(by_agent):
         for skill in sorted(by_agent[agent], key=lambda item: item.name):
-            lines.append(f"- {agent}: {skill.name} — "
-                         f"{skill.description} ({skill.status})")
+            line = (f"- {agent}: {skill.name} — "
+                    f"{skill.description} ({skill.status})")
+            if metrics:
+                note = metrics.get(f"{agent}/{skill.name}")
+                if note:
+                    line += f" [{note}]"
+            lines.append(line)
     return "\n".join(lines)
 
 

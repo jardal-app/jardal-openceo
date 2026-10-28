@@ -50,6 +50,7 @@ from orchestration import findings as findings_mod
 from orchestration import inbox as inbox_mod
 from orchestration import knowledge as knowledge_mod
 from orchestration import review as review_mod
+from orchestration import skill_metrics as skill_metrics_mod
 from orchestration.live import TIMEOUT_RETURNCODE
 from objectives import planner_models as planner_mod
 from objectives import plan_spend as spend_mod
@@ -789,6 +790,31 @@ def _stage_policy_details(
     return staged
 
 
+def _planner_skill_metrics() -> dict[str, str] | None:
+    """Latest-version success annotation per skill, None when unavailable.
+
+    Fail-open (TASK-2026-00334): metrics are runtime state next to the
+    crystallization lock, and the planner prompt renders as before when
+    the store is missing or unreadable.
+    """
+    try:
+        from catalog import catalog_root
+        store = skill_metrics_mod.load_store(
+            skill_metrics_mod.default_store_path(
+                catalog_root().parent))
+        notes: dict[str, str] = {}
+        for key in store.get("skills", {}):
+            role, _, name = key.partition("/")
+            metrics = skill_metrics_mod.latest_version(store, role, name)
+            if metrics is not None and metrics.uses > 0:
+                notes[key] = (
+                    f"{skill_metrics_mod.success_rate(metrics):.0%} "
+                    f"verified over {metrics.uses} uses")
+        return notes or None
+    except Exception:
+        return None
+
+
 def _planner_skills() -> tuple[str, dict[str, list[str]]]:
     """Skills index block + suggestable map for one planning cycle.
 
@@ -801,7 +827,8 @@ def _planner_skills() -> tuple[str, dict[str, list[str]]]:
     try:
         catalog = load_catalog()
         by_agent = load_all_role_skills(catalog)
-        index = skills_index_for_planner(by_agent)
+        index = skills_index_for_planner(
+            by_agent, _planner_skill_metrics())
     except Exception as exc:
         logger.warning("planner skills unavailable, skipping skill "
                        "check this cycle: %s", exc)
