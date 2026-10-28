@@ -91,7 +91,7 @@ def is_read_operation(channel: str, operation: str) -> bool:
     """Tell whether a connector call is an allowlisted read. Pure."""
     clean_channel = _clean_channel(channel)
     clean_operation = _clean_operation(operation)
-    return clean_operation in READ_OPERATIONS[clean_channel]
+    return clean_operation in READ_OPERATIONS.get(clean_channel, ())
 
 
 def check_external_operation(
@@ -107,7 +107,7 @@ def check_external_operation(
     """
     clean_channel = _clean_channel(channel)
     clean_operation = _clean_operation(operation)
-    if clean_operation in READ_OPERATIONS[clean_channel]:
+    if clean_operation in READ_OPERATIONS.get(clean_channel, ()):
         return {
             "allowed": True,
             "channel": clean_channel,
@@ -151,7 +151,7 @@ def external_reference(source: str, source_id: str) -> dict[str, str]:
     the ERP (D13): the remote system stays the source of truth.
     """
     clean_source = _clean_channel(source)
-    clean_id = str(source_id or "").strip()
+    clean_id = "" if source_id is None else str(source_id).strip()
     if not clean_id:
         raise ExternalReadError("an external reference needs its id")
     return {"source": clean_source, "source_id": clean_id}
@@ -161,10 +161,12 @@ def reference_key(reference: Mapping[str, Any]) -> str:
     """Stable ``source:source_id`` key of one external reference. Pure."""
     if not isinstance(reference, Mapping):
         raise ExternalReadError("an external reference is a mapping")
+    raw_source = reference.get("source")
+    raw_id = reference.get("source_id")
     return "{source}:{source_id}".format(
         **external_reference(
-            str(reference.get("source") or ""),
-            str(reference.get("source_id") or ""),
+            "" if raw_source is None else str(raw_source),
+            "" if raw_id is None else str(raw_id),
         )
     )
 
@@ -182,6 +184,7 @@ def resolve_external_reference(
     returned and ``create_new`` never runs; otherwise it runs exactly
     once with the validated reference. Mirrors the
     ``find_task_by_source`` idempotency in ``task_service``.
+    Adapters are synchronous: resolve any coroutine before calling.
     """
     reference = external_reference(source, source_id)
     existing = find_existing(reference["source"], reference["source_id"])

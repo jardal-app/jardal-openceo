@@ -83,6 +83,28 @@ class WriteGateTests(unittest.TestCase):
             is_read_operation("", "get_issue")
 
 
+class FailClosedAlignmentTests(unittest.TestCase):
+    def test_channel_without_allowlist_entry_denies_cleanly(self) -> None:
+        missing = READ_OPERATIONS.pop("jira")
+        try:
+            self.assertFalse(is_read_operation("jira", "get_issue"))
+            decision = check_external_operation(
+                channel="jira", operation="get_issue")
+            self.assertFalse(decision["allowed"])
+            with self.assertRaises(ExternalReadError):
+                require_external_read("jira", "get_issue")
+        finally:
+            READ_OPERATIONS["jira"] = missing
+
+    def test_numeric_zero_id_is_kept(self) -> None:
+        self.assertEqual(
+            external_reference("jira", 0),  # type: ignore[arg-type]
+            {"source": "jira", "source_id": "0"},
+        )
+        self.assertEqual(
+            reference_key({"source": "jira", "source_id": 0}), "jira:0")
+
+
 class ReferenceTests(unittest.TestCase):
     def test_reference_validates_and_keys(self) -> None:
         ref = external_reference("jira", "PROJ-123")
