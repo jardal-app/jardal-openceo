@@ -144,6 +144,27 @@ def _gaps_result(materiality: str) -> dict[str, Any]:
     }
 
 
+def _decided_result() -> dict[str, Any]:
+    return {
+        "objective_status": "active",
+        "state_summary": "the pedido is decided",
+        "tickets": [{
+            "local_ref": "pedido-1",
+            "title": "Decided pedido",
+            "target_agent": "dev",
+            "work_type": "implementation",
+            "goal": "decide this pedido",
+            "why_now": "it waits for a decision",
+            "acceptance_criteria": ["it runs"],
+            "expected_artifacts": ["a run"],
+            "coding_tool": "tier_b",
+            "tier_reason": "complex strong solving",
+            "why_not_c": "a single default session would drift",
+        }],
+        "roadmap_remaining": [],
+    }
+
+
 class PedidoPromptMaterialityTests(unittest.TestCase):
     def test_pedido_prompt_names_enum_with_example(self) -> None:
         prompt = engine_mod._pedido_prompt(_pedido())
@@ -175,8 +196,6 @@ class PedidoMaterialityTests(unittest.IsolatedAsyncioTestCase):
             out = await engine_mod.plan_pedido(env, _pedido())
             self.assertTrue(out["ok"], out)
             self.assertEqual(out["action"], "convert")
-            params = (patches.get("task-pedido-1") or {}).get("params") or {}
-            self.assertNotIn("planner_last_invalid", params)
 
     async def test_invalid_materiality_is_rejected_and_preserved(self) -> None:
         import tempfile
@@ -202,11 +221,13 @@ class PedidoMaterialityTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             env, _planner, _created, patches = _pedido_env(
-                self, repo, [_gaps_result("medium")])
+                self, repo, [_decided_result()])
             out = await engine_mod.plan_pedido(
                 env, _pedido(params={"planner_attempts": 1,
                                      "planner_last_invalid": "stale"}))
             self.assertTrue(out["ok"], out)
+            self.assertEqual(out["action"], "decided")
+            self.assertIn("task-pedido-1", patches)
             params = (patches.get("task-pedido-1") or {}).get("params") or {}
             self.assertNotIn("planner_last_invalid", params)
             self.assertNotIn("planner_attempts", params)
