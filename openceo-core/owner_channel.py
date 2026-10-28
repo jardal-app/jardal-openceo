@@ -23,6 +23,7 @@ __all__ = [
     "OWNER_QUESTION_TAG",
     "OWNER_KINDS",
     "OwnerChannelError",
+    "OwnerQuestionSkipped",
     "build_owner_question",
     "build_tool_ticket",
     "denied_origin_verdict",
@@ -56,6 +57,10 @@ _TITLE_MAX = 140
 
 class OwnerChannelError(ValueError):
     """The question does not pass the human-channel filter."""
+
+
+class OwnerQuestionSkipped(Exception):
+    """Infrastructure failed before recording: keep the question open."""
 
 
 def build_owner_question(
