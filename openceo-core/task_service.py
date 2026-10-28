@@ -73,6 +73,7 @@ from orchestration.ticket_handoff import (
     TICKET_OUTPUTS_KEY,
     publish_ticket_outputs,
 )
+from orchestration.vault_publisher import PublishConfig, publish_after_close
 from owner_channel import (
     OWNER_QUESTION_PHASE,
     build_owner_question,
@@ -4348,11 +4349,11 @@ class TaskService:
                         and has_knowledge_proposals(
                             task_id,
                             base_dir=self._crystallization_drafts_base()):
-                    # Knowledge proposal collect (TASK-2026-00330, D7):
-                    # proposals left in the ticket folder are validated
-                    # structurally and the outcome (valid + every reject
-                    # reason) lands on the ticket. Never publishes to the
-                    # vault (2.4) and never touches the ticket outcome.
+                    # Knowledge proposal publish (TASK-2026-00331, D7/D8):
+                    # proposals left in the ticket folder are validated and
+                    # published to the project vault; the outcome (published,
+                    # queued, deferred, every reject reason) lands on the
+                    # ticket. Never touches the ticket outcome.
                     asyncio.create_task(
                         self._collect_knowledge_after_close(
                             task_id, updated))
@@ -4464,24 +4465,62 @@ class TaskService:
     async def _collect_knowledge_after_close(
             self, task_id: str,
             ticket: dict[str, Any] | None) -> None:
-        """Fire-and-forget knowledge proposal collect (TASK-2026-00330).
+        """Fire-and-forget knowledge proposal publish (TASK-2026-00331).
 
-        Validates the proposals left in the ticket folder and records
-        the outcome on the ticket: valid ones stay ready for the 2.4
-        publisher, every rejection carries its reason. Never raises,
-        never publishes, never touches the ticket outcome.
+        Collects the proposals left in the ticket folder and publishes
+        them through the vault publisher (D7/D8): descriptive ones with
+        resolving evidence land in the project vault, normative ones
+        queue for Owner confirmation (2.5), transient states defer with
+        the proposal kept. Without a vault mapping it falls back to the
+        2.3 collect-and-record. Never raises, never touches the ticket
+        outcome.
         """
         try:
             project = (ticket or {}).get("project")
-            prefix = knowledge_target_prefix(
-                self._lock_project_config(project))
-            await collect_and_comment(
+            project_config = self._lock_project_config(project)
+            prefix = knowledge_target_prefix(project_config)
+            vault = ((project_config or {}).get("dev") or {}).get(
+                "vault_project") or {}
+            vault_dir = Path(str(vault.get("dir") or "")).expanduser() \
+                if vault.get("dir") else None
+            vault_project = str(vault.get("project") or "").strip()
+            if (not prefix or vault_dir is None or not vault_dir.is_dir()
+                    or not vault_project):
+                await collect_and_comment(
+                    task_id,
+                    project_prefix=prefix,
+                    base_dir=self._crystallization_drafts_base(),
+                    comment=self.comment_on_ticket)
+                return
+            mirror = mirror_ticket(ticket or {})
+            ticket_ref = str(mirror or "").strip() or task_id
+            repos = (project_config.get("project") or {}).get("repos") or []
+            first = repos[0] if repos and isinstance(repos[0], dict) else {}
+            repo_dir = str(first.get("local_path") or "").strip()
+
+            async def _ticket_exists(name: str) -> bool | None:
+                try:
+                    found = await self._repo.find_task_by_business_name(
+                        name)
+                except Exception:
+                    return None
+                return found is not None
+
+            await publish_after_close(
                 task_id,
-                project_prefix=prefix,
+                config=PublishConfig(
+                    ticket_ref=ticket_ref,
+                    vault_repo=vault_dir.parent,
+                    vault_dir=vault_dir,
+                    project=prefix,
+                    evidence_repo=Path(repo_dir).expanduser()
+                    if repo_dir and Path(repo_dir).expanduser().is_dir()
+                    else Path(__file__).resolve().parent.parent),
                 base_dir=self._crystallization_drafts_base(),
+                ticket_exists=_ticket_exists,
                 comment=self.comment_on_ticket)
         except Exception:
-            logger.warning("Knowledge collect failed for %s", task_id,
+            logger.warning("Knowledge publish failed for %s", task_id,
                            exc_info=True)
 
     async def _publish_ticket_outputs(
