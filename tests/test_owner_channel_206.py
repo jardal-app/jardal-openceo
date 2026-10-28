@@ -1447,7 +1447,7 @@ CONFIRM_HUB = ("---\ntype: hub\nproject: active\ndate: 2026-10-28\n---\n\n"
                "# Active\n\nProject hub.\n")
 CONFIRM_CHECKER = Path(
     "/home/develop/development/Jardal/jardal-knowledge/.agents/skills"
-    "/obsidian-vault-links/scripts/vault_check.py")
+    "/llm-vault-links/scripts/vault_check.py")
 
 
 def _confirm_proposal(name: str, **overrides: object) -> dict:
@@ -1483,7 +1483,7 @@ class ConfirmApplyCase(unittest.TestCase):
         project_dir.mkdir(parents=True)
         (project_dir / "active.md").write_text(CONFIRM_HUB, encoding="utf-8")
         checker_dir = (self.vault_repo / ".agents" / "skills"
-                       / "obsidian-vault-links" / "scripts")
+                       / "llm-vault-links" / "scripts")
         checker_dir.mkdir(parents=True)
         shutil.copyfile(CONFIRM_CHECKER, checker_dir / "vault_check.py")
         self._git(self.vault_repo, "add", "--all")

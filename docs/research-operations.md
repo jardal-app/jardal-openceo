@@ -158,7 +158,7 @@ claims. `Last-Modified` sirve para HTTP condicional, nunca como fecha de publica
 
 `research.export.export_conclusion` es una operación local separada y explícita:
 requiere mapping exacto del proyecto, owner y conclusiones públicas revisadas como
-durables. El runtime no monta el vault. Seguir `obsidian-vault-links`, enlazar el
+durables. El runtime no monta el vault. Seguir `llm-vault-links`, enlazar el
 hub y comprobar únicamente las notas creadas con `--project` y rutas explícitas.
 
 Un job que no puede publicar su evento (scope o esquema inválidos) queda anotado con

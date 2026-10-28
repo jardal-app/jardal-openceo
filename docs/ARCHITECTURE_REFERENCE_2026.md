@@ -58,7 +58,7 @@ The shared integration identifier is **`project_key`**. A project spans Jardal E
 ### Read and Write Boundaries
 
 - Agents read the vault as files within their project scope (see Engineering Knowledge and Code Context) and inspect repositories directly. OpenCEO is not a mandatory proxy for every read.
-- Knowledge writes go directly to the vault under the `obsidian-vault-links` skill and pass its checker. They do not require a ticket mutation or an Obsidian MCP.
+- Knowledge writes go directly to the vault under the `llm-vault-links` skill and pass its checker. They do not require a ticket mutation or an Obsidian MCP.
 - Agent-originated operational writes, including ticket creation, status transitions, workflow execution, and approvals, pass through OpenCEO capabilities. The Jardal ERP adapter applies business changes in Jardal ERP; runtime changes remain in MongoDB.
 - Human business activity in Jardal ERP reaches OpenCEO through explicit integration events or requests. Reads and knowledge edits must not silently start execution or change business status.
 - MCP exposes selected capabilities, not raw database access or unrestricted Jardal ERP APIs. There is no Obsidian MCP or Graphify MCP in this design.
@@ -162,7 +162,7 @@ Not every external integration goes through n8n. Each tool is evaluated case by 
 
 ## Engineering Knowledge and Code Context
 
-The engineering vault lives outside this repo. Placement, links, note shape, and validation are defined by the obsidian-vault-links skill and the "Vault y mantenimiento del conocimiento" section of the jardal-knowledge README. This section does not duplicate them; follow those sources. Agents access Markdown files directly; Obsidian is an optional viewer, not a runtime dependency.
+The engineering vault lives outside this repo. Placement, links, note shape, and validation are defined by the llm-vault-links skill and the "Vault y mantenimiento del conocimiento" section of the jardal-knowledge README. This section does not duplicate them; follow those sources. Agents access Markdown files directly; Obsidian is an optional viewer, not a runtime dependency.
 
 Retrieve context in this order:
 
@@ -1951,7 +1951,7 @@ LiveKit Android: Open `openceo-voice-android/` in Android Studio → Build → R
 
 1. For business work, identify the Jardal ERP project and stable `project_key`; preserve the explicit mapping to the local execution name.
 2. Create `projects/{name}/project.yaml` with repository/provider/routing configuration. Existing local-only execution remains compatible until an Jardal ERP adapter is integrated.
-3. Link the project to its vault hub using `obsidian-vault-links`; reuse existing knowledge and validate links. New projects get no `CONTEXT.md`: status goes to `STATUS.md` and work to Jardal ERP tickets (preset `sync_context`).
+3. Link the project to its vault hub using `llm-vault-links`; reuse existing knowledge and validate links. New projects get no `CONTEXT.md`: status goes to `STATUS.md` and work to Jardal ERP tickets (preset `sync_context`).
 
 ## Adding a New Business Process
 
@@ -1984,7 +1984,7 @@ LiveKit Android: Open `openceo-voice-android/` in Android Studio → Build → R
 
 - **README.md is an architecture document.** It defines flows, functionalities, and design decisions. NEVER add operational tracking here. That information belongs in `STATUS.md`.
 - Follow [OPENCEO_DIRECTION.md](OPENCEO_DIRECTION.md) for domain ownership. Preserve execution contracts when introducing Jardal ERP adapters or replacing compatibility context files.
-- Record durable engineering conclusions in the vault using `obsidian-vault-links`, with valid links and a passing checker. Keep code topology in the repository and business records in Jardal ERP.
+- Record durable engineering conclusions in the vault using `llm-vault-links`, with valid links and a passing checker. Keep code topology in the repository and business records in Jardal ERP.
 - Keep `README.md`, `STATUS.md`, and the affected skill manifests in sync whenever architecture, install contracts, or runtime behavior changes.
 - Do not put planning or tracking notes in `README.md`.
 - If you change the dev runtime flow, re-run the smoke checklist from `CLAUDE.md` §9 before closing the task.

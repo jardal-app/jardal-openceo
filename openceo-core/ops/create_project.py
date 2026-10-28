@@ -169,7 +169,7 @@ def _claude_md(
         f"{blurb}\n"
         f"\n"
         f"**Vault de este proyecto**: `{vault_project}` dentro de\n"
-        f"`{vault_root}/` (usar el skill `obsidian-vault-links`).\n"
+        f"`{vault_root}/` (usar el skill `llm-vault-links`).\n"
         f"Trabajo temporal de tickets: `docs/work/TASK-2026-000NN-tema.md`.\n"
         f"Remoto: `{remote_url}`.\n"
         f"\n"

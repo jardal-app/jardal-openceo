@@ -7,7 +7,7 @@
 
 ## 0. Cómo usar este documento
 
-- Es la referencia para todo cambio en la memoria y el aprendizaje de los agentes. Complementa `docs/ARCHITECTURE_REFERENCE_2026.md`, la sección «Vault y mantenimiento del conocimiento» de `jardal-knowledge/README.md`, el skill `obsidian-vault-links` (`jardal-knowledge/.agents/skills/obsidian-vault-links/SKILL.md`) y —fuera de estas fases— el documento del ERP (D14, etapa 5). No modifica los ADR aprobados del ERP.
+- Es la referencia para todo cambio en la memoria y el aprendizaje de los agentes. Complementa `docs/ARCHITECTURE_REFERENCE_2026.md`, la sección «Vault y mantenimiento del conocimiento» de `jardal-knowledge/README.md`, el skill `llm-vault-links` (`jardal-knowledge/.agents/skills/llm-vault-links/SKILL.md`) y —fuera de estas fases— el documento del ERP (D14, etapa 5). No modifica los ADR aprobados del ERP.
 - Lo que este documento describe como existente procede de esa documentación y **no está auditado en código**. Antes de crear tickets de implementación se verifica contra el código y los tests (paso 1.1).
 - No es un backlog. Los tickets se registran en ERPNext y citan la decisión que implementan (D1–D14).
 - Una decisión solo cambia con una decisión nueva del Owner, basada en un problema observado o en una medición.
@@ -51,7 +51,7 @@ La columna «Origen» indica la sección o el ticket de la documentación de ref
 
 | Capacidad | Hoy (según la documentación) | Falta | Origen |
 |---|---|---|---|
-| Vault por proyecto, skill y checker con `--project` | Existe | Tipo `practice` (D3) | `jardal-knowledge/README.md` (§ Vault y mantenimiento del conocimiento), skill `obsidian-vault-links` |
+| Vault por proyecto, skill y checker con `--project` | Existe | Tipo `practice` (D3) | `jardal-knowledge/README.md` (§ Vault y mantenimiento del conocimiento), skill `llm-vault-links` |
 | Lectura del vault por agentes autónomos | No: el sandbox no monta el vault | Montaje de solo lectura del proyecto activo e índice de prácticas (D6) | Agent isolation (00192, 00214) |
 | Escritura del vault por agentes autónomos | No | Propuestas y publicador (D7, D8) | — |
 | Respaldo nocturno | Existe: systemd, bloqueo, trabaja en `main`, no hace pull ni force-push | Exclusión mutua con el publicador (D8) | `jardal-knowledge/README.md` (§ Vault y mantenimiento del conocimiento), `jardal-knowledge/scripts/nightly-git-backup.sh` |
@@ -288,7 +288,7 @@ Se revisan en el resumen del Owner. Mientras haya pocos casos, la revisión es c
 
 ## 9. Referencias
 
-- `jardal-knowledge/README.md` (§ Vault y mantenimiento del conocimiento) y skill `obsidian-vault-links` (`jardal-knowledge/.agents/skills/obsidian-vault-links/SKILL.md`, `scripts/vault_check.py`): estructura, aislamiento y checker del vault.
+- `jardal-knowledge/README.md` (§ Vault y mantenimiento del conocimiento) y skill `llm-vault-links` (`jardal-knowledge/.agents/skills/llm-vault-links/SKILL.md`, `scripts/vault_check.py`): estructura, aislamiento y checker del vault.
 - `docs/ARCHITECTURE_REFERENCE_2026.md`: sandbox (00192, 00214), canal del Owner (00206), locks (00208), cristalización (00210), handoff (00211) y CEO (00119, 00213).
 - `ARCHITECTURE_REFERENCE_2026-ERP.md`: principios, etapa 5 y ADR aprobados.
 - How Claude remembers your project — Claude Code Docs: https://code.claude.com/docs/en/memory

@@ -7,7 +7,7 @@ prompt preamble every dev prompt starts with (TASK-2026-00123).
 
 F7b (after F6): on objective close — or a single ticket whose plan carries
 ``[durable: yes]`` decisions — ``muse`` writes one vault note through the
-``obsidian-vault-links`` skill boundaries, and the orchestrator validates it
+``llm-vault-links`` skill boundaries, and the orchestrator validates it
 with scoped ``vault_check.py --project … check <note>``. A check failure is
 an ERP comment, never a failed close.
 
@@ -134,7 +134,7 @@ def _vault_paths(vault: Mapping[str, str]) -> tuple[Path, str]:
 
 def _checker(vault: Mapping[str, str]) -> Path | None:
     root, _project = _vault_paths(vault)
-    candidate = (root.parent / ".agents" / "skills" / "obsidian-vault-links"
+    candidate = (root.parent / ".agents" / "skills" / "llm-vault-links"
                  / "scripts" / "vault_check.py")
     return candidate if candidate.is_file() else None
 
@@ -164,7 +164,7 @@ def _note_prompt(
     repo: Path | str | None = None,
 ) -> str:
     body = (
-        "Write ONE vault note with the obsidian-vault-links skill rules "
+        "Write ONE vault note with the llm-vault-links skill rules "
         f"(boundaries, frontmatter, local links): {note_abs}\n"
         f"Project: {project}. Subject: {subject}\n"
         "Content: durable facts, decisions, flows and conclusions only — no "
