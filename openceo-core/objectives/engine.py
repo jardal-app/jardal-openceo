@@ -808,6 +808,7 @@ def _planner_skill_metrics() -> dict[str, str] | None:
             metrics = skill_metrics_mod.latest_version(store, role, name)
             if metrics is not None and metrics.uses > 0:
                 notes[key] = (
+                    f"v{metrics.version} "
                     f"{skill_metrics_mod.success_rate(metrics):.0%} "
                     f"verified over {metrics.uses} uses")
         return notes or None

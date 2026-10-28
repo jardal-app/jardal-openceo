@@ -96,6 +96,19 @@ class RecordTests(unittest.TestCase):
             self.assertEqual(metrics.empty_store(),
                              metrics.load_store(path))
 
+    def test_use_of_skill_binds_digest_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "SKILL.md").write_text(
+                "---\nname: s\ndescription: d\n---\n\n# Body\n",
+                encoding="utf-8")
+            store = metrics.empty_store()
+            got = metrics.record_use_of_skill(
+                store, role="dev", name="recipe", skill_dir=root,
+                outcome="verified_success", ticket=TICKET)
+            self.assertEqual(metrics.version_of_skill(root), got.version)
+            self.assertEqual(1, got.uses)
+
     def test_version_digest_is_stable_and_content_bound(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -124,10 +137,11 @@ class RegressionTests(unittest.TestCase):
         self.assertIsNotNone(reason)
         assert reason is not None
         proposal = metrics.RevertProposal(
-            role="dev", name="recipe", from_version="v1",
-            to_version="v2", reason=reason, evidence_ticket=TICKET)
+            role="dev", name="recipe", previous_version="v1",
+            current_version="v2", reason=reason, evidence_ticket=TICKET)
         question = metrics.format_revert_question(proposal)
         self.assertIn("dev/recipe", question)
+        self.assertIn("Revert version v2 to v1", question)
         self.assertIn("approve", question)
 
     def test_regression_never_reverts_alone(self) -> None:
@@ -156,25 +170,50 @@ class RegressionTests(unittest.TestCase):
                              verified_successes=0)
         self.assertIsNone(metrics.regression_decision(previous, few))
 
+    def test_thin_baseline_holds(self) -> None:
+        thin = VersionMetrics(version="v1", uses=1,
+                              verified_successes=1)
+        current = VersionMetrics(version="v2", uses=6,
+                                 verified_successes=0)
+        self.assertIsNone(metrics.regression_decision(thin, current))
+
 
 class RetireTests(unittest.TestCase):
     def test_unused_past_grace_retires(self) -> None:
         store = metrics.empty_store()
-        store["skills"]["dev/stale"] = {
-            "versions": {"v1": {"version": "v1"}},
-            "order": ["v1"], "last_use_close": None}
-        store["closes"] = 12
-        idle = VersionMetrics(version="v1")
-        reason = metrics.retire_decision(idle, 12)
+        for _ in range(12):
+            metrics.mark_close(store)
+        reason = metrics.retire_check(store, "dev", "stale")
         self.assertIsNotNone(reason)
         assert reason is not None
         self.assertIn("no recorded use", reason)
 
+    def test_never_used_within_grace_stays(self) -> None:
+        store = metrics.empty_store()
+        for _ in range(3):
+            metrics.mark_close(store)
+        self.assertIsNone(metrics.retire_check(store, "dev", "fresh"))
+
+    def test_low_success_retires_through_store(self) -> None:
+        store = metrics.empty_store()
+        record(store, "dev", "weak", "v1", "verified_success")
+        record(store, "dev", "weak", "v1", "rework", count=5)
+        reason = metrics.retire_check(store, "dev", "weak")
+        self.assertIsNotNone(reason)
+        assert reason is not None
+        self.assertIn("low success", reason)
+
     def test_new_skill_is_never_retired(self) -> None:
-        self.assertIsNone(metrics.retire_decision(None, 99))
+        self.assertIsNone(metrics.retire_decision(None, 3))
         fresh = VersionMetrics(version="v1")
         self.assertIsNone(metrics.retire_decision(fresh, None))
         self.assertIsNone(metrics.retire_decision(fresh, 3))
+
+    def test_never_recorded_past_grace_retires(self) -> None:
+        reason = metrics.retire_decision(None, 99)
+        self.assertIsNotNone(reason)
+        assert reason is not None
+        self.assertIn("no recorded use", reason)
 
     def test_low_success_retires_healthy_stays(self) -> None:
         weak = VersionMetrics(version="v1", uses=6,
@@ -210,6 +249,16 @@ class RewriteTests(unittest.TestCase):
                "- Sing to the comets while it rises.\n"
                "- Serve cold with extra glitter on top.\n"
                "- Tip the void before leaving.\n")
+        self.assertTrue(metrics.is_full_rewrite(old, new))
+
+    def test_filling_empty_body_is_not_a_rewrite(self) -> None:
+        old = "---\nname: s\ndescription: d\n---\n\n"
+        new = "---\nname: s\ndescription: d\n---\n\n# Skill\n"
+        self.assertFalse(metrics.is_full_rewrite(old, new))
+
+    def test_wiping_body_is_a_rewrite(self) -> None:
+        old = "---\nname: s\ndescription: d\n---\n\n# Skill\n"
+        new = "---\nname: s\ndescription: d\n---\n\n"
         self.assertTrue(metrics.is_full_rewrite(old, new))
 
     def test_gate_rejects_full_rewrite_of_activa(self) -> None:

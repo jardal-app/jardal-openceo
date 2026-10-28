@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -42,7 +44,9 @@ __all__ = [
     "mark_close",
     "metrics_summary",
     "record_use",
+    "record_use_of_skill",
     "regression_decision",
+    "retire_check",
     "retire_decision",
     "save_store",
     "success_rate",
@@ -94,8 +98,8 @@ class RevertProposal:
 
     role: str
     name: str
-    from_version: str
-    to_version: str
+    previous_version: str
+    current_version: str
     reason: str
     evidence_ticket: str
 
@@ -126,8 +130,13 @@ def save_store(store: dict[str, Any], path: str | Path) -> None:
     """Persist a metrics store, creating the runtime dir as needed."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(store, indent=2, sort_keys=True)
-                      + "\n", encoding="utf-8")
+    payload = json.dumps(store, indent=2, sort_keys=True) + "\n"
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8",
+                                     dir=str(target.parent),
+                                     delete=False) as tmp:
+        tmp.write(payload)
+        tmp_path = tmp.name
+    os.replace(tmp_path, target)
 
 
 def _entry(store: dict[str, Any], role: str, name: str) -> dict[str, Any]:
@@ -171,6 +180,21 @@ def record_use(store: dict[str, Any], *, role: str, name: str,
     return metrics
 
 
+def record_use_of_skill(store: dict[str, Any], *, role: str, name: str,
+                        skill_dir: str | Path, outcome: str,
+                        ticket: str) -> VersionMetrics:
+    """Record one close binding the version to the skill dir contents.
+
+    The version digest comes from ``version_of_skill`` so callers never
+    invent it. No automatic caller exists yet: nothing tracks which
+    skill version a ticket used, so the close hook that will call this
+    is a seam for future wiring, not dead code to invoke speculatively.
+    """
+    return record_use(store, role=role, name=name,
+                      version=version_of_skill(skill_dir),
+                      outcome=outcome, ticket=ticket)
+
+
 def mark_close(store: dict[str, Any]) -> int:
     """Advance the close counter; staleness is measured in closes."""
     store["closes"] = int(store.get("closes", 0)) + 1
@@ -207,10 +231,12 @@ def regression_decision(previous: VersionMetrics,
                         current: VersionMetrics) -> str | None:
     """Reason to propose reverting, None when the version holds.
 
-    A regression opens only with enough uses on the new version and a
+    A regression opens only with enough uses on both versions and a
     material success-rate drop; the proposal never reverts alone.
     """
     if current.uses < REGRESSION_MIN_USES:
+        return None
+    if previous.uses < REGRESSION_MIN_USES:
         return None
     drop = success_rate(previous) - success_rate(current)
     if drop < REGRESSION_MIN_DROP:
@@ -225,10 +251,15 @@ def retire_decision(metrics: VersionMetrics | None,
     """Reason to retire a skill, None when it stays.
 
     Retires skills with enough uses but low verified success, or
-    skills idle past the grace period. New skills (no recorded use
-    within grace) are never retired.
+    skills idle past the grace period. A skill with no recorded entry
+    at all retires once the store lived past grace (the caller passes
+    the total close count as ``idle_closes``). New skills (no recorded
+    use within grace) are never retired.
     """
     if metrics is None:
+        if idle_closes is not None \
+                and idle_closes >= MAX_CLOSES_WITHOUT_USE:
+            return f"no recorded use across {idle_closes} closes"
         return None
     if metrics.uses >= MIN_USES_BEFORE_RETIRE \
             and success_rate(metrics) < MIN_SUCCESS_RATE:
@@ -241,12 +272,29 @@ def retire_decision(metrics: VersionMetrics | None,
     return None
 
 
+def retire_check(store: Mapping[str, Any], role: str,
+                 name: str) -> str | None:
+    """Retire reason for one skill through the real store path.
+
+    Never-recorded skills count the whole store lifetime as idle, so
+    the unused branch is reachable without hand-built entries. Pass
+    one catalog skill name per call; iterating the catalog is the
+    caller's job (no usage telemetry exists yet to do it here).
+    """
+    entry = store.get("skills", {}).get(f"{role}/{name}")
+    if entry is None or not entry.get("order"):
+        return retire_decision(None, int(store.get("closes", 0)))
+    metrics = VersionMetrics(**entry["versions"][entry["order"][-1]])
+    return retire_decision(metrics, closes_since_use(store, role, name))
+
+
 def format_revert_question(proposal: RevertProposal) -> str:
     """Owner-channel question text for one revert proposal."""
     return (
         f"Skill {proposal.role}/{proposal.name} regressed "
-        f"({proposal.reason}). Revert version {proposal.to_version} "
-        f"to {proposal.from_version}? Evidence: {proposal.evidence_ticket}. "
+        f"({proposal.reason}). Revert version {proposal.current_version} "
+        f"to {proposal.previous_version}? Evidence: "
+        f"{proposal.evidence_ticket}. "
         f"Reply approve to revert, deny with a reason to keep it.")
 
 
@@ -290,8 +338,10 @@ def is_full_rewrite(old_text: str, new_text: str) -> bool:
     old, new = _body(old_text), _body(new_text)
     if old == new:
         return False
-    if not old.strip() or not new.strip():
+    if not new.strip():
         return True
+    if not old.strip():
+        return False
     return SequenceMatcher(None, old, new).ratio() < REWRITE_MIN_SIMILARITY
 
 

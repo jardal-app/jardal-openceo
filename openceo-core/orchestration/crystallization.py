@@ -116,7 +116,8 @@ lowercase letters/digits/`-`) and a one-line `description`, then the recipe; add
 `scripts/` only where exactness or safe repetition is needed (every script ships \
 its `test_<stem>.py` next to it), `references/` for stable context, and \
 `workflow.yaml` for the exact part. If a skill already covers it, write the \
-improved full skill dir under `{DRAFTS_DIRNAME}/<same-name>/` instead; two drafts \
+improved skill dir with small evidenced changes under `{DRAFTS_DIRNAME}/<same-name>/` \
+instead (never a full rewrite); two drafts \
 of the same thing fuse into one. Never write outside `{DRAFTS_DIRNAME}/` for this: \
 the orchestrator promotes drafts to skills — everything new enters as a draft \
 (`borrador`), and a draft becomes a skill (`activa`) only when another ticket \
