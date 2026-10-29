@@ -1073,6 +1073,28 @@ class TaskService:
             parse_costs(declared_spend)
 
         doc = make_task_document(payload)
+        try:
+            from reliability import admission as _hunter_admission
+        except Exception:
+            _hunter_admission = None  # type: ignore[assignment]
+        if _hunter_admission is not None:
+            try:
+                if str(getattr(doc, "source_id", "") or "").startswith(
+                        _hunter_admission.HUNTER_SOURCE_ID_PREFIX):
+                    doc_params = dict(getattr(doc, "params", None) or {})
+                    if not _hunter_admission.hunter_claim(
+                            {"params": doc_params}):
+                        fields = _hunter_admission.claim_fields(doc_params)
+                        if fields is not None:
+                            claimed = _hunter_admission.attach_approval(
+                                {"params": doc_params},
+                                approval_id=fields["approval_id"],
+                                problem_key=fields["problem_key"],
+                                proposal_hash=fields["proposal_hash"])
+                            doc.params = claimed["params"]
+            except Exception:
+                logger.warning("Hunter claim normalization failed",
+                               exc_info=True)
         await self._apply_default_phase_workflow_to_document(doc)
         if doc.ticket_number is None:
             doc.ticket_number = await self._repo.get_next_ticket_number()
@@ -2054,6 +2076,60 @@ class TaskService:
             dict(decisions) if isinstance(decisions, dict) else {},
         )
 
+    @staticmethod
+    def _is_hunter_task(task: dict[str, Any]) -> bool:
+        """Hunter execution ticket, by source_id or params marker."""
+        try:
+            from reliability import admission as _admission
+        except Exception:
+            _admission = None  # type: ignore[assignment]
+        if _admission is not None:
+            try:
+                return bool(_admission.is_hunter_task(task))
+            except Exception:
+                return False
+        if not isinstance(task, dict):
+            return False
+        if str(task.get("source_id") or "").startswith("reliability:"):
+            return True
+        hunter = (task.get("params") or {}).get("_hunter")
+        return isinstance(hunter, dict) and bool(hunter)
+
+    def set_hunter_approval_reader(self, reader: Any | None) -> None:
+        """Inject the live ERP approval reader for the hunter gate.
+
+        ``None`` (default) keeps hunter tickets blocked fail-closed; the
+        activation (TASK-2026-00391) wires the production reader here and
+        on the dispatcher. Non-hunter tickets never touch the reader.
+        """
+        self._hunter_reader = reader
+
+    async def check_hunter_admission(
+            self, task: dict[str, Any]) -> dict[str, Any]:
+        """Hunter admission verdict for one execution ticket (TASK-2026-00387).
+
+        Never raises: any internal failure denies fail-closed, like the
+        gate itself.
+        """
+        try:
+            from reliability import admission as _admission
+        except Exception:
+            _admission = None  # type: ignore[assignment]
+        try:
+            if _admission is None:
+                hunter = str(task.get("source_id") or "").startswith(
+                    "reliability:")
+                if not hunter:
+                    return {"allowed": True, "reason": "not_hunter"}
+                return {"allowed": False,
+                        "reason": "approval_unverifiable"}
+            return await _admission.check_admission(
+                task, approvals=getattr(self, "_hunter_reader", None))
+        except Exception:
+            logger.warning("Hunter admission check failed (fail-closed)",
+                           exc_info=True)
+            return {"allowed": False, "reason": "approval_unverifiable"}
+
     async def register_erp_approval(self, task_id: str, approval: dict[str, Any]) -> None:
         """Record an approval Core requested, so only its decision applies."""
         repo = getattr(self, "_repo", None)
@@ -2126,12 +2202,32 @@ class TaskService:
                 comment=comment,
             )
             if not result.get("applied"):
+                if result.get("reason") == "not_answerable" and self._is_hunter_task(fresh):
+                    params = self._task_params(fresh)
+                    books = dict(params.get("_erp_decisions") or {})
+                    if decision_id not in books:
+                        actor = event.get("actor") or {}
+                        books[decision_id] = {
+                            "verdict": verdict, "approval_id": approval_id,
+                            "applied_at": datetime.now(timezone.utc).isoformat(),
+                            "actor_kind": str(actor.get("kind") or "").strip(),
+                            "actor_id": str(actor.get("id") or "").strip(),
+                            "version": decision_version,
+                        }
+                        params["_erp_decisions"] = books
+                        await self.patch_task(key, {"params": params})
                 return {"ok": False, "status": "not_answerable", "task_id": key,
                         "reason": result.get("reason"), "pending": True}
             params = self._task_params(fresh)
             books = dict(params.get("_erp_decisions") or {})
-            books[decision_id] = {"verdict": verdict, "approval_id": approval_id,
-                                  "applied_at": datetime.now(timezone.utc).isoformat()}
+            actor = event.get("actor") or {}
+            books[decision_id] = {
+                "verdict": verdict, "approval_id": approval_id,
+                "applied_at": datetime.now(timezone.utc).isoformat(),
+                "actor_kind": str(actor.get("kind") or "").strip(),
+                "actor_id": str(actor.get("id") or "").strip(),
+                "version": decision_version,
+            }
             params["_erp_decisions"] = books
             await self.patch_task(key, {"params": params})
             return {"ok": True, "status": "applied", "task_id": key,
@@ -2234,13 +2330,31 @@ class TaskService:
         name = str(payload.get("business_reference") or "").strip()
         if not name:
             return {"ok": False, "status": "invalid_order"}
+        adopted_params: dict[str, Any] = {
+            "_erp_order": {"order_id": order_id, "business_reference": name}}
+        try:
+            from reliability import admission as _adopt_admission
+        except Exception:
+            _adopt_admission = None  # type: ignore[assignment]
+        if _adopt_admission is not None:
+            try:
+                fields = _adopt_admission.claim_fields(payload)
+                if fields is not None:
+                    claimed = _adopt_admission.attach_approval(
+                        {"params": adopted_params},
+                        approval_id=fields["approval_id"],
+                        problem_key=fields["problem_key"],
+                        proposal_hash=fields["proposal_hash"])
+                    adopted_params = claimed["params"]
+            except Exception:
+                logger.warning("Hunter claim adoption failed", exc_info=True)
         request = TaskCreateRequest(
             source=TaskSource.API,
             source_id=source_id,
             title=str(payload.get("title") or f"Orden ERP {name}").strip()[:300],
             description=str(payload.get("reason") or payload.get("description") or "").strip()[:4000],
             autorun=bool(payload.get("autorun", True)),
-            params={"_erp_order": {"order_id": order_id, "business_reference": name}},
+            params=adopted_params,
         )
         doc = make_task_document(request)
         applier = getattr(self, "_apply_default_phase_workflow_to_document", None)
@@ -4269,6 +4383,26 @@ class TaskService:
                     )
                     self._wake_dispatcher()
                     return task
+                # Hunter admission gate (TASK-2026-00387, §9.3): manual
+                # launches verify the Owner approval; denials park with a
+                # typed reason instead of executing. Fail-closed.
+                hunter_verdict = await self.check_hunter_admission(task)
+                if not hunter_verdict.get("allowed"):
+                    reason = (f"hunter_approval:"
+                              f"{hunter_verdict.get('reason')}")
+                    logger.warning("run_task: hunter gate denied %s (%s)",
+                                   task_id, reason)
+                    await self.patch_task(task_id, {
+                        "status": TaskStatus.QUEUED.value,
+                        "waiting_reason": reason,
+                        "resume_at": None,
+                    })
+                    await self.comment_on_ticket(
+                        task_id,
+                        f"Hunter admission gate denied launch: {reason}. "
+                        f"A verified Owner approval is required "
+                        f"(TASK-2026-00387).")
+                    return await self._repo.get_task(task_id)
                 try:
                     task, stop = await self._plan_pedido_pre_stage(
                         task, force=force)
