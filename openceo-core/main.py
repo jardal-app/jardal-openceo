@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
+from pathlib import Path
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -65,6 +66,7 @@ from phase_workflows import merge_workflow_templates
 from project_service import ProjectService
 from qa_review_service import QAReviewService
 from rate_monitor import RateMonitor
+from release import read_release
 from router import CEORouter, resolve_explicit_name
 from dispatcher import Dispatcher, execution_repo_for_project_config
 from settings import get_settings
@@ -336,6 +338,9 @@ async def lifespan(_: FastAPI):
             f"agent views disagree with the catalog: {'; '.join(_mismatches)}")
     _boot_log.info("Agent consumers match the catalog "
                    "(enum, aliases, planner registry, graph).")
+    _release = read_release(Path(__file__).resolve().parents[1])
+    _boot_log.info("Release: sha=%s dirty=%s", _release["sha"],
+                   _release["dirty"])
     async with AsyncExitStack() as stack:
         if internal_mcp is not None:
             await stack.enter_async_context(internal_mcp.lifespan())
@@ -631,7 +636,8 @@ async def verify_api_key(authorization: str = Header(default="")) -> None:
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "service": "openceo-core"}
+    return {"status": "ok", "service": "openceo-core",
+            "release": read_release(Path(__file__).resolve().parents[1])}
 
 
 # ------------------------- file upload (R2) -------------------------
