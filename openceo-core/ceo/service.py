@@ -148,6 +148,8 @@ class CEOService:
             ),
             patch_task=self._patch_task,
             close_mission=self._close_mission,
+            reliability_problems=self._reliability_problems,
+            reliability_health=self._reliability_health,
         )
 
     # -- readers ------------------------------------------------------
@@ -220,6 +222,88 @@ class CEOService:
 
     async def _recent_research(self, limit: int) -> list[dict[str, Any]]:
         return await self._repo.list_recent_research_results(limit)
+
+    async def _reliability_problems(self) -> list[dict[str, Any]] | None:
+        """Visible Problems for the FIABILIDAD section, else None.
+
+        Reads ``reliability_problems`` straight from Mongo (motor):
+        any failure degrades the section to unknown, never to empty.
+        """
+        import asyncio as _asyncio
+
+        try:
+            coll = self._repo.db["reliability_problems"]
+        except Exception:
+            logger.warning("CEO: reliability store unavailable",
+                           exc_info=True)
+            return None
+        try:
+            cursor = coll.find({})
+            if hasattr(cursor, "to_list"):
+                docs = await _asyncio.wait_for(
+                    cursor.to_list(length=500), timeout=5.0)
+            else:
+                docs = list(cursor)[:500]
+            return [dict(doc) for doc in (docs or [])
+                    if isinstance(doc, dict)]
+        except Exception:
+            logger.warning("CEO: reliability problems unreadable",
+                           exc_info=True)
+            return None
+
+    async def _reliability_health(self) -> dict[str, Any] | None:
+        """Hunter health; each unknown gauge stays None, never 0."""
+        health: dict[str, Any] = {
+            "capture_failures": None,
+            "spool_pending": None,
+            "spool_discards": None,
+            "suppressed_incidents": None,
+            "budget_exhausted": None,
+            "worker_restarts": None,
+            "shadow_would_stops": None,
+        }
+        try:
+            from reliability import capture as _capture
+
+            runtime_dir = _capture.runtime_dir_for()
+            status = _capture.spool_status(runtime_dir)
+            pending = status.get("pending")
+            health["spool_pending"] = (
+                int(pending) if isinstance(pending, int) and pending >= 0
+                else None
+            )
+            dropped = status.get("dropped")
+            health["spool_discards"] = (
+                int(dropped) if isinstance(dropped, int) and dropped >= 0
+                else None
+            )
+            health["suppressed_incidents"] = sum(
+                int(value) for value in
+                _capture.suppressed_counts().values()
+            )
+        except Exception:
+            logger.warning("CEO: hunter spool health unreadable",
+                           exc_info=True)
+        try:
+            coll = self._repo.db["reliability_budget"]
+            import asyncio as _asyncio
+
+            cursor = coll.find({})
+            if hasattr(cursor, "to_list"):
+                buckets = await _asyncio.wait_for(
+                    cursor.to_list(length=100), timeout=5.0)
+            else:
+                buckets = list(cursor)[:100]
+            exhausted = 0
+            for bucket in buckets or []:
+                if isinstance(bucket, dict) and bool(
+                        bucket.get("exhausted")):
+                    exhausted += 1
+            health["budget_exhausted"] = exhausted
+        except Exception:
+            logger.warning("CEO: hunter budget health unreadable",
+                           exc_info=True)
+        return health
 
     async def _business_open(self) -> dict[str, Any]:
         reader = self._company_reader
