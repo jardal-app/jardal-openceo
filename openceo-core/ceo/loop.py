@@ -310,12 +310,23 @@ class CEOLoop:
         reasons, self._queued = self._queued, []
         return [text for text in reasons if str(text or "").strip()]
 
+    async def _note_review_exposure(self) -> None:
+        """Count one CEO review; never raises (fail-open)."""
+        try:
+            from reliability import exposures as _exposures
+
+            await _exposures.record_exposure(self._repo, "ceo_loop")
+        except Exception:
+            logger.warning("ceo_loop exposure failed (fail-open)",
+                           exc_info=True)
+
     async def _run_scheduled(
         self, trigger: dict[str, Any], *, reasons: list[str]
     ) -> None:
         now = self._now()
         pending = _merge_reasons(trigger.get("pending_reasons"), reasons)
         outcome = await self._review_runner("scheduled", pending)
+        await self._note_review_exposure()
         trigger["last_scheduled_at"] = now
         trigger["next_scheduled_at"] = next_scheduled_after(
             self._cadence(), now)
@@ -332,6 +343,7 @@ class CEOLoop:
         now = self._now()
         pending = _merge_reasons(trigger.get("pending_reasons"), reasons)
         outcome = await self._review_runner("reactive", pending)
+        await self._note_review_exposure()
         trigger["last_reactive_at"] = now
         trigger["last_review_at"] = now
         trigger["last_kind"] = "reactive"

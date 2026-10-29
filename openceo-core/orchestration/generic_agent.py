@@ -985,6 +985,18 @@ async def _reliability_finish_agent(
         out["result_comment"] = (
             f"{agent_name}: stalled_no_progress ({rule}): sin avance; "
             "rearme solo por el Owner u otro actor autorizado.")
+    try:
+        from reliability import exposures as _exposures
+
+        await _exposures.record_exposure(
+            wiring.repo, "generic_agent",
+            project_key=str(task.get("project") or ""),
+            task_id=str(task.get("task_id") or "") or None)
+    except Exception:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "generic_agent exposure failed (fail-open)", exc_info=True)
     return out
 
 

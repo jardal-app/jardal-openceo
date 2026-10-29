@@ -906,6 +906,16 @@ class DevSessionManager:
         attempt = 0
         while True:
             results = await asyncio.to_thread(run_gates, repo, specs)
+            try:
+                from reliability import exposures as _exposures
+
+                await _exposures.record_exposure(
+                    self._repo, "gates",
+                    project_key=str(task.get("project") or ""),
+                    task_id=str(task.get("task_id") or "") or None)
+            except Exception:
+                logger.warning("gates exposure failed (fail-open)",
+                               exc_info=True)
             failed = gates_failed(results)
             output.steps.append(self._step(
                 "gates", "ok" if not failed else "failed",
@@ -1191,6 +1201,16 @@ class DevSessionManager:
                 "informe de review nuevo o gate en verde; solo el Owner u "
                 f"otro actor autorizado rearma el freno (rama conservada: {kept}).")
             output.resume_at = None
+        try:
+            from reliability import exposures as _exposures
+
+            await _exposures.record_exposure(
+                self._repo, "dev_session",
+                project_key=str(task.get("project") or ""),
+                task_id=task_id or None)
+        except Exception:
+            logger.warning("dev_session exposure failed (fail-open)",
+                           exc_info=True)
         await self._deadline_mark_end(task_id)
         return output
 
@@ -1494,6 +1514,16 @@ class DevSessionManager:
             include_extras=False,
             cascade_enabled=review_mod.cascade_enabled(
                 review_cfg.get("cascade")))
+        try:
+            from reliability import exposures as _exposures
+
+            await _exposures.record_exposure(
+                self._repo, "review",
+                project_key=str(task.get("project") or ""),
+                task_id=str(task.get("task_id") or "") or None)
+        except Exception:
+            logger.warning("review exposure failed (fail-open)",
+                           exc_info=True)
         acceptance = [str(item) for item in
                       (task.get("acceptance") or [])]
         handoff_path = repo / ".openceo" / "HANDOFF.md"

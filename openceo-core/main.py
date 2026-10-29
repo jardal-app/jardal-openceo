@@ -420,9 +420,12 @@ async def lifespan(_: FastAPI):
                 replay_spool,
             )
             from reliability import endpoint as _reliability_endpoint
+            from reliability import exposures as _reliability_exposures
             _reliability_coll = repo.db["reliability_incidents"]
             _repo_root = Path(__file__).resolve().parents[1]
             await ensure_reliability_indexes(_reliability_coll)
+            await _reliability_exposures.ensure_exposure_indexes(
+                repo.db["reliability_exposures"])
             await replay_spool(
                 _reliability_coll, runtime_dir=_repo_root / ".runtime")
             await record_unclean_exit(
@@ -435,6 +438,8 @@ async def lifespan(_: FastAPI):
                 await _reliability_endpoint.start_endpoint(
                     _reliability_coll, repo.db["reliability_exposures"],
                     runtime_dir=_repo_root / ".runtime"))
+            await _reliability_exposures.record_exposure(
+                repo, "core_process")
         except Exception:
             logger.warning("Reliability startup reconcile failed", exc_info=True)
         # DeadlineWatch (TASK-2026-00383, §7): indexes plus the single

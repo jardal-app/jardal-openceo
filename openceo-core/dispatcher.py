@@ -378,6 +378,16 @@ class Dispatcher:
                     },
                 )
                 requeued += 1
+                try:
+                    from reliability import exposures as _exposures
+
+                    await _exposures.record_exposure(
+                        self._repo, "dispatcher",
+                        project_key=str(task.get("project") or ""),
+                        task_id=str(task.get("task_id") or "") or None)
+                except Exception:
+                    logger.warning("dispatcher exposure failed (fail-open)",
+                                   exc_info=True)
             except Exception:
                 logger.warning(
                     "Dispatcher: cannot requeue waiting ticket %s",
@@ -471,6 +481,16 @@ class Dispatcher:
         if claimed is None:
             # Lost the race: another cycle (or a manual run) took it.
             return "skipped"
+        try:
+            from reliability import exposures as _exposures
+
+            await _exposures.record_exposure(
+                self._repo, "dispatcher",
+                project_key=str(ticket.get("project") or ""),
+                task_id=task_id or None)
+        except Exception:
+            logger.warning("dispatcher exposure failed (fail-open)",
+                           exc_info=True)
         job = asyncio.create_task(self._launcher(task_id))
         job.add_done_callback(self._on_launch_done)
         return "launched"

@@ -177,20 +177,20 @@ async def _read_event(reader: asyncio.StreamReader,
 
 
 def _exposure_day_id(event: dict[str, Any], now: datetime) -> tuple[str, str]:
-    project = str(event.get("project_key") or "unknown").strip() or "unknown"
-    return f"{event['component']}|{project}|{now.strftime('%Y-%m-%d')}", project
+    from . import exposures as _exposures
+
+    project = _exposures.normalize_project(event.get("project_key"))
+    return _exposures.exposure_day_id(
+        event["component"], project, now), project
 
 
 async def _store_exposure(exposures: Any, event: dict[str, Any],
                           now: datetime) -> None:
-    day_id, project = _exposure_day_id(event, now)
-    result = exposures.update_one(
-        {"_id": day_id},
-        {"$inc": {"count": 1},
-         "$set": {"updated_at": now, "component": event["component"],
-                  "project": project, "day": now.strftime("%Y-%m-%d")},
-         "$setOnInsert": {"created_at": now}},
-        upsert=True)
+    from . import exposures as _exposures
+
+    day_id, update = _exposures.build_exposure_update(
+        event["component"], event.get("project_key"), now)
+    result = exposures.update_one({"_id": day_id}, update, upsert=True)
     if inspect.isawaitable(result):
         await result
 
