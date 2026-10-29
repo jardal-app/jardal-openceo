@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -309,6 +310,193 @@ def ticket_state(state: dict, ticket: str) -> dict:
     return state["tickets"].setdefault(ticket, {
         "phase": "work", "parked": "", "note": "", "failure": "",
         "sessions": 0, "base": {}, "reviews": [], "ready": ""})
+
+
+RUNNER_STALL_REASON = "stalled_no_progress"
+RUNNER_GUARD_DECISION = "20.3"
+RUNNER_FP_PREFIX = "sha256:"
+RUNNER_SCRATCH_DIRS = (".openceo-automatico", ".runtime", ".openceo")
+_GUARD: dict = {"module": None, "failed": False}
+
+
+def _guard_module():
+    cached = _GUARD
+    if cached["failed"]:
+        return None
+    if cached["module"] is None:
+        try:
+            if str(CORE) not in sys.path:
+                sys.path.insert(0, str(CORE))
+            from reliability import guard as module
+            cached["module"] = module
+        except Exception:  # noqa: BLE001 - fail-open: sin freno el runner sigue
+            cached["failed"] = True
+            return None
+    return cached["module"]
+
+
+def _guard_limits() -> tuple[int, int]:
+    try:
+        from reliability import config as _config
+        section = _config.RELIABILITY_DEFAULTS["guard"]
+        return (int(section["fingerprint_max_paths"]),
+                int(section["fingerprint_max_bytes"]))
+    except Exception:  # noqa: BLE001 - fail-open: usa los umbrales de diseno
+        return (100, 2097152)
+
+
+def load_owner_decisions(state_dir: Path = STATE_DIR) -> dict:
+    try:
+        data = json.loads((state_dir / "decisions.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def runner_guard_mode(decisions: dict | None = None) -> str:
+    if decisions is None:
+        decisions = load_owner_decisions()
+    return "enforce" if decisions.get(RUNNER_GUARD_DECISION) else "shadow"
+
+
+def _git_bytes(repo: Path, *args: str) -> bytes | None:
+    try:
+        proc = subprocess.run(
+            ["git", *args], cwd=repo, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def runner_work_fp(branch: str, base: str = "", repo: Path = REPO,
+                   max_paths: int | None = None,
+                   max_bytes: int | None = None) -> dict:
+    default_paths, default_bytes = _guard_limits()
+    if max_paths is None:
+        max_paths = default_paths
+    if max_bytes is None:
+        max_bytes = default_bytes
+    base_sha = (base or "").strip() or "HEAD"
+    if _git_bytes(repo, "rev-parse", "--show-toplevel") is None:
+        return {"fp": RUNNER_FP_PREFIX + "unavailable", "complete": False,
+                "paths": 0, "bytes": 0, "head": None,
+                "error": "no es un checkout git"}
+    head = ""
+    if branch:
+        out = _git_bytes(repo, "rev-parse", "--verify", branch)
+        if out is not None:
+            head = out.decode().strip()
+    if not head:
+        digest = hashlib.sha256(f"runner-empty:{base_sha}".encode())
+        return {"fp": RUNNER_FP_PREFIX + digest.hexdigest(), "complete": True,
+                "paths": 0, "bytes": 0, "head": base_sha, "error": None}
+    diff = _git_bytes(repo, "diff", "--binary", base_sha, head, "--", ".",
+                      *(f":!{d}" for d in RUNNER_SCRATCH_DIRS))
+    names = _git_bytes(repo, "diff", "--name-only", "-z", base_sha, head,
+                       "--", ".", *(f":!{d}" for d in RUNNER_SCRATCH_DIRS))
+    if diff is None or names is None:
+        return {"fp": RUNNER_FP_PREFIX + "unavailable", "complete": False,
+                "paths": 0, "bytes": 0, "head": head,
+                "error": "git diff no disponible"}
+    paths = [p for p in names.decode("utf-8", "replace").split("\x00") if p]
+    if not paths:
+        digest = hashlib.sha256(f"runner-empty:{base_sha}".encode())
+        return {"fp": RUNNER_FP_PREFIX + digest.hexdigest(), "complete": True,
+                "paths": 0, "bytes": 0, "head": head, "error": None}
+    digest = hashlib.sha256()
+    digest.update(base_sha.encode())
+    digest.update(b"\x00" + hashlib.sha256(diff).hexdigest().encode())
+    complete = len(paths) <= max_paths and len(diff) <= max_bytes
+    return {"fp": RUNNER_FP_PREFIX + digest.hexdigest(), "complete": complete,
+            "paths": len(paths), "bytes": len(diff), "head": head,
+            "error": None}
+
+
+def runner_result_sig(phase: str, marker: str) -> str:
+    name = marker if marker in MARKERS else "INVALID"
+    guard = _guard_module()
+    if guard is not None:
+        return guard.result_signature(phase, name)
+    return f"{phase.strip()}:{' '.join(name.split())}"
+
+
+def _reset_runner_guard(t: dict, *, actor: str, reason: str) -> None:
+    guard = _guard_module()
+    if guard is None:
+        return
+    try:
+        t["progress_guard"] = guard.reset_guard(
+            t.get("progress_guard"), actor=actor, reason=reason)
+    except Exception as exc:  # noqa: BLE001 - fail-open: el bucle sigue sin rearmar
+        t["guard_error"] = f"reset: {exc}"[:300]
+        log(f"rearme del freno falló (fail-open): {exc}"[:300])
+    else:
+        t.pop("brake", None)
+
+
+def guard_after_session(c: dict, t: dict, phase: str, *, marker: str = "",
+                        executed: bool = True, milestone: str = "",
+                        decisions: dict | None = None,
+                        now: str | None = None) -> str:
+    if not executed:
+        return ""
+    guard = _guard_module()
+    if guard is None:
+        t["guard_error"] = "reliability.guard no importable (fail-open)"
+        log(f"{c['ticket']}: freno no disponible, sigo (fail-open)")
+        return ""
+    mode = runner_guard_mode(decisions)
+    attempt_id = f"{c['ticket']}-s{t.get('sessions', 0)}"
+    sig = runner_result_sig(phase, marker)
+    try:
+        base = (t.get("base") or {}).get("openceo", "")
+        fp_info = runner_work_fp(c.get("branch", ""), base, REPO)
+    except Exception as exc:  # noqa: BLE001 - fail-open: huella incompleta, G3 sigue
+        fp_info = {"fp": RUNNER_FP_PREFIX + "unavailable", "complete": False,
+                   "error": str(exc)[:200]}
+        t["guard_error"] = f"huella: {exc}"[:300]
+    feed = {"attempt": attempt_id, "sig": sig, "fp": fp_info["fp"],
+            "milestone": milestone}
+    if t.get("guard_last_feed") == feed:
+        return ""
+    obs = {"phase": phase, "executed": True, "attempt_id": attempt_id,
+           "result_sig": sig, "work_fp": fp_info["fp"],
+           "fp_complete": bool(fp_info["complete"])}
+    if milestone:
+        obs["milestone"] = milestone
+    state = t.get("progress_guard")
+    if not isinstance(state, dict):
+        state = guard.empty_state(phase)
+    try:
+        stamp = now or datetime.now(timezone.utc).isoformat()
+        new_state, decision = guard.evaluate(
+            state, obs, {"mode": mode}, now=stamp)
+    except Exception as exc:  # noqa: BLE001 - fail-open: el bucle sigue y queda en log
+        t["guard_error"] = f"evaluate: {exc}"[:300]
+        log(f"{c['ticket']}: el freno lanzó (fail-open): {exc}"[:300])
+        return ""
+    t["progress_guard"] = new_state
+    t["guard_last_feed"] = feed
+    rule = decision.get("rule")
+    action = decision.get("action")
+    if rule:
+        log(f"{c['ticket']}: freno {rule} {action} "
+            f"(shadow={decision.get('shadow')}) huella={fp_info['fp'][:19]}")
+    if action == "stop":
+        t["brake"] = {"rule": rule, "mode": mode, "at": stamp,
+                      "reason": RUNNER_STALL_REASON}
+        t.update(parked="blocked", failure="", note=(
+            f"Freno del runner ({rule}): {RUNNER_STALL_REASON}. "
+            "Condición de reanudación: nuevo diff en la rama, informe de "
+            "review nuevo o gate en verde; el Owner puede rearmar el freno."))
+        log(f"{c['ticket']}: parado por el freno ({rule}): "
+            f"{RUNNER_STALL_REASON}")
+        return "blocked"
+    if action == "would_stop":
+        t["brake"] = {"rule": rule, "mode": mode, "at": stamp,
+                      "reason": RUNNER_STALL_REASON, "shadow": True}
+    return ""
 
 
 def git_head(repo: Path, ref: str = "HEAD") -> str:
@@ -787,7 +975,12 @@ def advance(c: dict, s: Settings, state: dict) -> str:
     if t["parked"] == "owner":
         t["note"] = (f"El Owner respondió (ticket en {info['status']}): lee "
                      "sus comentarios recientes y sigue su decisión.")
+        _reset_runner_guard(t, actor="owner", reason="owner-responded")
     elif t["parked"] == "blocked":
+        pg = t.get("progress_guard")
+        if isinstance(pg, dict) and pg.get("stopped") is not None:
+            _reset_runner_guard(t, actor="runner",
+                                reason="brake-parked-resume")
         t["note"] = (f"La ejecución anterior terminó bloqueada: {t['note']}. "
                      "Comprueba si ya se cumple la condición de reanudación; "
                      f"si no, termina de nuevo con {WORK_BLOCKED}.")
@@ -809,6 +1002,8 @@ def advance(c: dict, s: Settings, state: dict) -> str:
             if not t["reviews"]:
                 log(f"{ticket}: ningún revisor terminó; reanuda más tarde")
                 return "stop"
+            guard_after_session(c, t, phase, executed=True,
+                                milestone="review-accepted")
             t["phase"] = "close"
             save_state(state)
             continue
@@ -816,6 +1011,10 @@ def advance(c: dict, s: Settings, state: dict) -> str:
             ok, why = verify_code(c, t)
             if ok:
                 status = ticket_info(ticket)["status"]
+                guard_after_session(
+                    c, t, phase, executed=True,
+                    milestone=("done-verified" if status == "Completed"
+                               else "gate-passed"))
                 if status == "Completed":
                     t.update(phase="done", failure="", note="")
                     save_state(state)
@@ -843,6 +1042,16 @@ def advance(c: dict, s: Settings, state: dict) -> str:
         problem = repo_problem()
         if problem:
             marker = ""
+        brake = ""
+        if not problem and marker not in (WORK_OWNER, WORK_BLOCKED):
+            milestone = ("ready-accepted"
+                         if phase == "work" and marker == WORK_READY else "")
+            brake = guard_after_session(c, t, phase, marker=marker,
+                                        executed=True, milestone=milestone)
+            if brake == "blocked":
+                save_state(state)
+                log(f"{c['ticket']}: freno del runner: {t['note'][:200]}")
+                return "blocked"
         if marker in (WORK_OWNER, WORK_BLOCKED):
             parked = "owner" if marker == WORK_OWNER else "blocked"
             t.update(parked=parked, note=detail, failure="")
@@ -972,6 +1181,7 @@ def reopen_if_needed(c: dict, state: dict, children: dict[str, str]) -> None:
     t.update(phase="work", reviews=[], ready="", base={}, failure="",
              note="El ticket se reabrió en el ERP: lee sus comentarios "
                   "recientes para saber qué falta.")
+    _reset_runner_guard(t, actor="runner", reason="ticket-reopened")
 
 
 def drive(s: Settings) -> int:
