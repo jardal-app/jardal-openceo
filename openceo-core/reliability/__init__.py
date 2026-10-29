@@ -23,6 +23,7 @@ from . import guard as guard
 from . import invariants as invariants
 from . import models as models
 from . import publisher as publisher
+from . import recovery as recovery
 from . import sanitize as sanitize
 from . import supervisor as supervisor
 from . import verification as verification
