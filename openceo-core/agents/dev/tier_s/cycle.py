@@ -907,7 +907,8 @@ class TierSCycle:
             detail = f"checkpoint saved but cannot release branch: {detail}"
             reason = "config"
         outcome = await self._park(ctx, reason, detail, resume_at=resume_at,
-                                   patch_run=True, notify=True)
+                                   patch_run=True, notify=True,
+                                   skip_boundary=True)
         if agent_result is not None:
             ctx.parked_outcome = replace(outcome, agent_result=agent_result)
 
@@ -2488,7 +2489,7 @@ class TierSCycle:
             tier_s_mod.evaluate_attempt(
                 params, producer=tier_s_mod.TIER_S_PRODUCER, phase=phase,
                 attempt_id=attempt_id, result_sig=result_sig, work_fp=work_fp,
-                fp_complete=fp_complete, executed=bool(plan["executed"]),
+                fp_complete=fp_complete, executed=True,
                 milestone=milestone, mode=mode, now=now)
         ctx.pending_milestones.clear()
         decision = tier_s_mod.evaluate_attempt(
@@ -2615,6 +2616,7 @@ class TierSCycle:
         run_status: str = "waiting",
         drop_branch: bool = False,
         extra_comment: str = "",
+        skip_boundary: bool = False,
     ) -> CycleOutcome:
         fenced = await self._fenced_cancelled(ctx)
         if fenced is not None:
@@ -2622,7 +2624,11 @@ class TierSCycle:
         if resume_at is None and resume_in_min is not None:
             resume_at = (datetime.now(timezone.utc)
                          + timedelta(minutes=resume_in_min)).isoformat()
-        stop = await self._reliability_boundary(ctx, reason, detail, resume_at)
+        if skip_boundary:
+            stop = None
+        else:
+            stop = await self._reliability_boundary(
+                ctx, reason, detail, resume_at)
         if stop is not None:
             return stop
         task_id = str(ctx.ticket.get("task_id", ""))
@@ -2640,6 +2646,7 @@ class TierSCycle:
             "status": TaskStatus.WAITING.value,
             "waiting_reason": f"{reason}: {detail}"[:500],
             "resume_at": resume_at,
+            "params": dict(ctx.ticket.get("params") or {}),
         })
         if drop_branch:
             await asyncio.to_thread(self._drop_branch, ctx)

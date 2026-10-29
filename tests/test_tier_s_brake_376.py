@@ -189,7 +189,7 @@ async def test_streak_continues_across_runs(repo):
 
 @run_async
 async def test_build_done_without_diff_is_a_valid_milestone(repo):
-    """Verificación aceptada sin diff → hito válido (vacía la ventana)."""
+    """Verificación aceptada sin diff → hito válido (acredita el hito)."""
     runs, tasks = InMemoryRunStore(), InMemoryTaskStore()
     await runs.create_run({"run_id": "run", "task_id": "t",
                            "status": "running"})
@@ -312,7 +312,7 @@ async def test_all_orchestrator_milestones_credit_in_order(repo):
         brake_mod.MILESTONE_PLAN_READY, brake_mod.MILESTONE_BUILD_DONE,
         brake_mod.MILESTONE_GATE_FIXED, brake_mod.MILESTONE_REVIEW_REPORT,
         brake_mod.MILESTONE_FINDING_RESOLVED]
-    assert state["window"] == [] or len(state["window"]) == 1
+    assert len(state["window"]) == 1
 
 
 class RaisingExecutor:
@@ -427,3 +427,64 @@ async def test_enforce_stop_parks_without_resume_and_keeps_branch(
     assert patch["waiting_reason"].startswith("stalled_no_progress: G1")
     stalls = [doc for doc in fake.docs.values() if doc["kind"] == "stall"]
     assert stalls and all(doc["shadow"] is False for doc in stalls)
+
+
+@run_async
+async def test_park_build_evaluates_boundary_once(repo):
+    """_park_build evalúa la frontera una sola vez (sin doble incidente)."""
+    fake = _FakeIncidents()
+    runs, tasks = InMemoryRunStore(), InMemoryTaskStore()
+    await runs.create_run({"run_id": "run", "task_id": "t",
+                           "status": "running"})
+    git(repo, "checkout", "-qb", "tier-s/t-wip")
+    cycle = make_cycle(runs, tasks, ScriptedExecutor([]),
+                       incidents=incidents_source(fake))
+    ctx = make_ctx(repo, {})
+    await cycle._park_build(ctx, "config", "boom estable")
+    assert ctx.parked_outcome is not None
+    assert ctx.parked_outcome.reason == "config"
+    assert len(fake.docs) == 1
+    doc = next(iter(fake.docs.values()))
+    assert doc["kind"] == "terminal_failure"
+    window = tasks.patches["t"]["params"]["progress_guard"]["window"]
+    assert len(window) == 1
+    assert tasks.patches["t"]["status"] == "waiting"
+    assert "progress_guard" in tasks.patches["t"]["params"]
+
+
+@run_async
+async def test_milestone_survives_self_healing_wait(repo):
+    """Un hito pendiente se acredita aunque el park lleve temporizador."""
+    runs, tasks = InMemoryRunStore(), InMemoryTaskStore()
+    cycle = make_cycle(runs, tasks, ScriptedExecutor([]))
+    git(repo, "checkout", "-qb", "tier-s/t-wip")
+    ctx = make_ctx(repo, {})
+    cycle._note_tier_s_milestone(ctx, brake_mod.MILESTONE_PLAN_READY)
+    resume_at = (datetime.now(timezone.utc)
+                 + timedelta(minutes=15)).isoformat()
+    assert await cycle._reliability_boundary(
+        ctx, "scheduled_wait", "ventana de observación", resume_at) is None
+    state = tasks.patches["t"]["params"]["progress_guard"]
+    assert state["milestones"] == [brake_mod.MILESTONE_PLAN_READY]
+    assert state["window"] == []
+    assert ctx.pending_milestones == []
+
+
+@run_async
+async def test_milestone_clears_preexisting_window(repo):
+    """Un hito posterior vacía una ventana con intentos fallidos."""
+    runs, tasks = InMemoryRunStore(), InMemoryTaskStore()
+    cycle = make_cycle(runs, tasks, ScriptedExecutor([]))
+    git(repo, "checkout", "-qb", "tier-s/t-wip")
+    ctx = make_ctx(repo, {})
+    assert await cycle._reliability_boundary(
+        ctx, "config", "boom estable", None) is None
+    assert await cycle._reliability_boundary(
+        ctx, "config", "boom estable", None) is None
+    assert len(tasks.patches["t"]["params"]["progress_guard"]["window"]) == 2
+    cycle._note_tier_s_milestone(ctx, brake_mod.MILESTONE_BUILD_DONE)
+    assert await cycle._reliability_boundary(
+        ctx, "config", "sonda", None) is None
+    state = tasks.patches["t"]["params"]["progress_guard"]
+    assert state["milestones"] == [brake_mod.MILESTONE_BUILD_DONE]
+    assert len(state["window"]) == 1
