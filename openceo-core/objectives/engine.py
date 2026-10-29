@@ -116,6 +116,8 @@ class ObjectiveStore(Protocol):
         self, objective_id: str, updates: dict[str, Any]) -> dict[str, Any] | None: ...
     async def list_active_objectives(
         self, project: str | None = None) -> list[dict[str, Any]]: ...
+    async def list_boot_resumable_objectives(
+        self, limit: int = 100) -> list[dict[str, Any]]: ...
 
 
 class ObjectiveTaskLister(Protocol):
@@ -219,6 +221,12 @@ class InMemoryObjectiveStore:
                 if doc.get("status") == "active"
                 and (not project or doc.get("project") == project)]
 
+    async def list_boot_resumable_objectives(
+        self, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return [dict(doc) for doc in self.docs.values()
+                if doc.get("status") in ("final_review", "waiting")][:limit]
+
 
 class MongoObjectiveStore:
     def __init__(self, repo: Any) -> None:
@@ -239,6 +247,11 @@ class MongoObjectiveStore:
         self, project: str | None = None,
     ) -> list[dict[str, Any]]:
         return await self._repo.list_active_objectives(project)
+
+    async def list_boot_resumable_objectives(
+        self, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return await self._repo.list_boot_resumable_objectives(limit)
 
 
 class MongoObjectiveTaskLister:
@@ -3124,6 +3137,30 @@ def _work_children(
             and str(item.get("status") or "") != "converted"]
 
 
+def _is_dead_queued(
+    by_id: Mapping[str, Mapping[str, Any]],
+    item: Mapping[str, Any],
+) -> bool:
+    """Queued work whose blockers all failed terminally: it can never run.
+
+    The dispatcher skips it (``_blocked``) while the planner replaces it
+    instead of unblocking it, so counting it as an open gap wedges final
+    review forever (TASK-2026-00396). Unknown or live blockers stay open
+    gaps (fail-closed).
+    """
+    if str(item.get("status") or "") != "queued":
+        return False
+    deps = item.get("blocked_by") or []
+    if not deps:
+        return False
+    for dep in deps:
+        blocker = by_id.get(str(dep))
+        if blocker is None or str(blocker.get("status") or "") \
+                != FAILED_HISTORY_STATUS:
+            return False
+    return True
+
+
 def verify_delivery(
     objective: Mapping[str, Any],
     children: Sequence[Mapping[str, Any]],
@@ -3135,19 +3172,24 @@ def verify_delivery(
     objective back to planning; ``data_gaps`` (a settled terminal or
     failed child without acceptance criteria or expected artefacts)
     park it — no planner run can fix a closed ticket. Failed children
-    are history (``failed_children``), never open gaps. No LLM is
-    involved, ever.
+    are history (``failed_children``), never open gaps, and so is queued
+    work blocked only by failed-terminal blockers (``dead_children``).
+    No LLM is involved, ever.
     """
     work = _work_children(objective, children)
+    by_id = {str(item.get("task_id") or ""): item for item in children}
     open_gaps: list[str] = []
     data_gaps: list[str] = []
     failed: list[str] = []
+    dead: list[str] = []
     terminal = 0
     for item in work:
         short = str(item.get("task_id") or "")[:8]
         status = str(item.get("status") or "")
         if status == FAILED_HISTORY_STATUS:
             failed.append(short)
+        elif _is_dead_queued(by_id, item):
+            dead.append(short)
         elif status not in TERMINAL_TICKET_STATUS:
             open_gaps.append(f"{short}: still {status}")
             continue
@@ -3166,6 +3208,7 @@ def verify_delivery(
         "open_gaps": open_gaps,
         "data_gaps": data_gaps,
         "failed_children": failed,
+        "dead_children": dead,
         "work_children": len(work),
         "terminal_children": terminal,
         "dev_children": dev,
@@ -3265,6 +3308,7 @@ def _delivery_record(
         "work_children": verdict["work_children"],
         "terminal_children": verdict["terminal_children"],
         "failed_children": len(verdict["failed_children"]),
+        "dead_children": len(verdict["dead_children"]),
         "dev_children": verdict["dev_children"],
         "outcome_kpi": None,
         "evidence": dict(evidence or {}),
@@ -3309,6 +3353,94 @@ def _closer_no_verdict_detail(
         state = f"closure file has {lines} lines, {parsed} parsed verdicts"
     return (f"closer left {names} without a verdict after "
             f"{len(attempts)} runs ({','.join(runs)}); {state}")[:300]
+
+
+#: Waiting reasons the boot resume reconsiders (TASK-2026-00396):
+#: loop-guard stalls whose wedge may have cleared. Other parks
+#: (erp_error, data_gaps, capability_gap) need their own trigger and
+#: stay parked.
+_BOOT_RESUMABLE_PARKS = frozenset({"stalled"})
+
+
+def boot_resume_decision(
+    objective: Mapping[str, Any],
+    children: Sequence[Mapping[str, Any]],
+    max_final_reviews: int,
+) -> dict[str, Any]:
+    """Pure boot-resume call: resume_fresh, replan, park or leave.
+
+    No I/O, no tokens: the deterministic delivery check decides. A
+    ``final_review`` objective is always orphaned at boot (no review
+    task survives a restart); a ``stalled`` park resumes only when its
+    wedge provably cleared, into a fresh review episode. Still-wedged
+    stalls stay parked silently: they already escalated.
+    """
+    status = str(objective.get("status") or "")
+    reviews = int(objective.get("final_reviews") or 0)
+    if status == "final_review":
+        verdict = verify_delivery(objective, children)
+        gaps = list(verdict["open_gaps"]) + list(verdict["data_gaps"])
+        if not gaps:
+            return {"action": "resume_fresh",
+                    "reason": "orphaned final review, delivery clean"}
+        if reviews >= max_final_reviews:
+            return {"action": "park",
+                    "reason": "orphaned final review, gaps open, "
+                              "review budget exhausted"}
+        return {"action": "replan",
+                "reason": "orphaned final review, gaps open: "
+                          f"{'; '.join(gaps[:5])}"}
+    if status == "waiting":
+        reason = str(objective.get("waiting_reason") or "")
+        if reason.partition(":")[0] not in _BOOT_RESUMABLE_PARKS:
+            return {"action": "leave", "reason": "park needs its trigger"}
+        verdict = verify_delivery(objective, children)
+        gaps = list(verdict["open_gaps"]) + list(verdict["data_gaps"])
+        if gaps:
+            return {"action": "leave",
+                    "reason": "stall wedge still present"}
+        return {"action": "resume_fresh",
+                "reason": "stall wedge cleared, delivery clean"}
+    return {"action": "leave",
+            "reason": f"status {status or '<empty>'}"}
+
+
+async def boot_resume_one(
+    env: ObjectiveEnv, objective_id: str,
+) -> dict[str, Any]:
+    """Apply one boot-resume call: reset, notify, plan (TASK-2026-00396).
+
+    ``resume_fresh`` clears the park and the spent review budget: the
+    deterministic check proved the old wedge gone, so this is a new
+    episode, not the same loop. ``replan`` sends an orphaned review with
+    real gaps back to planning under the surviving budget. ``park``
+    escalates a hopeless orphan once; ``leave`` touches nothing.
+    """
+    objective = await env.objectives.get_objective(objective_id)
+    if objective is None:
+        return {"ok": False, "reason": "objective not found"}
+    call = boot_resume_decision(
+        objective, await env.tasks.list_by_objective(objective_id),
+        int(env.objectives_cfg.get("max_final_reviews", 2)))
+    action = str(call.get("action") or "leave")
+    if action == "leave":
+        return {"ok": True, "action": "leave",
+                "reason": str(call.get("reason") or "")}
+    if action == "park":
+        return await _objective_park(
+            env, objective, "stalled",
+            f"{call.get('reason')} (§9.6)")
+    patch: dict[str, Any] = {"status": "active", "waiting_reason": None}
+    if action == "resume_fresh":
+        patch["final_reviews"] = 0
+    await env.objectives.patch_objective(objective_id, patch)
+    if env.notify is not None:
+        await env.notify(
+            _notify_ref(objective),
+            f"Objective {objective_id} resumed at boot "
+            f"({action}): {call.get('reason')}.")
+    plan = await plan_objective(env, objective_id)
+    return {"ok": True, "action": action, "plan": plan}
 
 
 async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]:
