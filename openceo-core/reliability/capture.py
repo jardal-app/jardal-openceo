@@ -200,6 +200,7 @@ def build_incident_doc(
     kind: str | IncidentKind,
     component: str | Component,
     now: datetime | None = None,
+    severity: str | Severity | None = None,
     release: dict[str, Any] | None = None,
     retention_days: int | None = None,
     incident_id: str | None = None,
@@ -240,7 +241,16 @@ def build_incident_doc(
         "openceo-core/" in str(frame.get("file") or "")
         or str(frame.get("file") or "") == "automatico.py"
         for frame in (frames or []))
-    severity = default_severity(kind_enum, motor_frame=motor_frame, guard_rule=guard_rule)
+    resolved = default_severity(kind_enum, motor_frame=motor_frame, guard_rule=guard_rule)
+    if severity is not None:
+        try:
+            forced = severity if isinstance(severity, Severity) \
+                else Severity(str(severity).strip().lower())
+        except ValueError:
+            forced = None
+        if forced is not None:
+            resolved = forced
+    severity = resolved
     fingerprint = _fingerprint_for(
         kind=kind_enum, component=_key(component), phase=phase, exc_type=exc_type,
         frames=frames, reason_code=reason_code, brake=brake,

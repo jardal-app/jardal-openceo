@@ -7,7 +7,7 @@ paths:
 
 Solo para el paquete base del cazador (epic TASK-2026-00365, diseño v2).
 
-- I/O solo en `capture` (insert Mongo con timeout de 2 s, spool JSONL bajo `.runtime/`, replay), `supervisor` (backoff sleeps) y `endpoint` (socket Unix bajo `.runtime/`, spool del runner, ingesta con `late=true`); `guard` sigue puro salvo `work_fingerprint` (solo git de lectura: `rev-parse`, `diff`, `ls-files`). El worker lo ownea TASK-2026-00378.
+- I/O solo en `capture` (insert Mongo con timeout de 2 s, spool JSONL bajo `.runtime/`, replay), `supervisor` (backoff sleeps), `endpoint` (socket Unix bajo `.runtime/`, spool del runner, ingesta con `late=true`) y `deadlines` (un temporizador asyncio al plazo más próximo más parches fail-open de `attempt_deadline_at` en el ticket); `guard` sigue puro salvo `work_fingerprint` (solo git de lectura: `rev-parse`, `diff`, `ls-files`). El worker lo ownea TASK-2026-00378.
 - El socket y los spools quedan bajo `.runtime/`, enmascarado en el perfil bwrap de agentes. Los builders sin sandbox (`musej --disable-sandbox`) comparten usuario y alcanzan el socket: sus eventos son evidencia, nunca autorización.
 - `guard.evaluate` es puro y fail-open (estado corrupto o excepción → `continue`); solo cuentan observaciones con `executed=True` y el llamador resuelve el modo por productor.
 - Orden del pipeline: clasificación y huellas operan sobre el incidente crudo; el saneamiento corre en último lugar antes de persistir (sus frames son strings).

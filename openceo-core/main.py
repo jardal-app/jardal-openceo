@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hmac
 import logging
 from pathlib import Path
@@ -186,6 +187,10 @@ mcp_token_issuer = TokenIssuer(
 mcp_audit_sink = MongoAuditSink(db_provider=lambda: repo.db)
 task_service.set_token_issuer(mcp_token_issuer)
 workflow_service.set_task_service(task_service)
+# DeadlineWatch (TASK-2026-00383, §7): the generic loop writes and clears
+# attempt_deadline_at through this patcher (fail-open without it).
+graph._generic_wiring = dataclasses.replace(
+    graph._generic_wiring, patch_task=task_service.patch_task)
 dev_step_manager.set_task_service(task_service)  # Tier S notices + internal tickets (F3–F6)
 secretary_step_manager.set_task_service(task_service)  # email lock (00208)
 # Company-level objectives (F2): top-down entries + inverse group propagation.

@@ -475,6 +475,7 @@ class DevSessionManager:
                     params=stamp_effective_review(
                         task.get("params"), review_decision),
                 )
+        deadline_armed = await self._deadline_mark_start(task, decision.tool)
         try:
             if decision.tool == CodingTool.TIER_S:
                 output = await self._run_tier_s(task, project_config, qa_cfg)
@@ -483,6 +484,8 @@ class DevSessionManager:
         except Exception as exc:
             if decision.tool is not None and decision.tool is not CodingTool.TIER_S:
                 await self._capture_simple_exception(task, decision.tool, exc)
+            if deadline_armed:
+                await self._deadline_mark_end(holder)
             if outer_lock:
                 assert repo is not None
                 await self._repo.release_repo_lock(repo, holder)
@@ -962,7 +965,52 @@ class DevSessionManager:
         full[REVIEW_ROUND_PARAMS_KEY] = checkpoint
         output.params = full
 
-    # -- reliability hunter (TASK-2026-00375, design v2 §4.5 + §5.2) --------
+    # -- reliability hunter (TASK-2026-00375 + TASK-2026-00383) --------
+
+    async def _deadline_mark_start(
+        self, task: dict[str, Any], tool: Any,
+    ) -> bool:
+        """Write attempt_id + attempt_deadline_at (TASK-2026-00383, §7).
+
+        Tier S owns its own write inside the cycle; this covers A/B/C.
+        Fail-open: without a task service patcher nothing is written.
+        """
+        try:
+            if tool is not None and tool is CodingTool.TIER_S:
+                return False
+            patch = getattr(self._task_service, "patch_task", None)
+            if not callable(patch):
+                return False
+            from reliability import deadlines as deadline_mod
+            module = self._loop_brake()
+            if module is None:
+                return False
+            task_id = str(task.get("task_id") or "")
+            params = task.get("params")
+            attempt_id = module.next_attempt_id(
+                task_id, params if isinstance(params, dict) else {})
+            timeout_s = getattr(
+                self._settings, "DEV_TURN_TIMEOUT_SECONDS", 1800) or 1800
+            wrote = await deadline_mod.mark_attempt_start(
+                patch, task_id=task_id, attempt_id=attempt_id,
+                timeout_seconds=timeout_s)
+            return wrote is not None
+        except Exception:
+            logger.warning("deadline mark start failed (fail-open)",
+                           exc_info=True)
+            return False
+
+    async def _deadline_mark_end(self, task_id: str) -> None:
+        """Clear attempt_deadline_at when the attempt ends. Never raises."""
+        try:
+            patch = getattr(self._task_service, "patch_task", None)
+            if not callable(patch):
+                return
+            from reliability import deadlines as deadline_mod
+            await deadline_mod.clear_attempt_deadline(patch, task_id)
+        except Exception:
+            logger.warning("deadline mark end failed (fail-open)",
+                           exc_info=True)
 
     @staticmethod
     def _loop_brake():
@@ -1135,6 +1183,7 @@ class DevSessionManager:
                 "informe de review nuevo o gate en verde; solo el Owner u "
                 f"otro actor autorizado rearma el freno (rama conservada: {kept}).")
             output.resume_at = None
+        await self._deadline_mark_end(task_id)
         return output
 
     async def _capture_attempt(

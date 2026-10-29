@@ -500,6 +500,7 @@ class TierSCycle:
         if resume is not None:
             self._restore_checkpoint(ctx, resume)
         ctx.cost_sessions_base = len(ctx.metrics.get("sessions") or [])
+        await self._deadline_mark_start(ctx)
         try:
             outcome = await self._run_guarded(ctx)
             return replace(
@@ -520,6 +521,7 @@ class TierSCycle:
                 cost_runs=self._cost_delta(ctx),
                 params=dict(ctx.ticket.get("params") or {}))
         finally:
+            await self._deadline_mark_end(ctx)
             await self._cleanup(ctx)
 
     def _cost_delta(self, ctx: _Ctx) -> tuple[dict[str, Any], ...]:
@@ -2442,7 +2444,51 @@ class TierSCycle:
         await self._tasks.patch_task(task_id, {"params": params})
         return outcome
 
-    # -- reliability hunter (TASK-2026-00376, design v2 §4.5 + §5.2) --------
+    # -- reliability hunter (TASK-2026-00376 + TASK-2026-00383) --------
+
+    async def _deadline_mark_start(self, ctx: _Ctx) -> None:
+        """Write attempt_id + attempt_deadline_at (TASK-2026-00383, §7).
+
+        Fail-open: without a task store nothing is written.
+        """
+        try:
+            tasks = getattr(self, "_tasks", None)
+            patch = getattr(tasks, "patch_task", None)
+            if not callable(patch):
+                return
+            from reliability import deadlines as deadline_mod
+            params = ctx.ticket.get("params")
+            attempt_id = tier_s_mod.next_attempt_id(
+                str(ctx.ticket.get("task_id") or ""),
+                params if isinstance(params, dict) else {})
+            try:
+                timeout_s = sum(
+                    int(value) for value in
+                    dict(ctx.timeouts or {}).values()) * 60
+            except (TypeError, ValueError):
+                timeout_s = 0
+            if timeout_s <= 0:
+                timeout_s = 150 * 60
+            await deadline_mod.mark_attempt_start(
+                patch, task_id=str(ctx.ticket.get("task_id") or ""),
+                attempt_id=attempt_id, timeout_seconds=timeout_s)
+        except Exception:
+            logger.warning("tier-s deadline mark start failed (fail-open)",
+                           exc_info=True)
+
+    async def _deadline_mark_end(self, ctx: _Ctx) -> None:
+        """Clear attempt_deadline_at when the cycle ends. Never raises."""
+        try:
+            tasks = getattr(self, "_tasks", None)
+            patch = getattr(tasks, "patch_task", None)
+            if not callable(patch):
+                return
+            from reliability import deadlines as deadline_mod
+            await deadline_mod.clear_attempt_deadline(
+                patch, str(ctx.ticket.get("task_id") or ""))
+        except Exception:
+            logger.warning("tier-s deadline mark end failed (fail-open)",
+                           exc_info=True)
 
     def _note_tier_s_milestone(self, ctx: _Ctx, name: str) -> None:
         """Record an orchestrator-emitted milestone (§4.3) for the boundary."""

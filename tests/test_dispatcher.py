@@ -40,6 +40,7 @@ if str(CORE_DIR) not in sys.path:
 
 from dispatcher import Dispatcher  # noqa: E402
 from rate_monitor import ProviderStatus, RateMonitor  # noqa: E402
+from reliability import deadlines as deadline_mod  # noqa: E402
 from state import (  # noqa: E402
     WAIT_BLOCKED_BY,
     WAIT_LIMIT_GLOBAL,
@@ -1054,6 +1055,296 @@ class StartGuardTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(job.done())
         finally:
             await dispatcher.stop()
+
+
+class _FakeIncidents:
+    """Dict-backed incidents collection for the real capture path."""
+
+    def __init__(self) -> None:
+        self.docs: dict[str, dict] = {}
+
+    async def insert_one(self, doc: dict) -> SimpleNamespace:
+        self.docs[doc["_id"]] = dict(doc)
+        return SimpleNamespace(inserted_id=doc["_id"])
+
+    async def count_documents(self, filt: dict) -> int:
+        total = 0
+        for doc in self.docs.values():
+            if filt.get("fingerprint") is not None \
+                    and doc.get("fingerprint") != filt["fingerprint"]:
+                continue
+            gte = (filt.get("created_at") or {}).get("$gte")
+            if gte is not None and doc.get("created_at") < gte:
+                continue
+            total += 1
+        return total
+
+
+def _recorder(recorded: list[dict]):
+    async def _record(**fields: object) -> str:
+        recorded.append(dict(fields))
+        return f"incident-{len(recorded)}"
+    return _record
+
+
+def _watch(repo: _FakeRepo, recorded: list[dict],
+           now: datetime = _NOW) -> deadline_mod.DeadlineWatch:
+    return deadline_mod.DeadlineWatch(
+        repo, record=_recorder(recorded), clock=lambda: now)
+
+
+class DeadlineMathTests(unittest.IsolatedAsyncioTestCase):
+    async def test_attempt_deadline_adds_timeout_plus_grace(self) -> None:
+        start = datetime(2026, 10, 7, 12, 0, 0, tzinfo=timezone.utc)
+        self.assertEqual(
+            deadline_mod.attempt_deadline_for(start, 1800),
+            start + timedelta(seconds=1800 + 360))
+
+    async def test_attempt_deadline_obeys_grace_floor(self) -> None:
+        start = datetime(2026, 10, 7, 12, 0, 0, tzinfo=timezone.utc)
+        self.assertEqual(
+            deadline_mod.attempt_deadline_for(start, 60),
+            start + timedelta(seconds=60 + 300))
+
+    async def test_resume_deadline_adds_ten_minutes(self) -> None:
+        resume_at = datetime(2026, 10, 7, 12, 0, 0, tzinfo=timezone.utc)
+        self.assertEqual(
+            deadline_mod.resume_deadline_for(resume_at),
+            resume_at + timedelta(seconds=600))
+
+    async def test_mark_and_clear_roundtrip(self) -> None:
+        patches: list[tuple[str, dict]] = []
+
+        async def patch(task_id: str, updates: dict) -> None:
+            patches.append((task_id, dict(updates)))
+
+        wrote = await deadline_mod.mark_attempt_start(
+            patch, task_id="t1", attempt_id="t1-g0-w0", timeout_seconds=600,
+            started_at=_NOW)
+        assert wrote is not None
+        self.assertEqual(patches[-1][0], "t1")
+        self.assertEqual(patches[-1][1]["attempt_id"], "t1-g0-w0")
+        self.assertEqual(patches[-1][1]["attempt_deadline_at"], wrote)
+        await deadline_mod.clear_attempt_deadline(patch, "t1")
+        self.assertEqual(patches[-1], ("t1", {"attempt_deadline_at": None}))
+
+    async def test_mark_without_patcher_is_fail_open(self) -> None:
+        self.assertIsNone(await deadline_mod.mark_attempt_start(
+            None, task_id="t1", attempt_id="a", timeout_seconds=60))
+
+
+class DeadlineWatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_resume_overdue_records_deadline_missed(self) -> None:
+        repo = _FakeRepo([
+            _ticket("late", status=TaskStatus.WAITING.value,
+                    waiting_reason="rate_limit_queued",
+                    resume_at=_NOW - timedelta(minutes=11)),
+        ])
+        recorded: list[dict] = []
+        watch = _watch(repo, recorded)
+        try:
+            found = await watch.check_due(_NOW)
+            self.assertEqual(len(found), 1)
+            self.assertEqual(recorded[0]["deadline_type"], "resume")
+            self.assertEqual(recorded[0]["task_id"], "late")
+        finally:
+            await watch.close()
+
+    async def test_resume_within_grace_records_nothing(self) -> None:
+        repo = _FakeRepo([
+            _ticket("early", status=TaskStatus.WAITING.value,
+                    waiting_reason="rate_limit_queued",
+                    resume_at=_NOW - timedelta(minutes=9)),
+        ])
+        recorded: list[dict] = []
+        watch = _watch(repo, recorded)
+        try:
+            self.assertEqual(await watch.check_due(_NOW), [])
+            self.assertEqual(recorded, [])
+        finally:
+            await watch.close()
+
+    async def test_requeued_then_parked_for_capacity_records_nothing(
+        self,
+    ) -> None:
+        repo = _FakeRepo([
+            _ticket("requeued", status=TaskStatus.QUEUED.value,
+                    waiting_reason=WAIT_LIMIT_PROJECT,
+                    resume_at=_NOW - timedelta(minutes=30)),
+        ])
+        recorded: list[dict] = []
+        watch = _watch(repo, recorded)
+        try:
+            self.assertEqual(await watch.check_due(_NOW), [])
+            self.assertEqual(recorded, [])
+        finally:
+            await watch.close()
+
+    async def test_no_pending_leaves_no_timer(self) -> None:
+        repo = _FakeRepo()
+        recorded: list[dict] = []
+        watch = _watch(repo, recorded)
+        try:
+            self.assertIsNone(await watch.next_deadline(_NOW))
+            self.assertIsNone(await watch.arm(_NOW))
+            self.assertFalse(watch.has_timer)
+        finally:
+            await watch.close()
+
+    async def test_future_deadline_arms_single_timer(self) -> None:
+        repo = _FakeRepo([
+            _ticket("waiter", status=TaskStatus.WAITING.value,
+                    waiting_reason="rate_limit_queued",
+                    resume_at=_NOW + timedelta(minutes=5)),
+        ])
+        recorded: list[dict] = []
+        watch = _watch(repo, recorded)
+        try:
+            nearest = await watch.arm(_NOW)
+            self.assertEqual(nearest, _NOW + timedelta(minutes=15))
+            self.assertTrue(watch.has_timer)
+            self.assertEqual(await watch.check_due(_NOW), [])
+        finally:
+            await watch.close()
+
+    async def test_attempt_past_deadline_records_critical(self) -> None:
+        repo = _FakeRepo([
+            _ticket("hung", status=TaskStatus.IN_PROGRESS.value,
+                    attempt_id="hung-g0-w0",
+                    attempt_deadline_at=_NOW - timedelta(seconds=1)),
+        ])
+        recorded: list[dict] = []
+        watch = _watch(repo, recorded)
+        try:
+            found = await watch.check_due(_NOW)
+            self.assertEqual(len(found), 1)
+            self.assertEqual(recorded[0]["deadline_type"], "attempt")
+            self.assertEqual(recorded[0]["severity"], "critical")
+            self.assertEqual(recorded[0]["attempt_id"], "hung-g0-w0")
+        finally:
+            await watch.close()
+
+    async def test_attempt_cleared_or_finished_records_nothing(self) -> None:
+        repo = _FakeRepo([
+            _ticket("done", status=TaskStatus.COMPLETED.value,
+                    attempt_id="done-g0-w0",
+                    attempt_deadline_at=_NOW - timedelta(hours=1)),
+            _ticket("cleared", status=TaskStatus.IN_PROGRESS.value,
+                    attempt_id="cleared-g0-w1",
+                    attempt_deadline_at=None),
+        ])
+        recorded: list[dict] = []
+        watch = _watch(repo, recorded)
+        try:
+            self.assertEqual(await watch.check_due(_NOW), [])
+        finally:
+            await watch.close()
+
+    async def test_attempt_id_changed_after_arm_records_nothing(self) -> None:
+        repo = _FakeRepo([
+            _ticket("rotated", status=TaskStatus.IN_PROGRESS.value,
+                    attempt_id="rotated-g0-w0",
+                    attempt_deadline_at=_NOW - timedelta(seconds=1)),
+        ])
+        recorded: list[dict] = []
+        watch = _watch(repo, recorded)
+        try:
+            await watch.arm(_NOW)
+            await repo.patch_task("rotated", {
+                "attempt_id": "rotated-g0-w1",
+                "attempt_deadline_at": _NOW + timedelta(hours=1),
+            })
+            self.assertEqual(await watch.check_due(_NOW), [])
+            self.assertEqual(recorded, [])
+        finally:
+            await watch.close()
+
+    async def test_real_capture_path_severity_and_idempotency(self) -> None:
+        repo = _FakeRepo([
+            _ticket("hung", status=TaskStatus.IN_PROGRESS.value,
+                    attempt_id="hung-g0-w0",
+                    attempt_deadline_at=_NOW - timedelta(seconds=1)),
+            _ticket("late", status=TaskStatus.WAITING.value,
+                    waiting_reason="rate_limit_queued",
+                    resume_at=_NOW - timedelta(minutes=11)),
+        ])
+        incidents = _FakeIncidents()
+        watch = deadline_mod.DeadlineWatch(
+            repo, incidents=incidents, clock=lambda: _NOW)
+        try:
+            first = await watch.check_due(_NOW)
+            second = await watch.check_due(_NOW)
+            self.assertEqual(len(first), 2)
+            self.assertEqual(first, second)
+            self.assertEqual(len(incidents.docs), 2)
+            by_task = {(doc.get("engine") or {}).get("task_id"): doc
+                       for doc in incidents.docs.values()}
+            self.assertEqual(by_task["hung"]["severity"], "critical")
+            self.assertEqual(by_task["hung"]["kind"], "deadline_missed")
+            self.assertEqual(by_task["late"]["severity"], "high")
+            self.assertEqual(by_task["late"]["kind"], "deadline_missed")
+        finally:
+            await watch.close()
+
+
+class DispatcherDeadlineTests(unittest.IsolatedAsyncioTestCase):
+    def _dispatcher_with_watch(
+        self, repo: _FakeRepo, recorded: list[dict],
+    ) -> tuple[Dispatcher, deadline_mod.DeadlineWatch]:
+        service = _FakeService(repo)
+        launched: list[str] = []
+        watch = _watch(repo, recorded)
+        dispatcher = Dispatcher(
+            repo=repo, settings=_settings(), service=service,
+            rate_monitor=_FakeMonitor(), launcher=launched.append,
+            deadline_watch=watch)
+        return dispatcher, watch
+
+    async def test_blocked_overdue_wait_records_through_cycle(self) -> None:
+        repo = _FakeRepo([
+            _ticket("blocker", status=TaskStatus.IN_PROGRESS.value,
+                    project="other"),
+            _ticket("held", status=TaskStatus.WAITING.value, project="p1",
+                    waiting_reason="rate_limit_queued",
+                    resume_at=_NOW - timedelta(minutes=11),
+                    blocked_by=["blocker"]),
+        ])
+        recorded: list[dict] = []
+        dispatcher, watch = self._dispatcher_with_watch(repo, recorded)
+        try:
+            await dispatcher.dispatch_cycle(now=_NOW)
+            await _drain()
+            row = await repo.get_task("held")
+            assert row is not None
+            self.assertEqual(row["status"], TaskStatus.WAITING.value)
+            self.assertEqual(len(recorded), 1)
+            self.assertEqual(recorded[0]["deadline_type"], "resume")
+        finally:
+            await watch.close()
+
+    async def test_requeued_then_capacity_parked_records_nothing(
+        self,
+    ) -> None:
+        repo = _FakeRepo([
+            _ticket("active-1", status=TaskStatus.IN_PROGRESS.value,
+                    project="proj"),
+            _ticket("queued-1", project="proj",
+                    waiting_reason="rate_limit_queued",
+                    resume_at=_NOW - timedelta(minutes=30)),
+        ])
+        recorded: list[dict] = []
+        dispatcher, watch = self._dispatcher_with_watch(repo, recorded)
+        try:
+            out = await dispatcher.dispatch_cycle(now=_NOW)
+            await _drain()
+            self.assertEqual(out["parked"], 1)
+            row = await repo.get_task("queued-1")
+            assert row is not None
+            self.assertEqual(row["waiting_reason"], WAIT_LIMIT_PROJECT)
+            self.assertEqual(recorded, [])
+            self.assertFalse(watch.has_timer)
+        finally:
+            await watch.close()
 
 
 if __name__ == "__main__":
