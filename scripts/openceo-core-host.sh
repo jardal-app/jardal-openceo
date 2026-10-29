@@ -129,6 +129,7 @@ foreground() {
   # Primer plano para systemd ExecStart (TASK-2026-00370): mismo entorno
   # que start pero exec sin demonizar. El flock lo aplica main.py (exit 3
   # si otra instancia tiene el candado; la unidad no lo reintenta).
+  local sha_now
   load_env
   if [[ ! -x "$VENV_PY" ]]; then
     echo "Missing virtualenv python at $VENV_PY"
@@ -137,8 +138,14 @@ foreground() {
   fi
   # Best-effort: los reinicios de systemd no pueden bloquearse por árbol
   # sucio; el gate estricto vive en restart (TASK-2026-00367).
-  bash "$ROOT_DIR/scripts/write-release.sh" "$ROOT_DIR" "$RUNTIME_DIR" \
-    || echo "WARN: write-release failed; continuing without release identity."
+  if ! bash "$ROOT_DIR/scripts/write-release.sh" "$ROOT_DIR" "$RUNTIME_DIR"; then
+    # Sin identidad limpia no se conserva la anterior: se marca el HEAD
+    # en curso como sucio para no anunciar un sha limpio ajeno.
+    sha_now="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)"
+    [[ -n "${sha_now:-}" ]] && \
+      printf '{"sha":"%s","dirty":true}\n' "$sha_now" >"$RELEASE_FILE" || true
+    echo "WARN: write-release failed; continuing with dirty release identity."
+  fi
   "$VENV_PY" "$ROOT_DIR/scripts/sync-mcp-config.py" || echo "WARN: MCP config sync failed"
   cd "$APP_DIR"
   exec "$VENV_PY" main.py
@@ -148,6 +155,10 @@ unit_managed() {
   # La unidad manda solo si está habilitada o activa: instalada pero
   # deshabilitada + arranque por script sigue siendo vía script.
   command -v systemctl >/dev/null 2>&1 || return 1
+  # Sin sesión de usuario el bus no existe; se apunta al estándar.
+  : "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
+  : "${DBUS_SESSION_BUS_ADDRESS:=unix:path=$XDG_RUNTIME_DIR/bus}"
+  export XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
   systemctl --user cat openceo-core-host.service >/dev/null 2>&1 || return 1
   systemctl --user is-enabled --quiet openceo-core-host.service 2>/dev/null || \
     systemctl --user is-active --quiet openceo-core-host.service 2>/dev/null
@@ -194,13 +205,25 @@ stop() {
 status() {
   load_env
   if unit_managed; then
-    local state pids
+    local state pids count owner pid
     state="$(systemctl --user is-active openceo-core-host.service 2>/dev/null || echo unknown)"
     pids="$(runtime_pids || true)"
     if [[ -f "$RELEASE_FILE" ]]; then
       echo "release: $(cat "$RELEASE_FILE")"
     fi
     if [[ "$state" == "active" ]]; then
+      # Bajo la unidad también se verifica instancia única y puerto.
+      count="$(echo "$pids" | grep -cE '^[0-9]+$' || true)"
+      if [[ "$count" -gt 1 ]]; then
+        echo "WARNING: unit active but $count openceo-core instances run (pids: $(echo $pids | tr '\n' ' ')). Only one may run; stop all and start once."
+        return 2
+      fi
+      pid="$(echo "$pids" | grep -E '^[0-9]+$' | head -n 1 || true)"
+      owner="$(port_owner || true)"
+      if [[ -n "$pid" && -n "$owner" && "$owner" != "$pid" ]]; then
+        echo "WARNING: openceo-core (pid $pid) is not the port ${OPENCEO_PORT} owner (pid $owner)."
+        return 2
+      fi
       echo "openceo-core host is running under systemd (unit active)."
       return 0
     fi
@@ -241,13 +264,25 @@ status() {
 }
 
 logs() {
+  # Bajo la unidad la salida va al journal, no al fichero histórico.
+  if unit_managed && command -v journalctl >/dev/null 2>&1; then
+    journalctl --user -u openceo-core-host.service -n "${2:-120}" --no-pager || true
+    return 0
+  fi
   touch "$LOG_FILE"
   tail -n "${2:-120}" "$LOG_FILE"
 }
 
 case "${1:-}" in
   start) start ;;
-  stop) stop ;;
+  stop)
+    # Bajo la unidad manda systemd: matar PIDs sin avisar provoca
+    # un reinicio inmediato (Restart=on-failure), así que stop no pararía.
+    if unit_managed; then
+      systemctl --user stop openceo-core-host.service
+    else
+      stop
+    fi ;;
   restart)
     # Con cambios rastreados no se toca la instancia sana: se valida
     # antes de parar (TASK-2026-00367, hallazgo de revisión).

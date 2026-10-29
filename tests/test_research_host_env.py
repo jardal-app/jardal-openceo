@@ -16,10 +16,14 @@ class HostEnvTests(unittest.TestCase):
     def _check_launcher(self, name):
         script = Path(__file__).resolve().parents[1] / "scripts" / name
         if name.endswith("runner.sh"):
-            prefix = script.read_text().split('\nload_env\n', 1)[0]
-        else:
-            prefix = script.read_text().rsplit('\ncase "', 1)[0]
-            self.assertNotIn('case "', prefix)
+            # Lanzador delegante (TASK-2026-00370): el .env lo interpreta
+            # host.sh foreground; se verifica la delegación y luego host.sh.
+            text = script.read_text()
+            self.assertIn("openceo-core-host.sh", text)
+            self.assertIn("foreground", text)
+            script = script.with_name("openceo-core-host.sh")
+        prefix = script.read_text().rsplit('\ncase "', 1)[0]
+        self.assertNotIn('case "', prefix)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             envfile, canary = root / ".env", root / "must-not-exist"

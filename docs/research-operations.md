@@ -6,9 +6,10 @@ ticket de Jardal ERP. La activación recurrente se decide al terminar el proyect
 las pruebas del agente no requieren revisión humana por fase.
 
 Cuando el host está administrado por `openceo-core-host.service`, reiniciar la
-unidad de systemd de usuario. El launcher manual y el runner de esa unidad
-interpretan `.env` con python-dotenv: comillas, referencias `${KEY}` y saltos
-de línea se resuelven como en Settings, sin ejecutar texto del archivo.
+unidad de systemd de usuario. El launcher manual y el modo `foreground` de esa
+unidad interpretan `.env` con python-dotenv: comillas, referencias `${KEY}` y
+saltos de línea se resuelven como en Settings, sin ejecutar texto del archivo
+(el runner solo delega en `foreground`).
 
 ```bash
 XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus systemctl --user restart openceo-core-host.service

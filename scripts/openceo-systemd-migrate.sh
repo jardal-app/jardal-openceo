@@ -6,13 +6,30 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-UNIT_DIR="$HOME/.config/systemd/user"
+UNIT_DIR="${OPENCEO_SYSTEMD_USER_DIR:-$HOME/.config/systemd/user}"
 HOST_UNIT="$ROOT_DIR/deploy/systemd/openceo-core-host.service"
 ALERT_UNIT="$ROOT_DIR/deploy/systemd/openceo-alert.service"
 
 need_systemd() {
   command -v systemctl >/dev/null 2>&1 || {
     echo "systemctl no disponible; registre el comando exacto en TASK-2026-00370." >&2
+    exit 1
+  }
+}
+
+check_linger() {
+  # Sin linger la unidad de usuario no vuelve tras reiniciar el host.
+  local user linger
+  user="${USER:-$(id -un)}"
+  command -v loginctl >/dev/null 2>&1 || {
+    echo "WARN: sin loginctl; no se pudo verificar Linger para $user." >&2
+    return 0
+  }
+  linger="$(loginctl show-user "$user" -p Linger --value 2>/dev/null || true)"
+  [[ "$linger" == "yes" ]] || {
+    echo "Linger no activo para $user: la unidad no volvería tras reiniciar." >&2
+    echo "Habilítelo con: sudo loginctl enable-linger $user" >&2
+    echo "y registre el resultado en TASK-2026-00370." >&2
     exit 1
   }
 }
@@ -41,6 +58,7 @@ cmd_status() {
 
 cmd_install() {
   need_systemd
+  check_linger
   # Sin dos instancias: primero se para el arranque por script.
   bash "$ROOT_DIR/scripts/openceo-core-host.sh" stop
   link_units

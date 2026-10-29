@@ -51,7 +51,7 @@ script path; never run both at once (single flock in
 burst 5 per 600s, no retry on exit 3), records every stop in
 `.runtime/last-exit.json` via `ExecStopPost=record-exit.sh`, and fires
 `openceo-alert.service` (core-independent: spool, syslog, optional
-webhook) when the budget is exhausted. Migrate with
+webhook) on failure, including budget exhaustion. Migrate with
 `scripts/openceo-systemd-migrate.sh install|uninstall|status`
 (TASK-2026-00370).
 

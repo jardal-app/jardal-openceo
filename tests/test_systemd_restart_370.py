@@ -87,6 +87,116 @@ def test_host_script_has_foreground_mode():
     text = HOST_SH.read_text(encoding="utf-8")
     assert "foreground)" in text
     assert "unit_managed" in text
+    assert "systemctl --user stop openceo-core-host.service" in text
+    assert "journalctl --user" in text
+
+
+def test_host_unit_orders_after_docker():
+    unit = _read_unit(HOST_UNIT)
+    assert "docker.service" in unit["Unit"]["After"]
+
+
+def test_migrate_checks_linger_and_supports_custom_unit_dir():
+    text = MIGRATE_SH.read_text(encoding="utf-8")
+    assert "OPENCEO_SYSTEMD_USER_DIR" in text
+    assert "Linger" in text
+    assert "enable-linger" in text
+
+
+_SYSTEMCTL_SHIM = """#!/usr/bin/env bash
+# systemctl falso: registra llamadas y emula una unidad gestionada
+# (TASK-2026-00370). Solo para tests de delegación; nunca toca el manager.
+echo "systemctl $*" >>"$SHIM_CALLS"
+echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-UNSET}" >>"$SHIM_CALLS"
+case "$*" in
+  "--user cat openceo-core-host.service") exit "${SHIM_CAT_RC:-0}" ;;
+  "--user is-enabled --quiet openceo-core-host.service") exit "${SHIM_ENABLED_RC:-0}" ;;
+  "--user is-active --quiet openceo-core-host.service") exit "${SHIM_ACTIVE_QUIET_RC:-0}" ;;
+  "--user is-active openceo-core-host.service") echo "${SHIM_STATE:-active}"; exit 0 ;;
+  "--user restart openceo-core-host.service"|"--user stop openceo-core-host.service") exit 0 ;;
+esac
+exit 0
+"""
+
+
+@pytest.fixture()
+def systemctl_shim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    calls = tmp_path / "calls.log"
+    calls.write_text("")
+    shim = bindir / "systemctl"
+    shim.write_text(_SYSTEMCTL_SHIM)
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("SHIM_CALLS", str(calls))
+    return calls
+
+
+def test_restart_delegates_to_systemd_when_managed(
+    systemctl_shim: Path, monkeypatch: pytest.MonkeyPatch
+):
+    release = _REPO / ".runtime" / "RELEASE"
+    backup = release.read_text() if release.exists() else None
+    monkeypatch.setenv("SHIM_CAT_RC", "0")
+    monkeypatch.setenv("SHIM_ENABLED_RC", "0")
+    try:
+        proc = _run(["bash", str(HOST_SH), "restart"])
+    finally:
+        if backup is not None:
+            release.write_text(backup)
+    assert proc.returncode == 0, proc.stderr
+    assert "--user restart openceo-core-host.service" in systemctl_shim.read_text()
+
+
+def test_stop_delegates_to_systemd_when_managed(
+    systemctl_shim: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("SHIM_CAT_RC", "1")  # vía script: refresca el pidfile
+    _run(["bash", str(HOST_SH), "status"])
+    monkeypatch.setenv("SHIM_CAT_RC", "0")
+    monkeypatch.setenv("SHIM_ENABLED_RC", "0")
+    proc = _run(["bash", str(HOST_SH), "stop"])
+    assert proc.returncode == 0, proc.stderr
+    assert "--user stop openceo-core-host.service" in systemctl_shim.read_text()
+    pidfile = _REPO / ".runtime" / "openceo-core-host.pid"
+    if pidfile.exists() and pidfile.read_text().strip().isdigit():
+        os.kill(int(pidfile.read_text().strip()), 0)  # sigue vivo si no lanza
+
+
+def test_status_reports_unit_active(
+    systemctl_shim: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("SHIM_CAT_RC", "0")
+    monkeypatch.setenv("SHIM_ENABLED_RC", "0")
+    monkeypatch.setenv("SHIM_STATE", "active")
+    proc = _run(["bash", str(HOST_SH), "status"])
+    assert proc.returncode == 0, proc.stderr
+    assert "under systemd (unit active)" in proc.stdout
+
+
+def test_status_reports_unit_stopped(
+    systemctl_shim: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("SHIM_CAT_RC", "0")
+    monkeypatch.setenv("SHIM_ENABLED_RC", "0")
+    monkeypatch.setenv("SHIM_STATE", "inactive")
+    proc = _run(["bash", str(HOST_SH), "status"])
+    assert proc.returncode in (1, 2)
+    assert "unit inactive" in proc.stdout
+
+
+def test_unit_managed_sets_bus_env_without_session(
+    systemctl_shim: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("SHIM_CAT_RC", "0")
+    monkeypatch.setenv("SHIM_ENABLED_RC", "0")
+    monkeypatch.setenv("SHIM_STATE", "active")
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+    proc = _run(["bash", str(HOST_SH), "status"])
+    assert proc.returncode == 0, proc.stderr
+    assert "XDG_RUNTIME_DIR=/run/user/" in systemctl_shim.read_text()
 
 
 # --- record-exit.sh ---
@@ -138,6 +248,7 @@ def test_alert_spools_and_never_fails(tmp_path: Path):
     assert proc.returncode == 0, proc.stderr
     spool = (runtime / "alerts.log").read_text()
     assert "SIGKILL" in spool
+    assert "OnFailure" in spool
 
 
 # --- Pruebas vivas con unidad sintética (nunca el core real) ---
@@ -192,7 +303,7 @@ def _write_test_units(runtime: Path) -> None:
 def _remove_test_units() -> None:
     _systemctl("stop", TEST_CRASH)
     _systemctl("stop", TEST_ALERT)
-    _systemctl("reset-failed")
+    _systemctl("reset-failed", TEST_CRASH, TEST_ALERT)
     unit_dir = _user_unit_dir()
     for name in (TEST_CRASH, TEST_ALERT):
         try:
@@ -267,4 +378,4 @@ def test_restart_exhaustion_fires_alert(synthetic_units: Path):
         _systemctl("status", TEST_CRASH).stdout
     assert _wait_for(
         lambda: (runtime / "alerts.log").exists(), 30)
-    assert "reinicios" in (runtime / "alerts.log").read_text()
+    assert "OnFailure" in (runtime / "alerts.log").read_text()

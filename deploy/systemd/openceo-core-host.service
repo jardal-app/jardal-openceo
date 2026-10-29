@@ -1,6 +1,8 @@
 [Unit]
 Description=OpenCEO Core (Host Mode, no Docker)
-After=network-online.target
+# docker.service: el modo host reescribe jardal-mongo a 127.0.0.1; sin este
+# orden el core puede adelantarse al Mongo dockerizado y quemar reinicios.
+After=network-online.target docker.service
 Wants=network-online.target
 OnFailure=openceo-alert.service
 # En [Unit]: en [Service] systemd las ignoraría sin aplicar el tope.

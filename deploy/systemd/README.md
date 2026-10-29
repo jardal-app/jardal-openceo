@@ -27,6 +27,7 @@ scripts/openceo-systemd-migrate.sh uninstall # disable --now y retira los enlace
 
 `install` enlaza (symlink) los ficheros del repo en
 `~/.config/systemd/user/` para que el repo sea la fuente de verdad.
+Antes verifica `Linger` y falla con el comando exacto si falta.
 Tras `uninstall`, volver al script con
 `scripts/openceo-core-host.sh restart`. `restart`/`status` delegan en
 `systemctl --user` solo cuando la unidad está habilitada o activa; si
