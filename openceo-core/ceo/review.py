@@ -51,8 +51,12 @@ __all__ = [
     "CEOReviewKind",
     "CEOSignals",
     "CEO_EXECUTOR_ROLE",
+    "CEO_RELIABILITY_MAX",
+    "collapse_reliability_wake_reasons",
+    "compile_reliability",
     "compile_signals",
     "new_review_id",
+    "reliability_wake_reason",
     "run_review",
 ]
 
@@ -80,6 +84,44 @@ CEO_OPEN_TITLES = 200
 CEO_PROMPT_REASONS = 10
 CEO_STATUS_ROWS = 10
 
+# Reliability section (TASK-2026-00380, design v2 §12). At most this
+# many non-storm Problems travel, ranked by impact; every
+# release_regression storms on top, untruncated.
+CEO_RELIABILITY_MAX = 10
+CEO_RELIABILITY_AFFECTED_MAX = 20
+
+#: Problem statuses the CEO sees (open diagnosis pipeline states).
+_RELIABILITY_VISIBLE_STATUSES = frozenset({
+    "open", "diagnosed", "ticketed", "regressed",
+})
+
+#: Statuses counting as an active Problem for the operative readout.
+_RELIABILITY_ACTIVE_STATUSES = frozenset({
+    "open", "diagnosing", "diagnosed", "needs_split", "ticketed",
+    "fix_merged", "verifying", "regressed",
+})
+
+#: Transitions that wake the CEO, grouped by Problem + transition.
+#: 20 equivalent events render the same reason and collapse to one.
+_RELIABILITY_WAKE_TRANSITIONS = frozenset({
+    "new_critical",
+    "new_high",
+    "regressed",
+    "release_regression",
+    "brake_enforce_stop",
+})
+
+#: Hunter-health keys. Unknown stays None, never 0.
+_RELIABILITY_HEALTH_KEYS = (
+    "capture_failures",
+    "spool_pending",
+    "spool_discards",
+    "suppressed_incidents",
+    "budget_exhausted",
+    "worker_restarts",
+    "shadow_would_stops",
+)
+
 _OPEN_CHILD = frozenset({"queued", "in_progress", "waiting"})
 _BLOCKED_CHILD = frozenset({"failed", "escalated", "interrupted"})
 _CLOSED_CHILD = frozenset({"completed", "cancelled"})
@@ -105,6 +147,147 @@ def _secret_blocked(ticket: Mapping[str, Any]) -> bool:
     return isinstance(params, dict) and isinstance(
         params.get(SECRET_BLOCK_PARAM), dict
     )
+
+
+def _reliability_severity_rank(value: Any) -> int:
+    return {"critical": 2, "high": 1}.get(
+        str(value or "").strip().lower(), 0)
+
+
+def _reliability_counts(problem: Mapping[str, Any]) -> dict[str, Any]:
+    raw = problem.get("counts")
+    return dict(raw) if isinstance(raw, Mapping) else {}
+
+
+def _reliability_impact_key(problem: Mapping[str, Any]) -> tuple[int, int, int]:
+    counts = _reliability_counts(problem)
+    try:
+        occurrences = int(counts.get("occurrences", 0))
+    except (TypeError, ValueError):
+        occurrences = 0
+    try:
+        tickets = int(counts.get("distinct_tickets", 0))
+    except (TypeError, ValueError):
+        tickets = 0
+    return (
+        _reliability_severity_rank(problem.get("severity_max")),
+        occurrences,
+        tickets,
+    )
+
+
+def _is_storm_problem(problem: Mapping[str, Any]) -> bool:
+    if str(problem.get("kind") or "") == "release_regression":
+        return True
+    return str(problem.get("_id") or "").startswith("release_regression:")
+
+
+def _summarize_problem(problem: Mapping[str, Any]) -> dict[str, Any]:
+    """Bounded CEO view of one Problem (design v2 §12)."""
+    counts = _reliability_counts(problem)
+    ticket = problem.get("ticket")
+    ticket_view = (
+        {
+            "business_ref": ticket.get("business_ref"),
+            "source_id": ticket.get("source_id"),
+            "type": ticket.get("type"),
+        }
+        if isinstance(ticket, Mapping) else None
+    )
+    affected = problem.get("affected_open_tasks")
+    affected_list = (
+        [str(item) for item in affected] if isinstance(affected, list)
+        else []
+    )
+    return {
+        "problem_key": str(problem.get("_id") or ""),
+        "scope": problem.get("scope"),
+        "kind": problem.get("kind"),
+        "component": problem.get("component"),
+        "attribution": problem.get("attribution"),
+        "severity": problem.get("severity_max"),
+        "counts": {
+            "occurrences": counts.get("occurrences"),
+            "suppressed": counts.get("suppressed"),
+            "distinct_tickets": counts.get("distinct_tickets"),
+            "distinct_projects": counts.get("distinct_projects"),
+        },
+        "status": problem.get("status"),
+        "ticket": ticket_view,
+        "affected_open_tasks": affected_list[:CEO_RELIABILITY_AFFECTED_MAX],
+        "affected_open_tasks_total": len(affected_list),
+    }
+
+
+def compile_reliability(
+    problems: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], bool, int]:
+    """Rank visible Problems; storms always travel (design v2 §12).
+
+    Returns ``(top, truncated, environment_active)``: at most
+    ``CEO_RELIABILITY_MAX`` non-storm Problems by impact, every
+    release_regression storm, whether the regular list was cut, and
+    the active environment Problem count for the operative readout.
+    """
+    docs = [item for item in (problems or [])
+            if isinstance(item, Mapping)]
+    storms = sorted(
+        (_summarize_problem(item) for item in docs
+         if _is_storm_problem(item)),
+        key=lambda view: str(view["problem_key"]),
+    )
+    visible = sorted(
+        (item for item in docs
+         if not _is_storm_problem(item)
+         and str(item.get("status") or "") in _RELIABILITY_VISIBLE_STATUSES),
+        key=_reliability_impact_key,
+        reverse=True,
+    )
+    truncated = len(visible) > CEO_RELIABILITY_MAX
+    top = [_summarize_problem(item) for item in visible[:CEO_RELIABILITY_MAX]]
+    environment_active = sum(
+        1 for item in docs
+        if str(item.get("attribution") or "") == "environment"
+        and str(item.get("status") or "") in _RELIABILITY_ACTIVE_STATUSES
+    )
+    return top + storms, truncated, environment_active
+
+
+def reliability_wake_reason(event: Mapping[str, Any] | None) -> str | None:
+    """Stable CEO wake reason for one hunter transition, else None.
+
+    The reason names only Problem + transition, so 20 equivalent
+    events render one identical reason and the loop debounce keeps a
+    single notice (design v2 §12).
+    """
+    if not isinstance(event, Mapping):
+        return None
+    transition = str(
+        event.get("transition") or event.get("kind") or ""
+    ).strip().lower()
+    if transition not in _RELIABILITY_WAKE_TRANSITIONS:
+        return None
+    problem = event.get("problem")
+    key = (
+        event.get("problem_key") or event.get("problem_id")
+        or (problem.get("_id") if isinstance(problem, Mapping) else None)
+    )
+    text = str(key or "").strip()
+    if not text:
+        return None
+    return f"Reliability {text} {transition}"
+
+
+def collapse_reliability_wake_reasons(
+    events: Sequence[Mapping[str, Any]] | None,
+) -> list[str]:
+    """Group hunter events by Problem + transition, order kept."""
+    reasons: list[str] = []
+    for event in events or []:
+        reason = reliability_wake_reason(event)
+        if reason is not None and reason not in reasons:
+            reasons.append(reason)
+    return reasons
 
 
 def new_review_id(now: datetime | None = None) -> str:
@@ -148,6 +331,15 @@ class CEOEnv:
     close_mission: (
         Callable[..., Awaitable[dict[str, Any]]] | None
     ) = None
+    # Reliability hunter (TASK-2026-00380, design v2 §12). Both readers
+    # are optional: envs without hunter wiring compile the section as
+    # unknown instead of narrowing the rest of the review.
+    reliability_problems: (
+        Callable[[], Awaitable[list[dict[str, Any]]]] | None
+    ) = None
+    reliability_health: (
+        Callable[[], Awaitable[dict[str, Any] | None]] | None
+    ) = None
 
     def moment(self) -> datetime:
         return self.now() if self.now is not None else _utcnow()
@@ -179,6 +371,12 @@ class CEOSignals:
     open_escalations: list[dict[str, Any]] = field(default_factory=list)
     escalations_unknown: bool = False
     kpi_readings: dict[str, CEOKpiReading] = field(default_factory=dict)
+    reliability_problems: list[dict[str, Any]] = field(default_factory=list)
+    reliability_truncated: bool = False
+    reliability_unknown: bool = False
+    reliability_environment_active: int | None = None
+    reliability_health: dict[str, Any] = field(default_factory=dict)
+    reliability_health_unknown: bool = False
 
 
 def _objective_goal(objective: Mapping[str, Any]) -> str:
@@ -476,6 +674,36 @@ async def compile_signals(env: CEOEnv) -> CEOSignals:
     except Exception:
         logger.warning("CEO: open escalations unreadable", exc_info=True)
         signals.escalations_unknown = True
+    if env.reliability_problems is None:
+        signals.reliability_unknown = True
+    else:
+        try:
+            problems = await env.reliability_problems()
+        except Exception:
+            logger.warning("CEO: reliability problems unreadable",
+                           exc_info=True)
+            problems = None
+        if problems is None:
+            signals.reliability_unknown = True
+        else:
+            top, truncated, environment_active = compile_reliability(problems)
+            signals.reliability_problems = top
+            signals.reliability_truncated = truncated
+            signals.reliability_environment_active = environment_active
+    if env.reliability_health is None:
+        signals.reliability_health_unknown = True
+    else:
+        try:
+            health = await env.reliability_health()
+        except Exception:
+            logger.warning("CEO: hunter health unreadable", exc_info=True)
+            health = None
+        if not isinstance(health, Mapping):
+            signals.reliability_health_unknown = True
+        else:
+            signals.reliability_health = {
+                key: health.get(key) for key in _RELIABILITY_HEALTH_KEYS
+            }
     return signals
 
 
@@ -580,6 +808,58 @@ def _missions_section(signals: CEOSignals) -> str:
     return "\n".join(lines)
 
 
+def _reliability_value(value: Any) -> str:
+    return "UNKNOWN" if value is None else repr(value)
+
+
+def _reliability_section(signals: CEOSignals) -> str:
+    """Deterministic hunter readout: top Problems plus hunter health."""
+    if signals.reliability_unknown:
+        return "FIABILIDAD\nUNKNOWN (problems unreadable this review)"
+    lines = ["FIABILIDAD"]
+    if not signals.reliability_problems:
+        lines.append("(no visible problems)")
+    for item in signals.reliability_problems:
+        counts = item.get("counts") or {}
+        ticket = item.get("ticket") or {}
+        affected_total = item.get("affected_open_tasks_total", 0)
+        lines.append(
+            f"- {item.get('problem_key')} [{item.get('scope')}] "
+            f"({item.get('status')}): {item.get('kind')}/"
+            f"{item.get('component')} attr={item.get('attribution')} "
+            f"sev={item.get('severity')} "
+            f"occ={counts.get('occurrences')} "
+            f"supp={counts.get('suppressed')} "
+            f"tickets={counts.get('distinct_tickets')} "
+            f"projects={counts.get('distinct_projects')} "
+            f"ticket={ticket.get('business_ref') or ticket.get('source_id')} "
+            f"affected_open={affected_total}"
+        )
+    lines.append(
+        "truncated: "
+        + ("yes (showing top "
+           f"{CEO_RELIABILITY_MAX} by impact plus every "
+           "release_regression storm)"
+           if signals.reliability_truncated else "no")
+    )
+    lines.append(
+        "environment_active: "
+        + _reliability_value(signals.reliability_environment_active)
+    )
+    if signals.reliability_health_unknown:
+        lines.append("hunter health: UNKNOWN (unreadable this review)")
+    else:
+        health = signals.reliability_health or {}
+        lines.append(
+            "hunter health: "
+            + ", ".join(
+                f"{key}={_reliability_value(health.get(key))}"
+                for key in _RELIABILITY_HEALTH_KEYS
+            )
+        )
+    return "\n".join(lines)
+
+
 def _rows_section(
     title: str, rows: Sequence[Mapping[str, Any]], unknown: bool
 ) -> str:
@@ -644,6 +924,7 @@ def _ceo_prompt(
             signals.business_unknown),
         _missions_section(signals),
         _objectives_section(signals),
+        _reliability_section(signals),
         _rows_section(
             "RECENTLY CLOSED", signals.closed_rows,
             signals.closed_unknown),
@@ -702,6 +983,12 @@ def _ceo_prompt(
             "or a policy-mandated human review. Routine work never "
             "escalates. An already-open identical escalation needs no "
             "duplicate.",
+            "- FIABILIDAD informs prioritization and escalation, never "
+            "autonomy over the hunter: never approve hunter admission "
+            "(§9.3) or protected-path (§9.4) gates and never change "
+            "hunter configuration through any pedido. Reliability "
+            "wakes group by Problem and transition: one notice covers "
+            "equivalent events.",
             "- The deterministic validation rejects duplicates, "
             "unknown-project, unjustified pedidos, and causeless "
             "escalations. Propose work that survives it.",
@@ -827,6 +1114,18 @@ def _review_status(signals: CEOSignals) -> dict[str, Any]:
         "blocked_unknown": signals.blocked_unknown,
         "awaiting_owner": awaiting,
         "awaiting_unknown": signals.escalations_unknown,
+        "reliability": [
+            {
+                "ref": str(row.get("problem_key") or ""),
+                "title": (
+                    f"{row.get('kind')}/{row.get('component')} "
+                    f"({row.get('status')})"
+                ),
+            }
+            for row in signals.reliability_problems[:CEO_STATUS_ROWS]
+        ],
+        "reliability_unknown": signals.reliability_unknown,
+        "reliability_truncated": signals.reliability_truncated,
     }
 
 
@@ -853,6 +1152,12 @@ def _signals_digest(signals: CEOSignals) -> dict[str, Any]:
         "research_unknown": signals.research_unknown,
         "open_escalations": len(signals.open_escalations),
         "escalations_unknown": signals.escalations_unknown,
+        "reliability_problems": len(signals.reliability_problems),
+        "reliability_truncated": signals.reliability_truncated,
+        "reliability_unknown": signals.reliability_unknown,
+        "reliability_environment_active": (
+            signals.reliability_environment_active),
+        "reliability_health_unknown": signals.reliability_health_unknown,
     }
 
 
@@ -943,6 +1248,11 @@ async def _run_no_mandate_review(
             "axes": [], "kpis_measured": 0, "kpis_unknown": 0,
             "open_escalations": len(open_escalations or []),
             "escalations_unknown": escalations_unknown,
+            "reliability_problems": 0,
+            "reliability_truncated": False,
+            "reliability_unknown": True,
+            "reliability_environment_active": None,
+            "reliability_health_unknown": True,
         },
         "decision": None,
         "errors": [],
