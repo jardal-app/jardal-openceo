@@ -14,6 +14,7 @@ from . import classification as classification
 from . import endpoint as endpoint
 from . import fingerprint as fingerprint
 from . import guard as guard
+from . import invariants as invariants
 from . import models as models
 from . import sanitize as sanitize
 from . import supervisor as supervisor
