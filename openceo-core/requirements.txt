@@ -18,3 +18,7 @@ bcrypt==4.0.1
 
 # R2 / S3 storage
 boto3>=1.34.0
+
+# Error tracking auxiliar (TASK-2026-00371, ap. 16.3): solo se activa con
+# OPENCEO_GLITCHTIP_DSN; sin el paquete el tracking queda desactivado.
+sentry-sdk==2.73.0

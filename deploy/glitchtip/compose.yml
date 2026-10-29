@@ -22,6 +22,7 @@ services:
     environment:
       POSTGRES_DB: glitchtip
       POSTGRES_USER: glitchtip
+      POSTGRES_PASSWORD: ${GLITCHTIP_DB_PASSWORD}
     volumes:
       - glitchtip-db:/var/lib/postgresql/data
     expose:
@@ -55,11 +56,11 @@ services:
     env_file:
       - glitchtip.env
     environment:
-      DATABASE_URL: postgres://glitchtip:$${GLITCHTIP_DB_PASSWORD}@db:5432/glitchtip
+      DATABASE_URL: postgres://glitchtip:${GLITCHTIP_DB_PASSWORD}@db:5432/glitchtip
       REDIS_URL: redis://valkey:6379/0
     networks:
       - internal
-    command: ./bin/migrate.sh
+    command: ./bin/run-migrate.sh
 
   web:
     image: glitchtip/glitchtip:6
@@ -70,7 +71,7 @@ services:
     env_file:
       - glitchtip.env
     environment:
-      DATABASE_URL: postgres://glitchtip:$${GLITCHTIP_DB_PASSWORD}@db:5432/glitchtip
+      DATABASE_URL: postgres://glitchtip:${GLITCHTIP_DB_PASSWORD}@db:5432/glitchtip
       REDIS_URL: redis://valkey:6379/0
       PORT: "8080"
       GLITCHTIP_MAX_EVENT_LIFE_DAYS: "90"
@@ -99,12 +100,12 @@ services:
     env_file:
       - glitchtip.env
     environment:
-      DATABASE_URL: postgres://glitchtip:$${GLITCHTIP_DB_PASSWORD}@db:5432/glitchtip
+      DATABASE_URL: postgres://glitchtip:${GLITCHTIP_DB_PASSWORD}@db:5432/glitchtip
       REDIS_URL: redis://valkey:6379/0
       GLITCHTIP_MAX_EVENT_LIFE_DAYS: "90"
     networks:
       - internal
-    command: ./bin/celery.sh
+    command: ./bin/run-celery-with-beat.sh
     logging:
       driver: json-file
       options:

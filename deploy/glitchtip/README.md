@@ -10,7 +10,9 @@ afectar al resto de la epica.
 2. En el Traefik del host, entrypoint `glitchtip-in` ligado a
    `127.0.0.1` (nunca `0.0.0.0`: Docker salta UFW). Sin ese
    entrypoint no se levanta la ingesta.
-3. `docker compose -f deploy/glitchtip/compose.yml up -d`.
+3. `docker compose --env-file deploy/glitchtip/glitchtip.env -f deploy/glitchtip/compose.yml up -d`.
+   El `--env-file` es obligatorio: el compose interpola
+   `GLITCHTIP_DB_PASSWORD` y `GLITCHTIP_INGEST_HOST` desde el entorno.
 4. UI solo interna (tunel SSH). UI publica solo con allowlist de
    IP del Owner + TLS + autenticacion.
 
@@ -22,6 +24,8 @@ compose). El backup es opcional: telemetria auxiliar.
 - `openceo-core/reliability/error_tracking.py`: `init_error_tracking`
   con la release de RELEASE. Sin `OPENCEO_GLITCHTIP_DSN` queda
   desactivado y nada cambia.
+- Requiere `sentry-sdk` (fijado en `openceo-core/requirements.txt`);
+  sin el paquete el tracking queda desactivado sin romper nada.
 - Opciones fijas: `send_default_pii=False`,
   `include_local_variables=False`, `max_request_body_size="never"`,
   `before_send` con la redaccion de ap. 15.2, sin escribir en Mongo.

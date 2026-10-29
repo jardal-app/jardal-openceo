@@ -129,6 +129,21 @@ class GlitchtipInitTests(unittest.TestCase):
         self.assertEqual(calls["release"], "cafe01")
         self.assertEqual(calls["environment"], "production")
 
+    def test_init_failure_stays_disabled(self) -> None:
+        import os
+        os.environ[tracking.GLITCHTIP_DSN_ENV] = "not-a-valid-dsn"
+        module, integrations, asyncio_mod, _ = _install_fake_sentry()
+
+        def bad_init(**kwargs):
+            raise ValueError("Bad DSN")
+
+        module.init = bad_init
+        sys.modules["sentry_sdk"] = module
+        sys.modules["sentry_sdk.integrations"] = integrations
+        sys.modules["sentry_sdk.integrations.asyncio"] = asyncio_mod
+        self.assertFalse(tracking.init_error_tracking(release="r"))
+        self.assertFalse(tracking.is_active())
+
 
 class ScrubTests(unittest.TestCase):
     def test_redacts_text_and_drops_identity(self) -> None:
@@ -168,6 +183,26 @@ class ScrubTests(unittest.TestCase):
 
     def test_non_dict_event_is_dropped(self) -> None:
         self.assertIsNone(tracking.scrub_sentry_event("boom"))  # type: ignore[arg-type]
+
+    def test_before_send_accepts_sdk_hint_argument(self) -> None:
+        event = {"message": "boom", "user": {"id": "u1"}}
+        out = tracking.scrub_sentry_event(event, {"exc": "ValueError"})
+        assert out is not None
+        self.assertNotIn("user", out)
+
+    def test_context_line_is_scrubbed(self) -> None:
+        event = {"exception": {"values": [{
+            "value": "boom",
+            "stacktrace": {"frames": [{
+                "vars": {"secret": 1},
+                "context_line": "connect(password=s3cret)",
+                "pre_context": ["ok"],
+            }]}}]}}
+        out = tracking.scrub_sentry_event(event, None)
+        assert out is not None
+        frame = out["exception"]["values"][0]["stacktrace"]["frames"][0]
+        self.assertNotIn("s3cret", frame["context_line"])
+        self.assertNotIn("vars", frame)
 
 
 class CaptureTests(unittest.TestCase):
@@ -219,6 +254,25 @@ class CaptureTests(unittest.TestCase):
 
 
 class ComposeTests(unittest.TestCase):
+    def test_compose_structure_is_deployable(self) -> None:
+        import yaml
+        compose = yaml.safe_load(
+            (REPO / "deploy" / "glitchtip" / "compose.yml").read_text())
+        services = compose["services"]
+        db_env = services["db"]["environment"]
+        self.assertEqual(
+            db_env["POSTGRES_PASSWORD"], "${GLITCHTIP_DB_PASSWORD}")
+        for name in ("migrate", "web", "worker"):
+            url = services[name]["environment"]["DATABASE_URL"]
+            self.assertIn("${GLITCHTIP_DB_PASSWORD}", url)
+            self.assertNotIn("$${", url)
+        self.assertEqual(
+            services["migrate"]["command"], "./bin/run-migrate.sh")
+        self.assertEqual(
+            services["worker"]["command"], "./bin/run-celery-with-beat.sh")
+        for name, service in services.items():
+            self.assertNotIn("ports", service, name)
+
     def test_compose_is_pinned_internal_and_retained(self) -> None:
         text = (REPO / "deploy" / "glitchtip" / "compose.yml").read_text()
         self.assertIn("postgres:18", text)

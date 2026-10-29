@@ -43,9 +43,12 @@ def _scrub_frames(frames: object) -> None:
             value = frame.get(key)
             if isinstance(value, list):
                 frame[key] = [sanitize_message(str(line)) for line in value]
+        context_line = frame.get("context_line")
+        if isinstance(context_line, str):
+            frame["context_line"] = sanitize_message(context_line)
 
 
-def scrub_sentry_event(event: dict) -> dict | None:
+def scrub_sentry_event(event: dict, hint: dict | None = None) -> dict | None:
     """Redaccion de diseno ap. 15.2 para el evento Sentry/GlitchTip.
 
     Falla cerrada: sin dict valido devuelve None (el SDK descarta).
@@ -152,7 +155,11 @@ def init_error_tracking(
     }
     if integrations is not None:
         options["integrations"] = integrations
-    sentry_sdk.init(**options)
+    try:
+        sentry_sdk.init(**options)
+    except Exception:  # noqa: BLE001 - DSN invalido: desactivado, sigue todo
+        _ACTIVE = False
+        return False
     _ACTIVE = True
     return True
 
