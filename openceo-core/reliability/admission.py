@@ -186,6 +186,25 @@ def verify_approval(
     return True, "approved"
 
 
+def _recorded_entry(books: dict[str, Any],
+                    approval_id: str) -> dict[str, Any] | None:
+    """Newest recorded decision for an approval id, or None when absent."""
+    best: dict[str, Any] | None = None
+    best_version = -1
+    for entry in books.values():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("approval_id") or "") != approval_id:
+            continue
+        try:
+            version = int(entry.get("version", 0) or 0)
+        except (TypeError, ValueError):
+            version = 0
+        if best is None or version > best_version:
+            best, best_version = entry, version
+    return best
+
+
 def _recorded_human_approval(task: dict[str, Any],
                              approval_id: str) -> tuple[bool, str]:
     """Approval.decision evidence written only from validated ERP events."""
@@ -194,20 +213,34 @@ def _recorded_human_approval(task: dict[str, Any],
         params, dict) else None
     if not isinstance(books, dict):
         return False, "no_approved_human_decision"
-    for entry in books.values():
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("approval_id") or "") != approval_id:
-            continue
-        kind = str(entry.get("actor_kind") or "").strip()
-        if kind and kind != "human":
-            return False, "agent_decision"
-        if str(entry.get("verdict") or "").strip().lower() != "approved":
-            return False, "approval_denied"
-        if not kind:
-            return False, "actor_unverifiable"
-        return True, "approved"
-    return False, "no_approved_human_decision"
+    entry = _recorded_entry(books, approval_id)
+    if entry is None:
+        return False, "no_approved_human_decision"
+    kind = str(entry.get("actor_kind") or "").strip()
+    if kind and kind != "human":
+        return False, "agent_decision"
+    if str(entry.get("verdict") or "").strip().lower() != "approved":
+        return False, "approval_denied"
+    if not kind:
+        return False, "actor_unverifiable"
+    return True, "approved"
+
+
+def recorded_approval_version(task: dict[str, Any],
+                              approval_id: str) -> int | None:
+    """Recorded decision version for an approval id, if any."""
+    params = task.get("params")
+    books = (params or {}).get(HUNTER_DECISIONS_KEY) if isinstance(
+        params, dict) else None
+    if not isinstance(books, dict):
+        return None
+    entry = _recorded_entry(books, approval_id)
+    if entry is None:
+        return None
+    try:
+        return int(entry.get("version", 0) or 0)
+    except (TypeError, ValueError):
+        return None
 
 
 async def check_admission(
@@ -255,6 +288,18 @@ async def check_admission(
         return {"allowed": False, "reason": live_reason,
                 "problem_key": claim["problem_key"],
                 "approval_id": approval_id}
+    view = normalize_approval(live)
+    live_version = view.get("version") if isinstance(view, dict) else None
+    recorded_version = recorded_approval_version(task, approval_id)
+    if live_version is not None and recorded_version is not None:
+        try:
+            regressed = int(live_version) < int(recorded_version)
+        except (TypeError, ValueError):
+            regressed = False
+        if regressed:
+            return {"allowed": False, "reason": "stale_approval",
+                    "problem_key": claim["problem_key"],
+                    "approval_id": approval_id}
     return {"allowed": True, "reason": "approved",
             "problem_key": claim["problem_key"],
             "approval_id": approval_id}
@@ -276,3 +321,25 @@ def attach_approval(task: dict[str, Any], *, approval_id: str,
     params[HUNTER_PARAMS_KEY] = hunter
     updated["params"] = params
     return updated
+
+
+def claim_fields(source: dict[str, Any] | None) -> dict[str, str] | None:
+    """Hunter claim fields carried by an ERP payload or flat params.
+
+    Returns ``{problem_key, proposal_hash, approval_id?}`` when the
+    carrier names a complete proposal binding, else None. Pure helper
+    for execution-ingress wiring (creation and ERP adoption); the
+    authorization itself is always verified live at admission.
+    """
+    if not isinstance(source, dict):
+        return None
+    problem_key = str(source.get("problem_key") or "").strip()
+    proposal_hash = str(source.get("proposal_hash") or "").strip()
+    if not problem_key or not proposal_hash:
+        return None
+    approval_id = str(source.get("approval_id") or "").strip()
+    return {
+        "problem_key": problem_key,
+        "proposal_hash": proposal_hash,
+        "approval_id": approval_id or "",
+    }

@@ -577,5 +577,189 @@ class RunTaskGateTest(unittest.TestCase):
         self.assertEqual(calls, ["exec-hunter-1"])
 
 
+class VersionRegressionTest(unittest.TestCase):
+    def test_regressed_live_version_is_blocked(self) -> None:
+        task = _hunter_task()
+        verdict = _run(adm.check_admission(
+            task, approvals=FakeReader({"apr-1": _live_approval(version=2)})))
+        self.assertFalse(verdict["allowed"])
+        self.assertEqual(verdict["reason"], "stale_approval")
+
+    def test_newest_recorded_entry_wins(self) -> None:
+        task = _hunter_task()
+        params = dict(task["params"])
+        params["_erp_decisions"] = {
+            "dec-old": {
+                "verdict": "denied", "approval_id": "apr-1",
+                "applied_at": "2026-10-29T11:00:00+00:00",
+                "actor_kind": "human", "actor_id": "owner-1", "version": 2,
+            },
+            "dec-new": {
+                "verdict": "approved", "approval_id": "apr-1",
+                "applied_at": "2026-10-29T12:00:00+00:00",
+                "actor_kind": "human", "actor_id": "owner-1", "version": 3,
+            },
+        }
+        task["params"] = params
+        verdict = _run(adm.check_admission(
+            task, approvals=FakeReader({"apr-1": _live_approval()})))
+        self.assertTrue(verdict["allowed"])
+        self.assertEqual(verdict["reason"], "approved")
+
+
+class ChangedProposalRepublishTest(unittest.TestCase):
+    def _ticketed(self) -> dict[str, Any]:
+        return {
+            "_id": f"engine|{PROBLEM_KEY}", "scope": "engine",
+            "kind": "exception", "component": "dispatcher",
+            "attribution": "engine", "severity_max": "high",
+            "status": "ticketed",
+            "counts": {"occurrences": 5, "distinct_tickets": 3,
+                       "distinct_projects": 1},
+            "problem_key": PROBLEM_KEY, "version": 2,
+            "ticket": {
+                "business_ref": "TASK-2026-90001",
+                "source_id": f"reliability:problem:{PROBLEM_KEY}",
+                "type": "fix", "proposal_hash": "0" * 64,
+                "approval_id": "apr-old",
+            },
+        }
+
+    def test_changed_proposal_requests_new_approval(self) -> None:
+        seen: dict[str, Any] = {}
+
+        class ApprovingErp:
+            async def find_by_source_id(
+                    self, source: str, source_id: str) -> Any:
+                return None
+
+            async def create_ticket(self, payload: dict) -> dict:
+                raise AssertionError("republish must update, not create")
+
+            async def count_pending_hunter(self) -> int:
+                return 0
+
+            async def update_ticket(
+                    self, business_ref: str, patch: dict) -> dict:
+                seen["business_ref"] = business_ref
+                seen["patch"] = patch
+                return {"business_ref": business_ref, **patch}
+
+            async def add_comment(
+                    self, business_ref: str, content: str) -> None:
+                pass
+
+            async def request_approval(
+                    self, request: dict, *, key: str) -> dict:
+                seen["approval_request"] = request
+                return {"id": "apr-43", "status": "pending"}
+
+        outcome = _run(pub.publish(
+            self._ticketed(), ticket_type="fix", erp=ApprovingErp(),
+            proposal=dict(PROPOSAL),
+            tickets_cfg={"enabled": True, "max_pending_owner": 5}))
+        self.assertEqual(outcome["status"], "republished")
+        self.assertEqual(seen["business_ref"], "TASK-2026-90001")
+        self.assertEqual(seen["patch"]["approval_id"], "apr-43")
+        self.assertEqual(seen["patch"]["proposal_hash"], DIGEST)
+        self.assertIn(DIGEST, seen["approval_request"]["resource"])
+        ticket = outcome["problem_update"]["ticket"]
+        self.assertEqual(ticket["approval_id"], "apr-43")
+        self.assertEqual(ticket["proposal_hash"], DIGEST)
+
+    def test_same_proposal_keeps_hands_off_refusal(self) -> None:
+        class QuietErp:
+            async def find_by_source_id(
+                    self, source: str, source_id: str) -> Any:
+                return None
+
+            async def create_ticket(self, payload: dict) -> dict:
+                raise AssertionError("no create expected")
+
+            async def count_pending_hunter(self) -> int:
+                return 0
+
+            async def update_ticket(
+                    self, business_ref: str, patch: dict) -> dict:
+                raise AssertionError("no update expected")
+
+            async def add_comment(
+                    self, business_ref: str, content: str) -> None:
+                pass
+
+        proposal = {"hypothesis": {"cause": "x"},
+                    "proposed_change": "y",
+                    "target_components": ["dispatcher"],
+                    "regression_test": "z",
+                    "recovery": "none"}
+        problem = self._ticketed()
+        problem["ticket"] = dict(problem["ticket"])
+        problem["ticket"]["proposal_hash"] = pub.proposal_hash(proposal)
+        outcome = _run(pub.publish(
+            problem, ticket_type="fix", erp=QuietErp(),
+            proposal=proposal,
+            tickets_cfg={"enabled": True, "max_pending_owner": 5}))
+        self.assertEqual(outcome["status"], "refused")
+
+
+class HunterEvidenceWithoutRoutingTest(unittest.TestCase):
+    """H1: a hunter approval.decision is recorded even when no
+    human-wait routing applies, so the gate can verify it."""
+
+    def _service(self, repo: Any) -> Any:
+        from task_service import TaskService
+
+        service = TaskService.__new__(TaskService)
+        service._repo = repo
+        service._settings = SimpleNamespace(
+            JARDAL_ERP_OPENCEO_USER="openceo@jardal.app")
+        service._business = None
+        service._hub = SimpleNamespace(broadcast=AsyncMock())
+        service._dispatcher_wake = None
+        service._locks = {}
+        service._project_locks = {}
+        service._notion = None
+        service._workflow_service = None
+        service.apply_owner_decision = AsyncMock(
+            return_value={"applied": False, "reason": "not_answerable"})
+        return service
+
+    def test_decision_evidence_recorded_then_gate_admits(self) -> None:
+        task = _hunter_task()
+        params = dict(task["params"])
+        params.pop("_erp_decisions", None)
+        task["params"] = params
+        repo = _FakeRepo([task])
+        service = self._service(repo)
+        event = {
+            "event_id": "evt-h1", "type": "approval.decision",
+            "actor": {"kind": "human", "id": "owner-1"},
+            "payload": {"approval_id": "apr-1", "decision_id": "dec-9",
+                        "verdict": "approved", "version": 3,
+                        "execution_task_id": "exec-hunter-1"},
+        }
+        outcome = _run(service.apply_erp_event(event))
+        self.assertEqual(outcome["status"], "not_answerable")
+        self.assertTrue(outcome["pending"])
+        stored = _run(repo.get_task("exec-hunter-1"))
+        books = stored["params"]["_erp_decisions"]
+        self.assertEqual(books["dec-9"]["actor_kind"], "human")
+        self.assertEqual(books["dec-9"]["approval_id"], "apr-1")
+        verdict = _run(adm.check_admission(
+            stored, approvals=FakeReader({"apr-1": _live_approval()})))
+        self.assertTrue(verdict["allowed"])
+        self.assertEqual(verdict["reason"], "approved")
+
+    def test_claim_fields_helper(self) -> None:
+        self.assertIsNone(adm.claim_fields(None))
+        self.assertIsNone(adm.claim_fields({"problem_key": "k"}))
+        fields = adm.claim_fields(
+            {"problem_key": "k", "proposal_hash": "h",
+             "approval_id": "apr-1"})
+        self.assertEqual(fields, {
+            "problem_key": "k", "proposal_hash": "h",
+            "approval_id": "apr-1"})
+
+
 if __name__ == "__main__":
     unittest.main()

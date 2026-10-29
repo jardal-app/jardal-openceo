@@ -257,6 +257,76 @@ def build_ticket(problem: dict[str, Any], *, ticket_type: str,
     }
 
 
+async def republish_changed_proposal(
+        problem: dict[str, Any], proposal: dict[str, Any], *,
+        erp: ErpAdapter, source_id: str,
+        now: datetime | None = None,
+        store: Any = None) -> dict[str, Any] | None:
+    """New approval + ERP update when a ticketed proposal changes.
+
+    Returns None when this is not a changed-proposal republish (caller
+    keeps the previous flow). Never raises: ERP failures refuse
+    fail-closed without mutating the Problem.
+    """
+    if not isinstance(proposal, dict) or not proposal.get(
+            "proposed_change") or not proposal.get("regression_test"):
+        return None
+    ticket = problem.get("ticket") if isinstance(
+        problem.get("ticket"), dict) else {}
+    business_ref = str(ticket.get("business_ref") or "")
+    previous = ticket.get("proposal_hash")
+    try:
+        digest = proposal_hash(proposal)
+    except Exception:
+        return None
+    if previous is not None and previous == digest:
+        return None
+    if not business_ref:
+        return {"status": "unknown", "reason": "missing_business_ref",
+                "source_id": source_id}
+    requester = getattr(erp, "request_approval", None)
+    updater = getattr(erp, "update_ticket", None)
+    if not callable(requester) or not callable(updater):
+        return {"status": "refused",
+                "reason": "changed_proposal_needs_approval",
+                "source_id": source_id}
+    moment = now or _utcnow()
+    problem_key = str(
+        problem.get("problem_key") or problem.get("_id") or "")
+    request, key = build_approval_request(problem_key, digest)
+    try:
+        approval = await _maybe_await(requester(request, key=key))
+    except Exception:
+        logger.warning("Hunter re-approval request failed", exc_info=True)
+        return {"status": "unknown", "reason": "approval_request_failed",
+                "source_id": source_id}
+    approval_id = str((approval or {}).get("id") or "") or None
+    if not isinstance(approval, dict) or not approval_id:
+        return {"status": "unknown", "reason": "approval_request_failed",
+                "source_id": source_id}
+    human_action = ("Aprobar o rechazar la propuesta "
+                    f"{digest} del Problem {problem_key}")
+    try:
+        await _maybe_await(updater(business_ref, {
+            "proposal_hash": digest,
+            "approval_id": approval_id,
+            "status": STATUS_PENDING_REVIEW,
+            "human_action": human_action,
+        }))
+    except Exception:
+        logger.warning("Hunter ticket update failed", exc_info=True)
+        return {"status": "unknown", "reason": "ticket_update_failed",
+                "source_id": source_id}
+    ticketed = mark_ticketed(
+        problem, business_ref=business_ref, source_id=source_id,
+        ticket_type=TICKET_TYPE_FIX, proposal_hash=digest,
+        approval_id=approval_id, now=moment)
+    await _persist_problem(store, str(problem.get("_id")), ticketed)
+    return {"status": "republished", "ticket": ticketed["ticket"],
+            "source_id": source_id, "problem_status": str(ticketed["status"]),
+            "problem_update": ticketed}
+
+
 def build_promotion(problem: dict[str, Any],
                     proposal: dict[str, Any]) -> dict[str, Any]:
     """Investigate to fix promotion: a new hash and a new approval."""
@@ -315,6 +385,15 @@ async def publish(problem: dict[str, Any], *, ticket_type: str,
     status = str(problem.get("status") or "")
     if status == ProblemStatus.REJECTED.value:
         return {"status": "refused", "reason": "rejected_never_reproposed"}
+    if (status == ProblemStatus.TICKETED.value
+            and ticket_type == TICKET_TYPE_FIX):
+        republished = await republish_changed_proposal(
+            problem, proposal if isinstance(proposal, dict) else {},
+            erp=erp, source_id=source_id_for(str(
+                problem.get("problem_key") or problem.get("_id") or "")),
+            now=moment, store=store)
+        if republished is not None:
+            return republished
     if status in HANDS_OFF_FOR_PUBLISH - {ProblemStatus.REJECTED.value}:
         return {"status": "refused", "reason": f"status_{status}"}
     if bool((problem.get("links") or {}).get("grouped_under")):
