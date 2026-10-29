@@ -180,6 +180,52 @@ class BuildBundleTest(unittest.TestCase):
                      for entry in bundle["manifest"]}
         self.assertEqual(omissions.get("project:context"), "over_budget")
 
+    def test_sealed_size_includes_project_context(self) -> None:
+        bundle = diag.build_bundle(
+            _problem(scope="project:jardal-openceo"), [_incident(1)],
+            project_context="diff fragment")
+        self.assertIn("project_context", bundle)
+        sealed = diag.canonical_json({
+            "incidents": bundle["incidents"],
+            "manifest": bundle["manifest"],
+            "problem": bundle["problem"],
+            "project_context": bundle["project_context"]})
+        self.assertEqual(bundle["byte_size"], len(sealed.encode("utf-8")))
+        self.assertEqual(bundle["tokens_estimated"],
+                         bundle["byte_size"] // 4)
+
+    def test_over_budget_incidents_have_single_manifest_entry(self) -> None:
+        incidents = [_incident(day) for day in range(1, 8)]
+        bundle = diag.build_bundle(
+            _problem(scope="project:jardal-openceo"), incidents,
+            project_context="x" * 5000,
+            limits={"max_bytes": 3000, "max_tokens": 1000})
+        dropped = [entry for entry in bundle["manifest"]
+                   if entry["ref"].startswith("incident:")
+                   and entry["omission"] == "over_budget"]
+        self.assertTrue(dropped)
+        refs = [entry["ref"] for entry in bundle["manifest"]]
+        self.assertEqual(len(refs), len(set(refs)))
+
+    def test_no_incident_fits_is_insufficient(self) -> None:
+        summary = diag._problem_summary(_problem())
+        essential = diag.canonical_json({
+            "problem": summary,
+            "incidents": [diag._incident_core(_incident(1)),
+                          diag._incident_core(_incident(2))],
+            "manifest": [diag._manifest(
+                "problem:summary", "problem",
+                diag.canonical_json(summary))],
+        })
+        tight = len(essential.encode("utf-8")) + 100
+        bundle = diag.build_bundle(
+            _problem(), [_incident(1), _incident(2)],
+            limits={"max_bytes": tight, "max_tokens": 100000})
+        self.assertEqual(bundle["incidents"], [])
+        self.assertFalse(bundle["sufficient"])
+        self.assertEqual(bundle["decision_hint"],
+                         diag.INSUFFICIENT_EVIDENCE)
+
 
 class SchemaAndPolicyTest(unittest.TestCase):
     def test_invalid_json_publishes_no_cause(self) -> None:

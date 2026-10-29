@@ -245,10 +245,14 @@ def build_bundle(
     }
 
     def sealed_size(extra: str = "") -> int:
-        text = canonical_json(
-            {"problem": bundle["problem"],
-             "incidents": bundle["incidents"],
-             "manifest": bundle["manifest"]})
+        payload: dict[str, Any] = {
+            "problem": bundle["problem"],
+            "incidents": bundle["incidents"],
+            "manifest": bundle["manifest"],
+        }
+        if "project_context" in bundle:
+            payload["project_context"] = bundle["project_context"]
+        text = canonical_json(payload)
         return len((text + extra).encode("utf-8"))
 
     def fits(text: str) -> bool:
@@ -289,18 +293,20 @@ def build_bundle(
                       protocol_map=protocol_map,
                       brake_values=brake_values, fits=fits, omit=omit)
     _add_project_context(bundle, scope, project_context, fits, omit)
-    present = {str(item.get("ref")) for item in bundle["incidents"]}
-    for doc in chosen:
-        ref = f"incident:{doc.get('_id')}"
-        if ref not in present:
-            omit(ref, "incident", "over_budget")
+    if not bundle["incidents"]:
+        bundle["sufficient"] = False
+        bundle["decision_hint"] = INSUFFICIENT_EVIDENCE
     return _seal(bundle)
 
 
 def _seal(bundle: dict[str, Any]) -> dict[str, Any]:
-    text = canonical_json(
-        {"incidents": bundle["incidents"], "manifest": bundle["manifest"],
-         "problem": bundle["problem"]})
+    payload: dict[str, Any] = {
+        "incidents": bundle["incidents"], "manifest": bundle["manifest"],
+        "problem": bundle["problem"],
+    }
+    if "project_context" in bundle:
+        payload["project_context"] = bundle["project_context"]
+    text = canonical_json(payload)
     bundle["byte_size"] = len(text.encode("utf-8"))
     bundle["tokens_estimated"] = bundle["byte_size"] // 4
     return bundle
