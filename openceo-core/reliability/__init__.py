@@ -18,6 +18,7 @@ from . import invariants as invariants
 from . import models as models
 from . import sanitize as sanitize
 from . import supervisor as supervisor
+from . import worker as worker
 from .config import validate_reliability_config as validate_reliability_config
 
 _default_errors = validate_reliability_config(config.RELIABILITY_DEFAULTS)
