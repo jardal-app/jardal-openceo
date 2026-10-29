@@ -284,6 +284,47 @@ class CompletionHookTest(unittest.TestCase):
         self.assertEqual(stored["status"], "fix_merged")
         self.assertEqual(stored["fix"]["sha"], "fixsha9")
 
+    def test_completion_uses_stored_counts_for_baseline(self) -> None:
+        problems = FakeColl([_problem()])
+        exposures = FakeColl([
+            {"_id": "dispatcher|unknown|2026-10-20",
+             "component": "dispatcher", "day": "2026-10-20", "count": 10},
+            {"_id": "dispatcher|unknown|2026-10-25",
+             "component": "dispatcher", "day": "2026-10-25", "count": 20},
+        ])
+        task = {"source_id": "reliability:problem:engine|abc123",
+                "params": {"_hunter": {"problem_key": "engine|abc123",
+                                       "fix_sha": "fixsha9"}}}
+        outcome = _run(ver.note_ticket_completed(
+            task, "TASK-2026-00431", problems, exposure_store=exposures,
+            now=_utc()))
+        self.assertEqual(outcome["status"], "fix_merged")
+        stored = _run(problems.find_one({"_id": "engine|abc123"}))
+        assert stored is not None
+        self.assertAlmostEqual(stored["fix"]["baseline_rate"], 0.1)
+        self.assertEqual(stored["fix"]["required_exposures"], 30)
+
+    def test_record_fix_merged_reads_stored_occurrences(self) -> None:
+        problems = FakeColl([_problem()])
+        outcome = _run(ver.record_fix_merged(
+            problems, "engine|abc123", "fixsha9", exposures=30, now=_utc()))
+        self.assertEqual(outcome["status"], "fix_merged")
+        stored = _run(problems.find_one({"_id": "engine|abc123"}))
+        assert stored is not None
+        self.assertAlmostEqual(stored["fix"]["baseline_rate"], 0.1)
+        self.assertEqual(stored["fix"]["required_exposures"], 30)
+
+    def test_completion_falls_back_to_source_id_problem_key(self) -> None:
+        problems = FakeColl([_problem()])
+        task = {"source_id": "reliability:problem:engine|abc123",
+                "params": {"_hunter": {"fix_sha": "fixsha9"}}}
+        outcome = _run(ver.note_ticket_completed(
+            task, "TASK-2026-00431", problems, now=_utc()))
+        self.assertEqual(outcome["status"], "fix_merged")
+        stored = _run(problems.find_one({"_id": "engine|abc123"}))
+        assert stored is not None
+        self.assertEqual(stored["fix"]["sha"], "fixsha9")
+
     def test_non_hunter_ticket_is_ignored(self) -> None:
         problems = FakeColl([_problem()])
         outcome = _run(ver.note_ticket_completed(
@@ -354,6 +395,60 @@ class BootEvaluationTest(unittest.TestCase):
         assert regressed is not None
         self.assertEqual(regressed["status"], "regressed")
         self.assertTrue(regressed["ticket"]["reopen_pending"])
+
+    def test_boot_ignores_pre_deploy_traffic(self) -> None:
+        merged = _problem()
+        merged["_id"] = "engine|stale"
+        merged["problem_key"] = "engine|stale"
+        merged["status"] = "fix_merged"
+        merged["fix"] = {"sha": "fixS", "merged_at": _utc(20),
+                         "deployed_release": None, "baseline_rate": 0.05,
+                         "required_exposures": 60, "required_capped": False,
+                         "exposures_since": 0, "occurrences_since": 0}
+        problems = FakeColl([merged])
+        exposures = FakeColl([
+            {"_id": "dispatcher|unknown|2026-10-20",
+             "component": "dispatcher", "day": "2026-10-20", "count": 40},
+            {"_id": "dispatcher|unknown|2026-10-28",
+             "component": "dispatcher", "day": "2026-10-28", "count": 30},
+        ])
+        outcome = _run(ver.evaluate_release(
+            problems, exposures, "rel9",
+            contains=lambda fix, rel: True, now=_utc()))
+        self.assertEqual(outcome["waiting"], 1)
+        self.assertEqual(outcome["resolved"], 0)
+        stored = _run(problems.find_one({"_id": "engine|stale"}))
+        assert stored is not None
+        self.assertEqual(stored["status"], "verifying")
+        self.assertEqual(stored["fix"]["deployed_release"], "rel9")
+        self.assertEqual(stored["fix"]["exposures_since"], 0)
+
+    def test_deployed_problem_counts_only_post_deploy_exposures(
+            self) -> None:
+        problem = _problem()
+        problem["_id"] = "engine|dep"
+        problem["problem_key"] = "engine|dep"
+        problem["status"] = "verifying"
+        problem["fix"] = {"sha": "fixD", "merged_at": _utc(20),
+                          "deployed_release": "rel9",
+                          "deployed_at": _utc(29),
+                          "baseline_rate": 0.05,
+                          "required_exposures": 2, "required_capped": False,
+                          "exposures_since": 0, "occurrences_since": 0}
+        problems = FakeColl([problem])
+        exposures = FakeColl([
+            {"_id": "dispatcher|unknown|2026-10-28",
+             "component": "dispatcher", "day": "2026-10-28", "count": 100},
+            {"_id": "dispatcher|unknown|2026-10-29",
+             "component": "dispatcher", "day": "2026-10-29", "count": 2},
+        ])
+        outcome = _run(ver.evaluate_release(
+            problems, exposures, "rel9",
+            contains=lambda fix, rel: True, now=_utc()))
+        self.assertEqual(outcome["resolved"], 1)
+        stored = _run(problems.find_one({"_id": "engine|dep"}))
+        assert stored is not None
+        self.assertEqual(stored["fix"]["exposures_since"], 2)
 
     def test_boot_without_store_stays_empty(self) -> None:
         outcome = _run(ver.evaluate_release(

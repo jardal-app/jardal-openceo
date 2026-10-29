@@ -46,6 +46,9 @@ INCIDENTS_PER_PROBLEM_LIMIT = 200
 FIX_SHA_PARAM_KEY = "_hunter"
 FIX_SHA_FIELD = "fix_sha"
 
+# Same value as publisher.SOURCE_ID_PREFIX, kept local: creation owns it.
+SOURCE_ID_PREFIX = "reliability:problem:"
+
 VERIFIABLE_STATUSES = frozenset({
     ProblemStatus.FIX_MERGED.value,
     ProblemStatus.VERIFYING.value,
@@ -155,6 +158,15 @@ def is_hunter_task(task: Any) -> bool:
     return isinstance(hunter, dict) and bool(hunter)
 
 
+def _problem_key_from_source(task: Any) -> str | None:
+    source_id = str(task.get("source_id") or "") \
+        if isinstance(task, dict) else ""
+    if source_id.startswith(SOURCE_ID_PREFIX):
+        key = source_id[len(SOURCE_ID_PREFIX):].strip()
+        return key or None
+    return None
+
+
 def register_fix(
         problem: dict[str, Any],
         sha: str,
@@ -207,6 +219,7 @@ def note_release(
     updated = dict(problem)
     fix = _fix_block(problem)
     fix["deployed_release"] = str(release_sha or "").strip() or "unknown"
+    fix["deployed_at"] = moment
     updated["fix"] = fix
     updated["status"] = ProblemStatus.VERIFYING.value
     updated["version"] = int(problem.get("version", 1)) + 1
@@ -353,13 +366,48 @@ async def _reopen_same_ticket(
         return "reopen_pending"
 
 
+def _as_count(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _stored_occurrences(problem: dict[str, Any]) -> int:
+    counts = problem.get("counts")
+    if not isinstance(counts, dict):
+        return 0
+    try:
+        return max(0, int(counts.get("occurrences", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _sum_exposures(
+        exposure_store: Any, problem: dict[str, Any]) -> int:
+    if exposure_store is None:
+        return 0
+    since_day = _day_of(problem.get("first_seen"))
+    docs = await _collect(
+        exposure_store, _exposure_filter(problem, since_day), 10000)
+    total = 0
+    for doc in docs:
+        try:
+            total += max(0, int(doc.get("count", 0)))
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
 async def record_fix_merged(
         problems: Any,
         problem_key: str,
         sha: str,
         *,
-        occurrences: Any = 0,
-        exposures: Any = 0,
+        occurrences: Any = None,
+        exposures: Any = None,
+        exposure_store: Any = None,
         cfg: dict[str, Any] | None = None,
         now: datetime | None = None) -> dict[str, Any]:
     """Register the fix SHA on integration; never raises."""
@@ -370,8 +418,16 @@ async def record_fix_merged(
         if not isinstance(stored, dict):
             return {"status": "unknown", "reason": "no_problem",
                     "problem_key": str(problem_key)}
+        occ = _as_count(occurrences)
+        if occ is None:
+            occ = _stored_occurrences(stored)
+        runs = _as_count(exposures)
+        if runs is None and exposure_store is not None:
+            runs = await _sum_exposures(exposure_store, stored)
+        if runs is None:
+            runs = 0
         updated, event = register_fix(
-            stored, sha, occurrences=occurrences, exposures=exposures,
+            stored, sha, occurrences=occ, exposures=runs,
             cfg=cfg, now=moment)
         if event != "already_registered":
             await _persist(problems, str(stored.get("_id")), updated)
@@ -391,16 +447,19 @@ async def note_ticket_completed(
         business_ref: str,
         problems: Any,
         *,
-        occurrences: Any = 0,
-        exposures: Any = 0,
+        occurrences: Any = None,
+        exposures: Any = None,
+        exposure_store: Any = None,
         cfg: dict[str, Any] | None = None,
         now: datetime | None = None) -> dict[str, Any]:
     """Completion-path hook: a completed hunter ticket carries its fix SHA.
 
     Explicit call from the finalization path; never raises, never changes
     ticket flows. Fixes integrated outside the engine travel in the ticket
-    by convention (params._hunter.fix_sha); without it there is nothing
-    to register.
+    by convention (params._hunter.fix_sha, problem key there or in the
+    reliability:problem: source_id); without a SHA there is nothing
+    to register. Baseline counts come from the stored Problem and the
+    exposure store unless the caller passes explicit values.
     """
     try:
         if not is_hunter_task(task):
@@ -412,13 +471,17 @@ async def note_ticket_completed(
                     "ticket": str(business_ref or "")}
         claim = task.get("params", {}).get(FIX_SHA_PARAM_KEY, {}) \
             if isinstance(task.get("params"), dict) else {}
-        problem_key = str(claim.get("problem_key") or "").strip()
+        problem_key = str(claim.get("problem_key") or "").strip() \
+            if isinstance(claim, dict) else ""
+        if not problem_key:
+            problem_key = _problem_key_from_source(task) or ""
         if not problem_key:
             return {"status": "ignored", "reason": "no_problem_key",
                     "ticket": str(business_ref or "")}
         return await record_fix_merged(
             problems, problem_key, sha, occurrences=occurrences,
-            exposures=exposures, cfg=cfg, now=now)
+            exposures=exposures, exposure_store=exposure_store,
+            cfg=cfg, now=now)
     except Exception:
         logger.warning("ticket completion hook failed", exc_info=True)
         return {"status": "unknown", "reason": "hook_failed",
@@ -483,10 +546,10 @@ async def _collect(store: Any, filt: dict[str, Any],
 
 
 def _exposure_filter(problem: dict[str, Any],
-                     merged_day: str) -> dict[str, Any]:
+                     since_day: str) -> dict[str, Any]:
     filt: dict[str, Any] = {
         "component": str(problem.get("component") or ""),
-        "day": {"$gte": merged_day},
+        "day": {"$gte": since_day},
     }
     scope = str(problem.get("scope") or "")
     if scope.startswith("project:") and len(scope) > len("project:"):
@@ -503,11 +566,12 @@ def _day_of(moment: Any) -> str:
 
 async def _recount_exposures(
         exposures: Any, problem: dict[str, Any]) -> int:
-    """Sum component exposures since the fix merged; 0 without a store."""
+    """Sum component exposures since the fix deployed; 0 without a store."""
     if exposures is None:
         return int(_fix_block(problem).get("exposures_since", 0) or 0)
-    merged_day = _day_of(_fix_block(problem).get("merged_at"))
-    docs = await _collect(exposures, _exposure_filter(problem, merged_day),
+    fix = _fix_block(problem)
+    since_day = _day_of(fix.get("deployed_at") or fix.get("merged_at"))
+    docs = await _collect(exposures, _exposure_filter(problem, since_day),
                           10000)
     total = 0
     for doc in docs:

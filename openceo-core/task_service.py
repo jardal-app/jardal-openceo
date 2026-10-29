@@ -3278,14 +3278,20 @@ class TaskService:
                 from reliability import verification as _verification
                 _db = getattr(getattr(self, "_repo", None), "db", None)
                 _problems = None
+                _exposure_store = None
                 if _db is not None and hasattr(_db, "__getitem__"):
                     try:
                         _problems = _db["reliability_problems"]
                     except Exception:
                         _problems = None
+                    try:
+                        _exposure_store = _db["reliability_exposures"]
+                    except Exception:
+                        _exposure_store = None
                 if _problems is not None:
                     await _verification.note_ticket_completed(
-                        task or {}, name, _problems)
+                        task or {}, name, _problems,
+                        exposure_store=_exposure_store)
             except Exception:
                 logger.warning(
                     "Hunter fix registration failed", exc_info=True)
