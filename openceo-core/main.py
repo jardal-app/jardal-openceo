@@ -414,6 +414,7 @@ async def lifespan(_: FastAPI):
                 record_unclean_exit,
                 replay_spool,
             )
+            from reliability import endpoint as _reliability_endpoint
             _reliability_coll = repo.db["reliability_incidents"]
             _repo_root = Path(__file__).resolve().parents[1]
             await ensure_reliability_indexes(_reliability_coll)
@@ -422,6 +423,13 @@ async def lifespan(_: FastAPI):
             await record_unclean_exit(
                 _reliability_coll, runtime_dir=_repo_root / ".runtime",
                 release=_release)
+            await _reliability_endpoint.ingest_runner_spool(
+                _reliability_coll, repo.db["reliability_exposures"],
+                runtime_dir=_repo_root / ".runtime")
+            _reliability_endpoint._SERVER = (
+                await _reliability_endpoint.start_endpoint(
+                    _reliability_coll, repo.db["reliability_exposures"],
+                    runtime_dir=_repo_root / ".runtime"))
         except Exception:
             logger.warning("Reliability startup reconcile failed", exc_info=True)
         # Mirror workers + startup repairs (ex-WaitingTaskScheduler.start).
@@ -536,6 +544,9 @@ async def lifespan(_: FastAPI):
         await horizon_scheduler.stop()
         await ceo_loop.stop()
         await dispatcher.stop()
+        with suppress(Exception):
+            from reliability import endpoint as _reliability_endpoint
+            await _reliability_endpoint.stop_endpoint()
         await task_service.stop_notion_worker()
         await task_service.stop_jardal_erp_worker()
         await task_service.stop_visibility_worker()

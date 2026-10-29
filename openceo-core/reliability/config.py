@@ -52,6 +52,10 @@ RELIABILITY_DEFAULTS: dict[str, Any] = {
         "enabled": False,
         "max_pending_owner": 5,
     },
+    "endpoint": {
+        "max_event_bytes": 32768,
+        "max_per_minute": 120,
+    },
     "verification": {
         "min_exposures": 20,
         "max_exposures": 500,
