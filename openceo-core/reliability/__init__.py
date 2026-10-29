@@ -25,6 +25,7 @@ from . import models as models
 from . import publisher as publisher
 from . import sanitize as sanitize
 from . import supervisor as supervisor
+from . import verification as verification
 from . import worker as worker
 from .config import validate_reliability_config as validate_reliability_config
 
