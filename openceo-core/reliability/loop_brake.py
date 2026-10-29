@@ -13,8 +13,11 @@ spools as usual.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -171,6 +174,13 @@ def evaluate_attempt(
     if resolved_mode == "off":
         return {"action": "continue", "rule": None, "incident": None,
                 "shadow": False, "fail_open": False}
+    if milestone:
+        credited = params.get(PROGRESS_GUARD_KEY)
+        names = credited.get("milestones") \
+            if isinstance(credited, dict) else []
+        if isinstance(names, list) and milestone in names:
+            return {"action": "continue", "rule": None, "incident": None,
+                    "shadow": resolved_mode == "shadow", "fail_open": False}
     observation: dict[str, Any] = {
         "phase": phase, "executed": executed, "attempt_id": attempt_id,
         "result_sig": result_sig, "work_fp": work_fp,
@@ -255,8 +265,53 @@ def make_result_sig(phase: str, marker: str) -> str:
         return f"{str(phase).strip()}:{clean}"
 
 
-def dev_work_fp(repo: Any, base_sha: str) -> tuple[str, bool]:
-    """Work fingerprint over a dev checkout; unknown when unresolvable."""
+def _commit_diff_fp(repo: Any, base_sha: str, head_sha: str) -> str | None:
+    """Fingerprint of committed branch work; None when unresolvable."""
+    try:
+        from . import guard as guard_mod
+
+        prefix = str(guard_mod.FP_PREFIX)
+    except Exception:  # noqa: BLE001 - fail-open plain prefix
+        prefix = "fp:"
+    try:
+        start = Path(str(repo))
+        cwd = start if start.is_dir() else start.parent
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=cwd,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=60, check=False)
+        if top.returncode != 0:
+            return None
+        diff = subprocess.run(
+            ["git", "diff", "--binary", str(base_sha), str(head_sha),
+             "--", "."],
+            cwd=top.stdout.decode().strip(), stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=60, check=False)
+        if diff.returncode != 0:
+            return None
+        digest = hashlib.sha256()
+        digest.update(str(base_sha).encode("utf-8"))
+        digest.update(b"\x00" + str(head_sha).encode("utf-8"))
+        digest.update(
+            b"\x00" + hashlib.sha256(diff.stdout).hexdigest().encode())
+        return prefix + digest.hexdigest()
+    except Exception:
+        logger.debug("commit work fingerprint unresolvable (fallback)",
+                     exc_info=True)
+        return None
+
+
+def dev_work_fp(repo: Any, base_sha: str,
+                head_sha: str | None = None) -> tuple[str, bool]:
+    """Work fingerprint over a dev checkout; unknown when unresolvable.
+
+    A checkpoint head hashes the committed base...head diff, surviving
+    the release checkout to base. Without it the tree is hashed as before.
+    """
+    if head_sha:
+        fp = _commit_diff_fp(repo, base_sha, head_sha)
+        if fp is not None:
+            return fp, True
     try:
         from . import guard as guard_mod
 

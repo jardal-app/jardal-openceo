@@ -749,3 +749,46 @@ async def test_brake_generic_scheduled_wait_cap_records_brake(tmp_path):
     assert doc["kind"] == "brake_exhausted"
     assert doc["engine"]["brake"] == "scheduled_wait"
     assert doc["attribution"] == "environment"
+
+
+def _brake_attempt(**overrides):
+    from reliability import loop_brake as brake
+
+    kw = dict(producer=brake.DEV_PRODUCER, phase="tier_b",
+              attempt_id="t-g0-w0", result_sig="tier_b:boom",
+              work_fp="fp:test", fp_complete=True, executed=True,
+              mode="shadow", now="2026-10-29T00:00:00+00:00")
+    kw.update(overrides)
+    return kw
+
+
+@run_async
+async def test_brake_credited_milestone_records_single_observation():
+    from reliability import loop_brake as brake
+
+    params: dict = {}
+    brake.evaluate_attempt(params, milestone="gate-fixed",
+                           **_brake_attempt())
+    brake.evaluate_attempt(params, milestone="gate-fixed",
+                           **_brake_attempt())
+    brake.evaluate_attempt(params, **_brake_attempt())
+    window = params["progress_guard"]["window"]
+    assert len(window) == 1
+    assert params["progress_guard"]["milestones"] == ["gate-fixed"]
+
+
+@run_async
+async def test_brake_work_fp_uses_checkpoint_head_after_release(repo):
+    from reliability import loop_brake as brake
+
+    base = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-qb", "tier/brake-fp")
+    (repo / "work.txt").write_text("real work\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "work")
+    head = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-q", "main")
+    fp_head, complete_head = brake.dev_work_fp(str(repo), base, head)
+    fp_clean, _ = brake.dev_work_fp(str(repo), base)
+    assert complete_head is True
+    assert fp_head != fp_clean

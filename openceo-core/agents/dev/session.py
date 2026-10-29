@@ -1077,8 +1077,12 @@ class DevSessionManager:
         marker = str(plan["marker"])
         result_sig = module.make_result_sig(phase, marker)
         if branch is not None:
+            checkpoint = params.get("dev_checkpoint")
+            head_sha = checkpoint.get("head_sha") \
+                if isinstance(checkpoint, dict) else None
             work_fp, fp_complete = module.dev_work_fp(
-                str(branch.repo), branch.base_sha)
+                str(branch.repo), branch.base_sha,
+                head_sha if isinstance(head_sha, str) else None)
         else:
             work_fp, fp_complete = "unknown", False
         mode = module.guard_mode(module.DEV_PRODUCER)
