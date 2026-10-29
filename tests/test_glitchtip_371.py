@@ -270,6 +270,9 @@ class ComposeTests(unittest.TestCase):
             services["migrate"]["command"], "./bin/run-migrate.sh")
         self.assertEqual(
             services["worker"]["command"], "./bin/run-celery-with-beat.sh")
+        db_volumes = services["db"]["volumes"]
+        self.assertTrue(
+            any(str(v).endswith(":/var/lib/postgresql") for v in db_volumes))
         for name, service in services.items():
             self.assertNotIn("ports", service, name)
 
