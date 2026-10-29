@@ -61,6 +61,9 @@ RELIABILITY_DEFAULTS: dict[str, Any] = {
         "max_exposures": 500,
         "default_baseline_rate": 0.05,
     },
+    "routes_gate": {
+        "enabled": False,
+    },
     "recovery": {
         "reconcile_business_state": False,
     },

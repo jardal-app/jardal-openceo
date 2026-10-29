@@ -383,6 +383,68 @@ class DevSessionManager:
         self._rate_monitor = rate_monitor
         self._repo = repo
         self._task_service: Any | None = None
+        # Routes gate (TASK-2026-00389, §9.4): ERP adapter for protected
+        # diff approvals (request + live read). None keeps the gate off
+        # the network; the activation child wires the production adapter.
+        self._routes_gate_adapter: Any | None = None
+
+    def set_routes_gate_adapter(self, adapter: Any | None) -> None:
+        """Inject the ERP adapter for protected-diff approvals.
+
+        ``None`` (default) keeps the gate off the network: an enabled
+        gate with no adapter blocks protected diffs with their human
+        action. The activation (TASK-2026-00391) wires the production
+        adapter here. Untouched diffs never need it.
+        """
+        self._routes_gate_adapter = adapter
+
+    async def _protected_routes_check(
+            self, branch: _SimpleBranch, files: list[str],
+            head_sha: str, ref: str) -> str | None:
+        """Protected-routes gate (§9.4): None allows, text waits with detail.
+
+        Off while the calibration child owns activation; untouched diffs
+        pass without any ERP read. A protected diff requests its approval
+        (idempotent on the diff hash) and verifies it live; anything
+        unverifiable blocks fail-closed with the exact human action.
+        """
+        import logging as _logging
+
+        try:
+            from reliability import protected_routes as routes_mod
+        except Exception:  # noqa: BLE001 - logged, gate skipped
+            routes_mod = None  # type: ignore[assignment]
+        if routes_mod is None:
+            _logging.getLogger(__name__).warning(
+                "routes gate module unreadable, gate skipped")
+            return None
+        try:
+            if not routes_mod.routes_gate_enabled():
+                return None
+            touched = routes_mod.touched_protected(files)
+            if not touched:
+                return None
+            _, diff = await asyncio.to_thread(
+                routes_mod.collect_diff,
+                str(branch.repo), branch.base_sha, head_sha)
+            digest = routes_mod.diff_digest(files, diff)
+            created = await routes_mod.request_diff_approval(
+                self._routes_gate_adapter, digest, touched,
+                business_ref=ref)
+            approval_id = str((created or {}).get("id") or "").strip()
+            verdict = await routes_mod.check_integration(
+                files, diff, approval_id=approval_id or None,
+                approvals=self._routes_gate_adapter)
+        except Exception:  # noqa: BLE001 - logged, merge withheld
+            _logging.getLogger(__name__).warning(
+                "routes gate check failed (fail-closed)", exc_info=True)
+            return "protected_routes: gate error, merge withheld"
+        if verdict.get("allowed"):
+            return None
+        detail = str(verdict.get("human_action") or "protected diff")
+        if approval_id:
+            detail += f" (approval {approval_id} pending)"
+        return f"protected_routes: {detail}"
 
     def set_task_service(self, task_service: Any) -> None:
         """Late-bind the service (ERP comments + internal tickets, F3–F6).
@@ -1974,6 +2036,16 @@ class DevSessionManager:
             handoff_path.write_text(completed_handoff, encoding="utf-8")
         except OSError:
             pass
+        # Routes gate (§9.4, TASK-2026-00389): a protected diff waits with
+        # the exact human action instead of merging. The branch is kept.
+        routes_block = await self._protected_routes_check(
+            branch, files, sha, branch.ref)
+        if routes_block is not None:
+            output.status = TaskStatus.WAITING
+            output.waiting_reason = (
+                f"needs_owner: {routes_block} "
+                f"(branch kept: {branch.branch})")
+            return output
         auto_merge = bool(dev_cfg.get("auto_merge", True))
         if auto_merge or task.get("objective_id"):
             if self._simple_git(repo, "checkout", "-q", branch.base).returncode != 0:
