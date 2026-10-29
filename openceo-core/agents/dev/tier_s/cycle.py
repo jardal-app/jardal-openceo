@@ -39,7 +39,15 @@ from agents.dev.tier_s import gates as gate_mod
 from model_routing import review_wiring as wiring_mod
 from objectives import engine as objectives_mod
 from objectives import ticket_cost as cost_mod
-from objectives.agent_result import AGENT_RESULT_PROMPT, parse_agent_result, scheduled_resume
+from objectives.agent_result import (
+    AGENT_RESULT_PROMPT,
+    SCHEDULED_WAIT_COUNT_KEY,
+    SCHEDULED_WAIT_MAX_DECLINES,
+    AgentResult,
+    parse_agent_result,
+    scheduled_resume,
+    scheduled_wait_declines,
+)
 from orchestration.provider_recovery import transient_provider_error
 from orchestration import findings as findings_mod
 from orchestration import inbox as inbox_mod
@@ -873,6 +881,40 @@ class TierSCycle:
         if agent_result is not None:
             ctx.parked_outcome = replace(outcome, agent_result=agent_result)
 
+    async def _park_scheduled_wait(
+        self, ctx: _Ctx, verdict: AgentResult, resume_at: datetime,
+    ) -> None:
+        # Same cap as A/B/C and the generic agent (TASK-2026-00350): the
+        # count lives in the ticket params so it survives resumption.
+        declines = scheduled_wait_declines(ctx.ticket.get("params")) + 1
+        params = dict(ctx.ticket.get("params") or {})
+        params[SCHEDULED_WAIT_COUNT_KEY] = declines
+        ctx.ticket["params"] = params
+        await self._tasks.patch_task(
+            str(ctx.ticket.get("task_id", "")), {"params": params})
+        if declines >= SCHEDULED_WAIT_MAX_DECLINES:
+            await self._park_build(
+                ctx, "needs_owner",
+                f"scheduled_wait declined {declines} times in a row: "
+                f"{verdict.motivo} "
+                f"(last resume_at={resume_at.isoformat()}; no re-park)",
+                agent_result=verdict.model_dump(mode="json"))
+            return
+        await self._park_build(
+            ctx, "scheduled_wait", verdict.motivo,
+            resume_at=resume_at.isoformat(),
+            agent_result=verdict.model_dump(mode="json"))
+
+    async def _clear_scheduled_wait_count(self, ctx: _Ctx) -> None:
+        # Any non-wait outcome resets the consecutive-decline count.
+        params = dict(ctx.ticket.get("params") or {})
+        if SCHEDULED_WAIT_COUNT_KEY not in params:
+            return
+        del params[SCHEDULED_WAIT_COUNT_KEY]
+        ctx.ticket["params"] = params
+        await self._tasks.patch_task(
+            str(ctx.ticket.get("task_id", "")), {"params": params})
+
     async def _park_builder_failure(self, ctx: _Ctx, result: ExecResult) -> None:
         ctx.provider_parks += 1
         transient = transient_provider_error(
@@ -1113,11 +1155,16 @@ class TierSCycle:
             except ValueError as exc:
                 await self._park_build(ctx, "config", str(exc))
                 return False
-            await self._park_build(
-                ctx, "scheduled_wait" if resume_at else "agent_blocked", verdict.motivo,
-                resume_at=resume_at.isoformat() if resume_at else None,
-                agent_result=verdict.model_dump(mode="json"))
+            if resume_at is None:
+                await self._clear_scheduled_wait_count(ctx)
+                await self._park_build(
+                    ctx, "agent_blocked", verdict.motivo,
+                    agent_result=verdict.model_dump(mode="json"))
+                return False
+            await self._park_scheduled_wait(ctx, verdict, resume_at)
             return False
+        if verdict is not None and verdict.resultado.value == "hecho":
+            await self._clear_scheduled_wait_count(ctx)
         head = _git(ctx.repo, "rev-parse", "HEAD").stdout.strip()
         if head != ctx.base_sha:
             _git(ctx.repo, "reset", "--soft", ctx.base_sha)
