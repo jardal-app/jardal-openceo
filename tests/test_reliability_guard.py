@@ -107,6 +107,17 @@ class GuardRulesTests(unittest.TestCase):
         state, decision = run(state, "a-3")
         self.assertEqual(decision["action"], "stop")
 
+    def test_missing_executed_flag_does_not_count(self) -> None:
+        state = empty_state("building")
+        state, _ = run(state, "a-1")
+        naked = obs(attempt_id="q-1")
+        del naked["executed"]
+        state, decision = evaluate(state, naked, policy(mode="enforce"),
+                                   now=NOW)
+        self.assertEqual(decision["action"], "continue")
+        self.assertIsNone(decision["rule"])
+        self.assertEqual(len(state["window"]), 1)
+
     def test_stopped_state_stays_stopped(self) -> None:
         state = empty_state("building")
         for attempt in ("a-1", "a-2", "a-3"):
@@ -297,6 +308,22 @@ class GuardModesTests(unittest.TestCase):
             self.assertTrue(decision["fail_open"], bad)
             self.assertEqual(state["window"][0]["attempt_id"], "a-1")
             self.assertEqual(state["generation"], 0)
+
+    def test_brake_exception_fails_open(self) -> None:
+        from reliability import guard as guard_mod
+        original = guard_mod._match_rule
+
+        def boom(window, phase, policy):
+            raise RuntimeError("simulated brake failure")
+
+        guard_mod._match_rule = boom
+        try:
+            state, decision = run(empty_state("building"), "a-1")
+        finally:
+            guard_mod._match_rule = original
+        self.assertEqual(decision["action"], "continue")
+        self.assertIsNone(decision["rule"])
+        self.assertTrue(decision["fail_open"])
 
     def test_policy_thresholds_apply(self) -> None:
         self.assertEqual(

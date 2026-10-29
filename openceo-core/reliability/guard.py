@@ -159,8 +159,12 @@ def evaluate(state: Any, observation: dict[str, Any],
     """One terminated attempt in, new checkpoint state plus brake decision.
 
     Never raises on corrupt input: it recovers to an empty state and lets
-    the loop continue (fail-open). Only executed sessions count; requeues
-    by capacity or quota leave the window untouched.
+    the loop continue (fail-open). Rule evaluation is fail-open too: if
+    the brake throws, the loop continues and the caller logs a
+    reliability exception. Only executed sessions count; requeues by
+    capacity or quota leave the window untouched, as does an observation
+    without an explicit executed=True. The caller resolves
+    policy["mode"] to one "off"/"shadow"/"enforce" string per producer.
     """
     obs = observation if isinstance(observation, dict) else {}
     phase = str(obs.get("phase") or "")
@@ -175,7 +179,7 @@ def evaluate(state: Any, observation: dict[str, Any],
         action = "stop" if mode == "enforce" else "would_stop"
         return current, {"action": action, "rule": rule, "incident": None,
                          "shadow": mode == "shadow", "fail_open": fail_open}
-    if not obs.get("executed", True):
+    if not obs.get("executed", False):
         return current, _continue(mode == "shadow", fail_open)
     milestone = obs.get("milestone")
     if isinstance(milestone, str) and milestone.strip():
@@ -205,7 +209,10 @@ def evaluate(state: Any, observation: dict[str, Any],
     }]
     current = {**current, "phase": phase or current["phase"],
                "window": window[-WINDOW_MAX:]}
-    rule = _match_rule(current["window"], phase, parsed_policy)
+    try:
+        rule = _match_rule(current["window"], phase, parsed_policy)
+    except Exception:
+        return current, _continue(mode == "shadow", True)
     if rule is None:
         return current, _continue(mode == "shadow", fail_open)
     severity = "normal" if rule == "G3" else "high"
