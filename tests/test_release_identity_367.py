@@ -59,7 +59,8 @@ def test_write_release_clean(tmp_path: Path):
     data = json.loads((out / "RELEASE").read_text())
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
                           capture_output=True, text=True).stdout.strip()
-    assert data == {"sha": head, "dirty": False, "at": data["at"]}
+    assert data["sha"] == head and data["dirty"] is False
+    assert isinstance(data["at"], str) and data["at"]
 
 
 def test_write_release_tracked_dirty_refused(tmp_path: Path):
@@ -182,3 +183,45 @@ def test_release_info_reads_file(monkeypatch, tmp_path: Path):
     (rt / "RELEASE").write_text(json.dumps({"sha": "abc", "dirty": True}))
     monkeypatch.setattr(automatico, "REPO", tmp_path)
     assert automatico.release_info() == {"sha": "abc", "dirty": True}
+
+
+@pytest.mark.parametrize("payload", ["[]", "null", "123", '"x"'])
+def test_read_release_non_dict_json(tmp_path: Path, payload: str):
+    rt = tmp_path / ".runtime"
+    rt.mkdir()
+    (rt / "RELEASE").write_text(payload)
+    assert read_release(tmp_path) == {"sha": "unknown", "dirty": None,
+                                      "at": None}
+
+
+@pytest.mark.parametrize("payload", ["[]", "null", "123", '"x"'])
+def test_release_info_non_dict_json(monkeypatch, tmp_path: Path,
+                                    payload: str):
+    rt = tmp_path / ".runtime"
+    rt.mkdir()
+    (rt / "RELEASE").write_text(payload)
+    monkeypatch.setattr(automatico, "REPO", tmp_path)
+    assert automatico.release_info() == {"sha": "unknown", "dirty": None}
+
+
+def test_preflight_checks_given_epic(monkeypatch):
+    seen: list[list[str]] = []
+    monkeypatch.setattr(automatico.shutil, "which", lambda tool: f"/bin/{tool}")
+    monkeypatch.setattr(automatico, "repo_problem", lambda: "")
+    monkeypatch.setattr(automatico, "sh", lambda *a, **k: (0, "0\t0"))
+    monkeypatch.setattr(automatico, "health", lambda: "200")
+
+    def fake_read_erp(names, epic=""):
+        seen.append(list(names))
+        return {"children": {}, "tickets": {}}
+
+    monkeypatch.setattr(automatico, "read_erp", fake_read_erp)
+    assert automatico.preflight("TASK-2026-00000") is True
+    assert seen == [["TASK-2026-00000"]]
+
+
+def test_restart_checks_release_before_stop():
+    text = (_REPO / "scripts" / "openceo-core-host.sh").read_text()
+    branch = text.split("restart)")[1].split(";;")[0]
+    assert "write-release.sh" in branch
+    assert branch.index("write-release.sh") < branch.index("stop")

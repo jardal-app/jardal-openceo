@@ -202,7 +202,13 @@ logs() {
 case "${1:-}" in
   start) start ;;
   stop) stop ;;
-  restart) stop; start ;;
+  restart)
+    # Con cambios rastreados no se toca la instancia sana: se valida
+    # antes de parar (TASK-2026-00367, hallazgo de revisión).
+    if ! bash "$ROOT_DIR/scripts/write-release.sh" "$ROOT_DIR" "$RUNTIME_DIR"; then
+      exit 1
+    fi
+    stop; start ;;
   status) status ;;
   logs) logs "$@" ;;
   *)

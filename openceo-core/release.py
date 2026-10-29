@@ -25,6 +25,8 @@ def read_release(repo_root: str | Path) -> dict:
         data = json.loads(release_file(repo_root).read_text())
     except (OSError, ValueError):
         return {"sha": "unknown", "dirty": None, "at": None}
+    if not isinstance(data, dict):
+        return {"sha": "unknown", "dirty": None, "at": None}
     sha = data.get("sha") or "unknown"
     dirty = data.get("dirty")
     dirty = bool(dirty) if isinstance(dirty, bool) else None

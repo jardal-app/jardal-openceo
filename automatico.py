@@ -166,6 +166,8 @@ def release_info() -> dict:
         data = json.loads((REPO / ".runtime" / "RELEASE").read_text())
     except (OSError, ValueError):
         return {"sha": "unknown", "dirty": None}
+    if not isinstance(data, dict):
+        return {"sha": "unknown", "dirty": None}
     dirty = data.get("dirty")
     return {"sha": str(data.get("sha") or "unknown"),
             "dirty": bool(dirty) if isinstance(dirty, bool) else None}
@@ -899,7 +901,7 @@ def close_epic(s: Settings, epic: str) -> bool:
     return status == "Completed"
 
 
-def preflight() -> bool:
+def preflight(epic: str = EPIC) -> bool:
     missing = [tool for tool in ("muse", "bwrap") if not shutil.which(tool)]
     if missing:
         log(f"ABORT: faltan {', '.join(missing)}")
@@ -922,7 +924,7 @@ def preflight() -> bool:
         log(f"ABORT: servicio no sano (health:{status})")
         return False
     try:
-        read_erp([EPIC])
+        read_erp([epic])
     except (RuntimeError, ValueError) as exc:
         log(f"ABORT: Jardal ERP no responde: {exc}")
         return False
@@ -965,7 +967,7 @@ def drive(s: Settings) -> int:
     children: dict[str, str] = {}
     if not s.dry_run:
         save_state(state)
-        if not preflight():
+        if not preflight(epic):
             return 3
         children = read_erp([], epic)["children"]
         plan += discover_extra(plan, children)
