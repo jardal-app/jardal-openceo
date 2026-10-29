@@ -2269,6 +2269,49 @@ class TaskService:
                 return "dependency_open"
         return None
 
+    async def _record_erp_reopen_escape(
+        self, task: dict[str, Any], event: dict[str, Any],
+        business_status: str,
+    ) -> None:
+        """Escape incident for an ERP-side reopen. Never raises or flows."""
+        try:
+            from reliability import escapes as _escapes
+        except Exception:
+            logger.warning(
+                "Escape de reapertura no disponible para %s",
+                self._webhook_name(task), exc_info=True,
+            )
+            return
+        try:
+            previous = ""
+            try:
+                mirrors = self._task_params(task).get("_mirrors")
+                mirror = business_mirror(mirrors) \
+                    if isinstance(mirrors, dict) else {}
+                previous = str((mirror or {}).get("business_status") or "")
+            except Exception:
+                previous = ""
+            if not previous and str(task.get("status") or "") == \
+                    TaskStatus.COMPLETED.value:
+                previous = "Completed"
+            if not _escapes.is_reopen_escape(previous, business_status):
+                return
+            actor = event.get("actor") or {}
+            await _escapes.record_reopen_escape(
+                getattr(self, "_repo", None),
+                previous_status=previous, new_status=business_status,
+                task=task,
+                business_ref=self._webhook_name(task) or None,
+                project_key=str(task.get("project") or "") or None,
+                actor="erp:%s" % str(actor.get("id") or "unknown"),
+                event_id=str(event.get("event_id") or "") or None,
+                runtime_dir=getattr(
+                    self, "_reliability_runtime_dir", None),
+            )
+        except Exception:
+            logger.warning("Registro de escape de reapertura fallido",
+                           exc_info=True)
+
     async def _apply_erp_status(self, event: dict[str, Any]) -> dict[str, Any]:
         payload = event.get("payload") or {}
         task = await self._resolve_erp_task(payload)
@@ -2279,6 +2322,7 @@ class TaskService:
             return {"ok": False, "status": "not_found"}
         assert_link_provider(task, "jardal_erp")
         business_status = str(payload.get("business_status") or payload.get("status") or "").strip()
+        await self._record_erp_reopen_escape(task, event, business_status)
         deleted = payload.get("deleted") is True
         if business_status == "Completed" and not deleted:
             gate = await self._execution_close_gated(task)
@@ -3295,6 +3339,22 @@ class TaskService:
             except Exception:
                 logger.warning(
                     "Hunter fix registration failed", exc_info=True)
+        if current == "Completed" and target in {"Open", "Working"}:
+            try:
+                from reliability import escapes as _escapes
+                await _escapes.record_reopen_escape(
+                    getattr(self, "_repo", None),
+                    previous_status=current, new_status=target,
+                    task=task, business_ref=name,
+                    project_key=str((task or {}).get("project") or "")
+                    or None,
+                    actor=str(actor or "") or None,
+                    runtime_dir=getattr(
+                        self, "_reliability_runtime_dir", None),
+                )
+            except Exception:
+                logger.warning(
+                    "Hunter escape registration failed", exc_info=True)
         self._enqueue_visibility(
             str((task or {}).get("task_id") or "") or None, name, f"transition:{target}"
         )
