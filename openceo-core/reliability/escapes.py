@@ -139,6 +139,42 @@ def review_policy_of(task: Any) -> str:
     return "standard"
 
 
+def _attribution_source(primary: Any, fallback: Any = None) -> Any | None:
+    if isinstance(primary, dict):
+        return primary
+    if isinstance(fallback, dict):
+        return fallback
+    return None
+
+
+def _reopen_message(previous_status: Any, new_status: Any,
+                     actor: Any = None) -> str:
+    message = "reopen %s -> %s" % (
+        str(previous_status).strip(), str(new_status).strip())
+    if actor is not None and str(actor).strip():
+        message += " by %s" % str(actor).strip()
+    return message
+
+
+def _reopen_refs(event_id: Any = None) -> list[str]:
+    refs: list[str] = []
+    if event_id is not None and str(event_id).strip():
+        refs.append(str(event_id).strip())
+    return refs
+
+
+def _revert_message(sha: str, reverted_ref: str) -> str:
+    return "revert of %s from %s" % (
+        str(sha).lower(), str(reverted_ref).strip())
+
+
+def _revert_refs(reverted_ref: str, revert_ref: Any = None) -> list[str]:
+    refs = [str(reverted_ref).strip()]
+    if revert_ref is not None and str(revert_ref).strip():
+        refs.append(str(revert_ref).strip())
+    return refs
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -171,17 +207,10 @@ def build_reopen_doc(*, previous_status: Any, new_status: Any,
     """Escape doc for a reopen; attribution stays unknown (A10)."""
     from .capture import build_incident_doc
 
-    refs: list[str] = []
-    if event_id is not None and str(event_id).strip():
-        refs.append(str(event_id).strip())
     task_id: str | None = None
     if isinstance(task, dict):
         raw = str(task.get("task_id") or "").strip()
         task_id = raw or None
-    message = "reopen %s -> %s" % (
-        str(previous_status).strip(), str(new_status).strip())
-    if actor is not None and str(actor).strip():
-        message += " by %s" % str(actor).strip()
     return build_incident_doc(
         kind="escape", component=component, now=now or _utcnow(),
         escape_type=ESCAPE_REOPEN, tier=tier_of(task),
@@ -189,8 +218,8 @@ def build_reopen_doc(*, previous_status: Any, new_status: Any,
         task_id=task_id or (str(business_ref).strip() or None),
         business_ref=(str(business_ref).strip() or None),
         project_key=(str(project_key).strip() or None),
-        message=message,
-        evidence_refs=refs,
+        message=_reopen_message(previous_status, new_status, actor),
+        evidence_refs=_reopen_refs(event_id),
         incident_id=reopen_incident_id(
             task_id or business_ref, previous_status, new_status),
     )
@@ -201,28 +230,37 @@ def build_revert_doc(*, sha: str, reverted_ref: str,
                      project_key: Any = None,
                      component: str = "tier_s",
                      revert_ref: Any = None,
+                     reverted_task: Any = None,
                      now: datetime | None = None) -> dict[str, Any]:
-    """Escape doc for a revert of another Completed ticket's commit."""
+    """Escape doc for a revert of another Completed ticket's commit.
+
+    The escape belongs to the reverted ticket, so the doc carries its
+    reference and its tier/review policy (from ``reverted_task`` when
+    available, else from ``task`` as fallback); the integrating ticket
+    (``revert_ref``, else ``business_ref``) travels only as evidence.
+    """
     from .capture import build_incident_doc
 
-    refs = [str(reverted_ref).strip()]
-    if revert_ref is not None and str(revert_ref).strip():
-        refs.append(str(revert_ref).strip())
+    source = _attribution_source(reverted_task, task)
+    reverted = str(reverted_ref).strip()
     task_id: str | None = None
-    if isinstance(task, dict):
-        raw = str(task.get("task_id") or "").strip()
+    if isinstance(source, dict):
+        raw = str(source.get("task_id") or "").strip()
         task_id = raw or None
+    effective_revert_ref = revert_ref
+    if effective_revert_ref is None and business_ref is not None:
+        candidate = str(business_ref).strip() or None
+        effective_revert_ref = candidate if candidate != reverted else None
     return build_incident_doc(
         kind="escape", component=component, now=now or _utcnow(),
-        escape_type=ESCAPE_REVERT, tier=tier_of(task),
-        review_policy=review_policy_of(task),
-        task_id=task_id or (str(business_ref).strip() or None),
-        business_ref=(str(business_ref).strip() or None),
+        escape_type=ESCAPE_REVERT, tier=tier_of(source),
+        review_policy=review_policy_of(source),
+        task_id=task_id or reverted,
+        business_ref=reverted,
         project_key=(str(project_key).strip() or None),
-        message="revert of %s from %s" % (
-            str(sha).lower(), str(reverted_ref).strip()),
-        evidence_refs=refs,
-        incident_id=revert_incident_id(task_id or business_ref, sha),
+        message=_revert_message(sha, reverted),
+        evidence_refs=_revert_refs(reverted, effective_revert_ref),
+        incident_id=revert_incident_id(reverted, sha),
     )
 
 
@@ -246,21 +284,18 @@ async def record_reopen_escape(
         if isinstance(task, dict):
             raw = str(task.get("task_id") or "").strip()
             doc_task_id = raw or None
-        doc = build_reopen_doc(
-            previous_status=previous_status, new_status=new_status,
-            task=task, business_ref=business_ref, project_key=project_key,
-            component=component, actor=actor, event_id=event_id,
-            now=now or _utcnow())
+        ident = doc_task_id or (str(business_ref).strip() or None)
         return await record_incident(
             source, kind="escape", component=component,
             escape_type=ESCAPE_REOPEN, tier=tier_of(task),
             review_policy=review_policy_of(task),
-            task_id=doc_task_id or (str(business_ref).strip() or None),
+            task_id=ident,
             business_ref=(str(business_ref).strip() or None),
             project_key=(str(project_key).strip() or None),
-            message=str(doc["context"].get("message") or ""),
-            evidence_refs=list(doc["context"].get("evidence_refs") or []),
-            incident_id=str(doc["_id"]),
+            message=_reopen_message(previous_status, new_status, actor),
+            evidence_refs=_reopen_refs(event_id),
+            incident_id=reopen_incident_id(
+                ident, previous_status, new_status),
             runtime_dir=runtime_dir, now=now or _utcnow())
     except Exception:
         logger.warning("reopen escape record failed", exc_info=True)
@@ -271,10 +306,17 @@ async def record_revert_escape(
         source: Any, *, revert_message: Any, reverted_ref: Any,
         reverted_completed: bool, integrating_ref: Any = None,
         task: Any = None, business_ref: Any = None,
+        reverted_task: Any = None,
         project_key: Any = None, component: str = "tier_s",
         runtime_dir: Any = None,
         now: datetime | None = None) -> dict[str, Any]:
-    """Record a revert escape; explicit call from the integrating path."""
+    """Record a revert escape; explicit call from the integrating path.
+
+    The escape is filed under the reverted ticket (``reverted_ref`` with
+    its tier/review policy from ``reverted_task``, else from ``task``);
+    ``business_ref`` names the integrating ticket and only survives as
+    revert evidence when ``integrating_ref`` is absent.
+    """
     try:
         try:
             if resolve_collection(source) is None:
@@ -289,29 +331,27 @@ async def record_revert_escape(
             return {"recorded": False, **verdict}
         sha = str(verdict["sha"])
         target = str(verdict["reverted_ref"])
+        source_task = _attribution_source(reverted_task, task)
         task_id: str | None = None
-        if isinstance(task, dict):
-            raw = str(task.get("task_id") or "").strip()
+        if isinstance(source_task, dict):
+            raw = str(source_task.get("task_id") or "").strip()
             task_id = raw or None
-        task_id = task_id or (str(business_ref).strip() or None)
-        doc = build_revert_doc(
-            sha=sha, reverted_ref=target, task=task,
-            business_ref=business_ref, project_key=project_key,
-            component=component,
-            revert_ref=(str(integrating_ref).strip() or None)
-            if integrating_ref is not None else None,
-            now=now or _utcnow())
+        revert_ref = (str(integrating_ref).strip() or None) \
+            if integrating_ref is not None else None
+        if revert_ref is None and business_ref is not None:
+            candidate = str(business_ref).strip() or None
+            revert_ref = candidate if candidate != target else None
         stored = await record_incident(
             source, kind="escape", component=component,
-            escape_type=ESCAPE_REVERT, tier=tier_of(task),
-            review_policy=review_policy_of(task),
-            task_id=task_id,
-            business_ref=(str(business_ref).strip() or None),
+            escape_type=ESCAPE_REVERT, tier=tier_of(source_task),
+            review_policy=review_policy_of(source_task),
+            task_id=task_id or target,
+            business_ref=target,
             project_key=(str(project_key).strip() or None),
-            message=str(doc["context"].get("message") or ""),
-            evidence_refs=list(doc["context"].get("evidence_refs") or []),
+            message=_revert_message(sha, target),
+            evidence_refs=_revert_refs(target, revert_ref),
             reason_code=ESCAPE_REVERT,
-            incident_id=str(doc["_id"]),
+            incident_id=revert_incident_id(target, sha),
             runtime_dir=runtime_dir, now=now or _utcnow())
         return {"recorded": stored is not None, "incident_id": stored,
                 **verdict}

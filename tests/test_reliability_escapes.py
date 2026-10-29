@@ -181,6 +181,65 @@ class RecordRevertTests(unittest.TestCase):
         self.assertFalse(outcome["recorded"])
         self.assertEqual(coll.docs, {})
 
+    def test_revert_files_under_reverted_ticket(self) -> None:
+        coll = FakeCollection()
+        runtime = _tmpdir(self)
+        reverted = _task(task_id="exec-0", coding_tool="tier_a",
+                         qa_review_required=True)
+        outcome = asyncio.run(escapes.record_revert_escape(
+            coll, revert_message="This reverts commit deadbeef.",
+            reverted_ref="TASK-2026-00300",
+            reverted_completed=True,
+            integrating_ref="TASK-2026-00301",
+            task=_task(), business_ref="TASK-2026-00301",
+            reverted_task=reverted,
+            project_key="jardal-openceo",
+            runtime_dir=runtime,
+            now=_utc(2026, 10, 31)))
+        self.assertTrue(outcome["recorded"])
+        self.assertEqual(outcome["incident_id"],
+                         escapes.revert_incident_id(
+                             "TASK-2026-00300", "deadbeef"))
+        doc = coll.docs[str(outcome["incident_id"])]
+        self.assertEqual(doc["context"]["business_ref"], "TASK-2026-00300")
+        self.assertEqual(doc["context"]["evidence_refs"],
+                         ["TASK-2026-00300", "TASK-2026-00301"])
+        self.assertEqual(
+            doc["fingerprint"],
+            fingerprint_escape("revert", "tier_a", "qa_required"))
+
+    def test_revert_id_shared_across_integrators(self) -> None:
+        coll = FakeCollection()
+        runtime = _tmpdir(self)
+        first = asyncio.run(escapes.record_revert_escape(
+            coll, revert_message="This reverts commit deadbeef.",
+            reverted_ref="TASK-2026-00300", reverted_completed=True,
+            integrating_ref="TASK-2026-00301",
+            task=_task(), business_ref="TASK-2026-00301",
+            runtime_dir=runtime, now=_utc(2026, 10, 31)))
+        second = asyncio.run(escapes.record_revert_escape(
+            coll, revert_message="This reverts commit deadbeef.",
+            reverted_ref="TASK-2026-00300", reverted_completed=True,
+            integrating_ref="TASK-2026-00309",
+            task=_task(), business_ref="TASK-2026-00309",
+            runtime_dir=runtime, now=_utc(2026, 10, 31)))
+        self.assertTrue(first["recorded"])
+        self.assertEqual(first["incident_id"], second["incident_id"])
+        self.assertEqual(len(coll.docs), 1)
+
+    def test_build_revert_doc_attributes_to_reverted(self) -> None:
+        doc = escapes.build_revert_doc(
+            sha="DEADBEEF", reverted_ref="TASK-2026-00300",
+            task=_task(), business_ref="TASK-2026-00301",
+            reverted_task=_task(task_id="exec-0", coding_tool="tier_a"),
+            revert_ref="TASK-2026-00301", now=_utc(2026, 10, 31))
+        self.assertEqual(doc["_id"], escapes.revert_incident_id(
+            "TASK-2026-00300", "deadbeef"))
+        self.assertEqual(doc["context"]["business_ref"], "TASK-2026-00300")
+        self.assertEqual(
+            doc["fingerprint"],
+            fingerprint_escape("revert", "tier_a", "standard"))
+
 
 class LinkedBugTests(unittest.TestCase):
     def test_linked_bug_stays_not_covered(self) -> None:
