@@ -309,6 +309,95 @@ def test_advance_stops_third_identical_continue(monkeypatch):
     assert "stalled_no_progress" in ticket["note"]
 
 
+def test_reset_clears_brake_record():
+    ticket = _brake_ticket()
+    guard = automatico._guard_module()
+    state, _ = guard.evaluate(
+        {"generation": 0, "phase": "work", "window": [],
+         "stopped": None, "reset": None, "milestones": []},
+        {"phase": "work", "executed": True, "attempt_id": "a",
+         "result_sig": "work:x", "work_fp": "sha256:1",
+         "fp_complete": True},
+        {"mode": "enforce"})
+    ticket["progress_guard"] = state
+    ticket["brake"] = {"rule": None, "mode": "enforce", "at": "t",
+                       "reason": automatico.RUNNER_STALL_REASON}
+    automatico._reset_runner_guard(ticket, actor="owner",
+                                   reason="owner-responded")
+    assert ticket["progress_guard"]["reset"]["actor"] == "owner"
+    assert "brake" not in ticket
+
+
+def test_advance_rearms_brake_after_blocked_resume(monkeypatch):
+    calls = []
+
+    def fake_spawn(*_args, **_kwargs):
+        calls.append(1)
+        return 0, "trabajo sin cambios\nTICKET_CONTINUE sigo en ello\n"
+
+    monkeypatch.setattr(automatico, "spawn", fake_spawn)
+    monkeypatch.setattr(automatico, "ticket_info",
+                        lambda _t: {"status": "Open", "subject": "",
+                                    "description": "", "depends_on": [],
+                                    "owner_replied": False})
+    monkeypatch.setattr(automatico, "repo_problem", lambda: "")
+    monkeypatch.setattr(automatico, "git_head", lambda *a: "abc")
+    monkeypatch.setattr(automatico, "save_state", lambda _s: None)
+    monkeypatch.setattr(automatico, "runner_work_fp",
+                        lambda *a, **k: dict(FP_A))
+    monkeypatch.setattr(automatico, "load_owner_decisions",
+                        lambda *_a, **_k: dict(ENFORCE))
+    child = _brake_child()
+    state = {"epic": "TASK-2026-00365", "tickets": {}}
+    assert automatico.advance(child, automatico.Settings(max_sessions=16),
+                              state) == "blocked"
+    assert len(calls) == 3
+    ticket = state["tickets"][child["ticket"]]
+    assert ticket["progress_guard"]["stopped"]["rule"] == "G1"
+
+    def moving_fp(*_args, **_kwargs):
+        return {"fp": f"sha256:fp-{len(calls)}", "complete": True,
+                "paths": 1, "bytes": 10, "head": "h", "error": None}
+
+    monkeypatch.setattr(automatico, "runner_work_fp", moving_fp)
+    assert automatico.advance(child, automatico.Settings(max_sessions=5),
+                              state) == "stop"
+    assert len(calls) == 3 + 5
+    ticket = state["tickets"][child["ticket"]]
+    assert ticket["parked"] == ""
+    assert ticket["progress_guard"]["stopped"] is None
+    assert ticket["progress_guard"]["reset"]["reason"] == \
+        "brake-parked-resume"
+    assert "brake" not in ticket
+
+
+def test_advance_ready_feeds_ready_accepted(monkeypatch):
+    calls = []
+
+    def fake_spawn(*_args, **_kwargs):
+        calls.append(1)
+        return 0, "listo para revisión\nTICKET_READY todo hecho\n"
+
+    monkeypatch.setattr(automatico, "spawn", fake_spawn)
+    monkeypatch.setattr(automatico, "run_reviews", lambda *_a, **_k: [])
+    monkeypatch.setattr(automatico, "ticket_info",
+                        lambda _t: {"status": "Open", "subject": "",
+                                    "description": "", "depends_on": [],
+                                    "owner_replied": False})
+    monkeypatch.setattr(automatico, "repo_problem", lambda: "")
+    monkeypatch.setattr(automatico, "git_head", lambda *a: "abc")
+    monkeypatch.setattr(automatico, "save_state", lambda _s: None)
+    monkeypatch.setattr(automatico, "runner_work_fp",
+                        lambda *a, **k: dict(FP_A))
+    child = _brake_child()
+    state = {"epic": "TASK-2026-00365", "tickets": {}}
+    assert automatico.advance(child, automatico.Settings(max_sessions=5),
+                              state) == "stop"
+    assert len(calls) == 1
+    ticket = state["tickets"][child["ticket"]]
+    assert ticket["progress_guard"]["milestones"] == ["ready-accepted"]
+
+
 def test_advance_shadow_never_parks(monkeypatch):
     calls = []
 

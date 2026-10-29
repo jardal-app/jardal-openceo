@@ -431,6 +431,8 @@ def _reset_runner_guard(t: dict, *, actor: str, reason: str) -> None:
     except Exception as exc:  # noqa: BLE001 - fail-open: el bucle sigue sin rearmar
         t["guard_error"] = f"reset: {exc}"[:300]
         log(f"rearme del freno falló (fail-open): {exc}"[:300])
+    else:
+        t.pop("brake", None)
 
 
 def guard_after_session(c: dict, t: dict, phase: str, *, marker: str = "",
@@ -975,6 +977,10 @@ def advance(c: dict, s: Settings, state: dict) -> str:
                      "sus comentarios recientes y sigue su decisión.")
         _reset_runner_guard(t, actor="owner", reason="owner-responded")
     elif t["parked"] == "blocked":
+        pg = t.get("progress_guard")
+        if isinstance(pg, dict) and pg.get("stopped") is not None:
+            _reset_runner_guard(t, actor="runner",
+                                reason="brake-parked-resume")
         t["note"] = (f"La ejecución anterior terminó bloqueada: {t['note']}. "
                      "Comprueba si ya se cumple la condición de reanudación; "
                      f"si no, termina de nuevo con {WORK_BLOCKED}.")
