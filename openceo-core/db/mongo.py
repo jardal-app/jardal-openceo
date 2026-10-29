@@ -750,23 +750,14 @@ class MongoRepository:
         """Tasks holding a deadline (TASK-2026-00383, §13.5).
 
         Indexed by ``idx_deadline_attempt`` and the pre-existing
-        ``(status, resume_at)`` index: in-progress attempts with a
-        deadline plus waiting tasks with a resume. Bounded, oldest
-        first; the watch computes the nearest deadline in memory.
+        ``(status, resume_at)`` index: in-progress attempts with a real
+        deadline plus waiting tasks with a real resume. No sort is
+        requested (each $or branch would sort differently and cleared
+        ``None`` deadlines would float first); the watch orders the
+        bounded result in memory.
         """
-        rows = self.tasks.find(
-            {"$or": [
-                {
-                    "status": TaskStatus.IN_PROGRESS.value,
-                    "attempt_deadline_at": {"$exists": True},
-                },
-                {
-                    "status": TaskStatus.WAITING.value,
-                    "resume_at": {"$exists": True},
-                },
-            ]},
-            sort=[("attempt_deadline_at", ASCENDING)],
-        )
+        from reliability.deadlines import deadline_candidates_filter
+        rows = self.tasks.find(deadline_candidates_filter())
         docs = [self._clean(row) async for row in rows]
         return docs[: max(1, int(limit or 500))]
 

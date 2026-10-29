@@ -138,6 +138,29 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
+def deadline_candidates_filter() -> dict[str, Any]:
+    """Mongo filter for tasks holding a deadline (§13.5).
+
+    Each $or branch matches only real datetimes (``$type: date``), so
+    cleared attempts (``attempt_deadline_at: None``) never match. The
+    attempt branch is served by ``idx_deadline_attempt`` and the resume
+    branch by the pre-existing ``(status, resume_at)`` index; no sort is
+    requested because ``DeadlineWatch.pending`` orders in memory.
+    """
+    return {
+        "$or": [
+            {
+                "status": TaskStatus.IN_PROGRESS.value,
+                ATTEMPT_DEADLINE_FIELD: {"$type": "date"},
+            },
+            {
+                "status": TaskStatus.WAITING.value,
+                RESUME_FIELD: {"$type": "date"},
+            },
+        ],
+    }
+
+
 async def mark_attempt_start(
     patch_task: Callable[..., Any] | None,
     *,
@@ -146,8 +169,14 @@ async def mark_attempt_start(
     timeout_seconds: int | float,
     started_at: datetime | None = None,
     cfg: dict[str, Any] | None = None,
+    notify: Callable[[], Any] | None = None,
 ) -> datetime | None:
-    """Write attempt_id + attempt_deadline_at. Fail-open, never raises."""
+    """Write attempt_id + attempt_deadline_at. Fail-open, never raises.
+
+    ``notify`` runs after a successful write so the owner of the watch
+    re-arms its timer to the new deadline (registration, §7); it is
+    sync-or-async and fail-open like everything else here.
+    """
     try:
         if patch_task is None or not callable(patch_task):
             return None
@@ -160,6 +189,12 @@ async def mark_attempt_start(
             ATTEMPT_ID_FIELD: clean_attempt,
             ATTEMPT_DEADLINE_FIELD: deadline,
         }))
+        if notify is not None:
+            try:
+                await _maybe_await(notify())
+            except Exception:
+                logger.warning("deadline notify failed (fail-open)",
+                               exc_info=True)
         return deadline
     except Exception:
         logger.warning("deadline mark start failed (fail-open)", exc_info=True)
@@ -441,21 +476,25 @@ class DeadlineWatch:
         return task is not None and not task.done()
 
     async def arm(self, now: datetime | None = None) -> datetime | None:
-        """Arm the single timer to the nearest deadline; None clears it.
+        """Arm the single timer to the nearest future deadline.
 
-        An already-due nearest deadline is reported but never armed:
-        its check just ran (or runs on the next registration), and
-        arming it would spin the timer without advancing time.
+        Already-due deadlines are reported but never armed: their check
+        just ran (or runs on the next registration), and arming one
+        would spin the timer without advancing time. Overdue entries no
+        longer block later deadlines: the timer goes to the first
+        strictly-future deadline, or stays disarmed when none exists.
         """
         moment = _as_utc(now) if now is not None else self._now()
         self._armed = await self.pending(moment)
-        nearest = self._armed[0]["deadline"] if self._armed else None
         self._cancel_timer()
-        if nearest is None or nearest <= moment:
-            return nearest
-        delay = max(0.0, (nearest - moment).total_seconds())
+        future = next(
+            (item for item in self._armed if item["deadline"] > moment),
+            None)
+        if future is None:
+            return self._armed[0]["deadline"] if self._armed else None
+        delay = max(0.0, (future["deadline"] - moment).total_seconds())
         self._timer = asyncio.create_task(self._wait_and_fire(delay))
-        return nearest
+        return future["deadline"]
 
     def _cancel_timer(self) -> None:
         task = self._timer

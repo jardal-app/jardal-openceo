@@ -437,6 +437,20 @@ async def lifespan(_: FastAPI):
                     runtime_dir=_repo_root / ".runtime"))
         except Exception:
             logger.warning("Reliability startup reconcile failed", exc_info=True)
+        # DeadlineWatch (TASK-2026-00383, §7): indexes plus the single
+        # timer on the dispatcher. Never fails boot; off stays off when
+        # the wiring below cannot complete.
+        try:
+            from reliability.deadlines import (
+                DeadlineWatch,
+                ensure_deadline_indexes,
+            )
+            await ensure_deadline_indexes(repo.tasks)
+            dispatcher.set_deadline_watch(DeadlineWatch(
+                repo, incidents=repo.db["reliability_incidents"]))
+        except Exception:
+            logger.warning("DeadlineWatch startup wiring failed",
+                           exc_info=True)
         # Mirror workers + startup repairs (ex-WaitingTaskScheduler.start).
         task_service.start_notion_worker()
         task_service.start_jardal_erp_worker()
@@ -549,6 +563,7 @@ async def lifespan(_: FastAPI):
         await horizon_scheduler.stop()
         await ceo_loop.stop()
         await dispatcher.stop()
+        await dispatcher.close_deadline_watch()
         with suppress(Exception):
             from reliability import endpoint as _reliability_endpoint
             await _reliability_endpoint.stop_endpoint()

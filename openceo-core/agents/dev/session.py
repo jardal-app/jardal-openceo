@@ -484,12 +484,16 @@ class DevSessionManager:
         except Exception as exc:
             if decision.tool is not None and decision.tool is not CodingTool.TIER_S:
                 await self._capture_simple_exception(task, decision.tool, exc)
-            if deadline_armed:
-                await self._deadline_mark_end(holder)
             if outer_lock:
                 assert repo is not None
                 await self._repo.release_repo_lock(repo, holder)
             raise
+        finally:
+            # The attempt ended on every path (success, early return,
+            # exception): clear its deadline so the watch stops tracking
+            # it. The resume side, if any, is tracked via resume_at.
+            if deadline_armed:
+                await self._deadline_mark_end(holder)
         output.params = stamp_effective_review(
             output.params if isinstance(output.params, dict)
             else task.get("params"),
@@ -974,6 +978,8 @@ class DevSessionManager:
 
         Tier S owns its own write inside the cycle; this covers A/B/C.
         Fail-open: without a task service patcher nothing is written.
+        After a successful write the dispatcher is woken so its next
+        cycle re-arms the watch to the new deadline (registration, §7).
         """
         try:
             if tool is not None and tool is CodingTool.TIER_S:
@@ -991,9 +997,11 @@ class DevSessionManager:
                 task_id, params if isinstance(params, dict) else {})
             timeout_s = getattr(
                 self._settings, "DEV_TURN_TIMEOUT_SECONDS", 1800) or 1800
+            wake = getattr(self._task_service, "wake_dispatcher", None)
             wrote = await deadline_mod.mark_attempt_start(
                 patch, task_id=task_id, attempt_id=attempt_id,
-                timeout_seconds=timeout_s)
+                timeout_seconds=timeout_s,
+                notify=wake if callable(wake) else None)
             return wrote is not None
         except Exception:
             logger.warning("deadline mark start failed (fail-open)",

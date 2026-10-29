@@ -829,7 +829,8 @@ async def _deadline_mark_start(
 ) -> bool:
     """Write attempt_id + attempt_deadline_at (TASK-2026-00383, §7).
 
-    Fail-open: without a patcher nothing is written.
+    Fail-open: without a patcher nothing is written. No wake here
+    (the wiring has none): the dispatch cycle re-arms via refresh.
     """
     try:
         patch = getattr(wiring, "patch_task", None)

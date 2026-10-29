@@ -1287,6 +1287,134 @@ class DeadlineWatchTests(unittest.IsolatedAsyncioTestCase):
             await watch.close()
 
 
+class DeadlineReviewFixTests(unittest.IsolatedAsyncioTestCase):
+    """Regression tests for the agy2 review triage (TASK-2026-00383)."""
+
+    async def test_arm_skips_overdue_and_arms_next_future(self) -> None:
+        repo = _FakeRepo([
+            _ticket("hung", status=TaskStatus.IN_PROGRESS.value,
+                    attempt_id="hung-g0-w0",
+                    attempt_deadline_at=_NOW - timedelta(seconds=1)),
+            _ticket("waiter", status=TaskStatus.WAITING.value,
+                    waiting_reason="rate_limit_queued",
+                    resume_at=_NOW + timedelta(minutes=5)),
+        ])
+        recorded: list[dict] = []
+        watch = _watch(repo, recorded)
+        try:
+            nearest = await watch.arm(_NOW)
+            self.assertEqual(nearest, _NOW + timedelta(minutes=15))
+            self.assertTrue(watch.has_timer)
+        finally:
+            await watch.close()
+
+    async def test_wait_and_fire_records_due_then_rearms_future(self) -> None:
+        repo = _FakeRepo([
+            _ticket("hung", status=TaskStatus.IN_PROGRESS.value,
+                    attempt_id="hung-g0-w0",
+                    attempt_deadline_at=_NOW - timedelta(seconds=1)),
+            _ticket("waiter", status=TaskStatus.WAITING.value,
+                    waiting_reason="rate_limit_queued",
+                    resume_at=_NOW + timedelta(minutes=5)),
+        ])
+        recorded: list[dict] = []
+        watch = _watch(repo, recorded)
+        try:
+            await watch._wait_and_fire(0)
+            await _drain()
+            self.assertEqual(len(recorded), 1)
+            self.assertEqual(recorded[0]["task_id"], "hung")
+            self.assertTrue(watch.has_timer)
+        finally:
+            await watch.close()
+
+    async def test_mark_attempt_start_notifies_after_write(self) -> None:
+        patched: list[tuple[str, dict]] = []
+        notified: list[bool] = []
+
+        async def patch(task_id: str, updates: dict) -> None:
+            patched.append((task_id, dict(updates)))
+
+        def notify() -> None:
+            notified.append(True)
+
+        wrote = await deadline_mod.mark_attempt_start(
+            patch, task_id="t1", attempt_id="t1-g0-w0", timeout_seconds=600,
+            started_at=_NOW, notify=notify)
+        assert wrote is not None
+        self.assertEqual(patched[-1][1]["attempt_deadline_at"], wrote)
+        self.assertEqual(notified, [True])
+
+    async def test_mark_without_patcher_never_notifies(self) -> None:
+        notified: list[bool] = []
+
+        def notify() -> None:
+            notified.append(True)
+
+        self.assertIsNone(await deadline_mod.mark_attempt_start(
+            None, task_id="t1", attempt_id="a", timeout_seconds=60,
+            notify=notify))
+        self.assertEqual(notified, [])
+
+    async def test_candidates_filter_uses_date_type(self) -> None:
+        filt = deadline_mod.deadline_candidates_filter()
+        branches = filt["$or"]
+        self.assertEqual(len(branches), 2)
+        self.assertEqual(
+            branches[0]["attempt_deadline_at"], {"$type": "date"})
+        self.assertEqual(branches[1]["resume_at"], {"$type": "date"})
+
+    async def test_budget_hook_none_without_registration(self) -> None:
+        deadline_mod.set_budget_deadline_hook(None)
+        self.assertIsNone(deadline_mod.budget_window_for(_NOW, now=_NOW))
+
+    async def test_budget_hook_passthrough(self) -> None:
+        deadline_mod.set_budget_deadline_hook(
+            lambda deadline, now: ("window", deadline, now))
+        try:
+            self.assertEqual(
+                deadline_mod.budget_window_for(_NOW, now=_NOW),
+                ("window", _NOW, _NOW))
+        finally:
+            deadline_mod.set_budget_deadline_hook(None)
+
+    async def test_budget_hook_failure_is_fail_open(self) -> None:
+        def bad_hook(deadline: datetime, now: datetime) -> object:
+            raise RuntimeError("boom")
+
+        deadline_mod.set_budget_deadline_hook(bad_hook)
+        try:
+            self.assertIsNone(
+                deadline_mod.budget_window_for(_NOW, now=_NOW))
+        finally:
+            deadline_mod.set_budget_deadline_hook(None)
+
+    async def test_set_deadline_watch_wires_refresh(self) -> None:
+        repo = _FakeRepo([
+            _ticket("blocker", status=TaskStatus.IN_PROGRESS.value,
+                    project="other"),
+            _ticket("late", status=TaskStatus.WAITING.value, project="p1",
+                    waiting_reason="rate_limit_queued",
+                    resume_at=_NOW - timedelta(minutes=11),
+                    blocked_by=["blocker"]),
+        ])
+        recorded: list[dict] = []
+        service = _FakeService(repo)
+        launched: list[str] = []
+        dispatcher = Dispatcher(
+            repo=repo, settings=_settings(), service=service,
+            rate_monitor=_FakeMonitor(), launcher=launched.append)
+        watch = _watch(repo, recorded)
+        try:
+            dispatcher.set_deadline_watch(watch)
+            await dispatcher.dispatch_cycle(now=_NOW)
+            await _drain()
+            self.assertEqual(len(recorded), 1)
+            self.assertEqual(recorded[0]["deadline_type"], "resume")
+        finally:
+            await watch.close()
+
+
 class DispatcherDeadlineTests(unittest.IsolatedAsyncioTestCase):
     def _dispatcher_with_watch(
         self, repo: _FakeRepo, recorded: list[dict],

@@ -171,6 +171,22 @@ class Dispatcher:
         """A CRUD event says the queue may have changed. Coalesced."""
         self._wake.set()
 
+    def set_deadline_watch(self, watch: Any | None) -> None:
+        """Attach the DeadlineWatch (TASK-2026-00383, §7); None disables."""
+        self._deadline_watch = watch
+
+    async def close_deadline_watch(self) -> None:
+        """Disarm the watch timer. Never raises."""
+        watch = self._deadline_watch
+        self._deadline_watch = None
+        if watch is None:
+            return
+        try:
+            await watch.close()
+        except Exception:
+            logger.warning("Dispatcher: deadline watch close failed",
+                           exc_info=True)
+
     async def start(self) -> None:
         """Bounded startup reconciliation, then the reactive loop."""
         if self._job is not None and not self._job.done():

@@ -2449,7 +2449,9 @@ class TierSCycle:
     async def _deadline_mark_start(self, ctx: _Ctx) -> None:
         """Write attempt_id + attempt_deadline_at (TASK-2026-00383, §7).
 
-        Fail-open: without a task store nothing is written.
+        Fail-open: without a task store nothing is written. No wake
+        here (the store has none): the dispatch cycle re-arms via
+        refresh, well within Tier S attempt grace.
         """
         try:
             tasks = getattr(self, "_tasks", None)
