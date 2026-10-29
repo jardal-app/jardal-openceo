@@ -418,6 +418,18 @@ async def run_generic_agent(
     upstream = await _resolve_upstream(task, wiring)
     deadline_armed = await _deadline_mark_start(wiring, task, agent_name)
     try:
+        from reliability import exposures as _exposures
+
+        await _exposures.record_exposure(
+            wiring.repo, "generic_agent",
+            project_key=str(task.get("project") or ""),
+            task_id=str(task.get("task_id") or "") or None)
+    except Exception:
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "generic_agent exposure failed (fail-open)", exc_info=True)
+    try:
         if exact is not None:
             return await _run_exact_skill(
                 agent_name, task, params, profile, skill_name or "", exact,

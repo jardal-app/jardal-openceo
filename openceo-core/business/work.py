@@ -230,6 +230,7 @@ class JardalERPWork:
                 result = await self.client.request("POST", self._path(task) + "/transitions", body=body, key=key)
                 view = self._view(result["task"])
                 await self._check_reread_invariant(task["name"], target, view)
+                await self._notify_transition(task["name"], target)
                 return {"ok": True, "ticket": view}
             except BusinessVersionConflict:
                 if not retry_version_conflicts or attempt == 2:
@@ -238,6 +239,24 @@ class JardalERPWork:
                 if task["status"] not in {original_status, target}:
                     raise
         raise BusinessVersionConflict("Conflicto de versión.", status_code=409)
+
+    async def _notify_transition(self, name: str, target: str) -> None:
+        """Fire the business-transition sink; never raises (fail-open)."""
+        try:
+            import inspect as _inspect
+            import logging as _logging
+
+            sink = getattr(self, "on_business_transition", None)
+            if sink is None:
+                return
+            outcome = sink({"ticket": name, "target": target})
+            if _inspect.isawaitable(outcome):
+                await outcome
+        except Exception:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "Aviso de transicion fallido para %s", name, exc_info=True)
 
     async def _check_reread_invariant(self, name: str, target: str,
                                       view: dict[str, Any]) -> None:

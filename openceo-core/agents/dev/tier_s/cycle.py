@@ -501,6 +501,7 @@ class TierSCycle:
             self._restore_checkpoint(ctx, resume)
         ctx.cost_sessions_base = len(ctx.metrics.get("sessions") or [])
         await self._deadline_mark_start(ctx)
+        await self._note_exposure(ctx, "tier_s")
         try:
             outcome = await self._run_guarded(ctx)
             return replace(
@@ -647,6 +648,7 @@ class TierSCycle:
         baseline = await asyncio.to_thread(
             gate_mod.run_gates, ctx.repo, ctx.gate_specs)
         self._record_gates(ctx, "baseline", baseline)
+        await self._note_gates_exposure(ctx)
         blocked = gate_mod.baseline_blocked(baseline, ctx.gate_specs)
         if blocked:
             names = ", ".join(item.name for item in blocked)
@@ -1237,6 +1239,7 @@ class TierSCycle:
                 gate_mod.run_gates, ctx.repo, ctx.gate_specs)
             self._record_gates(ctx, "build" if attempt == 0 else f"fix{attempt}",
                                results)
+            await self._note_gates_exposure(ctx)
             failed = gate_mod.gates_failed(results)
             if not failed:
                 break
@@ -1513,6 +1516,7 @@ class TierSCycle:
         routing: wiring_mod.RoundRouting | None = None,
     ) -> dict[str, Any] | None:
         """Run one round; None when quorum is unreachable (§7.2)."""
+        await self._note_review_exposure(ctx)
         head = ctx.head_sha or ctx.build_sha
         request = review_mod.build_review_request(
             round_no, goal=str(ctx.ticket.get("title", "")),
@@ -1822,6 +1826,7 @@ class TierSCycle:
                 gate_mod.run_gates, ctx.repo, ctx.gate_specs)
             self._record_gates(ctx, f"fix{round_no}" if attempt == 0
                                else f"fix{round_no}b", results)
+            await self._note_gates_exposure(ctx)
             failed = gate_mod.gates_failed(results)
             if not failed:
                 break
@@ -1914,6 +1919,7 @@ class TierSCycle:
             results = await asyncio.to_thread(
                 gate_mod.run_gates, ctx.repo, ctx.gate_specs)
             self._record_gates(ctx, "arbitrated", results)
+            await self._note_gates_exposure(ctx)
             self._commit_if_changed(ctx, f"wip({ctx.ref}) arbitrated")
 
     @staticmethod
@@ -2189,6 +2195,7 @@ class TierSCycle:
         final = await asyncio.to_thread(
             gate_mod.run_gates, ctx.repo, ctx.gate_specs)
         self._record_gates(ctx, "final", final)
+        await self._note_gates_exposure(ctx)
         if gate_mod.gates_failed(final):
             names = ", ".join(item.name for item in gate_mod.gates_failed(final))
             return await self._park(
@@ -2763,6 +2770,27 @@ class TierSCycle:
             model=result.model or str(role_cfg.get("model", "")),
             duration_s=result.elapsed_s, exit_code=result.returncode,
             usage=dict(result.usage or {})))
+
+    async def _note_exposure(self, ctx: _Ctx, component: str) -> None:
+        """Count one pass through ``component``; never raises (fail-open)."""
+        try:
+            from reliability import exposures as _exposures
+
+            await _exposures.record_exposure(
+                self._incidents, component,
+                project_key=str(ctx.ticket.get("project") or ""),
+                task_id=str(ctx.ticket.get("task_id") or "") or None)
+        except Exception:
+            logger.warning("tier-s %s exposure failed (fail-open)",
+                           component, exc_info=True)
+
+    async def _note_review_exposure(self, ctx: _Ctx) -> None:
+        """Count one review round; never raises (fail-open)."""
+        await self._note_exposure(ctx, "review")
+
+    async def _note_gates_exposure(self, ctx: _Ctx) -> None:
+        """Count one gates execution; never raises (fail-open)."""
+        await self._note_exposure(ctx, "gates")
 
     def _record_gates(
         self, ctx: _Ctx, phase: str, results: Sequence[GateResult]) -> None:

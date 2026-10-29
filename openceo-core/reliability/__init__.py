@@ -2,9 +2,9 @@
 
 Pure incident models, capture-time redaction, v1 fingerprints, ordered
 attribution and global configuration. Only capture.py, supervisor.py,
-endpoint.py and deadlines.py do I/O (Mongo insert, local spool, backoff
-sleeps, Unix socket, one asyncio timer plus fail-open ticket deadline
-patches); guard stays pure. The worker, diagnosis and tickets belong to
+endpoint.py, exposures.py and deadlines.py do I/O (Mongo insert/upsert,
+local spool, backoff sleeps, Unix socket, one asyncio timer plus
+fail-open ticket deadline patches); guard stays pure. The worker, diagnosis and tickets belong to
 later children.
 """
 
@@ -15,6 +15,7 @@ from . import config as config
 from . import classification as classification
 from . import deadlines as deadlines
 from . import endpoint as endpoint
+from . import exposures as exposures
 from . import fingerprint as fingerprint
 from . import guard as guard
 from . import invariants as invariants

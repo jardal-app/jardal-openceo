@@ -343,6 +343,10 @@ class TaskService:
             if adapter is not None \
                     and getattr(adapter, "on_violation", None) is None:
                 adapter.on_violation = self._business_violation_sink
+            if adapter is not None and getattr(
+                    adapter, "on_business_transition", None) is None:
+                adapter.on_business_transition = \
+                    self._business_transition_sink
         except Exception:
             logger.warning("No se pudo cablear el sumidero INV-002",
                            exc_info=True)
@@ -2697,6 +2701,30 @@ class TaskService:
                     "Se perdio el incidente de invariante de %s",
                     ticket, exc_info=True,
                 )
+
+    async def _business_transition_sink(
+        self, payload: dict[str, Any]
+    ) -> None:
+        """Count one applied business transition; never raises, never changes flows."""
+        try:
+            from reliability import exposures as _exposures
+
+            name = str((payload or {}).get("ticket") or "")
+            project = ""
+            try:
+                found = await self.find_task_for_business_ref(task_id=None, ref=name or None)
+                if isinstance(found, dict):
+                    project = str(found.get("project") or "")
+            except Exception:
+                logger.debug("Proyecto no resuelto para %s; cuenta en unknown",
+                             name, exc_info=True)
+                project = ""
+            await _exposures.record_exposure(
+                getattr(self, "_repo", None), "business_sync",
+                project_key=project, task_id=None)
+        except Exception:
+            logger.warning("Sumidero de transicion empresarial fallido",
+                           exc_info=True)
 
     async def _business_violation_sink(
         self, payload: dict[str, Any]
