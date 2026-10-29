@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import traceback
 from typing import Any
 
 from .capture import record_incident, resolve_collection, transient_recovered
@@ -18,6 +19,22 @@ logger = logging.getLogger(__name__)
 
 BACKOFF_BASE_SECONDS = 1.0
 BACKOFF_MAX_SECONDS = 60.0
+MAX_FRAMES = 20
+
+
+def frames_from_exc(exc: BaseException) -> list[dict[str, str]]:
+    """Traceback frames for classify/fingerprint; never raises."""
+    try:
+        extracted = traceback.extract_tb(exc.__traceback__)
+        frames = [{
+            "file": str(entry.filename or ""),
+            "function": str(entry.name or ""),
+            "line": str(entry.lineno or ""),
+            "module": "?",
+        } for entry in extracted]
+        return frames[-MAX_FRAMES:]
+    except Exception:
+        return []
 
 
 def backoff_for(attempt: int, *,
@@ -83,7 +100,8 @@ class LoopSupervisor:
                 await record_incident(
                     source, kind=IncidentKind.EXCEPTION,
                     component=self._component, exc_type=type(exc).__name__,
-                    exc_text=str(exc)[:500], phase=phase, release=release,
+                    exc_text=str(exc)[:500], frames=frames_from_exc(exc),
+                    phase=phase, release=release,
                     runtime_dir=runtime_dir, notify=notify)
             except Exception:
                 logger.warning("%s incident capture failed",

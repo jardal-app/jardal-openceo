@@ -363,6 +363,111 @@ class CaptureTests(unittest.TestCase):
         wait = asyncio.run(_main())
         self.assertGreaterEqual(wait, 1.0)
 
+    def test_replay_preserves_datetime_types(self) -> None:
+        runtime = _tmpdir(self)
+        failing = FakeCollection(fail=RuntimeError("mongo down"))
+        doc_id = asyncio.run(record_incident(
+            failing, kind="exception", component="runner",
+            reason_code="rc-dates", runtime_dir=runtime,
+            now=_utc(2026, 10, 29)))
+        self.assertIsNotNone(doc_id)
+        healthy = FakeCollection()
+        outcome = asyncio.run(replay_spool(healthy, runtime_dir=runtime))
+        self.assertEqual(outcome, {"replayed": 1, "pending": 0, "failed": 0})
+        doc = healthy.docs[doc_id]
+        self.assertIsInstance(doc["created_at"], datetime)
+        self.assertIsInstance(doc["expire_at"], datetime)
+        self.assertEqual(doc["expire_at"] - doc["created_at"],
+                         timedelta(days=90))
+
+    def test_replay_keeps_concurrent_appends(self) -> None:
+        runtime = _tmpdir(self)
+        failing = FakeCollection(fail=RuntimeError("mongo down"))
+        first = asyncio.run(record_incident(
+            failing, kind="exception", component="runner",
+            reason_code="rc-first", runtime_dir=runtime,
+            now=_utc(2026, 10, 29)))
+        self.assertIsNotNone(first)
+        slow = FakeCollection(slow=0.4)
+
+        def _append_while_replaying() -> str | None:
+            import time
+            time.sleep(0.1)
+            return asyncio.run(record_incident(
+                failing, kind="exception", component="runner",
+                reason_code="rc-late", runtime_dir=runtime,
+                now=_utc(2026, 10, 29)))
+
+        appender = threading.Thread(target=_append_while_replaying)
+        appender.start()
+        outcome = asyncio.run(replay_spool(slow, runtime_dir=runtime))
+        appender.join()
+        self.assertEqual(outcome["replayed"], 1)
+        self.assertEqual(outcome["failed"], 0)
+        # The late append is never lost: inserted or still spooled.
+        late_pending = spool_status(runtime)["pending"]
+        late_ids = [doc.get("_id") for doc in slow.docs.values()]
+        from reliability.capture import _read_spool
+        late_spooled = [doc.get("_id") for doc in _read_spool(runtime)]
+        self.assertLessEqual(late_pending, 1)
+        self.assertEqual(len(late_ids) + late_pending, 2)
+        self.assertNotIn(first, late_spooled)
+
+    def test_sync_replays_spool_after_good_write(self) -> None:
+        runtime = _tmpdir(self)
+        spooled = record_incident_sync(
+            object(), kind="exception", component="runner",
+            reason_code="rc-sync-spool", runtime_dir=runtime,
+            now=_utc(2026, 10, 29))
+        self.assertIsNotNone(spooled)
+        self.assertEqual(spool_status(runtime)["pending"], 1)
+        coll = SyncCollection()
+        stored = record_incident_sync(
+            coll, kind="exception", component="runner",
+            reason_code="rc-sync-good", runtime_dir=runtime,
+            now=_utc(2026, 10, 29))
+        self.assertIsNotNone(stored)
+        self.assertEqual(spool_status(runtime)["pending"], 0)
+        self.assertEqual(len(coll.docs), 2)
+        doc = coll.docs[spooled]
+        self.assertIsInstance(doc["created_at"], datetime)
+
+    def test_supervisor_passes_frames_for_engine_attribution(self) -> None:
+        coll = FakeCollection()
+        supervisor = LoopSupervisor(name="t", component="dispatcher")
+
+        async def _boom() -> None:
+            raise RuntimeError("loop exploded with frames")
+
+        async def _main() -> None:
+            try:
+                await _boom()
+            except RuntimeError as exc:
+                await supervisor.failure(exc, source=coll, phase="cycle")
+
+        asyncio.run(_main())
+        self.assertEqual(len(coll.docs), 1)
+        doc = next(iter(coll.docs.values()))
+        # Frames travel from the traceback to the stored doc (empty before).
+        frames = doc["engine"].get("frames")
+        self.assertIsInstance(frames, list)
+        self.assertEqual(len(frames), 2)
+
+    def test_in_app_frames_classify_as_engine_high(self) -> None:
+        coll = FakeCollection()
+        runtime = _tmpdir(self)
+        doc_id = asyncio.run(record_incident(
+            coll, kind="exception", component="dispatcher",
+            exc_type="RuntimeError", exc_text="cycle failed",
+            frames=[{"module": "?", "function": "dispatch_cycle",
+                     "file": "openceo-core/dispatcher.py", "line": "212"}],
+            phase="dispatch_cycle", runtime_dir=runtime,
+            now=_utc(2026, 10, 29)))
+        self.assertIsNotNone(doc_id)
+        doc = coll.docs[doc_id]
+        self.assertEqual(doc["attribution"], "engine")
+        self.assertEqual(doc["severity"], "high")
+
 
 if __name__ == "__main__":
     unittest.main()

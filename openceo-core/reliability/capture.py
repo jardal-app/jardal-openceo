@@ -351,24 +351,45 @@ def _spool_append(doc: dict[str, Any],
         return False
 
 
+def _revive_doc(doc: dict[str, Any]) -> dict[str, Any]:
+    """Parse ISO date strings back to datetime (BSON TTL needs Date)."""
+    for field in ("created_at", "expire_at"):
+        value = doc.get(field)
+        if isinstance(value, str):
+            try:
+                moment = datetime.fromisoformat(
+                    value.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            doc[field] = moment
+    return doc
+
+
+def _read_lines(path: Path) -> list[dict[str, Any]]:
+    docs: list[dict[str, Any]] = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                doc = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(doc, dict):
+                docs.append(_revive_doc(doc))
+    return docs
+
+
 def _read_spool(runtime_dir: str | Path | None) -> list[dict[str, Any]]:
     try:
         path = spool_path(runtime_dir)
         if not path.exists():
             return []
-        docs: list[dict[str, Any]] = []
-        with open(path, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    doc = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(doc, dict):
-                    docs.append(doc)
-        return docs
+        with _SPOOL_LOCK:
+            return _read_lines(path)
     except OSError:
         logger.warning("Reliability spool read failed", exc_info=True)
         return []
@@ -378,13 +399,36 @@ def _rewrite_spool(docs: list[dict[str, Any]],
                    runtime_dir: str | Path | None) -> None:
     try:
         path = spool_path(runtime_dir)
-        tmp = path.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as fh:
-            for doc in docs:
-                fh.write(json.dumps(doc, default=str) + "\n")
-        tmp.replace(path)
+        with _SPOOL_LOCK:
+            tmp = path.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as fh:
+                for doc in docs:
+                    fh.write(json.dumps(doc, default=str) + "\n")
+            tmp.replace(path)
     except OSError:
         logger.warning("Reliability spool rewrite failed", exc_info=True)
+
+
+def _drop_replayed(replayed_ids: list[Any],
+                   runtime_dir: str | Path | None) -> int:
+    """Remove replayed ids from the spool, keeping concurrent appends."""
+    try:
+        done = set(replayed_ids)
+        path = spool_path(runtime_dir)
+        with _SPOOL_LOCK:
+            if not path.exists():
+                return 0
+            remaining = [doc for doc in _read_lines(path)
+                         if doc.get("_id") not in done]
+            tmp = path.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as fh:
+                for doc in remaining:
+                    fh.write(json.dumps(doc, default=str) + "\n")
+            tmp.replace(path)
+            return len(remaining)
+    except OSError:
+        logger.warning("Reliability spool rewrite failed", exc_info=True)
+        return -1
 
 
 def _is_duplicate_error(exc: BaseException) -> bool:
@@ -474,18 +518,53 @@ async def replay_spool(collection: Any,
         if coll is None:
             outcome["pending"] = len(pending)
             return outcome
-        remaining: list[dict[str, Any]] = []
-        for index, doc in enumerate(pending):
+        replayed_ids: list[Any] = []
+        for doc in pending:
             try:
                 await _insert_async(coll, doc)
+                replayed_ids.append(doc.get("_id"))
                 outcome["replayed"] += 1
             except Exception:
-                remaining.append(doc)
-                remaining.extend(pending[index + 1:])
                 outcome["failed"] += 1
                 break
-        _rewrite_spool(remaining, runtime_dir)
-        outcome["pending"] = len(remaining)
+        outcome["pending"] = _drop_replayed(replayed_ids, runtime_dir)
+        return outcome
+    except Exception:
+        logger.warning("Reliability spool replay failed", exc_info=True)
+        return outcome
+
+
+def replay_spool_sync(collection: Any,
+                      *,
+                      runtime_dir: str | Path | None = None) -> dict[str, int]:
+    """Blocking replay for the sync path; merges with concurrent appends."""
+    outcome = {"replayed": 0, "pending": 0, "failed": 0}
+    try:
+        pending = _read_spool(runtime_dir)
+        if not pending:
+            return outcome
+        coll = _resolve_collection(collection)
+        if coll is None:
+            outcome["pending"] = len(pending)
+            return outcome
+        replayed_ids: list[Any] = []
+        for doc in pending:
+            try:
+                if asyncio.iscoroutinefunction(
+                        getattr(coll, "insert_one", None)):
+                    with ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(
+                            asyncio.run, _insert_async(coll, doc))
+                        future.result(
+                            timeout=INSERT_TIMEOUT_SECONDS + 1)
+                else:
+                    _insert_sync(coll, doc)
+                replayed_ids.append(doc.get("_id"))
+                outcome["replayed"] += 1
+            except Exception:
+                outcome["failed"] += 1
+                break
+        outcome["pending"] = _drop_replayed(replayed_ids, runtime_dir)
         return outcome
     except Exception:
         logger.warning("Reliability spool replay failed", exc_info=True)
@@ -617,6 +696,11 @@ def record_incident_sync(
                 logger.warning("Reliability notify hook failed", exc_info=True)
         else:
             _notify(doc, None)
+        try:
+            replay_spool_sync(coll, runtime_dir=runtime_dir)
+        except Exception:
+            logger.warning("Reliability post-write replay failed",
+                           exc_info=True)
         return stored_id
     except Exception:
         logger.warning("record_incident_sync failed", exc_info=True)
