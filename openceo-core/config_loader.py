@@ -170,6 +170,30 @@ class ConfigLoader:
                     f"ceo in {project}/project.yaml must be "
                     "a mapping or absent."
                 )
+        # Reliability hunter config (epic TASK-2026-00365, TASK-2026-00368):
+        # global, not per-project, because engine Problems cross projects.
+        reliability = data.get("reliability")
+        if reliability is not None and reliability != {}:
+            if isinstance(reliability, dict):
+                found = ", ".join(sorted(str(key) for key in reliability))
+                errors.append(
+                    "reliability must not be set in project.yaml: "
+                    "the reliability hunter config is global. Remove it from "
+                    f"{project}/project.yaml (found: {found})."
+                )
+            else:
+                errors.append(
+                    f"reliability in {project}/project.yaml must be "
+                    "a mapping or absent."
+                )
+        from reliability.config import (
+            RELIABILITY_DEFAULTS,
+            validate_reliability_config,
+        )
+        errors.extend(
+            f"reliability defaults invalid: {err}"
+            for err in validate_reliability_config(RELIABILITY_DEFAULTS)
+        )
         # Email allowlist (TASK-2026-00208): recipients the secretary may
         # mail without the Owner. Malformed shape parks the project's
         # tickets; absent means nothing is pre-approved (fail-closed).
@@ -670,6 +694,11 @@ class ConfigLoader:
                     "role_profile": "ceo",
                 },
             },
+            # Reliability hunter (epic TASK-2026-00365, TASK-2026-00368):
+            # global thresholds; projects must not set reliability
+            # (see validate_project). Validated fail-closed on import
+            # and on every validate_project call.
+            "reliability": _reliability_defaults(),
             "voice": {
                 "peer_programming": {
                     "enabled": True,
@@ -710,6 +739,14 @@ class ConfigLoader:
         defaults["review"]["reviewers"].extend(
             _reviewer_reserves(Path(__file__).resolve().parent.parent))
         return _deep_merge(defaults, cfg)
+
+
+def _reliability_defaults() -> dict[str, Any]:
+    import copy
+
+    from reliability.config import RELIABILITY_DEFAULTS
+
+    return copy.deepcopy(RELIABILITY_DEFAULTS)
 
 
 def _reviewer_reserves(repo: Path) -> list[dict[str, Any]]:
