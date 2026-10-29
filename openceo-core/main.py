@@ -346,6 +346,15 @@ async def lifespan(_: FastAPI):
     _release = read_release(Path(__file__).resolve().parents[1])
     _boot_log.info("Release: sha=%s dirty=%s", _release["sha"],
                    _release["dirty"])
+    # GlitchTip (TASK-2026-00371, ap. 16.3): al principio del arranque
+    # para capturar los fallos de boot. Sin DSN queda desactivado.
+    try:
+        from reliability.error_tracking import init_error_tracking
+        _tracking = init_error_tracking(release=_release)
+    except ImportError:
+        _tracking = False
+    _boot_log.info("Error tracking (GlitchTip): %s",
+                   "active" if _tracking else "disabled")
     async with AsyncExitStack() as stack:
         if internal_mcp is not None:
             await stack.enter_async_context(internal_mcp.lifespan())

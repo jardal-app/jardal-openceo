@@ -1,0 +1,121 @@
+# GlitchTip autoalojado (TASK-2026-00371, diseno v2 ap. 16.2).
+#
+# Derivado del compose.sample.yml oficial. Versiones fijadas; PostgreSQL
+# propio >= 14; Valkey opcional (sin el, GlitchTip usa la base de datos
+# para cache y cola, mas lento pero correcto); retencion de 90 dias.
+#
+# Red: solo interna. Sin puertos publicados: la ingesta y la UI cuelgan
+# de Traefik. El entrypoint de ingesta DEBE estar ligado a 127.0.0.1 en
+# el host (nunca en todas las interfaces: Docker salta UFW). La UI solo
+# es interna
+# (tunel SSH), salvo allowlist del Owner con TLS y autenticacion.
+# Los secretos van en glitchtip.env (no en git): ver .env.example.
+
+name: glitchtip
+
+services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    env_file:
+      - glitchtip.env
+    environment:
+      POSTGRES_DB: glitchtip
+      POSTGRES_USER: glitchtip
+    volumes:
+      - glitchtip-db:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U glitchtip"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  valkey:
+    image: valkey/valkey:9
+    restart: unless-stopped
+    expose:
+      - "6379"
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    image: glitchtip/glitchtip:6
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - glitchtip.env
+    environment:
+      DATABASE_URL: postgres://glitchtip:$${GLITCHTIP_DB_PASSWORD}@db:5432/glitchtip
+      REDIS_URL: redis://valkey:6379/0
+    networks:
+      - internal
+    command: ./bin/migrate.sh
+
+  web:
+    image: glitchtip/glitchtip:6
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - glitchtip.env
+    environment:
+      DATABASE_URL: postgres://glitchtip:$${GLITCHTIP_DB_PASSWORD}@db:5432/glitchtip
+      REDIS_URL: redis://valkey:6379/0
+      PORT: "8080"
+      GLITCHTIP_MAX_EVENT_LIFE_DAYS: "90"
+    expose:
+      - "8080"
+    networks:
+      - internal
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.glitchtip-ingest.rule=Host(`${GLITCHTIP_INGEST_HOST}`)"
+      - "traefik.http.routers.glitchtip-ingest.entrypoints=glitchtip-in"
+      - "traefik.http.services.glitchtip.loadbalancer.server.port=8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  worker:
+    image: glitchtip/glitchtip:6
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - glitchtip.env
+    environment:
+      DATABASE_URL: postgres://glitchtip:$${GLITCHTIP_DB_PASSWORD}@db:5432/glitchtip
+      REDIS_URL: redis://valkey:6379/0
+      GLITCHTIP_MAX_EVENT_LIFE_DAYS: "90"
+    networks:
+      - internal
+    command: ./bin/celery.sh
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  internal:
+    internal: true
+  traefik-net:
+    external: true
+
+volumes:
+  glitchtip-db:

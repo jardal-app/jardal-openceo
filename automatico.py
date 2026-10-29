@@ -403,6 +403,36 @@ def _spool_runner_event_local(event: dict) -> None:
         log(f"spool local del runner falló (fail-open): {exc}"[:200])
 
 
+_TRACKING = {"module": None, "failed": False}
+
+
+def _tracking_module():
+    cached = _TRACKING
+    if cached["failed"]:
+        return None
+    if cached["module"] is None:
+        try:
+            if str(CORE) not in sys.path:
+                sys.path.insert(0, str(CORE))
+            from reliability import error_tracking as module
+            cached["module"] = module
+        except Exception:  # noqa: BLE001 - fail-open: sin SDK el runner sigue
+            cached["failed"] = True
+            return None
+    return cached["module"]
+
+
+def init_runner_error_tracking(release: dict) -> bool:
+    """Activa GlitchTip en el runner (ap. 16.3). Nunca lanza."""
+    try:
+        module = _tracking_module()
+        if module is None:
+            return False
+        return bool(module.init_error_tracking(release=release))
+    except Exception:  # noqa: BLE001 - fail-open: el runner sigue sin tracking
+        return False
+
+
 def report_runner_event(ticket: str, etype: str, **fields: str) -> None:
     """Informa al core (socket; spool si no responde). Nunca lanza."""
     event = {"type": etype, "component": "runner", "task_id": ticket,
@@ -1536,6 +1566,9 @@ def drive(s: Settings) -> int:
     log(f"épica {epic}: {len(plan)} tickets ({source})"
         + (" (dry-run)" if s.dry_run else "")
         + f"; release {rel['sha']} dirty={rel['dirty']}")
+    if not s.dry_run:
+        tracking = init_runner_error_tracking(rel)
+        log(f"error tracking (GlitchTip): {'active' if tracking else 'disabled'}")
     if s.dry_run:
         print_plan(plan, state)
         return 0
