@@ -172,8 +172,8 @@ async def reconcile_incident(
             return {"status": "already_reconciled", "ticket": ref,
                     "attempts": tries}
         if decision in ("needs_owner", "give_up", "unknown"):
-            status = decision if decision != "unknown" else "unknown"
-            return {"status": status, "reason": str(choice.get("reason")),
+            return {"status": decision,
+                    "reason": str(choice.get("reason")),
                     "ticket": ref, "attempts": tries}
         if applier is None:
             return {"status": "unknown", "reason": "no_applier",
