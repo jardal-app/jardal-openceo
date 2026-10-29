@@ -153,6 +153,7 @@ class Dispatcher:
         launcher: Callable[[str], Awaitable[Any]] | None = None,
         repo_for_project: Callable[[str], str | None] | None = None,
         deadline_watch: Any | None = None,
+        hunter_reader: Any | None = None,
     ) -> None:
         self._repo = repo
         self._settings = settings
@@ -161,6 +162,7 @@ class Dispatcher:
         self._launcher = launcher or service.run_task
         self._repo_for_project = repo_for_project
         self._deadline_watch = deadline_watch
+        self._hunter_reader = hunter_reader
         self._job: asyncio.Task[Any] | None = None
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
@@ -420,6 +422,32 @@ class Dispatcher:
         resume_at = _aware(ticket.get("resume_at"))
         if resume_at is not None and resume_at > now:
             return "skipped"
+        # Hunter admission gate (TASK-2026-00387, §9.3): hunter tickets need
+        # a verified Owner approval; denials park with a typed reason.
+        # Fail-closed even when the gate module itself is unreadable.
+        try:
+            from reliability import admission as _admission
+        except Exception:
+            _admission = None  # type: ignore[assignment]
+        if _admission is not None:
+            hunter = _admission.is_hunter_task(ticket)
+        else:
+            hunter = str(ticket.get("source_id") or "").startswith(
+                "reliability:")
+        if hunter:
+            if _admission is None:
+                verdict = {"allowed": False,
+                           "reason": "approval_unverifiable"}
+            else:
+                verdict = await _admission.check_admission(
+                    ticket, approvals=self._hunter_reader)
+            if not verdict.get("allowed"):
+                await self._park(
+                    ticket,
+                    f"hunter_approval:{verdict.get('reason')}",
+                    None, now,
+                )
+                return "parked"
         decision = resolve_coding_tool(ticket)
         effective = ticket
         effective_tier = decision.tool

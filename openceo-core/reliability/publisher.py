@@ -21,6 +21,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Protocol
 
+from .admission import build_approval_request
 from .config import RELIABILITY_DEFAULTS
 from .models import ProblemStatus
 
@@ -144,12 +145,14 @@ def record_rejection(problem: dict[str, Any],
 def mark_ticketed(problem: dict[str, Any], *, business_ref: str,
                   source_id: str, ticket_type: str,
                   proposal_hash: str | None = None,
+                  approval_id: str | None = None,
                   now: datetime | None = None) -> dict[str, Any]:
     updated = dict(problem)
     updated["status"] = ProblemStatus.TICKETED.value
     updated["ticket"] = {
         "business_ref": business_ref, "source_id": source_id,
         "type": ticket_type, "proposal_hash": proposal_hash,
+        "approval_id": approval_id,
     }
     updated["version"] = int(problem.get("version", 1)) + 1
     updated["updated_at"] = now or _utcnow()
@@ -324,6 +327,7 @@ async def publish(problem: dict[str, Any], *, ticket_type: str,
     except ValueError as exc:
         return {"status": "refused", "reason": str(exc)}
     source_id = str(payload["source_id"])
+    approval_id: str | None = None
     try:
         existing = await _maybe_await(
             erp.find_by_source_id(SOURCE, source_id))
@@ -338,6 +342,7 @@ async def publish(problem: dict[str, Any], *, ticket_type: str,
             source_id=source_id, ticket_type=ticket_type,
             proposal_hash=str(payload.get("proposal_hash"))
             if payload.get("proposal_hash") else None,
+            approval_id=approval_id,
             now=moment)
         await _persist_problem(store, str(problem.get("_id")), ticketed)
         return {"status": "already_exists",
@@ -355,6 +360,27 @@ async def publish(problem: dict[str, Any], *, ticket_type: str,
         await _persist_problem(store, str(problem.get("_id")), diagnosed)
         return {"status": "queued", "problem_status": "diagnosed",
                 "source_id": source_id, "problem_update": diagnosed}
+    # Ticket item 1: request an ERP approval whose resource references the
+    # proposal hash and the Problem, before creating the ticket. Optional:
+    # adapters without request_approval keep the previous flow, and the
+    # admission gate still blocks execution until approval is verified.
+    if ticket_type == TICKET_TYPE_FIX and isinstance(proposal, dict):
+        requester = getattr(erp, "request_approval", None)
+        if callable(requester):
+            problem_key = str(
+                problem.get("problem_key") or problem.get("_id") or "")
+            digest = proposal_hash(proposal)
+            request, key = build_approval_request(
+                problem_key, digest)
+            try:
+                approval = await _maybe_await(requester(request, key=key))
+                if isinstance(approval, dict):
+                    approval_id = str(approval.get("id") or "") or None
+            except Exception:
+                logger.warning("Hunter approval request failed; the ticket "
+                               "stays blocked at admission", exc_info=True)
+    if approval_id:
+        payload["approval_id"] = approval_id
     try:
         created = await _maybe_await(erp.create_ticket(payload))
     except TimeoutError:
@@ -372,6 +398,7 @@ async def publish(problem: dict[str, Any], *, ticket_type: str,
                 source_id=source_id, ticket_type=ticket_type,
                 proposal_hash=str(payload.get("proposal_hash"))
                 if payload.get("proposal_hash") else None,
+                approval_id=approval_id,
                 now=moment)
             await _persist_problem(
                 store, str(problem.get("_id")), ticketed)
@@ -394,6 +421,7 @@ async def publish(problem: dict[str, Any], *, ticket_type: str,
         source_id=source_id, ticket_type=ticket_type,
         proposal_hash=str(payload.get("proposal_hash") or None)
         if payload.get("proposal_hash") else None,
+        approval_id=approval_id,
         now=moment)
     await _persist_problem(store, str(problem.get("_id")), ticketed)
     return {"status": "published", "ticket": created,

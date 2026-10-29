@@ -2054,6 +2054,41 @@ class TaskService:
             dict(decisions) if isinstance(decisions, dict) else {},
         )
 
+    def set_hunter_approval_reader(self, reader: Any | None) -> None:
+        """Inject the live ERP approval reader for the hunter gate.
+
+        ``None`` (default) keeps hunter tickets blocked fail-closed; the
+        activation (TASK-2026-00391) wires the production reader here and
+        on the dispatcher. Non-hunter tickets never touch the reader.
+        """
+        self._hunter_reader = reader
+
+    async def check_hunter_admission(
+            self, task: dict[str, Any]) -> dict[str, Any]:
+        """Hunter admission verdict for one execution ticket (TASK-2026-00387).
+
+        Never raises: any internal failure denies fail-closed, like the
+        gate itself.
+        """
+        try:
+            from reliability import admission as _admission
+        except Exception:
+            _admission = None  # type: ignore[assignment]
+        try:
+            if _admission is None:
+                hunter = str(task.get("source_id") or "").startswith(
+                    "reliability:")
+                if not hunter:
+                    return {"allowed": True, "reason": "not_hunter"}
+                return {"allowed": False,
+                        "reason": "approval_unverifiable"}
+            return await _admission.check_admission(
+                task, approvals=getattr(self, "_hunter_reader", None))
+        except Exception:
+            logger.warning("Hunter admission check failed (fail-closed)",
+                           exc_info=True)
+            return {"allowed": False, "reason": "approval_unverifiable"}
+
     async def register_erp_approval(self, task_id: str, approval: dict[str, Any]) -> None:
         """Record an approval Core requested, so only its decision applies."""
         repo = getattr(self, "_repo", None)
@@ -2130,8 +2165,14 @@ class TaskService:
                         "reason": result.get("reason"), "pending": True}
             params = self._task_params(fresh)
             books = dict(params.get("_erp_decisions") or {})
-            books[decision_id] = {"verdict": verdict, "approval_id": approval_id,
-                                  "applied_at": datetime.now(timezone.utc).isoformat()}
+            actor = event.get("actor") or {}
+            books[decision_id] = {
+                "verdict": verdict, "approval_id": approval_id,
+                "applied_at": datetime.now(timezone.utc).isoformat(),
+                "actor_kind": str(actor.get("kind") or "").strip(),
+                "actor_id": str(actor.get("id") or "").strip(),
+                "version": decision_version,
+            }
             params["_erp_decisions"] = books
             await self.patch_task(key, {"params": params})
             return {"ok": True, "status": "applied", "task_id": key,
@@ -4269,6 +4310,26 @@ class TaskService:
                     )
                     self._wake_dispatcher()
                     return task
+                # Hunter admission gate (TASK-2026-00387, §9.3): manual
+                # launches verify the Owner approval; denials park with a
+                # typed reason instead of executing. Fail-closed.
+                hunter_verdict = await self.check_hunter_admission(task)
+                if not hunter_verdict.get("allowed"):
+                    reason = (f"hunter_approval:"
+                              f"{hunter_verdict.get('reason')}")
+                    logger.warning("run_task: hunter gate denied %s (%s)",
+                                   task_id, reason)
+                    await self.patch_task(task_id, {
+                        "status": TaskStatus.QUEUED.value,
+                        "waiting_reason": reason,
+                        "resume_at": None,
+                    })
+                    await self.comment_on_ticket(
+                        task_id,
+                        f"Hunter admission gate denied launch: {reason}. "
+                        f"A verified Owner approval is required "
+                        f"(TASK-2026-00387).")
+                    return await self._repo.get_task(task_id)
                 try:
                     task, stop = await self._plan_pedido_pre_stage(
                         task, force=force)
