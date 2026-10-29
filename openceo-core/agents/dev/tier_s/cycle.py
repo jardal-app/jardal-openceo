@@ -57,6 +57,7 @@ from orchestration.knowledge_proposals import (
     proposal_prompt_for,
 )
 from orchestration import review as review_mod
+from reliability import tier_s_brake as tier_s_mod
 from orchestration.live import (
     TIMEOUT_RETURNCODE,
     AllowAllQuota,
@@ -176,6 +177,13 @@ class _Ctx:
     cost_sessions_base: int = 0
     resume_phase: str = "review"
     provider_parks: int = 0
+    # Reliability hunter (TASK-2026-00376): orchestrator-emitted milestones
+    # (§4.3) pending consumption at the next attempt boundary, the brake
+    # phase of the current stage, and gate names that already failed once
+    # (a later pass notes the gate-fixed milestone).
+    pending_milestones: list[str] = field(default_factory=list)
+    brake_phase: str = "admission"
+    failed_gates: set[str] = field(default_factory=set)
     parked_outcome: CycleOutcome | None = None
     pool_resume_at: str | None = None
     vault_index: str = ""
@@ -377,6 +385,7 @@ class TierSCycle:
         inbox: inbox_mod.InboxStore | None = None,
         create_ticket: Callable[[dict[str, Any]], Awaitable[dict[str, Any] | None]] | None = None,
         objective_env: Any | None = None,
+        incidents: Any | None = None,
     ) -> None:
         self._runs = run_store
         self._locks = lock_store
@@ -395,6 +404,10 @@ class TierSCycle:
         # F6: without an objective env, oversized tickets park in
         # waiting(needs_owner) with their SIZING.md (pre-F6 behavior).
         self._objective_env = objective_env
+        # Reliability hunter (TASK-2026-00376): incidents collection (or a
+        # ``.db`` behind it); None skips capture but still evaluates the
+        # brake and persists its state.
+        self._incidents = incidents
 
     # -- configuration ---------------------------------------------------
 
@@ -494,6 +507,7 @@ class TierSCycle:
                 params=dict(ctx.ticket.get("params") or {}))
         except Exception as exc:  # fail explicit, resumable, lock always freed
             logger.exception("tier-s cycle failed; parking as transient")
+            await self._capture_exception(ctx, exc)
             detail = f"{type(exc).__name__}: {exc}"[:500]
             parked = await self._park(
                 ctx, "transient", detail,
@@ -844,6 +858,7 @@ class TierSCycle:
         }
 
     async def _resume_review(self, ctx: _Ctx) -> CycleOutcome:
+        ctx.brake_phase = ctx.resume_phase or "review"
         checked_out = _git(ctx.repo, "checkout", "-q", ctx.branch).returncode == 0
         head = _git(ctx.repo, "rev-parse", "HEAD").stdout.strip()
         if not checked_out or head != ctx.head_sha:
@@ -873,6 +888,10 @@ class TierSCycle:
         fenced = await self._fenced_cancelled(ctx)
         if fenced is not None:
             ctx.parked_outcome = fenced
+            return
+        stop = await self._reliability_boundary(ctx, reason, detail, resume_at)
+        if stop is not None:
+            ctx.parked_outcome = stop
             return
         if agent_result is not None:
             _tier_dir(ctx.repo).mkdir(exist_ok=True)
@@ -1031,6 +1050,7 @@ class TierSCycle:
     # -- planning (§6.2–§6.4) -------------------------------------------------
 
     async def _planning(self, ctx: _Ctx) -> Plan | None:
+        ctx.brake_phase = "planning"
         tier_dir = _tier_dir(ctx.repo)
         tier_dir.mkdir(exist_ok=True)
         prompt = self._planner_prompt(ctx)
@@ -1072,6 +1092,8 @@ class TierSCycle:
                              "files_counted": validation.files_counted},
                     "updated_at": _utcnow_iso(),
                 })
+                self._note_tier_s_milestone(
+                    ctx, tier_s_mod.MILESTONE_PLAN_READY)
                 return plan
             errors = "; ".join(validation.errors) if validation else "no PLAN.md"
             if "file budget exceeded" in errors:
@@ -1099,6 +1121,7 @@ class TierSCycle:
         return None
 
     async def _plan_review(self, ctx: _Ctx, plan: Plan) -> None:
+        ctx.brake_phase = "plan_review"
         plan_path = _tier_dir(ctx.repo) / "PLAN.md"
         timeout_s = int(ctx.timeouts.get("plan_review", 15)) * 60
         review = await self._exec.run(
@@ -1146,6 +1169,7 @@ class TierSCycle:
     # -- build (§6.5–§6.6) ----------------------------------------------------
 
     async def _build(self, ctx: _Ctx, plan: Plan) -> bool:
+        ctx.brake_phase = "build"
         timeout_s = int(ctx.timeouts.get("build", 60)) * 60
         result = await self._exec.run(
             "builder", self._builder_prompt(ctx, plan), ctx.repo, timeout_s)
@@ -1262,6 +1286,7 @@ class TierSCycle:
             "head_sha": ctx.build_sha, "metrics": ctx.metrics,
             "updated_at": _utcnow_iso(),
         })
+        self._note_tier_s_milestone(ctx, tier_s_mod.MILESTONE_BUILD_DONE)
         return True
 
     # -- review rounds (§6.7–§6.9, F3) ---------------------------------------------
@@ -1308,6 +1333,7 @@ class TierSCycle:
 
     async def _review_rounds(self, ctx: _Ctx) -> CycleOutcome | None:
         """R1 → FIX → R2 → FIX → arbitration. None = proceed to final gates."""
+        ctx.brake_phase = "review"
         if not ctx.pool:
             return None
         builder_family = self._builder_family(ctx)
@@ -1342,6 +1368,7 @@ class TierSCycle:
                 assembly1.routing.close()
         if round1 is None:
             return await self._park_review_quorum(ctx, 1)
+        self._note_tier_s_milestone(ctx, tier_s_mod.MILESTONE_REVIEW_REPORT)
         fix1 = await self._muse_fix(ctx, 1, round1["findings"])
         if fix1 is None:  # parked inside (fix gates unrecoverable)
             return await self._run_waited(ctx)
@@ -1383,6 +1410,7 @@ class TierSCycle:
                 assembly2.routing.close()
         if round2 is None:
             return await self._park_review_quorum(ctx, 2)
+        self._note_tier_s_milestone(ctx, tier_s_mod.MILESTONE_REVIEW_REPORT)
         fix2 = await self._muse_fix(ctx, 2, round2["findings"])
         if fix2 is None:
             return await self._run_waited(ctx)
@@ -1812,6 +1840,9 @@ class TierSCycle:
                 await self._park_builder_failure(ctx, fix)
                 return None
         self._commit_if_changed(ctx, f"wip({ctx.ref}) fix{round_no}")
+        if self._count_verdict(verdicts, "CORREGIDO"):
+            self._note_tier_s_milestone(
+                ctx, tier_s_mod.MILESTONE_FINDING_RESOLVED)
         return verdicts
 
     async def _arbitrate(
@@ -2147,6 +2178,7 @@ class TierSCycle:
         parked = await self._review_rounds(ctx)
         if parked is not None:
             return parked
+        ctx.brake_phase = "closing"
         await self._runs.patch_run(ctx.run_id, {
             "phase": "closing", "rounds": ctx.rounds,
             "arbitrations": ctx.arbitrations, "metrics": ctx.metrics,
@@ -2409,6 +2441,168 @@ class TierSCycle:
         await self._tasks.patch_task(task_id, {"params": params})
         return outcome
 
+    # -- reliability hunter (TASK-2026-00376, design v2 §4.5 + §5.2) --------
+
+    def _note_tier_s_milestone(self, ctx: _Ctx, name: str) -> None:
+        """Record an orchestrator-emitted milestone (§4.3) for the boundary."""
+        if name not in ctx.pending_milestones:
+            ctx.pending_milestones.append(name)
+
+    async def _reliability_boundary(
+        self, ctx: _Ctx, reason: str, detail: str,
+        resume_at: str | None,
+    ) -> CycleOutcome | None:
+        """Attempt/phase-boundary capture plus ProgressGuard. Never raises.
+
+        Returns the enforce-stop outcome when the brake stops the loop in
+        enforce mode, else None (the caller parks as usual). Shadow
+        would-stops record a ``stall`` with ``shadow=true`` and let the
+        loop continue with its own park.
+        """
+        try:
+            return await self._reliability_boundary_inner(
+                ctx, reason, detail, resume_at)
+        except Exception:
+            logger.warning("tier-s reliability boundary failed (fail-open)",
+                           exc_info=True)
+            return None
+
+    async def _reliability_boundary_inner(
+        self, ctx: _Ctx, reason: str, detail: str,
+        resume_at: str | None,
+    ) -> CycleOutcome | None:
+        params = ctx.ticket.get("params")
+        if not isinstance(params, dict):
+            params = {}
+            ctx.ticket["params"] = params
+        task_id = str(ctx.ticket.get("task_id", ""))
+        phase = ctx.brake_phase
+        plan = tier_s_mod.classify_park(reason, detail, resume_at)
+        attempt_id = tier_s_mod.next_attempt_id(task_id, params)
+        result_sig = tier_s_mod.make_result_sig(phase, str(plan["marker"]))
+        work_fp, fp_complete = tier_s_mod.tier_s_work_fp(
+            ctx.repo, ctx.base_sha or "")
+        mode = tier_s_mod.guard_mode()
+        now = tier_s_mod.utcnow_iso()
+        for milestone in dict.fromkeys(ctx.pending_milestones):
+            tier_s_mod.evaluate_attempt(
+                params, producer=tier_s_mod.TIER_S_PRODUCER, phase=phase,
+                attempt_id=attempt_id, result_sig=result_sig, work_fp=work_fp,
+                fp_complete=fp_complete, executed=bool(plan["executed"]),
+                milestone=milestone, mode=mode, now=now)
+        ctx.pending_milestones.clear()
+        decision = tier_s_mod.evaluate_attempt(
+            params, producer=tier_s_mod.TIER_S_PRODUCER, phase=phase,
+            attempt_id=attempt_id, result_sig=result_sig, work_fp=work_fp,
+            fp_complete=fp_complete, executed=bool(plan["executed"]),
+            mode=mode, now=now)
+        tier_s_mod.brake_record(params, decision, mode=mode, now=now)
+        if decision.get("brake_error"):
+            await tier_s_mod.record_async(
+                self._incidents, kind="exception", component="reliability",
+                task_id=task_id, run_id=ctx.run_id, attempt_id=attempt_id,
+                phase=phase, exc_text=str(decision["brake_error"])[:300],
+                message="progress guard failed open; the loop continues"[:300])
+        capture = plan["capture"]
+        if capture is not None:
+            await self._capture_boundary(
+                ctx, task_id, attempt_id, phase, result_sig,
+                str(capture["kind"]), str(capture.get("brake") or ""),
+                f"{reason}: {detail}")
+        if decision.get("incident"):
+            await tier_s_mod.record_async(
+                self._incidents, kind="stall",
+                task_id=task_id, run_id=ctx.run_id, attempt_id=attempt_id,
+                phase=phase, guard_rule=str(decision.get("rule") or ""),
+                result_signature=result_sig,
+                shadow=bool(decision.get("shadow", True)),
+                message=f"progress brake {decision.get('rule')} "
+                        f"({decision.get('action')})"[:300])
+        try:
+            await self._tasks.patch_task(task_id, {"params": params})
+        except Exception:
+            logger.warning("tier-s guard params patch failed (fail-open)",
+                           exc_info=True)
+        if decision.get("action") == "stop":
+            return await self._stall_stop(
+                ctx, task_id, str(decision.get("rule") or ""))
+        return None
+
+    async def _capture_boundary(
+        self, ctx: _Ctx, task_id: str, attempt_id: str, phase: str,
+        result_sig: str, kind: str, brake: str, error: str,
+    ) -> None:
+        """Record one attempt-boundary incident (never breaks the loop)."""
+        if kind == "brake_exhausted":
+            await tier_s_mod.record_async(
+                self._incidents, kind=kind,
+                task_id=task_id, run_id=ctx.run_id, attempt_id=attempt_id,
+                phase=phase, brake=brake or None,
+                reason_code=(brake or None),
+                result_signature=result_sig, message=error[:500] or None)
+            return
+        reason_code = tier_s_mod.terminal_reason_code(error)
+        await tier_s_mod.record_async(
+            self._incidents, kind="terminal_failure",
+            task_id=task_id, run_id=ctx.run_id, attempt_id=attempt_id,
+            phase=phase, reason_code=reason_code,
+            result_signature=result_sig, message=error[:500] or None)
+
+    async def _capture_exception(self, ctx: _Ctx, exc: BaseException) -> None:
+        """Record one uncontrolled exception, then let the caller proceed."""
+        try:
+            task_id = str(ctx.ticket.get("task_id", ""))
+            await tier_s_mod.record_async(
+                self._incidents, kind="exception",
+                task_id=task_id, run_id=ctx.run_id, phase=ctx.brake_phase,
+                exc_type=type(exc).__name__, exc_text=str(exc)[:300],
+                message=f"unhandled: {exc}"[:500])
+        except Exception:
+            logger.warning("tier-s exception capture failed (fail-open)",
+                           exc_info=True)
+
+    async def _stall_stop(self, ctx: _Ctx, task_id: str, rule: str) -> CycleOutcome:
+        """Enforce stop (§4.5): waiting run and ticket, repo released.
+
+        Same fields as A/B/C: ``stalled_no_progress`` with no resume, the
+        motive plus the resume condition, the branch kept. The observer maps
+        the stalled wait to business Working; re-arm is Owner-only.
+        """
+        self._commit_if_changed(ctx, f"checkpoint {ctx.ref}: stalled_no_progress")
+        if _git(ctx.repo, "checkout", "-q", ctx.base_branch).returncode != 0:
+            logger.warning("tier-s stall could not release %s", ctx.repo)
+        now = tier_s_mod.utcnow_iso()
+        detail = (f"stalled_no_progress: {rule} in phase '{ctx.brake_phase}'. "
+                  "Motivo: el freno nativo detuvo el bucle tras intentos sin "
+                  "avance. Condición de reanudación: nuevo diff en la rama, "
+                  "informe de review nuevo o gate en verde; solo el Owner u "
+                  "otro actor autorizado rearma el freno "
+                  f"(rama conservada: {ctx.branch}).")
+        try:
+            await self._runs.patch_run(ctx.run_id, {
+                "status": "waiting",
+                "waiting": {"reason": "stalled_no_progress", "detail": detail,
+                            "since": now, "resume_at": None},
+                "metrics": ctx.metrics, "gates": ctx.gate_runs,
+                "rounds": ctx.rounds, "updated_at": now})
+        except Exception:
+            logger.warning("tier-s stall run patch failed (fail-open)",
+                           exc_info=True)
+        try:
+            await self._tasks.patch_task(task_id, {
+                "status": TaskStatus.WAITING.value,
+                "waiting_reason": detail[:500],
+                "resume_at": None,
+                "params": dict(ctx.ticket.get("params") or {}),
+            })
+        except Exception:
+            logger.warning("tier-s stall task patch failed (fail-open)",
+                           exc_info=True)
+        ctx.parked_outcome = CycleOutcome(
+            status="waiting", run_id=ctx.run_id, reason="stalled_no_progress",
+            detail=detail, branch=ctx.branch, resume_at=None)
+        return ctx.parked_outcome
+
     async def _park(
         self,
         ctx: _Ctx,
@@ -2428,6 +2622,9 @@ class TierSCycle:
         if resume_at is None and resume_in_min is not None:
             resume_at = (datetime.now(timezone.utc)
                          + timedelta(minutes=resume_in_min)).isoformat()
+        stop = await self._reliability_boundary(ctx, reason, detail, resume_at)
+        if stop is not None:
+            return stop
         task_id = str(ctx.ticket.get("task_id", ""))
         if patch_run:
             await self._runs.patch_run(ctx.run_id, {
@@ -2516,6 +2713,15 @@ class TierSCycle:
         self, ctx: _Ctx, phase: str, results: Sequence[GateResult]) -> None:
         for item in results:
             ctx.gate_runs.append({"phase": phase, **item.to_dict()})
+            name = str(getattr(item, "name", "") or "")
+            if str(getattr(item, "status", "") or "") \
+                    in ("fail", "timeout", "error"):
+                if name:
+                    ctx.failed_gates.add(name)
+            elif name in ctx.failed_gates:
+                ctx.failed_gates.discard(name)
+                self._note_tier_s_milestone(
+                    ctx, tier_s_mod.MILESTONE_GATE_FIXED)
 
     @staticmethod
     def _read_artifact(ctx: _Ctx, name: str) -> str:
