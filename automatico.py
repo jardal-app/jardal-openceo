@@ -42,6 +42,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -316,7 +317,9 @@ RUNNER_STALL_REASON = "stalled_no_progress"
 RUNNER_GUARD_DECISION = "20.3"
 RUNNER_FP_PREFIX = "sha256:"
 RUNNER_SCRATCH_DIRS = (".openceo-automatico", ".runtime", ".openceo")
+RUNNER_SPOOL_FILENAME = "runner-events-spool.jsonl"
 _GUARD: dict = {"module": None, "failed": False}
+_ENDPOINT: dict = {"module": None, "failed": False}
 
 
 def _guard_module():
@@ -343,6 +346,47 @@ def _guard_limits() -> tuple[int, int]:
                 int(section["fingerprint_max_bytes"]))
     except Exception:  # noqa: BLE001 - fail-open: usa los umbrales de diseno
         return (100, 2097152)
+
+
+def _endpoint_module():
+    cached = _ENDPOINT
+    if cached["failed"]:
+        return None
+    if cached["module"] is None:
+        try:
+            if str(CORE) not in sys.path:
+                sys.path.insert(0, str(CORE))
+            from reliability import endpoint as module
+            cached["module"] = module
+        except Exception:  # noqa: BLE001 - fail-open: sin socket el runner sigue
+            cached["failed"] = True
+            return None
+    return cached["module"]
+
+
+def _spool_runner_event_local(event: dict) -> None:
+    try:
+        path = REPO / ".runtime" / RUNNER_SPOOL_FILENAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, default=str) + "\n")
+    except OSError as exc:  # noqa: BLE001 - solo log: el runner sigue
+        log(f"spool local del runner falló (fail-open): {exc}"[:200])
+
+
+def report_runner_event(ticket: str, etype: str, **fields: str) -> None:
+    """Informa al core (socket; spool si no responde). Nunca lanza."""
+    event = {"type": etype, "component": "runner", "task_id": ticket,
+             "event_id": uuid.uuid4().hex,
+             "ts": datetime.now(timezone.utc).isoformat(), **fields}
+    try:
+        module = _endpoint_module()
+        if module is None:
+            raise RuntimeError("endpoint no importable")
+        module.post_event(event, runtime_dir=REPO / ".runtime")
+    except Exception as exc:  # noqa: BLE001 - fail-open: el bucle sigue
+        log(f"{ticket}: reporte al core falló (fail-open): {exc}"[:200])
+        _spool_runner_event_local(event)
 
 
 def load_owner_decisions(state_dir: Path = STATE_DIR) -> dict:
@@ -445,6 +489,9 @@ def guard_after_session(c: dict, t: dict, phase: str, *, marker: str = "",
     if guard is None:
         t["guard_error"] = "reliability.guard no importable (fail-open)"
         log(f"{c['ticket']}: freno no disponible, sigo (fail-open)")
+        report_runner_event(c["ticket"], "incident", kind="exception",
+                            attempt_id=f"{c['ticket']}-s{t.get('sessions', 0)}",
+                            phase=phase, exc_text="reliability.guard")
         return ""
     mode = runner_guard_mode(decisions)
     attempt_id = f"{c['ticket']}-s{t.get('sessions', 0)}"
@@ -456,6 +503,9 @@ def guard_after_session(c: dict, t: dict, phase: str, *, marker: str = "",
         fp_info = {"fp": RUNNER_FP_PREFIX + "unavailable", "complete": False,
                    "error": str(exc)[:200]}
         t["guard_error"] = f"huella: {exc}"[:300]
+        report_runner_event(c["ticket"], "incident", kind="exception",
+                            attempt_id=attempt_id, phase=phase,
+                            exc_text=f"huella: {exc}"[:200])
     feed = {"attempt": attempt_id, "sig": sig, "fp": fp_info["fp"],
             "milestone": milestone}
     if t.get("guard_last_feed") == feed:
@@ -475,6 +525,9 @@ def guard_after_session(c: dict, t: dict, phase: str, *, marker: str = "",
     except Exception as exc:  # noqa: BLE001 - fail-open: el bucle sigue y queda en log
         t["guard_error"] = f"evaluate: {exc}"[:300]
         log(f"{c['ticket']}: el freno lanzó (fail-open): {exc}"[:300])
+        report_runner_event(c["ticket"], "incident", kind="exception",
+                            attempt_id=attempt_id, phase=phase,
+                            exc_text=f"evaluate: {exc}"[:200])
         return ""
     t["progress_guard"] = new_state
     t["guard_last_feed"] = feed
@@ -484,6 +537,9 @@ def guard_after_session(c: dict, t: dict, phase: str, *, marker: str = "",
         log(f"{c['ticket']}: freno {rule} {action} "
             f"(shadow={decision.get('shadow')}) huella={fp_info['fp'][:19]}")
     if action == "stop":
+        report_runner_event(c["ticket"], "incident", kind="stall",
+                            attempt_id=attempt_id, phase=phase,
+                            guard_rule=rule or "", result_signature=sig)
         t["brake"] = {"rule": rule, "mode": mode, "at": stamp,
                       "reason": RUNNER_STALL_REASON}
         t.update(parked="blocked", failure="", note=(
@@ -1034,6 +1090,8 @@ def advance(c: dict, s: Settings, state: dict) -> str:
             return "stop"
         sessions += 1
         t["sessions"] += 1
+        report_runner_event(ticket, "exposure", phase=phase,
+                            attempt_id=f"{ticket}-s{t['sessions']}")
         prompt = work_prompt(c, t) if phase == "work" else close_prompt(c, t)
         code, out = spawn(prompt, s.worker_timeout, s,
                           f"{phase}-{ticket[-5:]}-s{t['sessions']}",
@@ -1073,6 +1131,10 @@ def advance(c: dict, s: Settings, state: dict) -> str:
             t["failure"] = problem or (f"sin marcador válido para la fase "
                                        f"{phase} (exit={code}):\n{out[-2000:]}")
             log(f"{ticket}: {t['failure'][:200]}")
+            report_runner_event(ticket, "incident", kind="terminal_failure",
+                                attempt_id=f"{ticket}-s{t['sessions']}",
+                                phase=phase, reason_code="invalid_marker",
+                                message=t["failure"][:300])
             if failures > s.max_fix:
                 save_state(state)
                 return "stop"
