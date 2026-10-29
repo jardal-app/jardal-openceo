@@ -191,6 +191,23 @@ class SocketTests(unittest.TestCase):
         finally:
             self._close()
 
+    def test_unknown_fields_rejected_over_socket(self) -> None:
+        self._serve()
+        try:
+            body = json.dumps({"type": "exposure", "component": "runner",
+                               "authorize": True}).encode()
+            self.assertEqual(_raw_post(self.runtime, body), 400)
+            self.assertEqual(len(self.exposures.docs), 0)
+        finally:
+            self._close()
+
+    def test_malformed_request_line_rejected(self) -> None:
+        self._serve()
+        try:
+            self.assertEqual(_raw_post(self.runtime, b"{}", path="/"), 404)
+        finally:
+            self._close()
+
     def test_valid_incident_stored(self) -> None:
         self._serve()
         try:
@@ -278,6 +295,79 @@ class SpoolTests(unittest.TestCase):
     def test_spool_event_never_raises(self) -> None:
         self.assertFalse(spool_event({"type": "exposure"},
                                       runtime_dir="/proc/nope/nada"))
+
+    def test_spool_event_assigns_event_id_and_ingests_once(self) -> None:
+        self.assertTrue(spool_event({"type": "incident", "kind": "stall",
+                                     "component": "runner"},
+                                    runtime_dir=self.runtime))
+        lines = (self.runtime / endpoint.RUNNER_SPOOL_FILENAME
+                 ).read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(json.loads(lines[0])["event_id"])
+
+        async def _ingest() -> dict[str, int]:
+            return await ingest_runner_spool(
+                self.incidents, self.exposures, runtime_dir=self.runtime)
+
+        outcome = asyncio.run(_ingest())
+        self.assertEqual(outcome["replayed"], 1)
+        self.assertEqual(outcome["pending"], 0)
+        again = asyncio.run(_ingest())
+        self.assertEqual(again["pending"], 0)
+        self.assertEqual(len(self.incidents.docs), 1)
+
+    def test_ingest_preserves_incident_ts(self) -> None:
+        self.assertTrue(spool_event(
+            {"type": "incident", "kind": "stall", "component": "runner",
+             "task_id": "TASK-2026-00379", "ts": "2026-10-20T10:00:00+00:00"},
+            runtime_dir=self.runtime))
+
+        async def _ingest() -> dict[str, int]:
+            return await ingest_runner_spool(
+                self.incidents, self.exposures, runtime_dir=self.runtime,
+                now=datetime(2026, 10, 29, tzinfo=timezone.utc))
+
+        self.assertEqual(asyncio.run(_ingest())["replayed"], 1)
+        doc = next(iter(self.incidents.docs.values()))
+        self.assertEqual(doc["created_at"],
+                         datetime(2026, 10, 20, 10, 0,
+                                  tzinfo=timezone.utc))
+
+    def test_store_exposure_awaits_motor_future(self) -> None:
+        from reliability.endpoint import _store_exposure
+
+        class MotorLikeFuture:
+            """Motor returns Futures: awaitable, not coroutines."""
+
+            def __init__(self) -> None:
+                self.awaited = False
+
+            def __await__(self):  # type: ignore[no-untyped-def]
+                self.awaited = True
+                yield
+                return SimpleNamespace(matched_count=1)
+
+        class MotorLikeExposures:
+            def __init__(self) -> None:
+                self.sent: MotorLikeFuture | None = None
+
+            def update_one(self, filt: dict[str, Any],
+                           update: dict[str, Any],
+                           upsert: bool = False) -> MotorLikeFuture:
+                self.sent = MotorLikeFuture()
+                return self.sent
+
+        fake = MotorLikeExposures()
+
+        async def _run() -> None:
+            await _store_exposure(
+                fake, {"type": "exposure", "component": "runner"},
+                datetime.now(timezone.utc))
+
+        asyncio.run(_run())
+        self.assertIsNotNone(fake.sent)
+        assert fake.sent is not None
+        self.assertTrue(fake.sent.awaited)
 
 
 class RunnerClientTests(unittest.TestCase):

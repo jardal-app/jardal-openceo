@@ -14,6 +14,7 @@ When the core is unreachable the runner appends raw events to
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -146,7 +147,7 @@ async def _read_event(reader: asyncio.StreamReader,
         return _reason(400, "headers too large")
     lines = head.decode("latin-1").split("\r\n")
     parts = lines[0].split(" ")
-    method, target = parts[0], parts[1] if len(parts) == 3 else ("", "")
+    method, target = (parts[0], parts[1]) if len(parts) == 3 else ("", "")
     if method != "POST" or target != "/events":
         return _reason(404, "only POST /events is served")
     length = -1
@@ -190,7 +191,7 @@ async def _store_exposure(exposures: Any, event: dict[str, Any],
                   "project": project, "day": now.strftime("%Y-%m-%d")},
          "$setOnInsert": {"created_at": now}},
         upsert=True)
-    if asyncio.iscoroutine(result):
+    if inspect.isawaitable(result):
         await result
 
 
@@ -285,9 +286,11 @@ def spool_event(event: dict[str, Any],
                 runtime_dir: str | Path | None = None) -> bool:
     """Append one raw event to the runner spool; never raises."""
     try:
+        payload = dict(event)
+        payload.setdefault("event_id", uuid.uuid4().hex)
         path = runner_spool_path(runtime_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(event, default=str) + "\n"
+        line = json.dumps(payload, default=str) + "\n"
         if (path.stat().st_size if path.exists() else 0) + len(
                 line.encode()) > int(RELIABILITY_DEFAULTS["spool_max_bytes"]):
             logger.warning("Runner spool full; event discarded")
@@ -403,6 +406,12 @@ async def ingest_runner_spool(incidents: Any, exposures: Any, *,
                 outcome["replayed"] += 1
                 continue
             try:
+                stamp = moment
+                try:
+                    stamp = datetime.fromisoformat(
+                        str(event.get("ts") or "").replace("Z", "+00:00"))
+                except ValueError:
+                    pass
                 if event["type"] == "incident":
                     fields = {k: v for k, v in event.items()
                               if k not in ("type", "event_id", "ts", "kind",
@@ -411,16 +420,10 @@ async def ingest_runner_spool(incidents: Any, exposures: Any, *,
                         incidents, kind=event["kind"],
                         component=event["component"],
                         incident_id=event["event_id"], late=True,
-                        runtime_dir=runtime_dir, **fields)
+                        runtime_dir=runtime_dir, now=stamp, **fields)
                 else:
                     if exposures is None:
                         raise RuntimeError("no exposures store")
-                    stamp = moment
-                    try:
-                        stamp = datetime.fromisoformat(
-                            str(event.get("ts") or "").replace("Z", "+00:00"))
-                    except ValueError:
-                        pass
                     await _store_exposure(exposures, event, stamp)
                 replayed.append(event["event_id"])
                 outcome["replayed"] += 1

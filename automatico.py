@@ -1133,7 +1133,9 @@ def advance(c: dict, s: Settings, state: dict) -> str:
             log(f"{ticket}: {t['failure'][:200]}")
             report_runner_event(ticket, "incident", kind="terminal_failure",
                                 attempt_id=f"{ticket}-s{t['sessions']}",
-                                phase=phase, reason_code="invalid_marker",
+                                phase=phase,
+                                reason_code=("repo_problem" if problem
+                                             else "invalid_marker"),
                                 message=t["failure"][:300])
             if failures > s.max_fix:
                 save_state(state)
