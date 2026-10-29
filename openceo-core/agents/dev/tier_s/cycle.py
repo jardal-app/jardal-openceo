@@ -120,6 +120,11 @@ class CycleOutcome:
     resume_at: str | None = None  # ISO-8601 UTC when the wait self-heals
     cost_runs: tuple[dict[str, Any], ...] = ()  # sessions of THIS execution
     agent_result: dict[str, Any] | None = None
+    # Ticket params as the cycle left them (TASK-2026-00366): _run_tier_s
+    # rebuilds DevExecutionOutput.params from the run-start snapshot and
+    # run_task persists it over the cycle's store patch, so in-cycle writes
+    # (e.g. the scheduled_wait count) must travel here to survive.
+    params: dict[str, Any] | None = None
 
 
 @dataclass
@@ -484,7 +489,9 @@ class TierSCycle:
         ctx.cost_sessions_base = len(ctx.metrics.get("sessions") or [])
         try:
             outcome = await self._run_guarded(ctx)
-            return replace(outcome, cost_runs=self._cost_delta(ctx))
+            return replace(
+                outcome, cost_runs=self._cost_delta(ctx),
+                params=dict(ctx.ticket.get("params") or {}))
         except Exception as exc:  # fail explicit, resumable, lock always freed
             detail = f"{type(exc).__name__}: {exc}"[:500]
             parked = await self._park(
@@ -495,7 +502,8 @@ class TierSCycle:
                 status="failed", run_id=ctx.run_id,
                 reason="transient", detail=detail,
                 resume_at=parked.resume_at,
-                cost_runs=self._cost_delta(ctx))
+                cost_runs=self._cost_delta(ctx),
+                params=dict(ctx.ticket.get("params") or {}))
         finally:
             await self._cleanup(ctx)
 
@@ -906,7 +914,7 @@ class TierSCycle:
             agent_result=verdict.model_dump(mode="json"))
 
     async def _clear_scheduled_wait_count(self, ctx: _Ctx) -> None:
-        # Any non-wait outcome resets the consecutive-decline count.
+        # Callers: a hecho verdict and agent_blocked without resume_at.
         params = dict(ctx.ticket.get("params") or {})
         if SCHEDULED_WAIT_COUNT_KEY not in params:
             return

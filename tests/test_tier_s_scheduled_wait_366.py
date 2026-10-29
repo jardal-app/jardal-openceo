@@ -19,6 +19,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "openceo-core"))
 
 from agents.dev.tier_s.cycle import TierSCycle, _Ctx
+from agents.dev.tier_s.models import (
+    BUDGETS_DEFAULTS,
+    TIMEOUTS_DEFAULTS,
+    WAITING_DEFAULTS,
+)
 from agents.dev.tier_s.plan import Plan, PlannedFile
 from agents.dev.tier_s.stores import (
     InMemoryLockStore,
@@ -178,3 +183,135 @@ async def test_scheduled_wait_count_clears_on_hecho(repo):
     ctx.base_sha = base
     assert await cycle._build(ctx, demo_plan()) is True
     assert SCHEDULED_WAIT_COUNT_KEY not in tasks.patches["t"]["params"]
+
+
+_RUN_PLAN_MD = """TICKET: TASK-2026-99999
+OBJECTIVE: none
+GOAL: Observar una ventana de despliegue
+ACCEPTANCE:
+- salud verificada en el registro de despliegue
+FILES:
+- tracked.txt (modify) — la ventana se observa aquí
+CONTRACTS:
+- produces none
+DECISIONS:
+- D1 [durable: no] solo observar — el alcance lo pide
+STEPS:
+1. Observar la ventana
+2. Registrar el resultado
+ESTIMATE: files=1 lines=1
+OUT_OF_SCOPE:
+- anything else
+"""
+
+_RUN_PLAN_REVIEW_MD = """O1 [WARN] PLAN.md:7 — la ventana es corta → registrar el inicio y el plazo
+> ACCEPTANCE:
+REVIEW_DONE_plan_0
+"""
+
+
+class RunBoundaryExecutor:
+    """Role-aware stand-in for full TierSCycle.run() (no CLI, no spend).
+
+    Planner/reviewer answer with files like the F1+F2 final test; the
+    builder answers the queued AgentResult verdicts.
+    """
+
+    def __init__(self, verdicts: list[AgentResult]) -> None:
+        self._verdicts = list(verdicts)
+
+    async def run(self, role, prompt, workdir, timeout_s):
+        del timeout_s
+        tier_dir = Path(workdir) / ".openceo"
+        tier_dir.mkdir(exist_ok=True)
+        if role == "planner" and "PLAN_RESPONSE.md is incomplete" not in prompt \
+                and "Answer each plan observation" not in prompt \
+                and "Your PLAN.md is invalid" not in prompt:
+            (tier_dir / "PLAN.md").write_text(_RUN_PLAN_MD, encoding="utf-8")
+            (tier_dir / "status").write_text("PLAN_READY\n", encoding="utf-8")
+            return ExecResult(0, 1.0, signal="PLAN_READY", model="opus",
+                              slot="claudej")
+        if role == "planner":
+            (tier_dir / "PLAN_RESPONSE.md").write_text(
+                "O1: ACEPTADA — inicio y plazo registrados\n", encoding="utf-8")
+            (tier_dir / "status").write_text("PLAN_RESPONDED\n",
+                                             encoding="utf-8")
+            return ExecResult(0, 0.5, signal="PLAN_RESPONDED", model="opus",
+                              slot="claudej")
+        if role == "plan_reviewer":
+            (tier_dir / "PLAN_REVIEW.md").write_text(
+                _RUN_PLAN_REVIEW_MD, encoding="utf-8")
+            return ExecResult(0, 0.5, model="gpt-6.1-sol", slot="codexj")
+        if role == "builder":
+            verdict = self._verdicts.pop(0)
+            return ExecResult(0, 1, output_tail=verdict.model_dump_json())
+        raise AssertionError(f"unexpected role {role}")
+
+    async def cleanup(self, role) -> None:
+        return None
+
+
+def run_ticket(task_id: str, params: dict) -> dict:
+    return {
+        "task_id": task_id,
+        "ref": "TASK-2026-99999",
+        "title": "tope de esperas",
+        "description": "observar una ventana de despliegue",
+        "acceptance": ["salud verificada en el registro de despliegue"],
+        "coding_tool": "tier_s",
+        "blocked_by": [],
+        "origin": "owner",
+        "params": dict(params),
+    }
+
+
+def run_cfg(roles: dict) -> dict:
+    return {
+        "roles": roles,
+        "budgets": dict(BUDGETS_DEFAULTS),
+        "timeouts": dict(TIMEOUTS_DEFAULTS),
+        "waiting": dict(WAITING_DEFAULTS),
+        "auto_merge": True,
+        "base_branch": "main",
+        "budget_exclude": [],
+    }
+
+
+@run_async
+async def test_scheduled_wait_count_travels_in_outcome_across_resumes(repo):
+    """H1 regression: the count must travel in the CycleOutcome.
+
+    _run_tier_s rebuilds DevExecutionOutput.params from the run-start
+    snapshot and run_task persists it over the cycle's store patch, so a
+    count kept only in the task store never reaches the third decline.
+    Each resume below is fed exclusively from the previous outcome.params,
+    like production re-reading the ticket from Mongo.
+    """
+    runs = InMemoryRunStore()
+    locks = InMemoryLockStore()
+    tasks = InMemoryTaskStore()
+    roles = {
+        "planner": {"account": "claudej", "model": "opus",
+                    "command": ["true"]},
+        "plan_reviewer": {"account": "codexj", "model": "gpt-6.1-sol",
+                          "command": ["true"]},
+        "builder": {"account": "muse",
+                    "model": "muse-spark-1.3-contributor",
+                    "command": ["true"]},
+    }
+    carried: dict = {}
+    for expected in range(1, SCHEDULED_WAIT_MAX_DECLINES + 1):
+        cycle = TierSCycle(runs, locks, tasks,
+                           RunBoundaryExecutor([wait_verdict()]))
+        outcome = await cycle.run(run_ticket("t", carried), repo,
+                                  run_cfg(roles), gate_specs=[])
+        assert outcome.params is not None
+        carried = dict(outcome.params)
+        assert carried[SCHEDULED_WAIT_COUNT_KEY] == expected
+        if expected < SCHEDULED_WAIT_MAX_DECLINES:
+            assert outcome.reason == "scheduled_wait"
+            assert outcome.resume_at is not None
+        else:
+            assert outcome.reason == "needs_owner"
+            assert outcome.resume_at is None
+            assert outcome.detail.startswith("scheduled_wait declined 3 times")
