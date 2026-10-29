@@ -130,6 +130,7 @@ class GenericAgentWiring:
     settings: Any = None
     repo: Any = None
     workflow_service: Any = None
+    patch_task: Any = None
     executor_factory: Callable[
         [str, Mapping[str, Any], Any], Any] | None = None
     badge_provider_factory: Callable[
@@ -415,12 +416,17 @@ async def run_generic_agent(
     exact = resolve_exact_skill_path(skill.source, repo_root=skills_root) \
         if skill is not None else None
     upstream = await _resolve_upstream(task, wiring)
-    if exact is not None:
-        return await _run_exact_skill(
-            agent_name, task, params, profile, skill_name or "", exact,
-            wiring, upstream=upstream)
-    return await _run_llm(agent_name, task, params, profile, selection,
-                          skill_name, wiring, skills, upstream=upstream)
+    deadline_armed = await _deadline_mark_start(wiring, task, agent_name)
+    try:
+        if exact is not None:
+            return await _run_exact_skill(
+                agent_name, task, params, profile, skill_name or "", exact,
+                wiring, upstream=upstream)
+        return await _run_llm(agent_name, task, params, profile, selection,
+                              skill_name, wiring, skills, upstream=upstream)
+    finally:
+        if deadline_armed:
+            await _deadline_mark_end(wiring, task)
 
 
 #: Exact verdict citations stay bounded: lines, then chars per value.
@@ -816,6 +822,52 @@ def _loop_brake():
         logger.warning("reliability loop brake unavailable (fail-open)",
                        exc_info=True)
         return None
+
+
+async def _deadline_mark_start(
+    wiring: GenericAgentWiring, task: dict[str, Any], agent_name: str,
+) -> bool:
+    """Write attempt_id + attempt_deadline_at (TASK-2026-00383, §7).
+
+    Fail-open: without a patcher nothing is written. No wake here
+    (the wiring has none): the dispatch cycle re-arms via refresh.
+    """
+    try:
+        patch = getattr(wiring, "patch_task", None)
+        if not callable(patch):
+            return False
+        from reliability import deadlines as deadline_mod
+        module = _loop_brake()
+        if module is None:
+            return False
+        task_id = str(task.get("task_id") or "")
+        params = task.get("params")
+        attempt_id = module.next_attempt_id(
+            task_id, params if isinstance(params, dict) else {})
+        timeout_s = getattr(wiring, "timeout_s", None) \
+            or GENERIC_AGENT_TIMEOUT_S
+        wrote = await deadline_mod.mark_attempt_start(
+            patch, task_id=task_id, attempt_id=attempt_id,
+            timeout_seconds=timeout_s)
+        return wrote is not None
+    except Exception:
+        logger.warning("deadline mark start failed (fail-open)", exc_info=True)
+        return False
+
+
+async def _deadline_mark_end(
+    wiring: GenericAgentWiring, task: dict[str, Any],
+) -> None:
+    """Clear attempt_deadline_at when the attempt ends. Never raises."""
+    try:
+        patch = getattr(wiring, "patch_task", None)
+        if not callable(patch):
+            return
+        from reliability import deadlines as deadline_mod
+        await deadline_mod.clear_attempt_deadline(
+            patch, str(task.get("task_id") or ""))
+    except Exception:
+        logger.warning("deadline mark end failed (fail-open)", exc_info=True)
 
 
 async def _reliability_finish_agent(

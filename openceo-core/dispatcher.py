@@ -152,6 +152,7 @@ class Dispatcher:
         rate_monitor: Any | None = None,
         launcher: Callable[[str], Awaitable[Any]] | None = None,
         repo_for_project: Callable[[str], str | None] | None = None,
+        deadline_watch: Any | None = None,
     ) -> None:
         self._repo = repo
         self._settings = settings
@@ -159,6 +160,7 @@ class Dispatcher:
         self._rate_monitor = rate_monitor
         self._launcher = launcher or service.run_task
         self._repo_for_project = repo_for_project
+        self._deadline_watch = deadline_watch
         self._job: asyncio.Task[Any] | None = None
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
@@ -168,6 +170,22 @@ class Dispatcher:
     def wake(self) -> None:
         """A CRUD event says the queue may have changed. Coalesced."""
         self._wake.set()
+
+    def set_deadline_watch(self, watch: Any | None) -> None:
+        """Attach the DeadlineWatch (TASK-2026-00383, §7); None disables."""
+        self._deadline_watch = watch
+
+    async def close_deadline_watch(self) -> None:
+        """Disarm the watch timer. Never raises."""
+        watch = self._deadline_watch
+        self._deadline_watch = None
+        if watch is None:
+            return
+        try:
+            await watch.close()
+        except Exception:
+            logger.warning("Dispatcher: deadline watch close failed",
+                           exc_info=True)
 
     async def start(self) -> None:
         """Bounded startup reconciliation, then the reactive loop."""
@@ -269,6 +287,7 @@ class Dispatcher:
         """
         moment = _aware(now) or datetime.now(timezone.utc)
         requeued = await self._requeue_due_waiting(moment)
+        await self._refresh_deadlines(moment)
 
         queued = await self._repo.list_tasks_by_status(TaskStatus.QUEUED)
         active = await self._repo.list_tasks_by_status(TaskStatus.IN_PROGRESS)
@@ -320,6 +339,21 @@ class Dispatcher:
             "parked": parked,
             "backup_at": backup_at,
         }
+
+    async def _refresh_deadlines(self, now: datetime) -> None:
+        """DeadlineWatch pass: record due misses, re-arm the timer.
+
+        Fail-open and off by default: without a watch this is a no-op,
+        so existing cycles behave exactly as before.
+        """
+        watch = self._deadline_watch
+        if watch is None:
+            return
+        try:
+            await watch.refresh(now)
+        except Exception:
+            logger.warning("Dispatcher: deadline refresh failed (fail-open)",
+                           exc_info=True)
 
     async def _requeue_due_waiting(self, now: datetime) -> int:
         due = await self._repo.due_waiting_tasks(now)

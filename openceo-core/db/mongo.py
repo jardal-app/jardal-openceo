@@ -247,6 +247,12 @@ class MongoRepository:
         )
         # Multikey index for user visibility across all roles
         await self.tasks.create_index([("involved_user_ids", ASCENDING)])
+        # DeadlineWatch (TASK-2026-00383, §13.5): hung attempts. The
+        # resume side reuses the (status, resume_at) index above.
+        await self.tasks.create_index(
+            [("status", ASCENDING), ("attempt_deadline_at", ASCENDING)],
+            name="idx_deadline_attempt",
+        )
         # QA review queries
         await self.tasks.create_index(
             [("qa_review_required", ASCENDING), ("qa_review_state", ASCENDING), ("updated_at", DESCENDING)],
@@ -737,6 +743,23 @@ class MongoRepository:
             sort=[("resume_at", ASCENDING)],
         )
         return [self._clean(row) async for row in rows]
+
+    async def deadline_candidates(
+        self, now_utc: datetime, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        """Tasks holding a deadline (TASK-2026-00383, §13.5).
+
+        Indexed by ``idx_deadline_attempt`` and the pre-existing
+        ``(status, resume_at)`` index: in-progress attempts with a real
+        deadline plus waiting tasks with a real resume. No sort is
+        requested (each $or branch would sort differently and cleared
+        ``None`` deadlines would float first); the watch orders the
+        bounded result in memory.
+        """
+        from reliability.deadlines import deadline_candidates_filter
+        rows = self.tasks.find(deadline_candidates_filter())
+        docs = [self._clean(row) async for row in rows]
+        return docs[: max(1, int(limit or 500))]
 
     # ------------------------- Dispatcher (F3, TASK-2026-00113) -------------------------
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hmac
 import logging
 from pathlib import Path
@@ -186,6 +187,10 @@ mcp_token_issuer = TokenIssuer(
 mcp_audit_sink = MongoAuditSink(db_provider=lambda: repo.db)
 task_service.set_token_issuer(mcp_token_issuer)
 workflow_service.set_task_service(task_service)
+# DeadlineWatch (TASK-2026-00383, §7): the generic loop writes and clears
+# attempt_deadline_at through this patcher (fail-open without it).
+graph._generic_wiring = dataclasses.replace(
+    graph._generic_wiring, patch_task=task_service.patch_task)
 dev_step_manager.set_task_service(task_service)  # Tier S notices + internal tickets (F3–F6)
 secretary_step_manager.set_task_service(task_service)  # email lock (00208)
 # Company-level objectives (F2): top-down entries + inverse group propagation.
@@ -432,6 +437,20 @@ async def lifespan(_: FastAPI):
                     runtime_dir=_repo_root / ".runtime"))
         except Exception:
             logger.warning("Reliability startup reconcile failed", exc_info=True)
+        # DeadlineWatch (TASK-2026-00383, §7): indexes plus the single
+        # timer on the dispatcher. Never fails boot; off stays off when
+        # the wiring below cannot complete.
+        try:
+            from reliability.deadlines import (
+                DeadlineWatch,
+                ensure_deadline_indexes,
+            )
+            await ensure_deadline_indexes(repo.tasks)
+            dispatcher.set_deadline_watch(DeadlineWatch(
+                repo, incidents=repo.db["reliability_incidents"]))
+        except Exception:
+            logger.warning("DeadlineWatch startup wiring failed",
+                           exc_info=True)
         # Mirror workers + startup repairs (ex-WaitingTaskScheduler.start).
         task_service.start_notion_worker()
         task_service.start_jardal_erp_worker()
@@ -544,6 +563,7 @@ async def lifespan(_: FastAPI):
         await horizon_scheduler.stop()
         await ceo_loop.stop()
         await dispatcher.stop()
+        await dispatcher.close_deadline_watch()
         with suppress(Exception):
             from reliability import endpoint as _reliability_endpoint
             await _reliability_endpoint.stop_endpoint()
