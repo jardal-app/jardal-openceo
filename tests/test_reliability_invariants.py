@@ -147,6 +147,8 @@ class ModePolicyTests(unittest.TestCase):
         config = {"mode": {"INV-003": "enforce"}}
         self.assertTrue(inv.should_reject("INV-003", actor="engine",
                                           config=config))
+        self.assertTrue(inv.should_reject("INV-003", actor="owner",
+                                          config=config))
 
     def test_inv001_never_rejects_owner_or_manual(self) -> None:
         config = {"mode": {"INV-001": "enforce", "INV-002": "enforce"}}
@@ -249,7 +251,11 @@ class FakeRepo:
     async def interrupted_tier_s_runs(
         self, limit: int = 200
     ) -> list[dict[str, Any]]:
-        return [dict(row) for row in self.runs[:limit]]
+        # Same visible set as MongoRepository (db/mongo.py): waiting runs
+        # never come through this listing.
+        return [dict(row) for row in self.runs[:limit]
+                if str(row.get("status") or "") in
+                {"active", "running", "resuming"}]
 
     def violations(self, invariant_id: str) -> list[dict[str, Any]]:
         return [doc for doc in self.incidents.docs.values()
@@ -354,11 +360,28 @@ class TransitionWiringTests(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0]["severity"], "critical")
 
+    def test_post_and_reread_miss_record_single_inv002(self) -> None:
+        from business.work import JardalERPWork
+
+        repo = FakeRepo([_exec("t-1")])
+        probe = _service(repo, FakeBusinessAdapter(_business()))
+        settings = SimpleNamespace(JARDAL_ERP_SITE_TIMEZONE="UTC",
+                                   JARDAL_ERP_URL="http://127.0.0.1:1")
+        probe._business = JardalERPWork(
+            settings, client=FakeERPClient(_row(), "Working"),
+            on_violation=probe._business_violation_sink)
+        result = _run(probe.transition_ticket(
+            "TASK-2026-99999", "Completed", "done",
+            evidence="gates and review verified"))
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("status"), "mismatch")
+        self.assertEqual(len(repo.violations("INV-002")), 1)
+
     def test_two_live_runs_record_inv003_in_record_mode(self) -> None:
         repo = FakeRepo(
             [_exec("t-1")],
             runs=[{"run_id": "r-1", "task_id": "t-1", "status": "running"},
-                  {"run_id": "r-2", "task_id": "t-1", "status": "waiting"}])
+                  {"run_id": "r-2", "task_id": "t-1", "status": "active"}])
         service = _service(repo, FakeBusinessAdapter(_business()))
         result = _run(service.transition_ticket(
             "TASK-2026-00377", "Completed", "done",
@@ -388,7 +411,7 @@ class TransitionWiringTests(unittest.TestCase):
         self.assertEqual(adapter.puts, 0)
         self.assertEqual(len(repo.violations("INV-003")), 1)
 
-    def test_owner_transition_records_but_applies_in_enforce(self) -> None:
+    def test_owner_transition_applies_without_violations_in_enforce(self) -> None:
         modes = RELIABILITY_DEFAULTS["invariants"]["mode"]
         previous = modes["INV-003"]
         modes["INV-003"] = "enforce"
@@ -399,10 +422,34 @@ class TransitionWiringTests(unittest.TestCase):
             "TASK-2026-00377", "Working", "owner order",
             owner_instruction="Owner: reabrelo", actor="owner"))
         self.assertTrue(result.get("ok"), result)
+        self.assertEqual(repo.incidents.docs, {})
+
+    def test_owner_transition_rejected_on_inv003_in_enforce(self) -> None:
+        modes = RELIABILITY_DEFAULTS["invariants"]["mode"]
+        previous = modes["INV-003"]
+        modes["INV-003"] = "enforce"
+        self.addCleanup(modes.__setitem__, "INV-003", previous)
+        adapter = FakeBusinessAdapter(_business())
+        repo = FakeRepo(
+            [_exec("t-1")],
+            runs=[{"run_id": "r-1", "task_id": "t-1", "status": "running"},
+                  {"run_id": "r-2", "task_id": "t-1", "status": "active"}])
+        service = _service(repo, adapter)
+        result = _run(service.transition_ticket(
+            "TASK-2026-00377", "Completed", "done",
+            evidence="gates and review verified",
+            owner_instruction="Owner: cierralo", actor="owner"))
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("status"), "invariant")
+        self.assertEqual(result.get("invariant"), "INV-003")
+        self.assertEqual(adapter.puts, 0)
+        self.assertEqual(len(repo.violations("INV-003")), 1)
 
 
 class FakeERPClient:
     """Minimal Jardal ERP HTTP fake for the adapter transition path."""
+
+    is_configured = True
 
     def __init__(self, row: dict[str, Any], post_status: str) -> None:
         self.row = dict(row)

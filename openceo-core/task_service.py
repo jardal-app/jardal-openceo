@@ -2638,6 +2638,8 @@ class TaskService:
         self, task_id: str
     ) -> list[dict[str, Any]] | None:
         """Live Tier S runs of a task for INV-003; None when unobservable."""
+        # Seam: the interrupted-runs listing (db/mongo.py) only carries
+        # active/running/resuming runs; waiting runs stay invisible here.
         try:
             repo = getattr(self, "_repo", None)
             listing = getattr(repo, "interrupted_tier_s_runs", None)
@@ -2706,6 +2708,14 @@ class TaskService:
             if isinstance(violation, dict) and ticket:
                 await self._record_invariant_violations(
                     [violation], ticket=ticket, task=None)
+                try:
+                    hits = getattr(self, "_adapter_invariant_hits", None)
+                    if not isinstance(hits, dict):
+                        hits = {}
+                        self._adapter_invariant_hits = hits
+                    hits[ticket] = str((payload or {}).get("target") or "")
+                except Exception:
+                    pass
         except Exception:
             logger.warning("Sumidero INV-002 del adaptador fallido",
                            exc_info=True)
@@ -2999,6 +3009,13 @@ class TaskService:
         transition_context = {}
         if getattr(adapter, "provider", "erpnext") == "jardal_erp":
             transition_context = {"reason": clean_reason, "evidence": evidence, "human_action": human_action}
+        # Fresh adapter INV-002 mark: the sink sets it during the POST below.
+        try:
+            _hits = getattr(self, "_adapter_invariant_hits", None)
+            if isinstance(_hits, dict):
+                _hits.pop(name, None)
+        except Exception:
+            pass
         span_extended = False
         delay = 1.0
         for attempt in range(3):
@@ -3073,8 +3090,16 @@ class TaskService:
             }
         actual = str(reread.get("status") or "").strip()
         if actual != target:
-            await self._record_reread_violation(
-                ticket=name, target=target, actual=actual, task=task)
+            # The adapter POST check already recorded this same miss via
+            # the sink; skip the second doc, keep reread-only misses.
+            try:
+                _hits = getattr(self, "_adapter_invariant_hits", None)
+                _dup = isinstance(_hits, dict) and _hits.pop(name, None) == target
+            except Exception:
+                _dup = False
+            if not _dup:
+                await self._record_reread_violation(
+                    ticket=name, target=target, actual=actual, task=task)
             return {
                 "ok": False,
                 "status": "mismatch",
