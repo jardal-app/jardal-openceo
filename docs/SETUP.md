@@ -9,6 +9,7 @@ Usa servicios externos ya desplegados.
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r openceo-core/requirements.txt
+pip install -r requirements-dev.txt  # ruff: gate ruff_swallowed_exceptions (TASK-2026-00369)
 ./scripts/install-agent-requirements.sh
 ```
 

@@ -1,8 +1,8 @@
 # TASK-2026-00369 (§16.6): ningún `except` amplio nuevo traga errores en
 # silencio. Alcance del gate: openceo-core/ y automatico.py.
 # Decisión de agente (reversible por el Owner): `select` explícito en vez
-# de `extend-select` porque ruff 0.17 trae por defecto cientos de reglas
-# (UP, SIM, I, ...); con `extend-select` el gate exigiría todo eso. Con
-# `select` el gate aplica exactamente las 4 reglas del ticket.
+# de `extend-select` porque `extend-select` conserva las reglas por defecto
+# de ruff (E4, E7, E9, F) y el gate exigiría esas familias además de las 4
+# del ticket. Con `select` el gate aplica exactamente BLE001/S110/S112/E722.
 [lint]
 select = ["BLE001", "S110", "S112", "E722"]

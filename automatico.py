@@ -686,6 +686,9 @@ def verify_ruff() -> tuple[bool, str]:
     code, out = sh([str(PYTHON), "-m", "ruff", "check", "--config",
                     "ruff.toml", *RUFF_SCOPE], 300)
     if code != 0:
+        if "No module named ruff" in out:
+            return False, ("ruff no instalado: "
+                           "pip install -r requirements-dev.txt")
         return False, "ruff gate rojo:\n" + out[-2000:]
     return True, "ruff OK"
 

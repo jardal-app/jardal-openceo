@@ -10,6 +10,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -49,17 +50,19 @@ def _needs_ruff(test: object) -> object:
 @_needs_ruff
 class RuffConfigTests(unittest.TestCase):
     def test_gate_selects_exactly_the_ticket_rules(self) -> None:
-        config = RUFF_TOML.read_text(encoding="utf-8")
-        self.assertIn('"BLE001"', config)
-        self.assertIn('"S110"', config)
-        self.assertIn('"S112"', config)
-        self.assertIn('"E722"', config)
+        with RUFF_TOML.open("rb") as handle:
+            lint = tomllib.load(handle)["lint"]
+        self.assertEqual(set(lint.get("select", [])), RULES)
+        self.assertNotIn("extend-select", lint)
 
     def test_baseline_passes(self) -> None:
         proc = _ruff_check(*SCOPE)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
     def test_synthetic_swallow_fails_gate(self) -> None:
+        # Prueba la selección de reglas con un fichero fuera del ámbito;
+        # que el ámbito cubre openceo-core/ y automatico.py lo prueban
+        # test_baseline_passes (ámbito real en verde) y los tests de cableado.
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "synthetic.py"
             target.write_text("try:\n    pass\nexcept Exception:\n    pass\n",
@@ -67,6 +70,15 @@ class RuffConfigTests(unittest.TestCase):
             proc = _ruff_check(str(target))
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("BLE001", proc.stdout)
+
+    def test_synthetic_bare_except_fails_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "bare.py"
+            target.write_text("try:\n    pass\nexcept:\n    pass\n",
+                              encoding="utf-8")
+            proc = _ruff_check(str(target))
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("E722", proc.stdout)
 
     def test_logged_swallow_passes_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -107,6 +119,16 @@ class RuffWiringTests(unittest.TestCase):
             ok, why = automatico.verify_ruff()
         self.assertFalse(ok)
         self.assertIn("ruff", why)
+
+    def test_automatico_verify_ruff_reports_missing_ruff(self) -> None:
+        with patch.object(automatico, "sh",
+                          return_value=(1, "No module named ruff")):
+            ok, why = automatico.verify_ruff()
+        self.assertFalse(ok)
+        self.assertIn("requirements-dev.txt", why)
+
+    def test_scope_is_single_sourced(self) -> None:
+        self.assertEqual(tuple(SCOPE), tuple(automatico.RUFF_SCOPE))
 
 
 if __name__ == "__main__":
