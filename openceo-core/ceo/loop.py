@@ -221,7 +221,32 @@ class CEOLoop:
             self._wake.clear()
             try:
                 await self._cycle()
-            except Exception:
+                supervisor = self.__dict__.get("_loop_supervisor")
+                if supervisor is not None:
+                    supervisor.success()
+            except Exception as exc:
+                # Reliability hunter (TASK-2026-00372): record one exception
+                # incident and restart with backoff; transients recovered by
+                # the engine only log a WARNING inside the supervisor.
+                try:
+                    from reliability.supervisor import LoopSupervisor
+                except Exception:
+                    logger.warning("CEO loop reliability wiring unavailable",
+                                   exc_info=True)
+                    supervisor = None
+                else:
+                    supervisor = self.__dict__.get("_loop_supervisor")
+                    if supervisor is None:
+                        supervisor = LoopSupervisor(
+                            name="ceo-loop", component="ceo_loop")
+                        self.__dict__["_loop_supervisor"] = supervisor
+                if supervisor is not None:
+                    try:
+                        await asyncio.sleep(await supervisor.failure(
+                            exc, source=self._repo, phase="ceo_cycle"))
+                    except Exception:
+                        logger.warning("CEO loop incident capture failed",
+                                       exc_info=True)
                 logger.exception(
                     "CEO loop cycle failed; will retry on next wake")
             delay = await self._seconds_until_scheduled()

@@ -210,7 +210,32 @@ class Dispatcher:
             self._wake.clear()
             try:
                 await self.dispatch_cycle()
-            except Exception:
+                supervisor = self.__dict__.get("_loop_supervisor")
+                if supervisor is not None:
+                    supervisor.success()
+            except Exception as exc:
+                # Reliability hunter (TASK-2026-00372): record one exception
+                # incident and restart with backoff; transients recovered by
+                # the engine only log a WARNING inside the supervisor.
+                try:
+                    from reliability.supervisor import LoopSupervisor
+                except Exception:
+                    logger.warning("Dispatcher reliability wiring unavailable",
+                                   exc_info=True)
+                    supervisor = None
+                else:
+                    supervisor = self.__dict__.get("_loop_supervisor")
+                    if supervisor is None:
+                        supervisor = LoopSupervisor(
+                            name="dispatcher", component="dispatcher")
+                        self.__dict__["_loop_supervisor"] = supervisor
+                if supervisor is not None:
+                    try:
+                        await asyncio.sleep(await supervisor.failure(
+                            exc, source=self._repo, phase="dispatch_cycle"))
+                    except Exception:
+                        logger.warning("Dispatcher incident capture failed",
+                                       exc_info=True)
                 logger.exception("Dispatcher cycle failed; will retry on next wake")
             delay = await self._seconds_until_backup()
             try:

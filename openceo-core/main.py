@@ -405,6 +405,25 @@ async def lifespan(_: FastAPI):
             logger.warning("Restart recovery failed", exc_info=True)
         await repo.mark_interrupted_dev_sessions()
         await dev_session_service.startup_reconcile()
+        # Reliability hunter (TASK-2026-00372): one bounded pass, never a
+        # sweep. Replays the spooled incidents, ensures the §13.1 indexes
+        # and registers unclean_exit from last-exit.json. Never fails boot.
+        try:
+            from reliability.capture import (
+                ensure_reliability_indexes,
+                record_unclean_exit,
+                replay_spool,
+            )
+            _reliability_coll = repo.db["reliability_incidents"]
+            _repo_root = Path(__file__).resolve().parents[1]
+            await ensure_reliability_indexes(_reliability_coll)
+            await replay_spool(
+                _reliability_coll, runtime_dir=_repo_root / ".runtime")
+            await record_unclean_exit(
+                _reliability_coll, runtime_dir=_repo_root / ".runtime",
+                release=_release)
+        except Exception:
+            logger.warning("Reliability startup reconcile failed", exc_info=True)
         # Mirror workers + startup repairs (ex-WaitingTaskScheduler.start).
         task_service.start_notion_worker()
         task_service.start_jardal_erp_worker()
