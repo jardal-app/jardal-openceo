@@ -69,10 +69,12 @@ class JardalERPWork:
     owns_visibility = False
     legacy_date_repairs = False
 
-    def __init__(self, settings: Any, *, client: JardalERPClient | None = None) -> None:
+    def __init__(self, settings: Any, *, client: JardalERPClient | None = None,
+                 on_violation: Any = None) -> None:
         self.client = client or JardalERPClient(settings)
         self._settings = settings
         self._zone = ZoneInfo(str(getattr(settings, "JARDAL_ERP_SITE_TIMEZONE", "UTC")))
+        self.on_violation = on_violation
 
     def _view(self, row: dict[str, Any], detail: dict[str, Any] | None = None) -> dict[str, Any]:
         return task_view(row, detail, zone=self._zone)
@@ -226,7 +228,9 @@ class JardalERPWork:
             key = operation_key("transition", task["name"], body)
             try:
                 result = await self.client.request("POST", self._path(task) + "/transitions", body=body, key=key)
-                return {"ok": True, "ticket": self._view(result["task"])}
+                view = self._view(result["task"])
+                await self._check_reread_invariant(task["name"], target, view)
+                return {"ok": True, "ticket": view}
             except BusinessVersionConflict:
                 if not retry_version_conflicts or attempt == 2:
                     raise
@@ -234,6 +238,37 @@ class JardalERPWork:
                 if task["status"] not in {original_status, target}:
                     raise
         raise BusinessVersionConflict("Conflicto de versión.", status_code=409)
+
+    async def _check_reread_invariant(self, name: str, target: str,
+                                      view: dict[str, Any]) -> None:
+        """INV-002 on the POST response; detection only, never raises."""
+        try:
+            import inspect as _inspect
+            import logging as _logging
+
+            from reliability import invariants as inv_mod
+
+            violation = inv_mod.check_reread(
+                target=target, actual=str(view.get("status") or ""), ticket=name)
+            if violation is None:
+                return
+            doc = inv_mod.violation_doc(
+                violation, component="business_sync", business_ref=name)
+            sink = getattr(self, "on_violation", None)
+            if sink is None:
+                _logging.getLogger(__name__).warning(
+                    "INV-002 sin sumidero: %s quedo en %s, no en %s",
+                    name, view.get("status"), target)
+                return
+            outcome = sink({"doc": doc, "violation": violation,
+                            "ticket": name, "target": target})
+            if _inspect.isawaitable(outcome):
+                await outcome
+        except Exception:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "Chequeo INV-002 fallido para %s", name, exc_info=True)
 
     async def update_status(
         self, name: str, opencero_status: str | None, *, task: dict[str, Any] | None = None,

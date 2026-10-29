@@ -66,6 +66,11 @@ RELIABILITY_DEFAULTS: dict[str, Any] = {
     },
     "spool_max_bytes": 10485760,
     "retention_days": {"incidents": 90, "exposures": 180},
+    "invariants": {
+        "mode": {"INV-001": "record", "INV-002": "record",
+                 "INV-003": "record", "INV-004": "record",
+                 "INV-005": "record"},
+    },
 }
 
 GUARD_MODES = frozenset({"off", "shadow", "enforce"})
@@ -114,6 +119,8 @@ def _validate_value(value: Any, spec: Any, label: str) -> list[str]:
             return [f"{label}: must be a mapping"]
         if label == "reliability.guard.mode":
             return _validate_guard_mode(value)
+        if label == "reliability.invariants.mode":
+            return _validate_invariant_mode(value)
         errors: list[str] = []
         for key in value:
             if key not in spec:
@@ -135,6 +142,22 @@ def _validate_guard_mode(value: dict[str, Any]) -> list[str]:
             errors.append(
                 f"reliability.guard.mode.{producer}: must be one of "
                 f"{sorted(GUARD_MODES)}")
+    return errors
+
+
+def _validate_invariant_mode(value: dict[str, Any]) -> list[str]:
+    from .invariants import INVARIANTS, INVARIANT_MODES
+
+    errors: list[str] = []
+    for invariant_id, mode in value.items():
+        if invariant_id not in INVARIANTS:
+            errors.append(
+                f"reliability.invariants.mode.{invariant_id}: unknown "
+                "invariant (fail-closed)")
+        elif mode not in INVARIANT_MODES:
+            errors.append(
+                f"reliability.invariants.mode.{invariant_id}: must be one of "
+                f"{sorted(INVARIANT_MODES)}")
     return errors
 
 

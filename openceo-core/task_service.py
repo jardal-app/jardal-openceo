@@ -338,6 +338,14 @@ class TaskService:
         self._workflow_service = workflow_service
         # `erpnext` es alias depreciado (TASK-2026-00318, una version).
         self._business = business if business is not None else erpnext
+        try:
+            adapter = self._business
+            if adapter is not None \
+                    and getattr(adapter, "on_violation", None) is None:
+                adapter.on_violation = self._business_violation_sink
+        except Exception:
+            logger.warning("No se pudo cablear el sumidero INV-002",
+                           exc_info=True)
         # Optional project.yaml reader (autonomy F4 TASK-2026-00118): the
         # default phase template skips human QA unless the project policy
         # demands it. Tests build TaskService without it; every use
@@ -2626,6 +2634,110 @@ class TaskService:
         name = str(business.get("name") or "").strip()
         return name or None
 
+    async def _live_runs_for_task(
+        self, task_id: str
+    ) -> list[dict[str, Any]] | None:
+        """Live Tier S runs of a task for INV-003; None when unobservable."""
+        # Seam: the interrupted-runs listing (db/mongo.py) only carries
+        # active/running/resuming runs; waiting runs stay invisible here.
+        try:
+            repo = getattr(self, "_repo", None)
+            listing = getattr(repo, "interrupted_tier_s_runs", None)
+            if not str(task_id or "").strip() or not callable(listing):
+                return None
+            rows = await listing(limit=200)
+            if not isinstance(rows, list):
+                return None
+            return [
+                row for row in rows
+                if isinstance(row, dict)
+                and str(row.get("task_id") or "") == str(task_id)
+            ]
+        except Exception:
+            logger.warning(
+                "No se pudieron leer los runs de %s para INV-003",
+                task_id, exc_info=True,
+            )
+            return None
+
+    async def _record_invariant_violations(
+        self,
+        violations: list[dict[str, Any]],
+        *,
+        ticket: str,
+        task: dict[str, Any] | None,
+    ) -> None:
+        """Persist invariant violations; never raises, never changes flows."""
+        if not violations:
+            return
+        try:
+            from reliability.capture import record_incident
+        except Exception:
+            logger.warning(
+                "Registro de invariantes no disponible para %s",
+                ticket, exc_info=True,
+            )
+            return
+        task_id = str((task or {}).get("task_id") or "") or None
+        runtime_dir = getattr(self, "_reliability_runtime_dir", None)
+        for violation in violations:
+            try:
+                await record_incident(
+                    getattr(self, "_repo", None),
+                    kind="invariant_violation", component="business_sync",
+                    invariant_id=str(
+                        violation.get("invariant_id") or "INV-?"),
+                    task_id=task_id or ticket,
+                    business_ref=ticket,
+                    message=str(violation.get("detail") or ""),
+                    runtime_dir=runtime_dir,
+                )
+            except Exception:
+                logger.warning(
+                    "Se perdio el incidente de invariante de %s",
+                    ticket, exc_info=True,
+                )
+
+    async def _business_violation_sink(
+        self, payload: dict[str, Any]
+    ) -> None:
+        """Persist adapter-side INV-002 detections; never raises."""
+        try:
+            violation = (payload or {}).get("violation")
+            ticket = str((payload or {}).get("ticket") or "")
+            if isinstance(violation, dict) and ticket:
+                await self._record_invariant_violations(
+                    [violation], ticket=ticket, task=None)
+                try:
+                    hits = getattr(self, "_adapter_invariant_hits", None)
+                    if not isinstance(hits, dict):
+                        hits = {}
+                        self._adapter_invariant_hits = hits
+                    hits[ticket] = str((payload or {}).get("target") or "")
+                except Exception:
+                    pass
+        except Exception:
+            logger.warning("Sumidero INV-002 del adaptador fallido",
+                           exc_info=True)
+
+    async def _record_reread_violation(
+        self, *, ticket: str, target: str, actual: str,
+        task: dict[str, Any] | None,
+    ) -> None:
+        """INV-002 after a business transition whose reread missed the target."""
+        try:
+            from reliability import invariants as inv_mod
+        except Exception:
+            logger.warning(
+                "Chequeo INV-002 no disponible para %s", ticket, exc_info=True
+            )
+            return
+        violation = inv_mod.check_reread(
+            target=target, actual=actual, ticket=ticket)
+        if violation is not None:
+            await self._record_invariant_violations(
+                [violation], ticket=ticket, task=task)
+
     async def transition_ticket(
         self,
         ticket: str,
@@ -2636,6 +2748,7 @@ class TaskService:
         evidence: str | None = None,
         owner_instruction: str | None = None,
         secret_block: dict[str, Any] | None = None,
+        actor: str | None = None,
     ) -> dict[str, Any]:
         """Mueve el estado de NEGOCIO con el criterio global (TASK-2026-00132).
 
@@ -2647,6 +2760,8 @@ class TaskService:
         (sin ella se crea el escalado y no se cancela nada).
         `secret_block` (TASK-2026-00142) solo aparca en Working: escribe el
         marcador de secreto ausente que el cockpit lee como bloqueo.
+        `actor` nombra quien mueve el ticket (`engine` por defecto);
+        INV-001 nunca rechaza transiciones del Owner o manuales.
 
         Devuelve `outcome` (`applied` | `already_applied` | `escalated`) con el
         estado de negocio RELEIDO, o `ok: False` con `status` clasificado. El
@@ -2839,6 +2954,46 @@ class TaskService:
                 )
 
         try:
+            from reliability import invariants as _invariants
+        except Exception:
+            logger.warning(
+                "Invariantes v1 no disponibles para %s; sigue sin chequear",
+                name, exc_info=True,
+            )
+            _invariants = None  # type: ignore[assignment]
+        if _invariants is not None:
+            invariant_actor = str(actor or "").strip().lower() or "engine"
+            if clean_instruction:
+                invariant_actor = "owner"
+            context: dict[str, Any] = {
+                "target": target,
+                "ticket": name,
+                "task": task,
+                "evidence": evidence,
+            }
+            if task is not None:
+                context["active_runs"] = await self._live_runs_for_task(
+                    str(task.get("task_id") or ""))
+            violations = _invariants.evaluate_transition(context)
+            await self._record_invariant_violations(
+                violations, ticket=name, task=task)
+            for violation in violations:
+                if _invariants.should_reject(
+                        str(violation.get("invariant_id") or ""),
+                        actor=invariant_actor):
+                    return {
+                        "ok": False,
+                        "status": "invariant",
+                        "ticket": name,
+                        "business_status": current,
+                        "to_status": target,
+                        "invariant": violation.get("invariant_id"),
+                        "message": f"{name} no pasa a {target}: invariante "
+                        f"{violation.get('invariant_id')} violado "
+                        f"({violation.get('detail')}).",
+                    }
+
+        try:
             transition_dates = visibility.work_dates_for_transition(
                 target=target,
                 zone=self._site_zone_name(),
@@ -2854,6 +3009,13 @@ class TaskService:
         transition_context = {}
         if getattr(adapter, "provider", "erpnext") == "jardal_erp":
             transition_context = {"reason": clean_reason, "evidence": evidence, "human_action": human_action}
+        # Fresh adapter INV-002 mark: the sink sets it during the POST below.
+        try:
+            _hits = getattr(self, "_adapter_invariant_hits", None)
+            if isinstance(_hits, dict):
+                _hits.pop(name, None)
+        except Exception:
+            pass
         span_extended = False
         delay = 1.0
         for attempt in range(3):
@@ -2928,6 +3090,16 @@ class TaskService:
             }
         actual = str(reread.get("status") or "").strip()
         if actual != target:
+            # The adapter POST check already recorded this same miss via
+            # the sink; skip the second doc, keep reread-only misses.
+            try:
+                _hits = getattr(self, "_adapter_invariant_hits", None)
+                _dup = isinstance(_hits, dict) and _hits.pop(name, None) == target
+            except Exception:
+                _dup = False
+            if not _dup:
+                await self._record_reread_violation(
+                    ticket=name, target=target, actual=actual, task=task)
             return {
                 "ok": False,
                 "status": "mismatch",
