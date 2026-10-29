@@ -108,9 +108,21 @@ def triage_counts(incidents: list[dict[str, Any]]) -> dict[str, int]:
         "occurrences": len(live),
         "distinct_tickets": len(tickets),
         "distinct_projects": len(projects),
+        "critical": sum(1 for doc in live
+                        if str(doc.get("severity") or "") == "critical"),
         "fix_attempts_failed": sum(
             1 for doc in incidents if bool(doc.get("from_reliability_ticket"))),
     }
+
+
+_SEVERITY_RANK = {"normal": 0, "high": 1, "critical": 2}
+
+
+def _max_severity(first: str, second: str) -> str:
+    left, right = str(first or "normal"), str(second or "normal")
+    if _SEVERITY_RANK.get(right, 0) > _SEVERITY_RANK.get(left, 0):
+        return right
+    return left
 
 
 def triage_eligible(attribution: str | Attribution,
@@ -219,17 +231,18 @@ def build_problem_doc(
         "version": 1,
         "updated_at": moment,
     }
-    if scope != Attribution.ENGINE.value:
-        project = engine.get("project_key") or first.get("project_key")
-        if project:
-            doc["project_key"] = str(project)
-    else:
+    if scope == Attribution.ENGINE.value \
+            or scope == Attribution.ENVIRONMENT.value:
         doc["engine"] = {
             key: engine.get(key) for key in (
                 "exc_type", "reason_code", "guard_rule", "brake",
                 "invariant_id", "frames",
             ) if engine.get(key) is not None
         }
+    else:
+        project = engine.get("project_key") or first.get("project_key")
+        if project:
+            doc["project_key"] = str(project)
     return doc
 
 
@@ -414,6 +427,52 @@ async def _find_incidents(incidents: Any, problem_id: str,
         return []
 
 
+async def _supersede_stale_versions(
+    problems: Any,
+    scope: str,
+    fingerprint: str,
+    version: int,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Mark OPEN Problems of older fingerprint versions as superseded."""
+    moment = _utcnow() if now is None else _as_utc(now)
+    try:
+        cursor = problems.find({"scope": scope, "fingerprint": fingerprint})
+        stored = await _maybe_await(cursor.to_list(length=10000))
+    except AttributeError:
+        stored = await _maybe_await(
+            problems.find({"scope": scope, "fingerprint": fingerprint}))
+    except Exception:
+        return 0
+    stale = 0
+    for item in stored:
+        if not isinstance(item, dict):
+            continue
+        if int(item.get("fingerprint_version", FINGERPRINT_VERSION)) == int(
+                version):
+            continue
+        if str(item.get("status") or "") != ProblemStatus.OPEN.value:
+            continue
+        with _suppress():
+            await _maybe_await(problems.update_one(
+                {"_id": item.get("_id")},
+                {"$set": {"status": ProblemStatus.SUPERSEDED.value,
+                          "updated_at": moment},
+                 "$inc": {"version": 1}}))
+            stale += 1
+    return stale
+
+
+async def _mark_processed(incidents: Any, incident: dict[str, Any]) -> None:
+    if incidents is None:
+        return
+    with _suppress():
+        await _maybe_await(incidents.update_one(
+            {"_id": incident.get("_id")},
+            {"$set": {"processed": True}}))
+
+
 async def process_incident(
     source: Any,
     incident: dict[str, Any],
@@ -464,25 +523,16 @@ async def _process(
         return outcome
     existing = await _maybe_await(
         problems.find_one({"_id": problem_id}))
-    if isinstance(existing, dict) and int(
-            existing.get("fingerprint_version", FINGERPRINT_VERSION)) != int(
-            incident.get("fingerprint_version", FINGERPRINT_VERSION)):
-        await _maybe_await(problems.update_one(
-            {"_id": problem_id},
-            {"$set": {"status": ProblemStatus.SUPERSEDED.value,
-                      "updated_at": moment},
-             "$inc": {"version": 1}}))
-        existing = None
-        outcome["reason"] = "superseded"
+    if existing is None:
+        await _maybe_await(_supersede_stale_versions(
+            problems, scope, str(incident.get("fingerprint") or "?"),
+            int(incident.get("fingerprint_version", FINGERPRINT_VERSION)),
+            now=moment))
     if not isinstance(existing, dict):
         counts = triage_counts([incident])
-        critical = str(incident.get("severity") or "") == "critical"
         eligible, reason = triage_eligible(
             str(incident.get("attribution") or "unknown"), counts,
             triage_cfg)
-        if critical and str(
-                incident.get("attribution") or "") == "engine":
-            eligible, reason = True, "engine_first_critical"
         doc = build_problem_doc(
             scope=scope, fingerprint=str(incident.get("fingerprint") or "?"),
             fingerprint_version=int(incident.get(
@@ -505,8 +555,12 @@ async def _process(
             outcome.update({"problem": problem_id, "created": True,
                             "diagnosable": bool(doc["triage"]["eligible"]),
                             "reason": str(doc["triage"]["reason"])})
-            await _maybe_await(_check_storm(
+            storm_id = await _maybe_await(_check_storm(
                 problems, doc, triage_cfg=triage_cfg, now=moment))
+            if storm_id is not None:
+                outcome.update({"diagnosable": False,
+                                "reason": "grouped_under_storm"})
+            await _maybe_await(_mark_processed(incidents, incident))
             return outcome
     problem = existing if isinstance(existing, dict) else None
     if problem is None:
@@ -523,6 +577,7 @@ async def _process(
         problem = dict(problem)
         problem["status"] = ProblemStatus.OPEN.value
         problem["mute"] = {"reason": None, "actor": None, "until": None}
+        problem["version"] = int(problem.get("version", 1)) + 1
     live: list[dict[str, Any]] = []
     if incidents is not None:
         live = await _find_incidents(
@@ -536,12 +591,16 @@ async def _process(
         "counts.occurrences": int(counts["occurrences"]),
         "counts.distinct_tickets": int(counts["distinct_tickets"]),
         "counts.distinct_projects": int(counts["distinct_projects"]),
+        "severity_max": _max_severity(
+            str(problem.get("severity_max") or "normal"),
+            str(incident.get("severity") or "normal")),
         "updated_at": moment,
     }
     releases = sorted({*(problem.get("releases_seen") or []),
                        _release_sha(incident)})
     update["releases_seen"] = releases[:10]
-    if str(problem.get("status") or "") == ProblemStatus.OPEN.value:
+    if str(problem.get("status") or "") == ProblemStatus.OPEN.value \
+            and not bool((problem.get("links") or {}).get("grouped_under")):
         eligible, reason = triage_eligible(
             str(problem.get("attribution") or "unknown"), counts,
             triage_cfg, now=moment, first_seen=problem.get("first_seen"))
@@ -551,15 +610,16 @@ async def _process(
         update["triage.occurrences_at_last"] = int(counts["occurrences"])
         outcome["diagnosable"] = bool(eligible)
         outcome["reason"] = reason
+    elif bool((problem.get("links") or {}).get("grouped_under")):
+        outcome["diagnosable"] = False
+        outcome["reason"] = "grouped_under_storm"
     else:
         outcome["reason"] = f"status_{problem.get('status')}"
-    await _maybe_await(problems.update_one(
-        {"_id": problem_id}, {"$set": update, "$inc": {"version": 1}}))
-    if incidents is not None:
-        with _suppress():
-            await _maybe_await(incidents.update_one(
-                {"_id": incident.get("_id")},
-                {"$set": {"processed": True}}))
+    if str(problem.get("status") or "") not in HANDS_OFF_STATUSES:
+        await _maybe_await(problems.update_one(
+            {"_id": problem_id, "version": int(problem.get("version", 1))},
+            {"$set": update, "$inc": {"version": 1}}))
+    await _maybe_await(_mark_processed(incidents, incident))
     outcome["problem"] = problem_id
     return outcome
 
@@ -590,6 +650,22 @@ async def _check_storm(
     release_sha = str(doc.get("first_release") or "")
     if not release_sha or release_sha == "unknown":
         return None
+    storm_id = storm_problem_id(release_sha)
+    try:
+        seen = await _maybe_await(problems.find_one({"_id": storm_id}))
+    except Exception:
+        logger.warning("Release storm lookup failed", exc_info=True)
+        return None
+    if isinstance(seen, dict):
+        with _suppress():
+            await _maybe_await(problems.update_one(
+                {"_id": doc.get("_id")},
+                {"$set": {"links.grouped_under": storm_id,
+                          "triage.eligible": False,
+                          "triage.reason": "grouped_under_storm",
+                          "updated_at": moment},
+                 "$inc": {"version": 1}}))
+        return storm_id
     try:
         cursor = problems.find({"scope": Attribution.ENGINE.value})
         stored = await _maybe_await(cursor.to_list(length=10000))
@@ -604,14 +680,6 @@ async def _check_storm(
         release_sha, now=moment, window_hours=window)
     if len(members) < needed:
         return None
-    storm_id = storm_problem_id(release_sha)
-    try:
-        seen = await _maybe_await(problems.find_one({"_id": storm_id}))
-    except Exception:
-        logger.warning("Release storm lookup failed", exc_info=True)
-        return None
-    if isinstance(seen, dict):
-        return storm_id
     storm = build_storm_doc(
         release_sha=release_sha, members=members, now=moment)
     try:
@@ -765,6 +833,7 @@ class ReliabilityWorker:
         if self._task is not None:
             with _suppress():
                 await asyncio.wait_for(self._task, timeout=5.0)
+        self.uninstall()
         return {"processed": self._processed, "restarts": self.restarts}
 
     async def mute(self, problem_id: str, *, actor: str, token: str | None,
@@ -893,4 +962,7 @@ async def _expire_claims(source: Any,
                     {"_id": doc.get("problem_id")},
                     {"$set": {"diagnosis.claim_until": None,
                               "updated_at": moment}}))
+        if doc.get("_id") is not None:
+            with _suppress():
+                await _maybe_await(budget.delete_one({"_id": doc.get("_id")}))
     return expired

@@ -107,6 +107,13 @@ class FakeProblems:
                 return SimpleNamespace(matched_count=1)
         return SimpleNamespace(matched_count=0)
 
+    async def delete_one(self, filt: dict[str, Any]) -> SimpleNamespace:
+        for doc_id, doc in list(self.docs.items()):
+            if _matches(doc, filt):
+                del self.docs[doc_id]
+                return SimpleNamespace(deleted_count=1)
+        return SimpleNamespace(deleted_count=0)
+
     async def create_index(self, keys: Any, **kwargs: Any) -> str:
         return "idx"
 
@@ -197,6 +204,8 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(problem["status"], ProblemStatus.NO_ACTION.value)
         self.assertFalse(problem["triage"]["eligible"])
         self.assertFalse(outcome["diagnosable"])
+        self.assertNotIn("project_key", problem)
+        self.assertIn("engine", problem)
 
     def test_release_storm_groups_members(self) -> None:
         db = FakeDb()
@@ -295,11 +304,13 @@ class WorkerTests(unittest.TestCase):
         outcome = asyncio.run(_store_and_process(db, incident))
         self.assertTrue(outcome["created"])
         self.assertEqual(outcome["reason"], "engine_below_threshold")
-        ids = [doc["_id"] for doc in db.problems.docs.values()]
-        self.assertIn(worker.problem_id_for(
-            "engine", incident["fingerprint"], 0), ids)
-        self.assertIn(worker.problem_id_for(
-            "engine", incident["fingerprint"], FINGERPRINT_VERSION), ids)
+        old_id = worker.problem_id_for(
+            "engine", incident["fingerprint"], 0)
+        new_id = worker.problem_id_for(
+            "engine", incident["fingerprint"], FINGERPRINT_VERSION)
+        self.assertIn(old_id, db.problems.docs)
+        self.assertIn(new_id, db.problems.docs)
+        self.assertEqual(db.problems.docs[old_id]["status"], "superseded")
 
     def test_task_threshold_needs_five_tickets(self) -> None:
         db = FakeDb()
@@ -338,6 +349,120 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(handle.processed, 1)
 
         asyncio.run(_scenario())
+
+    def test_grouped_member_never_returns_to_diagnosis(self) -> None:
+        db = FakeDb()
+        moment = _utc(2026, 10, 29, 12, 0, 0)
+        release = {"sha": "abc123", "dirty": False}
+        for index in range(3):
+            incident = build_incident_doc(
+                kind="invariant_violation", component="gates",
+                now=moment + timedelta(minutes=index),
+                invariant_id=f"INV-00{index + 1}", task_id=f"t{index}",
+                attempt_id="a1", project_key="proj-a", release=release)
+            asyncio.run(_store_and_process(db, incident))
+        followup = build_incident_doc(
+            kind="invariant_violation", component="gates",
+            now=moment + timedelta(minutes=10),
+            invariant_id="INV-001", task_id="t9",
+            attempt_id="a1", project_key="proj-b", release=release)
+        outcome = asyncio.run(_store_and_process(db, followup))
+        self.assertFalse(outcome["diagnosable"])
+        self.assertEqual(outcome["reason"], "grouped_under_storm")
+        member_id = worker.problem_id_for(
+            "engine", followup["fingerprint"], FINGERPRINT_VERSION)
+        member = db.problems.docs[member_id]
+        self.assertEqual(member["links"]["grouped_under"],
+                         "release_regression:abc123")
+        self.assertFalse(member["triage"]["eligible"])
+
+    def test_fourth_storm_member_joins_existing_storm(self) -> None:
+        db = FakeDb()
+        moment = _utc(2026, 10, 29, 12, 0, 0)
+        release = {"sha": "abc123", "dirty": False}
+        for index in range(3):
+            incident = build_incident_doc(
+                kind="invariant_violation", component="gates",
+                now=moment + timedelta(minutes=index),
+                invariant_id=f"INV-00{index + 1}", task_id=f"t{index}",
+                attempt_id="a1", project_key="proj-a", release=release)
+            asyncio.run(_store_and_process(db, incident))
+        fourth = build_incident_doc(
+            kind="invariant_violation", component="gates",
+            now=moment + timedelta(minutes=30),
+            invariant_id="INV-004", task_id="t4",
+            attempt_id="a1", project_key="proj-a", release=release)
+        outcome = asyncio.run(_store_and_process(db, fourth))
+        self.assertTrue(outcome["created"])
+        self.assertFalse(outcome["diagnosable"])
+        self.assertEqual(outcome["reason"], "grouped_under_storm")
+        fourth_id = worker.problem_id_for(
+            "engine", fourth["fingerprint"], FINGERPRINT_VERSION)
+        self.assertEqual(db.problems.docs[fourth_id]["links"]
+                         ["grouped_under"], "release_regression:abc123")
+
+    def test_creator_incident_marked_processed(self) -> None:
+        db = FakeDb()
+        incident = _exception_incident("t1", "proj-a")
+        asyncio.run(_store_and_process(db, incident))
+        self.assertTrue(db.incidents.docs[incident["_id"]]["processed"])
+
+    def test_critical_incident_escalates_existing_problem(self) -> None:
+        db = FakeDb()
+        moment = _utc(2026, 10, 29, 12, 0, 0)
+        asyncio.run(_store_and_process(
+            db, _exception_incident("t1", "proj-a", now=moment)))
+        asyncio.run(_store_and_process(
+            db, _exception_incident("t2", "proj-a", now=moment)))
+        critical = _exception_incident("t3", "proj-b", now=moment)
+        critical["severity"] = "critical"
+        outcome = asyncio.run(_store_and_process(db, critical))
+        self.assertTrue(outcome["diagnosable"])
+        self.assertEqual(outcome["reason"], "engine_first_critical")
+        problem = next(iter(db.problems.docs.values()))
+        self.assertEqual(problem["severity_max"], "critical")
+
+    def test_hands_off_problem_keeps_state_but_marks_processed(self) -> None:
+        db = FakeDb()
+        incident = _exception_incident("t1", "proj-a")
+        asyncio.run(_store_and_process(db, incident))
+        problem_id = next(iter(db.problems.docs))
+        db.problems.docs[problem_id]["status"] = "diagnosing"
+        followup = _exception_incident("t2", "proj-b")
+        outcome = asyncio.run(_store_and_process(db, followup))
+        self.assertFalse(outcome["diagnosable"])
+        self.assertEqual(outcome["reason"], "status_diagnosing")
+        self.assertTrue(db.incidents.docs[followup["_id"]]["processed"])
+
+    def test_claim_expiry_cleans_budget(self) -> None:
+        db = FakeDb()
+        incident = _exception_incident("t1", "proj-a")
+        asyncio.run(_store_and_process(db, incident))
+        problem_id = next(iter(db.problems.docs))
+        moment = _utc(2026, 10, 29, 12, 0, 0)
+        db.problems.docs[problem_id]["diagnosis"]["claim_until"] = _utc(
+            2026, 10, 20)
+        asyncio.run(db.budget.insert_one({
+            "_id": "claim-1", "problem_id": problem_id,
+            "until": _utc(2026, 10, 20)}))
+        expired = asyncio.run(worker._expire_claims(db, now=moment))
+        self.assertEqual(expired, 1)
+        self.assertNotIn("claim-1", db.budget.docs)
+        self.assertIsNone(
+            db.problems.docs[problem_id]["diagnosis"]["claim_until"])
+
+    def test_stop_uninstalls_notify_hook(self) -> None:
+        from reliability import capture as _capture_mod
+
+        db = FakeDb()
+        handle = worker.ReliabilityWorker(db)
+        try:
+            handle.install()
+            self.assertIsNotNone(_capture_mod._NOTIFY_HOOK)
+            asyncio.run(handle.stop())
+            self.assertIsNone(_capture_mod._NOTIFY_HOOK)
+        finally:
+            _capture_mod.set_notify_hook(None)
 
     def test_reconcile_covers_spool_unprocessed_and_last_exit(self) -> None:
         async def _scenario(tmp: Path) -> None:
