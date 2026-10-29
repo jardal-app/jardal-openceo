@@ -10,6 +10,7 @@ from __future__ import annotations
 from . import config as config
 from . import classification as classification
 from . import fingerprint as fingerprint
+from . import guard as guard
 from . import models as models
 from . import sanitize as sanitize
 from .config import validate_reliability_config as validate_reliability_config
