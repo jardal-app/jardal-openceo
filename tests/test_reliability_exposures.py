@@ -197,28 +197,42 @@ def test_build_update_matches_socket_shape() -> None:
     assert update["$set"]["component"] == "runner"
 
 
+def test_record_converts_non_utc_zone_to_utc_day() -> None:
+    from reliability.exposures import _as_utc
+
+    eastern = timezone(timedelta(hours=-5))
+    moment = datetime(2026, 10, 29, 20, 0, tzinfo=eastern)
+    assert _as_utc(moment) == datetime(2026, 10, 30, 1, 0,
+                                      tzinfo=timezone.utc)
+    assert exposure_day_id("core_process", "p1", _as_utc(moment)) == \
+        "core_process|p1|2026-10-30"
+
+
+@run_async
+async def test_core_process_hook_shape_counts_one() -> None:
+    store = exposure_store()
+    assert await record_exposure(store, "core_process") is True
+    docs = exposures_of(store).docs
+    assert len(docs) == 1
+    assert next(iter(docs.values()))["component"] == "core_process"
+
+
 # ------------------------- points: one count per pass -------------------------
 
 @run_async
-async def test_dev_session_attempt_counts_one(repo) -> None:
-    from agents.dev.session import (
-        DevExecutionOutput,
-        DevSessionManager,
-        _SimpleBranch,
-    )
+async def test_dev_session_attempt_counts_one() -> None:
+    from agents.dev.session import DevSessionManager
 
     store = exposure_store()
-    dev = DevSessionManager(SimpleNamespace(DEV_EXECUTION_MODE="cli"),
+    dev = DevSessionManager(SimpleNamespace(DEV_EXECUTION_MODE="mock"),
                             MagicMock(), repo=None)
     dev._repo = store
-    base = git(repo, "rev-parse", "HEAD")
-    branch = _SimpleBranch(repo, "tier/exp", "main", base, "t")
-    output = await dev._reliability_finish(
-        {"task_id": "t-exp-1", "project": "p1", "params": {}},
-        CodingTool.TIER_B, branch,
-        DevExecutionOutput(status=TaskStatus.FAILED, error="boom",
-                           params={}))
-    assert output.status == TaskStatus.FAILED
+    with patch.object(DevSessionManager, "_step_code",
+                      new=AsyncMock(side_effect=RuntimeError("boom"))):
+        with pytest.raises(RuntimeError):
+            await dev._run_simple_tool(
+                {"task_id": "t-exp-1", "project": "p1", "params": {}},
+                {}, CodingTool.TIER_B, {})
     docs = exposures_of(store).docs
     assert len(docs) == 1
     doc = next(iter(docs.values()))
@@ -227,30 +241,67 @@ async def test_dev_session_attempt_counts_one(repo) -> None:
 
 
 @run_async
-async def test_dev_session_finish_fails_open_on_broken_store(repo) -> None:
-    from agents.dev.session import (
-        DevExecutionOutput,
-        DevSessionManager,
-        _SimpleBranch,
-    )
+async def test_dev_session_success_counts_one() -> None:
+    from agents.dev.session import DevSessionManager
 
-    store = exposure_store(fail=True)
-    dev = DevSessionManager(SimpleNamespace(DEV_EXECUTION_MODE="cli"),
+    store = exposure_store()
+    dev = DevSessionManager(SimpleNamespace(DEV_EXECUTION_MODE="mock"),
                             MagicMock(), repo=None)
     dev._repo = store
-    base = git(repo, "rev-parse", "HEAD")
-    branch = _SimpleBranch(repo, "tier/exp", "main", base, "t")
-    output = await dev._reliability_finish(
-        {"task_id": "t-exp-2", "params": {}},
-        CodingTool.TIER_B, branch,
-        DevExecutionOutput(status=TaskStatus.FAILED, error="boom",
-                           params={}))
-    assert output.status == TaskStatus.FAILED
+    output = await dev._run_simple_tool(
+        {"task_id": "t-exp-ok", "project": "p1", "params": {}},
+        {}, CodingTool.TIER_B, {})
+    assert output.status == TaskStatus.COMPLETED
+    docs = exposures_of(store).docs
+    assert [(doc["component"], doc["count"])
+            for doc in docs.values()] == [("dev_session", 1)]
+
+
+@run_async
+async def test_dev_session_attempt_fails_open_on_broken_store() -> None:
+    from agents.dev.session import DevSessionManager
+
+    store = exposure_store(fail=True)
+    dev = DevSessionManager(SimpleNamespace(DEV_EXECUTION_MODE="mock"),
+                            MagicMock(), repo=None)
+    dev._repo = store
+    with patch.object(DevSessionManager, "_step_code",
+                      new=AsyncMock(side_effect=RuntimeError("boom"))):
+        with pytest.raises(RuntimeError):
+            await dev._run_simple_tool(
+                {"task_id": "t-exp-2", "params": {}},
+                {}, CodingTool.TIER_B, {})
     assert exposures_of(store).docs == {}
 
 
 @run_async
-async def test_tier_s_boundary_counts_one(repo) -> None:
+async def test_dev_session_baseline_counts_gates(repo) -> None:
+    from agents.dev.session import CodingStepResult, DevSessionManager
+
+    store = exposure_store()
+    dev = DevSessionManager(SimpleNamespace(DEV_EXECUTION_MODE="cli"),
+                            MagicMock(), repo=None)
+    dev._repo = store
+    config = {"project": {"repos": [{"local_path": str(repo)}]}, "dev": {}}
+    waiting = CodingStepResult(
+        step={"name": "code", "status": "waiting"}, prompt="", summary="",
+        waiting_reason="scheduled_wait: probe",
+        resume_at=datetime.now(timezone.utc) + timedelta(hours=2))
+    with patch.object(DevSessionManager, "_step_code",
+                      new=AsyncMock(return_value=waiting)):
+        output = await dev._run_simple_tool(
+            {"task_id": "t-exp-b", "project": "p1", "params": {}},
+            config, CodingTool.TIER_B, {})
+    assert output.status == TaskStatus.WAITING
+    docs = exposures_of(store).docs
+    assert sorted(doc["component"] for doc in docs.values()) == \
+        ["dev_session", "gates"]
+    assert all(doc["count"] == 1 for doc in docs.values())
+
+
+@run_async
+async def test_tier_s_run_counts_one(repo) -> None:
+    from agents.dev.tier_s.cycle import CycleOutcome, TierSCycle
     from agents.dev.tier_s.stores import (
         InMemoryRunStore,
         InMemoryTaskStore,
@@ -260,13 +311,21 @@ async def test_tier_s_boundary_counts_one(repo) -> None:
     store = exposure_store()
     cycle = make_cycle(InMemoryRunStore(), InMemoryTaskStore(), None,
                        incidents=store)
-    ctx = make_ctx(repo, {})
-    assert await cycle._reliability_boundary_inner(
-        ctx, "config", "checkpoint has no valid plan", None) is None
+    outcome = CycleOutcome(status="completed", run_id="run-exp")
+    with patch.object(TierSCycle, "_run_guarded",
+                      new=AsyncMock(return_value=outcome)):
+        result = await cycle.run(
+            {"task_id": "t", "ref": "t", "project": "p1", "params": {}},
+            repo, {})
+    assert result.status == "completed"
     docs = exposures_of(store).docs
     assert len(docs) == 1
     doc = next(iter(docs.values()))
     assert (doc["component"], doc["count"]) == ("tier_s", 1)
+    ctx = make_ctx(repo, {})
+    assert await cycle._reliability_boundary_inner(
+        ctx, "config", "checkpoint has no valid plan", None) is None
+    assert len(exposures_of(store).docs) == 1
 
 
 @run_async

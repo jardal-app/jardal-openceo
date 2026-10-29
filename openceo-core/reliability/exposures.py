@@ -34,7 +34,7 @@ def _as_utc(moment: datetime | None = None) -> datetime:
         return datetime.now(timezone.utc)
     if moment.tzinfo is None:
         return moment.replace(tzinfo=timezone.utc)
-    return moment
+    return moment.astimezone(timezone.utc)
 
 
 def normalize_project(project_key: Any) -> str:

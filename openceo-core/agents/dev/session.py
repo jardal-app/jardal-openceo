@@ -537,6 +537,7 @@ class DevSessionManager:
         retired here: gates replaced it.
         """
         del qa_cfg
+        await self._note_exposure(task, "dev_session")
         output = DevExecutionOutput(
             status=TaskStatus.IN_PROGRESS,
             coding_tool=tool,
@@ -550,6 +551,9 @@ class DevSessionManager:
             if isinstance(opened, DevExecutionOutput):
                 return opened
             branch = opened
+            if not isinstance((task.get("params") or {}).get(
+                    "dev_checkpoint"), dict):
+                await self._note_exposure(task, "gates")
 
         if tool == CodingTool.TIER_C:
             await self._record_tier_c_event(task, "started")
@@ -1112,6 +1116,21 @@ class DevSessionManager:
         return {"executed": True, "marker": marker,
                 "capture": {"kind": "terminal_failure"}}
 
+    async def _note_exposure(
+        self, task: dict[str, Any], component: str,
+    ) -> None:
+        """Count one pass through ``component``; never raises (fail-open)."""
+        try:
+            from reliability import exposures as _exposures
+
+            await _exposures.record_exposure(
+                self._repo, component,
+                project_key=str(task.get("project") or ""),
+                task_id=str(task.get("task_id") or "") or None)
+        except Exception:
+            logger.warning("%s exposure failed (fail-open)",
+                           component, exc_info=True)
+
     async def _reliability_finish(
         self,
         task: dict[str, Any],
@@ -1201,16 +1220,6 @@ class DevSessionManager:
                 "informe de review nuevo o gate en verde; solo el Owner u "
                 f"otro actor autorizado rearma el freno (rama conservada: {kept}).")
             output.resume_at = None
-        try:
-            from reliability import exposures as _exposures
-
-            await _exposures.record_exposure(
-                self._repo, "dev_session",
-                project_key=str(task.get("project") or ""),
-                task_id=task_id or None)
-        except Exception:
-            logger.warning("dev_session exposure failed (fail-open)",
-                           exc_info=True)
         await self._deadline_mark_end(task_id)
         return output
 

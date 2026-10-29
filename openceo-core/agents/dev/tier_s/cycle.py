@@ -501,6 +501,7 @@ class TierSCycle:
             self._restore_checkpoint(ctx, resume)
         ctx.cost_sessions_base = len(ctx.metrics.get("sessions") or [])
         await self._deadline_mark_start(ctx)
+        await self._note_exposure(ctx, "tier_s")
         try:
             outcome = await self._run_guarded(ctx)
             return replace(
@@ -2578,15 +2579,6 @@ class TierSCycle:
         except Exception:
             logger.warning("tier-s guard params patch failed (fail-open)",
                            exc_info=True)
-        try:
-            from reliability import exposures as _exposures
-
-            await _exposures.record_exposure(
-                self._incidents, "tier_s",
-                project_key=str(ctx.ticket.get("project") or ""),
-                task_id=task_id or None)
-        except Exception:
-            logger.warning("tier-s exposure failed (fail-open)", exc_info=True)
         if decision.get("action") == "stop":
             return await self._stall_stop(
                 ctx, task_id, str(decision.get("rule") or ""))
