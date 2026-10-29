@@ -120,6 +120,22 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+class FakeProblems:
+    """Minimal dict-backed Problems store (mirror worker fakes)."""
+
+    def __init__(self) -> None:
+        self.docs: dict[str, dict[str, Any]] = {}
+
+    async def update_one(self, filt: dict[str, Any],
+                         update: dict[str, Any]) -> None:
+        for doc_id, doc in self.docs.items():
+            if doc_id == filt.get("_id"):
+                doc.update(update.get("$set", {}))
+                self.docs[doc_id] = doc
+                return None
+        return None
+
+
 class PublisherIdentityTest(unittest.TestCase):
     def test_source_id_destination_and_autorun(self) -> None:
         self.assertEqual(pub.source_id_for("engine|abc"),
@@ -161,8 +177,12 @@ class PublisherContentTest(unittest.TestCase):
     def test_section_92_content_without_foreign_text(self) -> None:
         evidence = {"kind": "investigate", "role": "data",
                     "evidence_blocks": []}
+        problem = _problem(transcript="full dump of the session",
+                           logs=["line one", "line two"],
+                           foreign_text="其他项目 secreto de otro proyecto",
+                           other_project={"key": "tienda|xyz"})
         payload = pub.build_ticket(
-            _problem(), ticket_type="fix", proposal=_proposal(),
+            problem, ticket_type="fix", proposal=_proposal(),
             evidence=evidence,
             affected_open_tasks=[f"TASK-{number}" for number in range(25)],
             touches_protected=True)
@@ -219,6 +239,56 @@ class PublishFlowTest(unittest.TestCase):
         self.assertEqual(
             second["ticket"]["business_ref"],
             first["ticket"]["business_ref"])
+
+    def test_already_exists_syncs_store_as_ticketed(self) -> None:
+        erp = FakeErp()
+        problem = _problem()
+        first = _run(pub.publish(problem, ticket_type="fix",
+                                proposal=_proposal(), erp=erp,
+                                tickets_cfg=dict(ENABLED)))
+        self.assertEqual(first["status"], "published")
+        store = FakeProblems()
+        store.docs[str(problem["_id"])] = dict(problem)
+        second = _run(pub.publish(dict(problem), ticket_type="fix",
+                                  proposal=_proposal(), erp=erp,
+                                  tickets_cfg=dict(ENABLED), store=store))
+        self.assertEqual(second["status"], "already_exists")
+        self.assertEqual(second["problem_status"], "ticketed")
+        self.assertEqual(second["problem_update"]["status"], "ticketed")
+        self.assertEqual(
+            second["problem_update"]["ticket"]["business_ref"],
+            first["ticket"]["business_ref"])
+        self.assertEqual(store.docs[str(problem["_id"])]["status"],
+                         "ticketed")
+
+    def test_timeout_confirm_syncs_store_as_ticketed(self) -> None:
+        erp = FakeErp(timeout_on_create=True)
+        store = FakeProblems()
+        problem = _problem()
+        store.docs[str(problem["_id"])] = dict(problem)
+        outcome = _run(pub.publish(problem, ticket_type="fix",
+                                   proposal=_proposal(), erp=erp,
+                                   tickets_cfg=dict(ENABLED), store=store))
+        self.assertEqual(outcome["status"], "already_exists")
+        self.assertEqual(outcome["problem_status"], "ticketed")
+        self.assertEqual(store.docs[str(problem["_id"])]["status"],
+                         "ticketed")
+
+    def test_impact_score_accepts_severity_enum(self) -> None:
+        from reliability.models import Severity
+        self.assertEqual(pub.impact_score(occurrences_30d=3,
+                                         severity_max=Severity.CRITICAL,
+                                         distinct_tickets_30d=2), 30)
+        self.assertEqual(pub.impact_score(occurrences_30d=3,
+                                         severity_max=Severity.HIGH,
+                                         distinct_tickets_30d=2), 18)
+        ordered = pub.reevaluate_queue(
+            [_problem(_id="enum", problem_key="enum",
+                      severity_max=Severity.CRITICAL,
+                      counts={"occurrences": 3, "distinct_tickets": 2,
+                              "distinct_projects": 1},
+                      status="diagnosed")])
+        self.assertEqual([doc["_id"] for doc in ordered], ["enum"])
 
     def test_full_queue_parks_problem_as_diagnosed(self) -> None:
         erp = FakeErp(pending=5)

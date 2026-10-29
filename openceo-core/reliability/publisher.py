@@ -107,7 +107,8 @@ def destination_for(scope: str) -> str | None:
 
 def impact_score(*, occurrences_30d: int, severity_max: str,
                  distinct_tickets_30d: int) -> int:
-    weight = SEVERITY_WEIGHT.get(str(severity_max or "normal"), 1)
+    key = getattr(severity_max, "value", severity_max)
+    weight = SEVERITY_WEIGHT.get(str(key or "normal"), 1)
     return max(0, int(occurrences_30d)) * weight * max(
         0, int(distinct_tickets_30d))
 
@@ -167,7 +168,7 @@ def reevaluate_queue(problems: list[dict[str, Any]]) -> list[dict[str, Any]]:
         key=lambda doc: (
             -impact_score(
                 occurrences_30d=int(counts_of(doc).get("occurrences", 0)),
-                severity_max=str(doc.get("severity_max") or "normal"),
+                severity_max=doc.get("severity_max") or "normal",
                 distinct_tickets_30d=int(
                     counts_of(doc).get("distinct_tickets", 0))),
             str(doc.get("_id") or "")))
@@ -331,8 +332,18 @@ async def publish(problem: dict[str, Any], *, ticket_type: str,
         return {"status": "unknown", "reason": "lookup_failed",
                 "source_id": source_id}
     if isinstance(existing, dict) and existing:
+        ticketed = mark_ticketed(
+            problem,
+            business_ref=str(existing.get("business_ref") or ""),
+            source_id=source_id, ticket_type=ticket_type,
+            proposal_hash=str(payload.get("proposal_hash"))
+            if payload.get("proposal_hash") else None,
+            now=moment)
+        await _persist_problem(store, str(problem.get("_id")), ticketed)
         return {"status": "already_exists",
-                "ticket": existing, "source_id": source_id}
+                "ticket": existing, "source_id": source_id,
+                "problem_status": str(ticketed["status"]),
+                "problem_update": ticketed}
     try:
         pending = await _maybe_await(erp.count_pending_hunter())
     except Exception:
@@ -355,8 +366,19 @@ async def publish(problem: dict[str, Any], *, ticket_type: str,
             logger.warning("Hunter confirm-after-timeout failed",
                            exc_info=True)
         if isinstance(confirmed, dict) and confirmed:
+            ticketed = mark_ticketed(
+                problem,
+                business_ref=str(confirmed.get("business_ref") or ""),
+                source_id=source_id, ticket_type=ticket_type,
+                proposal_hash=str(payload.get("proposal_hash"))
+                if payload.get("proposal_hash") else None,
+                now=moment)
+            await _persist_problem(
+                store, str(problem.get("_id")), ticketed)
             return {"status": "already_exists", "ticket": confirmed,
-                    "source_id": source_id}
+                    "source_id": source_id,
+                    "problem_status": str(ticketed["status"]),
+                    "problem_update": ticketed}
         return {"status": "unknown",
                 "reason": "create_timeout_unconfirmed",
                 "source_id": source_id}
