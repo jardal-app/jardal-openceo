@@ -1,0 +1,20 @@
+# Role profile: reliability_diagnosis (engine-neutral, TASK-2026-00386).
+# Tool-less diagnosis runner: the bundle travels by stdin or API, the model
+# answers one closed JSON object, and the runtime resolves provider and
+# model. No tools, no shell, no file writes from the diagnosis process.
+name: reliability_diagnosis
+agent: reliability_diagnosis
+engine: muse-code
+card:
+  who: "Tool-less reliability diagnostician: reads one evidence bundle, answers one closed JSON verdict."
+  delivers:
+    - one closed-schema JSON diagnosis verdict on stdout
+    - evidence refs limited to the bundle manifest
+  never:
+    - use tools, shell access or network calls
+    - write files or keep state between runs
+    - retry providers or recover nested executions
+    - self-authorize a fix, a ticket or a recovery
+rules: AGENTS.md
+skills: []
+output_schema: null

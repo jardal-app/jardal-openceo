@@ -15,6 +15,7 @@ from . import config as config
 from . import classification as classification
 from . import deadlines as deadlines
 from . import diagnosis as diagnosis
+from . import diagnosis_exec as diagnosis_exec
 from . import endpoint as endpoint
 from . import exposures as exposures
 from . import fingerprint as fingerprint

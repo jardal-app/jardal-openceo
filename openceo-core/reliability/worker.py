@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from . import capture as _capture
+from . import diagnosis_exec as _diagnosis_exec
 from .capture import _scope_for as _capture_scope
 from .config import RELIABILITY_DEFAULTS
 from .fingerprint import FINGERPRINT_VERSION, problem_key
@@ -874,6 +875,8 @@ async def reconcile_on_boot(
     limit: int = RECONCILE_DEFAULT_LIMIT,
     triage_cfg: dict[str, Any] | None = None,
     now: datetime | None = None,
+    diagnosis_cfg: dict[str, Any] | None = None,
+    toolless_ok: bool = False,
 ) -> dict[str, Any]:
     """Single bounded pass: spool, unprocessed, claims, last-exit, queue."""
     summary: dict[str, Any] = {
@@ -881,7 +884,9 @@ async def reconcile_on_boot(
         "unprocessed": 0,
         "claims_expired": 0,
         "unclean_exit": None,
-        "queue": "diagnosis_disabled",
+        "queue": _diagnosis_exec.diagnosis_queue_state(
+            diagnosis_cfg, toolless_ok=toolless_ok,
+            now=now),
     }
     try:
         summary["spool"] = await _capture.replay_spool(
@@ -902,6 +907,14 @@ async def reconcile_on_boot(
         summary["claims_expired"] = await _expire_claims(source, now=now)
     except Exception:
         logger.warning("Boot claim expiry failed", exc_info=True)
+    try:
+        if isinstance(diagnosis_cfg, dict) and diagnosis_cfg.get("enabled") \
+                and toolless_ok and source is not None:
+            budget = source[_diagnosis_exec.BUDGET_COLLECTION]
+            _diagnosis_exec.install_budget_hook(
+                budget, lambda: dict(diagnosis_cfg))
+    except Exception:
+        logger.warning("Boot budget hook failed", exc_info=True)
     return summary
 
 
@@ -958,10 +971,15 @@ async def _expire_claims(source: Any,
         expired += 1
         if problems is not None and doc.get("problem_id"):
             with _suppress():
+                current = await _maybe_await(problems.find_one(
+                    {"_id": doc.get("problem_id")}))
+                patch: dict[str, Any] = {
+                    "diagnosis.claim_until": None, "updated_at": moment}
+                if isinstance(current, dict) and current.get("status") == \
+                        ProblemStatus.DIAGNOSING.value:
+                    patch["status"] = ProblemStatus.OPEN.value
                 await _maybe_await(problems.update_one(
-                    {"_id": doc.get("problem_id")},
-                    {"$set": {"diagnosis.claim_until": None,
-                              "updated_at": moment}}))
+                    {"_id": doc.get("problem_id")}, {"$set": patch}))
         if doc.get("_id") is not None:
             with _suppress():
                 await _maybe_await(budget.delete_one({"_id": doc.get("_id")}))
