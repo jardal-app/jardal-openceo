@@ -265,9 +265,7 @@ class CEOService:
         try:
             from reliability import capture as _capture
 
-            runtime_dir = (
-                Path(__file__).resolve().parents[2] / ".runtime"
-            )
+            runtime_dir = _capture.runtime_dir_for()
             status = _capture.spool_status(runtime_dir)
             pending = status.get("pending")
             health["spool_pending"] = (
