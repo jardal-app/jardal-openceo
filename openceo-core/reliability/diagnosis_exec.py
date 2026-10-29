@@ -272,7 +272,7 @@ async def run_diagnosis(executor: ToollessExecutor, bundle: dict[str, Any],
         with _suppress():
             await executor.abort()
         return {"ok": False, "error": "timeout",
-                "processes_used": processes}
+                "processes_used": processes + 1}
     processes += 1
     if code != 0:
         return {"ok": False, "error": "nonzero_exit",
@@ -288,7 +288,7 @@ async def run_diagnosis(executor: ToollessExecutor, bundle: dict[str, Any],
             with _suppress():
                 await executor.abort()
             return {"ok": False, "error": "timeout",
-                    "processes_used": processes}
+                    "processes_used": processes + 1}
         processes += 1
         if code != 0:
             return {"ok": False, "error": "nonzero_exit",
@@ -510,6 +510,10 @@ async def consume_budget(budget: Any, problems: Any, problem_id: str,
             budget, day, max_day,
             bucket_start=moment.replace(
                 hour=0, minute=0, second=0, microsecond=0)):
+        with _suppress():
+            await _maybe_await(budget.update_one(
+                {"_id": hour, "count": {"$gt": 0}},
+                {"$inc": {"count": -1}}))
         day_start = moment.replace(
             hour=0, minute=0, second=0, microsecond=0)
         return {"ok": False, "reason": "daily_budget_exhausted",

@@ -313,6 +313,31 @@ class BudgetTest(unittest.TestCase):
 
         asyncio.run(_scenario())
 
+    def test_daily_exhaustion_does_not_leak_hourly_slot(self) -> None:
+        async def _scenario() -> None:
+            db = FakeDb()
+            cfg = _diag_cfg(max_starts_per_day=1)
+            moment = _utc(2026, 10, 29, 12, 0, 0)
+            await db.problems.insert_one(_problem("problem-0"))
+            first = await ex.consume_budget(
+                db.budget, db.problems, "problem-0", cfg, now=moment)
+            self.assertTrue(first["ok"], first)
+            await db.problems.update_one(
+                {"_id": "problem-0"},
+                {"$set": {"status": "diagnosed",
+                          "diagnosis.claim_until": None}})
+            await db.problems.insert_one(_problem("problem-1"))
+            refused = await ex.consume_budget(
+                db.budget, db.problems, "problem-1", cfg, now=moment)
+            self.assertFalse(refused["ok"])
+            self.assertEqual(refused["reason"], "daily_budget_exhausted")
+            self.assertEqual(refused["next_slot"],
+                             _utc(2026, 10, 30, 0, 0, 0))
+            hour = await db.budget.find_one({"_id": ex.hour_id(moment)})
+            self.assertEqual(hour["count"], 1)
+
+        asyncio.run(_scenario())
+
 
 class RunTest(unittest.TestCase):
     def test_partial_output_with_nonzero_exit_rejected(self) -> None:
@@ -363,6 +388,8 @@ class RunTest(unittest.TestCase):
             self.assertFalse(outcome["ok"])
             self.assertEqual(outcome["error"], "timeout")
             self.assertTrue(executor.killed)
+            self.assertEqual(outcome["processes_used"], 1)
+            self.assertEqual(executor.runs, 1)
 
         asyncio.run(_scenario())
 
