@@ -1,0 +1,6 @@
+[Unit]
+Description=OpenCEO restart-budget exhausted alert (no core dependency)
+
+[Service]
+Type=oneshot
+ExecStart=/home/develop/development/Jardal/jardal-openceo/scripts/openceo-alert.sh
