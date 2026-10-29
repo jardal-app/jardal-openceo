@@ -125,6 +125,34 @@ start() {
   return 1
 }
 
+foreground() {
+  # Primer plano para systemd ExecStart (TASK-2026-00370): mismo entorno
+  # que start pero exec sin demonizar. El flock lo aplica main.py (exit 3
+  # si otra instancia tiene el candado; la unidad no lo reintenta).
+  load_env
+  if [[ ! -x "$VENV_PY" ]]; then
+    echo "Missing virtualenv python at $VENV_PY"
+    echo "Run: scripts/setup.sh"
+    return 1
+  fi
+  # Best-effort: los reinicios de systemd no pueden bloquearse por árbol
+  # sucio; el gate estricto vive en restart (TASK-2026-00367).
+  bash "$ROOT_DIR/scripts/write-release.sh" "$ROOT_DIR" "$RUNTIME_DIR" \
+    || echo "WARN: write-release failed; continuing without release identity."
+  "$VENV_PY" "$ROOT_DIR/scripts/sync-mcp-config.py" || echo "WARN: MCP config sync failed"
+  cd "$APP_DIR"
+  exec "$VENV_PY" main.py
+}
+
+unit_managed() {
+  # La unidad manda solo si está habilitada o activa: instalada pero
+  # deshabilitada + arranque por script sigue siendo vía script.
+  command -v systemctl >/dev/null 2>&1 || return 1
+  systemctl --user cat openceo-core-host.service >/dev/null 2>&1 || return 1
+  systemctl --user is-enabled --quiet openceo-core-host.service 2>/dev/null || \
+    systemctl --user is-active --quiet openceo-core-host.service 2>/dev/null
+}
+
 stop() {
   local pid pids all target
   all=""
@@ -165,6 +193,24 @@ stop() {
 
 status() {
   load_env
+  if unit_managed; then
+    local state pids
+    state="$(systemctl --user is-active openceo-core-host.service 2>/dev/null || echo unknown)"
+    pids="$(runtime_pids || true)"
+    if [[ -f "$RELEASE_FILE" ]]; then
+      echo "release: $(cat "$RELEASE_FILE")"
+    fi
+    if [[ "$state" == "active" ]]; then
+      echo "openceo-core host is running under systemd (unit active)."
+      return 0
+    fi
+    if [[ -n "${pids// }" ]]; then
+      echo "WARNING: unit $state but legacy PIDs run ($(echo $pids | tr '\n' ' ')); use one path (CLAUDE.md §3)."
+      return 2
+    fi
+    echo "openceo-core host is stopped (unit $state)."
+    return 1
+  fi
   local pids count owner
   pids="$(runtime_pids || true)"
   count="$(echo "$pids" | grep -cE '^[0-9]+$' || true)"
@@ -208,11 +254,16 @@ case "${1:-}" in
     if ! bash "$ROOT_DIR/scripts/write-release.sh" "$ROOT_DIR" "$RUNTIME_DIR"; then
       exit 1
     fi
-    stop; start ;;
+    if unit_managed; then
+      systemctl --user restart openceo-core-host.service
+    else
+      stop; start
+    fi ;;
   status) status ;;
+  foreground) foreground ;;
   logs) logs "$@" ;;
   *)
-    echo "Usage: $0 {start|stop|restart|status|logs [lines]}"
+    echo "Usage: $0 {start|stop|restart|status|foreground|logs [lines]}"
     exit 1
     ;;
 esac

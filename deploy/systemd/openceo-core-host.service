@@ -1,14 +1,21 @@
 [Unit]
 Description=OpenCEO Core (Host Mode, no Docker)
-After=network-online.target docker.service
+After=network-online.target
 Wants=network-online.target
+OnFailure=openceo-alert.service
+# En [Unit]: en [Service] systemd las ignoraría sin aplicar el tope.
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
 WorkingDirectory=/home/develop/development/Jardal/jardal-openceo
-ExecStart=/home/develop/development/Jardal/jardal-openceo/scripts/openceo-core-host-runner.sh
-Restart=always
-RestartSec=3
+ExecStart=/home/develop/development/Jardal/jardal-openceo/scripts/openceo-core-host.sh foreground
+ExecStopPost=/home/develop/development/Jardal/jardal-openceo/scripts/record-exit.sh
+Restart=on-failure
+RestartSec=10
+# Sin el candado (exit 3) no hay bucle: instancia duplicada no reintenta.
+RestartPreventExitStatus=3
 Environment=OPENCEO_HOST_PORT=18765
 
 [Install]

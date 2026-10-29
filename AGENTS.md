@@ -43,6 +43,18 @@ Full suite (~8 min): `./.venv/bin/python -m pytest tests/ -q`
 scripts/openceo-core-host.sh restart|status
 ```
 
+`restart`/`status` delegate to `systemctl --user` when the user unit
+`openceo-core-host.service` is enabled or active, else use the legacy
+script path; never run both at once (single flock in
+`.runtime/openceo-core-host.lock`, exit 3). The unit runs
+`openceo-core-host.sh foreground`, restarts `on-failure` (`RestartSec=10`,
+burst 5 per 600s, no retry on exit 3), records every stop in
+`.runtime/last-exit.json` via `ExecStopPost=record-exit.sh`, and fires
+`openceo-alert.service` (core-independent: spool, syslog, optional
+webhook) when the budget is exhausted. Migrate with
+`scripts/openceo-systemd-migrate.sh install|uninstall|status`
+(TASK-2026-00370).
+
 `restart` deploys only from a clean tree: it writes the SHA to
 `.runtime/RELEASE` (`{sha, dirty}`) and aborts on tracked changes; the
 explicit override `OPENCEO_ALLOW_DIRTY=1` starts with `dirty=true`
