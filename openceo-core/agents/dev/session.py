@@ -2193,7 +2193,9 @@ class DevSessionManager:
             detail = (f"converted to objective {outcome.detail}"
                       if converted
                       else f"closed {outcome.commit_sha[:12] if outcome.commit_sha else ''}")
-            s_params = dict(params or {})
+            s_params = dict(
+                outcome.params if outcome.params is not None
+                else (params or {}))
             s_params.pop("_objective_close", None)
             if not converted and task.get("objective_id"):
                 # The cycle already notified the objective post-persist:
@@ -2213,7 +2215,11 @@ class DevSessionManager:
                 params=s_params,
                 cost_runs=list(getattr(outcome, "cost_runs", None) or []),
             )
-        outcome_params = dict(params or {})
+        # The cycle may have patched the ticket params mid-run (TASK-2026-00366):
+        # prefer its closing snapshot over the run-start one, or run_task
+        # would persist the stale snapshot over the cycle's writes.
+        outcome_params = dict(
+            outcome.params if outcome.params is not None else (params or {}))
         if outcome.agent_result is not None:
             outcome_params["agent_result"] = outcome.agent_result
         declined = outcome.reason == "agent_blocked"
