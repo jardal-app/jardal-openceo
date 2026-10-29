@@ -501,3 +501,251 @@ async def test_s_no_change_close_preserves_review_and_creates_no_empty_commit(re
     assert result.status == "completed"
     cycle._review_rounds.assert_awaited_once()
     assert git(repo, "rev-parse", "HEAD") == base
+
+
+# --- TASK-2026-00375: capture + ProgressGuard in A/B/C and generic agent ---
+#
+# Fakes only: scripted executors, a dict-backed incidents collection, synthetic
+# git repos. No network, no CLI, no LLM.
+
+
+class _FakeIncidents:
+    """Async dict-backed incidents collection for brake tests."""
+
+    def __init__(self) -> None:
+        self.docs: dict[str, dict] = {}
+
+    async def insert_one(self, doc: dict) -> SimpleNamespace:
+        self.docs[doc["_id"]] = dict(doc)
+        return SimpleNamespace(inserted_id=doc["_id"])
+
+    async def count_documents(self, filt: dict) -> int:
+        since = (filt.get("created_at") or {}).get("$gte")
+        want = filt.get("fingerprint")
+        total = 0
+        for doc in self.docs.values():
+            if want is not None and doc.get("fingerprint") != want:
+                continue
+            if since is not None and doc.get("created_at") < since:
+                continue
+            total += 1
+        return total
+
+
+def _brake_store(fake: _FakeIncidents) -> SimpleNamespace:
+    return SimpleNamespace(
+        db={"reliability_incidents": fake},
+        get_task=AsyncMock(return_value=None),
+        patch_task=AsyncMock(return_value={}))
+
+
+def _gate_result(status: str) -> SimpleNamespace:
+    return SimpleNamespace(name="g1", status=status, required=True,
+                           detail="", output_tail="")
+
+
+def _hecho_step() -> CodingStepResult:
+    return CodingStepResult(
+        step={"step": "code", "status": "ok"}, prompt="p", summary="s",
+        agent_result={"resultado": "hecho", "motivo": "ok",
+                      "entregables": ["x"], "evidencia": "done"})
+
+
+def _dev_project(repo) -> dict:
+    return {"project": {"repos": [{"local_path": str(repo)}]}, "dev": {}}
+
+
+@run_async
+async def test_brake_gate_recovered_within_budget_records_no_incident(repo):
+    fake = _FakeIncidents()
+    dev = manager()
+    dev._repo = _brake_store(fake)
+    (repo / ".openceo").mkdir(exist_ok=True)
+    (repo / ".openceo" / "HANDOFF.md").write_text("word " * 40)
+    dev._step_code = AsyncMock(return_value=_hecho_step())
+    dev._simple_followup = AsyncMock(
+        return_value={"engine": "test", "duration_s": 0.1})
+    with patch("agents.dev.session.run_gates",
+               side_effect=[[], [_gate_result("fail")],
+                             [_gate_result("pass")]]):
+        output = await dev._run_simple_tool(
+            {"task_id": "t-375-a", "title": "probe", "params": {}},
+            _dev_project(repo), CodingTool.TIER_B, {})
+    assert output.status == TaskStatus.COMPLETED
+    assert fake.docs == {}
+    milestones = output.params["progress_guard"]["milestones"]
+    assert "gate-fixed" in milestones
+    assert "phase-closed" in milestones
+    assert output.params["progress_guard"]["window"]
+
+
+@run_async
+async def test_brake_gates_exhausted_records_brake_exhausted_task(repo):
+    fake = _FakeIncidents()
+    dev = manager()
+    dev._repo = _brake_store(fake)
+    dev._step_code = AsyncMock(return_value=_hecho_step())
+    project = _dev_project(repo)
+    project["dev"] = {"tier_s": {"budgets": {"gate_retries": 0}}}
+    with patch("agents.dev.session.run_gates",
+               side_effect=[[], [_gate_result("fail")]]):
+        output = await dev._run_simple_tool(
+            {"task_id": "t-375-b", "title": "probe", "params": {}},
+            project, CodingTool.TIER_B, {})
+    assert output.status == TaskStatus.FAILED
+    assert "gates failed after 0 retries" in output.error
+    assert len(fake.docs) == 1
+    doc = next(iter(fake.docs.values()))
+    assert doc["kind"] == "brake_exhausted"
+    assert doc["component"] == "dev_session"
+    assert doc["engine"]["brake"] == "gates"
+    assert doc["attribution"] == "task"
+    assert doc["shadow"] is False
+    assert output.params["progress_guard"]["window"]
+
+
+@run_async
+async def test_brake_credential_error_attributes_environment():
+    fake = _FakeIncidents()
+    dev = manager()
+    dev._repo = _brake_store(fake)
+    dev._step_code = AsyncMock(return_value=CodingStepResult(
+        step={"step": "code", "status": "failed"}, prompt="p", summary="",
+        error="invalid API key: auth failed (credential expired)"))
+    output = await dev._run_simple_tool(
+        {"task_id": "t-375-c", "params": {}}, {}, CodingTool.TIER_B, {})
+    assert output.status == TaskStatus.FAILED
+    assert len(fake.docs) == 1
+    doc = next(iter(fake.docs.values()))
+    assert doc["kind"] == "terminal_failure"
+    assert doc["attribution"] == "environment"
+    assert output.params["progress_guard"]["window"]
+
+
+@run_async
+async def test_brake_shadow_would_stop_keeps_loop_running(repo):
+    fake = _FakeIncidents()
+    dev = manager()
+    dev._repo = _brake_store(fake)
+    base = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "-b", "tier/brake")
+    branch = _SimpleBranch(repo, "tier/brake", "main", base, "t")
+    params: dict = {}
+    output = None
+    for _ in range(3):
+        candidate = DevExecutionOutput(
+            status=TaskStatus.FAILED, error="boom", params=params)
+        output = await dev._reliability_finish(
+            {"task_id": "t-375-d", "params": {}}, CodingTool.TIER_B,
+            branch, candidate)
+        assert output.status == TaskStatus.FAILED
+        params = output.params
+    terminals = [doc for doc in fake.docs.values()
+                 if doc["kind"] == "terminal_failure"]
+    assert len(terminals) == 3
+    stalls = [doc for doc in fake.docs.values() if doc["kind"] == "stall"]
+    assert len(stalls) == 1
+    assert stalls[0]["shadow"] is True
+    assert stalls[0]["severity"] == "high"
+    assert stalls[0]["engine"]["guard_rule"] == "G1"
+    assert params["brake"]["rule"] == "G1"
+    assert params["brake"]["mode"] == "shadow"
+    assert params["brake"]["shadow"] is True
+
+
+@run_async
+async def test_brake_dev_scheduled_wait_cap_records_brake_exhausted():
+    from objectives.agent_result import SCHEDULED_WAIT_MAX_DECLINES
+
+    fake = _FakeIncidents()
+    dev = manager()
+    dev._repo = _brake_store(fake)
+    verdict = wait_result().model_dump(mode="json")
+    declined = SCHEDULED_WAIT_MAX_DECLINES - 1
+    out = dev._return_agent_verdict(
+        {"task_id": "t-375-e", "params": {"scheduled_wait_count": declined}},
+        CodingTool.TIER_B, None,
+        CodingStepResult(step={"step": "code", "status": "ok"},
+                         prompt="p", summary="wait",
+                         agent_result=dict(verdict)),
+        {"scheduled_wait_count": declined})
+    assert out.status == TaskStatus.WAITING
+    assert "needs_owner: scheduled_wait" in out.waiting_reason
+    finished = await dev._reliability_finish(
+        {"task_id": "t-375-e", "params": {}}, CodingTool.TIER_B, None, out)
+    assert finished.status == TaskStatus.WAITING
+    assert len(fake.docs) == 1
+    doc = next(iter(fake.docs.values()))
+    assert doc["kind"] == "brake_exhausted"
+    assert doc["engine"]["brake"] == "scheduled_wait"
+    assert doc["attribution"] == "environment"
+
+
+@run_async
+async def test_brake_generic_hecho_records_no_incident(tmp_path):
+    from orchestration.generic_agent import run_generic_agent
+    from test_generic_agent_205 import (generic_task, hecho_stdout,
+                                        scripted_executor, tiny_catalog,
+                                        wiring_with)
+
+    fake = _FakeIncidents()
+    factory, _calls = scripted_executor(
+        ExecResult(0, 1, output_tail=hecho_stdout("listo")))
+    wiring = wiring_with(
+        tmp_path, tiny_catalog({"operations": {"enabled": True}}), factory,
+        repo=SimpleNamespace(db={"reliability_incidents": fake}))
+    out = await run_generic_agent("operations", generic_task(), wiring)
+    assert out["status"] == "completed"
+    assert fake.docs == {}
+    assert "agent-hecho" in out["params"]["progress_guard"]["milestones"]
+
+
+@run_async
+async def test_brake_generic_bloqueado_records_terminal_failure(tmp_path):
+    from orchestration.generic_agent import run_generic_agent
+    from test_generic_agent_205 import (generic_task, scripted_executor,
+                                        tiny_catalog, verdict_stdout,
+                                        wiring_with)
+
+    fake = _FakeIncidents()
+    factory, _calls = scripted_executor(
+        ExecResult(0, 1, output_tail=verdict_stdout("bloqueado", "stuck")))
+    wiring = wiring_with(
+        tmp_path, tiny_catalog({"operations": {"enabled": True}}), factory,
+        repo=SimpleNamespace(db={"reliability_incidents": fake}))
+    out = await run_generic_agent("operations", generic_task(), wiring)
+    assert out["status"] == "failed"
+    assert len(fake.docs) == 1
+    doc = next(iter(fake.docs.values()))
+    assert doc["kind"] == "terminal_failure"
+    assert doc["component"] == "generic_agent"
+    assert out["params"]["progress_guard"]["window"]
+
+
+@run_async
+async def test_brake_generic_scheduled_wait_cap_records_brake(tmp_path):
+    from objectives.agent_result import SCHEDULED_WAIT_MAX_DECLINES
+    from orchestration.generic_agent import run_generic_agent
+    from test_generic_agent_205 import (generic_task, scripted_executor,
+                                        tiny_catalog, wiring_with)
+
+    fake = _FakeIncidents()
+    verdict = wait_result()
+    factory, _calls = scripted_executor(
+        ExecResult(0, 1, output_tail=verdict.model_dump_json()))
+    wiring = wiring_with(
+        tmp_path, tiny_catalog({"operations": {"enabled": True}}), factory,
+        repo=SimpleNamespace(db={"reliability_incidents": fake}))
+    out = await run_generic_agent(
+        "operations",
+        generic_task(params={"scheduled_wait_count":
+                             SCHEDULED_WAIT_MAX_DECLINES - 1}),
+        wiring)
+    assert out["status"] == "waiting"
+    assert "needs_owner: scheduled_wait" in out["waiting_reason"]
+    assert out.get("resume_at") is None
+    assert len(fake.docs) == 1
+    doc = next(iter(fake.docs.values()))
+    assert doc["kind"] == "brake_exhausted"
+    assert doc["engine"]["brake"] == "scheduled_wait"
+    assert doc["attribution"] == "environment"

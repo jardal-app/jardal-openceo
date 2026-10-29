@@ -480,7 +480,9 @@ class DevSessionManager:
                 output = await self._run_tier_s(task, project_config, qa_cfg)
             else:
                 output = await self._run_simple_tool(task, project_config, decision.tool, qa_cfg)
-        except Exception:
+        except Exception as exc:
+            if decision.tool is not None and decision.tool is not CodingTool.TIER_S:
+                await self._capture_simple_exception(task, decision.tool, exc)
             if outer_lock:
                 assert repo is not None
                 await self._repo.release_repo_lock(repo, holder)
@@ -579,7 +581,7 @@ class DevSessionManager:
             output.status = TaskStatus.WAITING
             output.waiting_reason = code_result.waiting_reason
             output.resume_at = code_result.resume_at or (datetime.now(timezone.utc) + timedelta(hours=2))
-            return output
+            return await self._reliability_finish(task, tool, branch, output)
         if code_result.error:
             if branch is not None:
                 self._save_simple_checkpoint(branch, output.params)
@@ -590,23 +592,28 @@ class DevSessionManager:
             else:
                 output.status = TaskStatus.FAILED
                 output.error = code_result.error
-            return output
+                if code_result.provider_retryable:
+                    self._hint_reliability_capture(output, {
+                        "kind": "brake_exhausted", "brake": "provider"})
+            return await self._reliability_finish(task, tool, branch, output)
 
         verdict = (code_result.agent_result or {}).get("resultado")
         if verdict in {"bloqueado", "no_aplica"}:
             # The agent declined: no gates, no merge. The verdict rides
             # in params for the post-persist return (TASK-2026-00202).
-            return self._return_agent_verdict(
-                task, tool, branch, code_result, output.params)
+            return await self._reliability_finish(
+                task, tool, branch, self._return_agent_verdict(
+                    task, tool, branch, code_result, output.params))
 
         if branch is None:
             if resolve_review(task).mode != REVIEW_OFF:
                 output.steps.append(self._step(
                     "review", "skipped", "no repo snapshot available"))
             output.status = TaskStatus.COMPLETED
-            return output
-        return await self._finish_simple_tool(
-            task, project_config, tool, output, branch)
+            return await self._reliability_finish(task, tool, branch, output)
+        return await self._reliability_finish(task, tool, branch,
+            await self._finish_simple_tool(
+                task, project_config, tool, output, branch))
 
     # -- simple-tier git flow (F5, §10/§12) -------------------------------------
 
@@ -898,6 +905,11 @@ class DevSessionManager:
                 "; ".join(f"{item.name}={item.status}" for item in results)
                 or "no gates configured"))
             if not failed:
+                if attempt:
+                    module = self._loop_brake()
+                    if module is not None:
+                        self._note_reliability_milestone(
+                            output, module.MILESTONE_GATE_FIXED)
                 return results
             if tool == CodingTool.TIER_C:
                 await self._record_tier_c_event(task, "cycle_failure")
@@ -949,6 +961,221 @@ class DevSessionManager:
                     else (task.get("params") or {}))
         full[REVIEW_ROUND_PARAMS_KEY] = checkpoint
         output.params = full
+
+    # -- reliability hunter (TASK-2026-00375, design v2 §4.5 + §5.2) --------
+
+    @staticmethod
+    def _loop_brake():
+        """Shared capture/brake helper; None when unavailable (fail-open)."""
+        try:
+            from reliability import loop_brake as module
+            return module
+        except Exception:
+            logger.warning("reliability loop brake unavailable (fail-open)",
+                           exc_info=True)
+            return None
+
+    def _note_reliability_milestone(
+        self, output: DevExecutionOutput, name: str,
+    ) -> None:
+        """Record an orchestrator-emitted milestone (§4.3) for the finish."""
+        module = self._loop_brake()
+        if module is None:
+            return
+        params = output.params if isinstance(output.params, dict) else {}
+        output.params = params
+        milestones = params.get(module.MILESTONE_KEY)
+        if not isinstance(milestones, list):
+            milestones = []
+            params[module.MILESTONE_KEY] = milestones
+        if name not in milestones:
+            milestones.append(name)
+
+    def _hint_reliability_capture(
+        self, output: DevExecutionOutput, hint: dict[str, Any],
+    ) -> None:
+        """Leave an explicit capture hint for the attempt finish."""
+        module = self._loop_brake()
+        if module is None:
+            return
+        params = output.params if isinstance(output.params, dict) else {}
+        output.params = params
+        params[module.CAPTURE_HINT_KEY] = dict(hint)
+
+    @staticmethod
+    def _reliability_plan(
+        output: DevExecutionOutput, hint: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Map one attempt outcome to executed/marker/capture (no I/O)."""
+        reason = str(output.waiting_reason or "")
+        error = str(output.error or "")
+        if output.status == TaskStatus.COMPLETED:
+            return {"executed": True, "marker": "hecho", "capture": None}
+        if output.status == TaskStatus.WAITING:
+            if reason.startswith("scheduled_wait:"):
+                return {"executed": False, "marker": "waiting:scheduled",
+                        "capture": None}
+            if "needs_owner: scheduled_wait" in reason:
+                return {"executed": True, "marker": "brake_exhausted:scheduled_wait",
+                        "capture": {"kind": "brake_exhausted", "brake": "scheduled_wait"}}
+            if "needs_owner: review quorum unreachable" in reason:
+                return {"executed": True, "marker": "brake_exhausted:quorum",
+                        "capture": {"kind": "brake_exhausted", "brake": "quorum"}}
+            if "needs_owner: review findings without verdict" in reason:
+                return {"executed": True, "marker": "brake_exhausted:correction",
+                        "capture": {"kind": "brake_exhausted", "brake": "correction"}}
+            if hint is not None and hint.get("capture") == "none":
+                return {"executed": bool(hint.get("executed", False)),
+                        "marker": "waiting:held", "capture": None}
+            return {"executed": output.resume_at is None,
+                    "marker": f"waiting:{reason[:60]}".strip(),
+                    "capture": None}
+        if hint is not None and hint.get("kind"):
+            brake = str(hint.get("brake") or "")
+            marker = f"brake_exhausted:{brake}" if brake else "failed"
+            return {"executed": True, "marker": marker, "capture": dict(hint)}
+        if "gates failed after" in error:
+            return {"executed": True, "marker": "brake_exhausted:gates",
+                    "capture": {"kind": "brake_exhausted", "brake": "gates"}}
+        verdict = ""
+        params = output.params if isinstance(output.params, dict) else {}
+        agent_result = params.get("agent_result")
+        if isinstance(agent_result, dict):
+            verdict = str(agent_result.get("resultado") or "")
+        marker = verdict if verdict in ("bloqueado", "no_aplica") else "terminal_failure"
+        return {"executed": True, "marker": marker,
+                "capture": {"kind": "terminal_failure"}}
+
+    async def _reliability_finish(
+        self,
+        task: dict[str, Any],
+        tool: CodingTool,
+        branch: _SimpleBranch | None,
+        output: DevExecutionOutput,
+    ) -> DevExecutionOutput:
+        """Attempt-boundary capture plus ProgressGuard (shadow by default).
+
+        The guard state lands in ``output.params`` next to ``dev_checkpoint``,
+        so the funnel persists both in the same atomic write. Shadow
+        would-stops record a ``stall`` with ``shadow=true`` and let the loop
+        continue; enforce stops park the ticket as stalled with no resume.
+        """
+        module = self._loop_brake()
+        if module is None:
+            return output
+        params = output.params if isinstance(output.params, dict) else {}
+        output.params = params
+        hint = module.take_capture_hint(params)
+        milestones = module.take_milestones(params)
+        if output.status == TaskStatus.COMPLETED \
+                and module.MILESTONE_PHASE_CLOSED not in milestones:
+            milestones.append(module.MILESTONE_PHASE_CLOSED)
+        task_id = str(task.get("task_id") or "")
+        phase = tool.value if isinstance(tool, CodingTool) else str(tool or "build")
+        attempt_id = module.next_attempt_id(task_id, params)
+        plan = self._reliability_plan(output, hint)
+        marker = str(plan["marker"])
+        result_sig = module.make_result_sig(phase, marker)
+        if branch is not None:
+            work_fp, fp_complete = module.dev_work_fp(
+                str(branch.repo), branch.base_sha)
+        else:
+            work_fp, fp_complete = "unknown", False
+        mode = module.guard_mode(module.DEV_PRODUCER)
+        now = module.utcnow_iso()
+        for milestone in dict.fromkeys(milestones):
+            module.evaluate_attempt(
+                params, producer=module.DEV_PRODUCER, phase=phase,
+                attempt_id=attempt_id, result_sig=result_sig, work_fp=work_fp,
+                fp_complete=fp_complete, executed=bool(plan["executed"]),
+                milestone=milestone, mode=mode, now=now)
+        decision = module.evaluate_attempt(
+            params, producer=module.DEV_PRODUCER, phase=phase,
+            attempt_id=attempt_id, result_sig=result_sig, work_fp=work_fp,
+            fp_complete=fp_complete, executed=bool(plan["executed"]),
+            mode=mode, now=now)
+        module.brake_record(params, decision, mode=mode, now=now)
+        if decision.get("brake_error"):
+            await module.record_async(
+                self._repo, kind="exception", component="reliability",
+                task_id=task_id, attempt_id=attempt_id, phase=phase,
+                exc_text=str(decision["brake_error"])[:300],
+                message="progress guard failed open; the loop continues"[:300])
+        capture = plan["capture"]
+        if capture is not None:
+            await self._capture_attempt(
+                module, task_id, phase, attempt_id, capture, output)
+        if decision.get("incident"):
+            await module.record_async(
+                self._repo, kind="stall", component="dev_session",
+                task_id=task_id, attempt_id=attempt_id, phase=phase,
+                guard_rule=str(decision.get("rule") or ""),
+                result_signature=result_sig,
+                shadow=bool(decision.get("shadow", True)),
+                message=f"progress brake {decision.get('rule')} "
+                        f"({decision.get('action')})"[:300])
+        if decision.get("action") == "stop":
+            if branch is not None:
+                try:
+                    self._save_simple_checkpoint(branch, params)
+                except Exception:
+                    logger.warning("stalled checkpoint failed (fail-open)",
+                                   exc_info=True)
+            rule = str(decision.get("rule") or "")
+            kept = branch.branch if branch is not None else "n/a"
+            output.status = TaskStatus.WAITING
+            output.waiting_reason = (
+                f"stalled_no_progress: {rule} in phase '{phase}'. "
+                "Motivo: el freno nativo detuvo el bucle tras intentos sin "
+                "avance. Condición de reanudación: nuevo diff en la rama, "
+                "informe de review nuevo o gate en verde; solo el Owner u "
+                f"otro actor autorizado rearma el freno (rama conservada: {kept}).")
+            output.resume_at = None
+        return output
+
+    async def _capture_attempt(
+        self,
+        module: Any,
+        task_id: str,
+        phase: str,
+        attempt_id: str,
+        capture: dict[str, Any],
+        output: DevExecutionOutput,
+    ) -> None:
+        """Record one attempt-boundary incident (never breaks the loop)."""
+        kind = str(capture.get("kind") or "terminal_failure")
+        brake = str(capture.get("brake") or "")
+        error = str(output.error or output.waiting_reason or "")
+        if kind == "brake_exhausted":
+            reason = brake or error[:120]
+            await module.record_async(
+                self._repo, kind=kind, component="dev_session",
+                task_id=task_id, attempt_id=attempt_id, phase=phase,
+                brake=brake or None, reason_code=reason or None,
+                message=error[:500] or None)
+            return
+        reason_code = module.terminal_reason_code(error)
+        await module.record_async(
+            self._repo, kind="terminal_failure", component="dev_session",
+            task_id=task_id, attempt_id=attempt_id, phase=phase,
+            reason_code=reason_code, message=error[:500] or None)
+
+    async def _capture_simple_exception(
+        self, task: dict[str, Any], tool: Any, exc: BaseException,
+    ) -> None:
+        """Record one uncontrolled exception, then let the caller re-raise."""
+        try:
+            module = self._loop_brake()
+            if module is None:
+                return
+            phase = tool.value if isinstance(tool, CodingTool) else str(tool or "build")
+            await module.record_async(
+                self._repo, kind="exception", component="dev_session",
+                task_id=str(task.get("task_id") or ""), phase=phase,
+                exc_type=type(exc).__name__, exc_text=str(exc)[:300],
+                message=f"unhandled: {exc}"[:500])
+        except Exception:
+            logger.warning("exception capture failed (fail-open)", exc_info=True)
 
     @staticmethod
     def _simple_fix_prompt(count: int, missing: list[int]) -> str:
@@ -1373,6 +1600,11 @@ class DevSessionManager:
             "no_quorum_waits": prior_waits}
         self._store_review_checkpoint(task, output, checkpoint)
         valid_n = sum(1 for report in reports if report["valid"])
+        if valid_n:
+            module = self._loop_brake()
+            if module is not None:
+                self._note_reliability_milestone(
+                    output, module.MILESTONE_REVIEW_REPORT)
         output.steps.append(self._step(
             "review", "ok",
             f"quorum {valid_n} valid report(s) from "
@@ -1473,6 +1705,10 @@ class DevSessionManager:
             return gated
         checkpoint["phase"] = "done"
         self._store_review_checkpoint(task, output, checkpoint)
+        module = self._loop_brake()
+        if module is not None:
+            self._note_reliability_milestone(
+                output, module.MILESTONE_FINDING_RESOLVED)
         output.steps.append(self._step(
             "review", "ok",
             f"{len(resolutions)} finding(s) resolved, final gates green"))
