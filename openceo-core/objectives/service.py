@@ -252,7 +252,7 @@ class ObjectiveService:
 
         try:
             mandate = self._config.load_company_mandate()
-        except Exception:
+        except Exception:  # noqa: BLE001
             mandate = None
 
         issuer = issuer_for_repo(repo)
@@ -431,7 +431,7 @@ class ObjectiveService:
             catalog = load_catalog()
             skills = suggestable_skills(
                 catalog, load_all_role_skills(catalog))
-        except Exception:
+        except Exception:  # noqa: BLE001
             skills = {}
         return await playbooks_mod.propose_playbook(
             env, objective_id, "owner_request",

@@ -104,7 +104,7 @@ def build_vault_index(
     """
     try:
         roots = vault_project_read_root(project_config)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return ""
     if not roots:
         return ""

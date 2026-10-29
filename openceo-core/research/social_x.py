@@ -187,5 +187,5 @@ if __name__ == "__main__":
         print(json.dumps({"ok": True, "items": items}))
     except SocialError as exc:
         print(json.dumps({"ok": False, "reason": exc.reason}))
-    except Exception:
+    except Exception:  # noqa: BLE001
         print(json.dumps({"ok": False, "reason": "source_unavailable"}))

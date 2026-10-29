@@ -101,7 +101,7 @@ class OpenCodeSessionManager:
             try:
                 process.kill()
                 await asyncio.wait_for(process.wait(), timeout=10)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
             cleanup_sandbox_scratch(work_dir)
 
@@ -135,7 +135,7 @@ class OpenCodeSessionManager:
             )
             conn.commit()
             conn.close()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning("Failed to clear assistant for %s: %s", session_id, e)
 
     def _build_session_url(self, work_dir: str, session_id: str) -> str:

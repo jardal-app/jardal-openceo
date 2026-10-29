@@ -341,7 +341,7 @@ class QAReviewService:
             if matches:
                 return matches[0]  # Return the first match
             return None
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     async def _run_gh_pr_list(self, work_dir: str, ticket_number: int) -> str | None:
@@ -378,7 +378,7 @@ class QAReviewService:
                 lines.append(f"    branch: {head} → {base}")
 
             return "\n".join(lines) if lines else None
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     async def _run_git_log_grep(self, work_dir: str, ticket_number: int) -> str | None:
@@ -397,7 +397,7 @@ class QAReviewService:
             if output:
                 return f"Commits relacionados:\n{output}"
             return None
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     # ------------------------------------------------------------------

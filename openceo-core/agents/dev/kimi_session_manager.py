@@ -63,7 +63,7 @@ class KimiSessionManager:
                         record = json.loads(first_line)
                         if record.get("role") == "_system_prompt":
                             return record
-                except Exception:
+                except Exception:  # noqa: BLE001, S112
                     continue
         return None
 
@@ -250,7 +250,7 @@ class KimiSessionManager:
                     state["custom_title"] = f"QA {state.get('custom_title', 'Session')}"
                     with open(state_path, "w", encoding="utf-8") as f:
                         json.dump(state, f, indent=2, ensure_ascii=False)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
 
         kimi_web_base = os.environ.get("KIMI_WEB_BASE_URL", "https://kimi.jardal.app")

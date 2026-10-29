@@ -66,7 +66,7 @@ def _now() -> datetime:
 def _zone(timezone_name: str) -> ZoneInfo:
     try:
         return ZoneInfo(timezone_name)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return ZoneInfo("UTC")
 
 

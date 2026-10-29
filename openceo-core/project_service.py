@@ -135,6 +135,6 @@ class ProjectService:
                 presets[k] = entry
                 if p_num is not None:
                     presets[str(p_num)] = entry
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
         return presets

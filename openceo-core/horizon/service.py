@@ -1657,7 +1657,7 @@ class HorizonService:
             return None, None
         try:
             rows = await lister(project)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None, None
         actives = [
             row
@@ -1863,7 +1863,7 @@ class HorizonService:
             )
             try:
                 decision = requires_owner(owner_action, self._company_mandate())
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 return {
                     "promoted": False,
                     "reason": "invalid_signals",
@@ -2102,7 +2102,7 @@ class HorizonService:
             return []
         try:
             task = await svc.get_task(task_id)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return []
         if not isinstance(task, dict):
             return []

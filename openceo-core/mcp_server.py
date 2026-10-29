@@ -560,7 +560,7 @@ def _register_openceo_tools(
         try:
             result = await task_service.create_task(req)
             return {"ok": True, "task_id": result.get("task_id"), "task": result}
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"ok": False, "status": "error", "message": str(exc)}
 
     async def openceo_create_tickets_batch(tickets: str, autorun: bool = False) -> dict[str, Any]:
@@ -602,7 +602,7 @@ def _register_openceo_tools(
                 result = await task_service.create_task(req)
                 created += 1
                 results.append({"ok": True, "task_id": result.get("task_id"), "task": result})
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 failed += 1
                 results.append({"ok": False, "status": "error", "message": str(exc)})
         return {"ok": True, "created_count": created, "failed_count": failed, "results": results}
@@ -681,7 +681,7 @@ def _register_openceo_tools(
                 result = await task_service.create_task(req)
                 created += 1
                 results.append({"ok": True, "task_id": result.get("task_id"), "task": result})
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 failed += 1
                 results.append({"ok": False, "status": "error", "message": str(exc)})
         return {"ok": True, "created_count": created, "failed_count": failed, "results": results}

@@ -330,14 +330,14 @@ async def migrate_notes(notes: Any, *, horizon: Any, tickets: Any,
             result["errors"].append(
                 {"note_id": note_id, "reason": str(exc)[:80]})
             continue
-        except Exception:
+        except Exception:  # noqa: BLE001
             reason = ("capture_failed" if target == "personal"
                       else "sink_failed")
             result["errors"].append({"note_id": note_id, "reason": reason})
             continue
         try:
             await notes.delete_one({"note_id": note_id})
-        except Exception:
+        except Exception:  # noqa: BLE001
             result["errors"].append(
                 {"note_id": note_id, "reason": "delete_failed"})
     return result

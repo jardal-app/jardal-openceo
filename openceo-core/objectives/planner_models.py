@@ -507,7 +507,7 @@ async def _validate_completion(
         errors.append(f"{where}: completions claim no findings")
     try:
         exists = await task_exists(str(ticket.completes_task_id or ""))
-    except Exception:
+    except Exception:  # noqa: BLE001
         exists = False
     if not exists:
         errors.append(f"{where}: completes unknown "
@@ -621,7 +621,7 @@ async def validate_planner_result(
                 continue
             try:
                 exists = await task_exists(str(dep))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 exists = False
             if not exists:
                 errors.append(f"{where}: blocked_by unknown {dep!r}")

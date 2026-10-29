@@ -107,7 +107,7 @@ def authorized_persons(project_config: Mapping[str, Any] | None) -> list[str]:
             if clean and clean not in seen:
                 seen.append(clean)
         return seen
-    except Exception:
+    except Exception:  # noqa: BLE001
         return []
 
 

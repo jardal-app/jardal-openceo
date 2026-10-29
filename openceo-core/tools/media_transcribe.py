@@ -233,7 +233,7 @@ def transcribe_audio(
             with audio_path.open("rb") as handle:
                 result = client.audio.transcriptions.create(file=(audio_path.name, handle.read()), **payload)
             return result if isinstance(result, str) else str(getattr(result, "text", result))
-        except Exception as exc:  # rate limits, transient 5xx, network blips
+        except Exception as exc:  # rate limits, transient 5xx, network blips  # noqa: BLE001
             last_error = exc
             status = getattr(exc, "status_code", None)
             retriable = status in (408, 429, 500, 502, 503, 504) or "rate limit" in str(exc).lower()
@@ -333,7 +333,7 @@ def transcribe_urls(
                     _remove_audio(audio_file)
                 if sleep_seconds and index < len(urls):
                     time.sleep(sleep_seconds)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 totals["failed"] += 1
                 out.write(f"{MARKER_PREFIX} ERROR {url} {MARKER_PREFIX}\n{exc}\n\n")
                 out.flush()

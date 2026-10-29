@@ -206,7 +206,7 @@ class SocialBroker:
                 raise SocialError("source_timeout") from None
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception:  # noqa: BLE001
                 raise SocialError("source_unavailable") from None
             await self._valid_lease(token)
             grant = await self.authorize(**scope)  # revoke/expiry during I/O discards payload

@@ -89,7 +89,7 @@ def knowledge_target_prefix(project_config: Mapping[str, Any] | None) -> str:
         dev = (project_config or {}).get("dev") or {}
         vault = dev.get("vault_project") or {}
         return str(vault.get("project") or "").strip().strip("/")
-    except Exception:
+    except Exception:  # noqa: BLE001
         return ""
 
 

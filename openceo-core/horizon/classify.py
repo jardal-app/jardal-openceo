@@ -340,7 +340,7 @@ def is_finance_operative(text: str) -> bool:
         )
         from agents.finance.voice_expense import looks_like_expense as _looks_expense
         from agents.finance.voice_income import looks_like_income as _looks_income
-    except Exception as exc:  # pragma: no cover - depende del arbol de imports
+    except Exception as exc:  # pragma: no cover - depende del arbol de imports  # noqa: BLE001
         logger.warning(
             "Finance intent guard unavailable (%s); Horizon keeps the phrase", exc
         )

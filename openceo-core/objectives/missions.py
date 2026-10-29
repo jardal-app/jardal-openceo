@@ -330,7 +330,7 @@ async def create_mission(
                    if not criteria else "")
                 + "."
             )
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
     return mission
 

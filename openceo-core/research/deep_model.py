@@ -49,7 +49,7 @@ class BudgetedDeepModel:
             incoming, outgoing = (Decimal(x) for x in rates)
             if not all(x.is_finite() and x > 0 for x in (incoming, outgoing)):
                 raise ValueError
-        except Exception:
+        except Exception:  # noqa: BLE001
             raise DeepModelError("invalid_price_configuration") from None
         raw_bytes = len(prompt.encode("utf-8"))
         if raw_bytes > 64_000:
@@ -118,7 +118,7 @@ class BudgetedDeepModel:
             raise
         except DeepModelError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001
             raise DeepModelError("model_unavailable") from None
         finally:
             if not settled:

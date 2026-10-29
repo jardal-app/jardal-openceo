@@ -239,7 +239,7 @@ async def write_objective_note(env: Any, objective: Mapping[str, Any]) -> str:
         env.repo, timeout_s)
     try:
         await env.executor.cleanup("closer")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
     if not note.is_file():
         raise RuntimeError(f"closer wrote no note at {relpath}")
@@ -283,7 +283,7 @@ async def write_ticket_note(
         env.repo, timeout_s)
     try:
         await env.executor.cleanup("closer")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
     if not note.is_file():
         raise RuntimeError(f"closer wrote no note at {relpath}")

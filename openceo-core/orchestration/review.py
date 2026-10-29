@@ -471,7 +471,7 @@ def cascade_mandate_threshold() -> Decimal:
         path = (Path(__file__).resolve().parents[2]
                 / "projects" / "company_mandate.yaml")
         mandate = load_mandate_file(path)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return Decimal("0.00")
     if not isinstance(mandate, MandatoEmpresa):
         return Decimal("0.00")
@@ -571,7 +571,7 @@ class CascadeGuard:
             from model_routing import paid as paid_mod
             from model_routing.paths import paid_path
             self._ranking = paid_mod.load_paid_ranking(paid_path())
-        except Exception:
+        except Exception:  # noqa: BLE001
             self._ranking = None
         return self._ranking
 
@@ -580,7 +580,7 @@ class CascadeGuard:
         if loader is not None:
             try:
                 return loader() or None
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return None
         ranking = self._dynamic_ranking()
         if ranking is None:
@@ -1037,7 +1037,7 @@ async def _recover_quorum(
             except asyncio.TimeoutError:
                 outcome = new_outcome(slot, attempt)
                 outcome.update(kind="timeout", reason="review recovery deadline reached")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 outcome = new_outcome(slot, attempt)
                 outcome.update(kind="slot_error", reason=f"{type(exc).__name__}: {exc}"[:300])
             outcomes.append(outcome)

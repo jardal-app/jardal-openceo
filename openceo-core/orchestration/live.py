@@ -274,7 +274,7 @@ class ProcessExecutor:
                 paid_target, config_argv, paid_model = (
                     paid_mod.resolve_paid_review(
                         config_argv, premium=bool(spec.get("premium"))))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 paid_target, paid_model = None, None
             if paid_model is not None:
                 spec = {**spec, "model": paid_model}
@@ -325,7 +325,7 @@ class ProcessExecutor:
                              or role))
             try:
                 badge = await self._badge_provider.mint(role)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 return ExecResult(
                     returncode=1, elapsed_s=0.0,
                     output_tail=f"role badge mint failed: {exc}",
@@ -672,7 +672,7 @@ class RateMonitorQuota:
                 resume = (_blocking_resume(status) + self._margin).isoformat()
                 detail = (f"5h={status.remaining_5h:.0%} "
                           f"weekly={status.remaining_weekly:.0%}")
-            except Exception:
+            except Exception:  # noqa: BLE001
                 resume, detail = None, "monitor unreadable"
             verdicts[str(account)] = QuotaVerdict(
                 ok=False, resume_at=resume, detail=detail)

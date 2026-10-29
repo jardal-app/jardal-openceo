@@ -128,7 +128,7 @@ def site_datetime_to_utc(text: Any, zone: str | None) -> datetime | None:
         return None
     try:
         return naive.replace(tzinfo=site_zone(zone)).astimezone(timezone.utc)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 

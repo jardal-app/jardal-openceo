@@ -496,7 +496,7 @@ async def _run_exact_skill(
     try:
         raw = workflow_path.read_text(encoding="utf-8")
         workflow = service.parse_workflow_text(raw, source=str(workflow_path))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("exact skill %s has an invalid workflow %s: %s",
                        skill_name, workflow_path, exc)
         return _waiting(agent_name,

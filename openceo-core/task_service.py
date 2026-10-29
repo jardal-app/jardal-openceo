@@ -1303,6 +1303,8 @@ class TaskService:
                 "api", loose_spend_source_id(
                     str(existing.get("task_id") or "")))
         except Exception:
+            logger.warning("loose-spend prior lookup failed; proceeding",
+                           exc_info=True)
             prior = None
         if prior is not None and question_answered(prior):
             return None
@@ -1411,6 +1413,7 @@ class TaskService:
             logger.warning(
                 "Default phase workflow kept human QA: project %r unreadable",
                 project,
+                exc_info=True,
             )
             return phases
         if project_requires_human_review(project_config):
@@ -1524,6 +1527,8 @@ class TaskService:
                 else:
                     applied += 1
             except Exception as exc:
+                logger.warning("bulk transition failed for %s", task_id,
+                               exc_info=True)
                 failed += 1
                 errors.append({"task_id": task_id, "error": str(exc)})
         return {"applied": applied, "failed": failed, "errors": errors}
@@ -1988,6 +1993,8 @@ class TaskService:
             try:
                 task = await repo.get_task(exec_id)
             except Exception:
+                logger.warning("execution lookup failed for %s", exec_id,
+                               exc_info=True)
                 task = None
             if task:
                 return task
@@ -1996,6 +2003,8 @@ class TaskService:
             try:
                 task = await self.find_task_for_business_ref(ref=ref)
             except Exception:
+                logger.warning("business-ref lookup failed for %s", ref,
+                               exc_info=True)
                 task = None
             if task:
                 return task
@@ -2004,6 +2013,8 @@ class TaskService:
             try:
                 return await repo.find_task_by_business_name(name)
             except Exception:
+                logger.warning("business-name lookup failed for %s", name,
+                               exc_info=True)
                 return None
         return None
 
@@ -2129,6 +2140,8 @@ class TaskService:
         try:
             run = await getattr(self, "_repo").latest_workflow_run_for_task(str(task.get("task_id") or ""))
         except Exception:
+            logger.warning("workflow-run lookup failed for %s",
+                           task.get("task_id"), exc_info=True)
             run = None
         if run and str(run.get("status") or "") == WorkflowRunStatus.BLOCKED_HUMAN.value:
             return "blocked_run_open"
@@ -2139,6 +2152,8 @@ class TaskService:
             try:
                 blocker = await getattr(self, "_repo").get_task(raw)
             except Exception:
+                logger.warning("blocker lookup failed for %s", raw,
+                               exc_info=True)
                 blocker = None
             if blocker and str(blocker.get("status") or "") not in {
                 TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value,
@@ -2199,6 +2214,8 @@ class TaskService:
         try:
             existing = await repo.find_task_by_source(TaskSource.API.value, source_id)
         except Exception:
+            logger.warning("adoption lookup failed for %s", source_id,
+                           exc_info=True)
             existing = None
         if existing:
             return {"ok": True, "status": "already_adopted", "task_id": existing.get("task_id")}
@@ -3225,6 +3242,8 @@ class TaskService:
         try:
             execution = await repo.get_task(task_id)
         except Exception:
+            logger.warning("rollup execution lookup failed for %s", task_id,
+                           exc_info=True)
             return {"ok": False, "status": "no_execution"}
         parent = str(self._visibility_mirror(execution).get("parent_task") or "")
         parent = parent.strip()
@@ -3591,6 +3610,7 @@ class TaskService:
                 ref=str(business.get("openceo_ref") or "").strip() or None,
             )
         except Exception:
+            logger.warning("rollup execution resolve failed", exc_info=True)
             execution = None
         if isinstance(execution, dict):
             raw = self._visibility_mirror(execution).get("due_date_explicit")
@@ -3738,6 +3758,8 @@ class TaskService:
                     ref=str(doc.get("openceo_ref") or "").strip() or None,
                 )
             except Exception:
+                logger.warning("dependency execution resolve failed",
+                               exc_info=True)
                 dep_execution = None
             try:
                 if await self._estimate_open_ticket(
@@ -4129,6 +4151,7 @@ class TaskService:
                     else:
                         graph_out = await self._graph.execute(task, agent_hint=hint)
                 except Exception as exc:
+                    logger.exception("run_task crashed for %s", task_id)
                     current = await self._repo.get_task(task_id)
                     current_status = str((current or {}).get("status") or "")
                     if (current is not None
@@ -4545,6 +4568,8 @@ class TaskService:
                     found = await self._repo.find_task_by_business_name(
                         name)
                 except Exception:
+                    logger.warning("ticket existence check failed for %s",
+                                   name, exc_info=True)
                     return None
                 return found is not None
 
@@ -4680,6 +4705,8 @@ class TaskService:
                         (item.outputs for item in found
                          if item.name == skill_name), [])
                 except Exception:
+                    logger.warning("role-skill outputs unreadable for %s/%s",
+                                   agent, skill_name, exc_info=True)
                     declared = []
             return await publish_ticket_outputs(
                 agent=agent, skill=skill_name, verdict=verdict,
@@ -5001,6 +5028,8 @@ class TaskService:
             try:
                 origin = await self._repo.get_task(str(origin_task_id))
             except Exception:
+                logger.warning("lock origin lookup failed for %s",
+                               origin_task_id, exc_info=True)
                 origin = None
         origin_key = str(origin_task_id or "").strip() or "no-origin"
         key = (str(source_id or "").strip()
@@ -5126,6 +5155,8 @@ class TaskService:
         try:
             config = loader.load_project(str(project).strip())
         except Exception:
+            logger.warning("lock project config unreadable for %r", project,
+                           exc_info=True)
             return {}
         return dict(config) if isinstance(config, dict) else {}
 
@@ -5139,6 +5170,8 @@ class TaskService:
             try:
                 found = await self._repo.get_task(str(origin_task_id))
             except Exception:
+                logger.warning("lock origin resolve failed for %s",
+                               origin_task_id, exc_info=True)
                 found = None
             if found is not None:
                 return found
@@ -7075,6 +7108,8 @@ class TaskService:
                 try:
                     current = await self._repo.get_task(task_id)
                 except Exception:
+                    logger.warning("loose-apply current lookup failed for %s",
+                                   task_id, exc_info=True)
                     current = None
                 if current is not None and str(
                         current.get("status") or "") == \
@@ -7170,6 +7205,8 @@ class TaskService:
                 try:
                     current = await self._repo.get_task(task_id)
                 except Exception:
+                    logger.warning("loose-return current lookup failed for %s",
+                                   task_id, exc_info=True)
                     current = None
             out = await engine_mod.plan_pedido(
                 env, current or ticket, return_from=entry)
@@ -7205,6 +7242,8 @@ class TaskService:
             try:
                 latest = await self._repo.get_task(task_id)
             except Exception:
+                logger.warning("loose-return latest lookup failed for %s",
+                               task_id, exc_info=True)
                 latest = None
             try:
                 held = await self._hold_decided_spend(
