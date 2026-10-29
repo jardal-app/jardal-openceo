@@ -2423,6 +2423,7 @@ class DevSessionManager:
             MongoLockStore(repo) if repo is not None else InMemoryLockStore(),
             MongoTaskStore(repo) if repo is not None else InMemoryTaskStore(),
             executor, quota=quota, notify=notify,
+            incidents=repo,
             slots=(MongoSlotStore(repo) if repo is not None
                    else InMemorySlotStore()),
             reviews=(MongoReviewStore(repo) if repo is not None
