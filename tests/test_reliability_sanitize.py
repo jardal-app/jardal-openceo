@@ -13,6 +13,7 @@ CORE = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE) not in sys.path:
     sys.path.insert(0, str(CORE))
 
+from reliability.models import SCHEMA_VERSION  # noqa: E402
 from reliability.sanitize import (  # noqa: E402
     MAX_MESSAGE_CHARS,
     is_in_app_frame,
@@ -92,6 +93,29 @@ class SanitizeTests(unittest.TestCase):
         self.assertNotIn("extra", out)
         self.assertEqual(out["engine"]["exc_type"], "ValueError")
         self.assertEqual(len(out["context"]["evidence_refs"]), 10)
+
+    def test_sanitized_incident_carries_schema_version(self) -> None:
+        out = sanitize_incident({"engine": {}, "context": {}})
+        self.assertEqual(out["schema_version"], SCHEMA_VERSION)
+
+    def test_redacts_file_urls_and_traversal(self) -> None:
+        text = sanitize_message("open file:///home/u/x")
+        self.assertNotIn("/home/u/x", text)
+        self.assertIn("[PATH]", text)
+        text = sanitize_message("x /repo/../etc/passwd", repo_root="/repo")
+        self.assertNotIn("etc/passwd", text)
+        self.assertIn("[PATH]", text)
+
+    def test_evidence_refs_are_redacted_but_business_ref_is_verbatim(self) -> None:
+        out = sanitize_incident({
+            "engine": {},
+            "context": {"message": "",
+                        "business_ref": "TASK-2026-00368",
+                        "evidence_refs": ["see a@b.com", "log /etc/passwd"]},
+        })
+        self.assertEqual(out["context"]["business_ref"], "TASK-2026-00368")
+        self.assertIn("[EMAIL]", out["context"]["evidence_refs"][0])
+        self.assertIn("[PATH]", out["context"]["evidence_refs"][1])
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ _KEY_VALUE = re.compile(
 _BARE_TOKEN = re.compile(r"(?i)\b(sk-[A-Za-z0-9_-]{8,}|xox[bap]-?[A-Za-z0-9-]{8,})")
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _URL_CREDS = re.compile(r"(\w+://)[^\s/@]+@")
+_FILE_URL = re.compile(r"(?i)\bfile://[^\s\"']+")
 _DSN = re.compile(r"(?i)\b(dsn\s*[:=]\s*)([^\s,;\"']+)")
 _ABS_PATH = re.compile(r"(?<![\w@:/-])/(?:[\w.-]+/)+[\w.-]+|(?<![\w@:/-])/(?:etc|home|root|tmp|var|opt|usr|mnt|data)(?:/[\w.-]+)*")
 
@@ -46,20 +47,20 @@ def is_in_app_frame(file: str) -> bool:
     return f"/{_IN_APP_PREFIX}" in f"/{normalized}"
 
 
-def is_motor_frame(file: str) -> bool:
-    return f"/{_IN_APP_PREFIX}" in f"/{_normalized_path(file)}"
-
-
 def sanitize_message(text: str, repo_root: str | None = None) -> str:
     redacted = _KEY_VALUE.sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", text or "")
     redacted = _BARE_TOKEN.sub("[REDACTED]", redacted)
     redacted = _URL_CREDS.sub(lambda m: m.group(1) + "[CREDS]@", redacted)
+    redacted = _FILE_URL.sub("[PATH]", redacted)
     redacted = _DSN.sub(lambda m: m.group(1) + "[REDACTED]", redacted)
     redacted = _EMAIL.sub("[EMAIL]", redacted)
     root = (repo_root or "").replace("\\", "/").rstrip("/")
 
     def _path(match: re.Match[str]) -> str:
-        if root and PurePosixPath(match.group(0)).is_relative_to(PurePosixPath(root)):
+        path = PurePosixPath(match.group(0))
+        if ".." in path.parts:
+            return "[PATH]"
+        if root and path.is_relative_to(PurePosixPath(root)):
             return match.group(0)
         return "[PATH]"
 
@@ -80,6 +81,15 @@ def sanitize_frames(frames: list[dict[str, str]]) -> list[str]:
 
 
 def sanitize_incident(payload: dict, repo_root: str | None = None) -> dict:
+    """Redact one captured incident for persistence.
+
+    Runs last in the pipeline: classify/fingerprint operate on the raw
+    incident first, since sanitized frames are plain strings.
+    Identity fields (business_ref, project/task/run ids) travel verbatim;
+    free text (message, evidence_refs) is redacted.
+    """
+    from .models import SCHEMA_VERSION
+
     engine_in = payload.get("engine") if isinstance(payload.get("engine"), dict) else {}
     context_in = payload.get("context") if isinstance(payload.get("context"), dict) else {}
     engine = {key: engine_in[key] for key in ENGINE_FIELDS if key in engine_in}
@@ -88,9 +98,10 @@ def sanitize_incident(payload: dict, repo_root: str | None = None) -> dict:
     if "reason_code" in engine:
         engine["reason_code"] = str(engine["reason_code"])[:120]
     message = sanitize_message(str(context_in.get("message") or ""), repo_root)
-    refs = context_in.get("evidence_refs")
-    refs = [str(ref) for ref in refs[:MAX_EVIDENCE_REFS]] if isinstance(refs, list) else []
+    refs_in = context_in.get("evidence_refs")
+    refs_in = refs_in[:MAX_EVIDENCE_REFS] if isinstance(refs_in, list) else []
+    refs = [sanitize_message(str(ref), repo_root) for ref in refs_in]
     context = {"message": message, "evidence_refs": refs}
     if context_in.get("business_ref") is not None:
         context["business_ref"] = str(context_in["business_ref"])
-    return {"engine": engine, "context": context}
+    return {"schema_version": SCHEMA_VERSION, "engine": engine, "context": context}

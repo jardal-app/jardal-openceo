@@ -21,6 +21,11 @@ from reliability.config import (  # noqa: E402
     validate_reliability_config,
 )
 
+import tempfile  # noqa: E402
+
+from config_loader import ConfigLoader  # noqa: E402
+from settings import Settings  # noqa: E402
+
 
 class ReliabilityConfigTests(unittest.TestCase):
     def test_defaults_are_valid(self) -> None:
@@ -54,12 +59,42 @@ class ReliabilityConfigTests(unittest.TestCase):
         self.assertEqual(effective, RELIABILITY_DEFAULTS)
         self.assertIsNot(effective["guard"], RELIABILITY_DEFAULTS["guard"])
 
+    def test_partial_block_keeps_remaining_defaults(self) -> None:
+        effective = get_reliability_config(
+            {"reliability": {"guard": {"same_work_attempts": 5}}})
+        self.assertEqual(effective["guard"]["same_work_attempts"], 5)
+        self.assertEqual(effective["guard"]["mode"],
+                         RELIABILITY_DEFAULTS["guard"]["mode"])
+        self.assertEqual(effective["guard"]["alternating_attempts"],
+                         RELIABILITY_DEFAULTS["guard"]["alternating_attempts"])
+        self.assertEqual(validate_reliability_config(effective), [])
+
+    def test_top_level_override_preserves_siblings(self) -> None:
+        effective = get_reliability_config({"reliability": {"capture": False}})
+        self.assertIs(effective["capture"], False)
+        self.assertEqual(effective["guard"], RELIABILITY_DEFAULTS["guard"])
+
     def test_code_invariants_are_not_configurable(self) -> None:
         self.assertIs(HUNTER_TICKET_AUTORUN, False)
         self.assertIn("reliability", SELF_DIAGNOSIS_EXCLUDED)
         self.assertNotIn("autorun", RELIABILITY_DEFAULTS["tickets"])
-        for key in RELIABILITY_DEFAULTS:
-            self.assertNotIn("autorun", key)
+        self.assertNotIn("autorun", repr(RELIABILITY_DEFAULTS))
+
+    def test_project_yaml_reliability_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proj = root / "proj"
+            proj.mkdir()
+            loader = ConfigLoader(Settings(_env_file=None,
+                                           PROJECTS_DIR=str(root)))
+            (proj / "project.yaml").write_text(
+                "reliability:\n  capture: false\n", encoding="utf-8")
+            errors = loader.validate_project("proj")
+            self.assertTrue(any("reliability must not be set" in error
+                               for error in errors))
+            (proj / "project.yaml").write_text(
+                "dev:\n  default_provider: codex\n", encoding="utf-8")
+            self.assertEqual(loader.validate_project("proj"), [])
 
 
 if __name__ == "__main__":

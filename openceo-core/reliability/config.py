@@ -129,9 +129,21 @@ def _validate_guard_mode(value: dict[str, Any]) -> list[str]:
                 f"reliability.guard.mode.{producer}: unknown producer (fail-closed)")
         elif mode not in GUARD_MODES:
             errors.append(
-                "reliability.guard.mode.{producer}: must be one of "
-                f"{sorted(GUARD_MODES)}".format(producer=producer))
+                f"reliability.guard.mode.{producer}: must be one of "
+                f"{sorted(GUARD_MODES)}")
     return errors
+
+
+def _deep_merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    out = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge_dict(out[key], value)
+        else:
+            import copy
+
+            out[key] = copy.deepcopy(value)
+    return out
 
 
 def get_reliability_config(merged: dict[str, Any]) -> dict[str, Any]:
@@ -140,5 +152,5 @@ def get_reliability_config(merged: dict[str, Any]) -> dict[str, Any]:
     out = copy.deepcopy(RELIABILITY_DEFAULTS)
     block = merged.get("reliability")
     if isinstance(block, dict):
-        out.update(copy.deepcopy(block))
+        out = _deep_merge_dict(out, copy.deepcopy(block))
     return out

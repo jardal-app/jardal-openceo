@@ -2,6 +2,10 @@
 
 The first matching rule wins and its id stays on the incident. Diagnosis may
 later confirm or correct the attribution; agent free text never changes it.
+Operates on the raw incident, before sanitize_incident redacts it.
+
+Provider brakes are checked before task brakes, so review_quorum stays
+ENVIRONMENT; transient/quota name Tier S waits (WAIT_REASONS).
 """
 
 from __future__ import annotations
@@ -9,7 +13,7 @@ from __future__ import annotations
 from orchestration.provider_recovery import transient_provider_error
 
 from .models import Attribution, Component, IncidentKind
-from .sanitize import is_motor_frame
+from .sanitize import is_in_app_frame
 
 REASON_CODE_MAP_VERSION = 1
 
@@ -21,7 +25,7 @@ _ENVIRONMENT_REASONS = (
 _PROJECT_REASONS = ("pytest", "unittest", "test_", "_test", "test-")
 
 _PROVIDER_BRAKES = ("provider", "quorum", "scheduled_wait", "recovery",
-                    "resume", "retry")
+                    "resume", "retry", "transient", "quota")
 
 _TASK_BRAKES = ("gate", "review", "correction", "fix")
 
@@ -33,7 +37,7 @@ _CONTINUE_MARKERS = ("TICKET_CONTINUE", "CONTINUE")
 
 def _innermost_in_app(frames: list[dict[str, str]]) -> dict[str, str] | None:
     in_app = [frame for frame in frames or []
-              if is_motor_frame(str(frame.get("file") or ""))]
+              if is_in_app_frame(str(frame.get("file") or ""))]
     return in_app[-1] if in_app else None
 
 
@@ -47,6 +51,11 @@ def classify(kind: IncidentKind,
              service_result: str | None = None,
              free_text: str | None = None) -> tuple[Attribution, str]:
     del free_text
+    if isinstance(kind, str):
+        try:
+            kind = IncidentKind(kind)
+        except ValueError:
+            return Attribution.UNKNOWN, "A10"
     if kind is IncidentKind.INVARIANT_VIOLATION:
         return Attribution.ENGINE, "A1"
     if kind is IncidentKind.EXCEPTION:

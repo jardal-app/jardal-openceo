@@ -8,6 +8,7 @@ paths:
 Solo para el paquete base del cazador (epic TASK-2026-00365, diseño v2).
 
 - Sin I/O en este paquete: modelos, saneamiento, huellas, atribución y config. Mongo, spool, socket y worker los owns hijos posteriores.
+- Orden del pipeline: clasificación y huellas operan sobre el incidente crudo; el saneamiento corre en último lugar antes de persistir (sus frames son strings).
 - `schema_version` en todo documento; `fingerprint_version` forma parte de la clave del Problem. Cambiar el algoritmo cierra los anteriores como `superseded`, nunca se reescribe.
 - La huella nunca lleva líneas, rutas ni mensaje; el texto libre es evidencia truncada y jamás decide atribución ni severidad.
 - `classification.py` es el único dueño de A1–A10 y del mapa `reason_code→atribución` (versionado). Los transitorios se reutilizan de `orchestration/provider_recovery.py`, no se duplican.

@@ -46,6 +46,27 @@ class ClassificationTests(unittest.TestCase):
                      exc_text="bad value", frames=MOTOR_FRAMES),
             (Attribution.ENGINE, "A3"),
         )
+        runner_frames = [
+            {"module": "automatico", "function": "main",
+             "line": "1", "file": "automatico.py"},
+        ]
+        self.assertEqual(
+            classify(IncidentKind.EXCEPTION, exc_type="ValueError",
+                     exc_text="bad value", frames=runner_frames),
+            (Attribution.ENGINE, "A3"),
+        )
+
+    def test_str_kind_is_coerced_to_enum(self) -> None:
+        self.assertEqual(
+            classify("exception", exc_type="ValueError",
+                     exc_text="bad value", frames=MOTOR_FRAMES),
+            classify(IncidentKind.EXCEPTION, exc_type="ValueError",
+                     exc_text="bad value", frames=MOTOR_FRAMES),
+        )
+        self.assertEqual(
+            classify("not_a_kind"),
+            (Attribution.UNKNOWN, "A10"),
+        )
 
     def test_auth_error_is_not_transient(self) -> None:
         self.assertEqual(
@@ -79,6 +100,11 @@ class ClassificationTests(unittest.TestCase):
             classify(IncidentKind.BRAKE_EXHAUSTED, brake="scheduled_wait"),
             (Attribution.ENVIRONMENT, "A6"),
         )
+        for brake in ("transient", "quota", "review_quorum"):
+            self.assertEqual(
+                classify(IncidentKind.BRAKE_EXHAUSTED, brake=brake),
+                (Attribution.ENVIRONMENT, "A6"),
+            )
 
     def test_a7_gate_brake_is_task(self) -> None:
         self.assertEqual(
@@ -94,18 +120,19 @@ class ClassificationTests(unittest.TestCase):
 
     def test_a9_terminal_failure_uses_versioned_map(self) -> None:
         self.assertGreaterEqual(REASON_CODE_MAP_VERSION, 1)
-        self.assertEqual(
-            classify(IncidentKind.TERMINAL_FAILURE, reason_code="auth denied"),
-            (Attribution.ENVIRONMENT, "A9"),
-        )
-        self.assertEqual(
-            classify(IncidentKind.TERMINAL_FAILURE,
-                     reason_code="pytest test_x failed"),
-            (Attribution.PROJECT, "A9"),
-        )
-        self.assertEqual(reason_code_attribution("quota exceeded"),
-                         Attribution.ENVIRONMENT)
+        for code, expected in (("auth denied", Attribution.ENVIRONMENT),
+                               ("pytest test_x failed", Attribution.PROJECT),
+                               ("quota exceeded", Attribution.ENVIRONMENT)):
+            self.assertEqual(
+                classify(IncidentKind.TERMINAL_FAILURE, reason_code=code),
+                (expected, "A9"),
+            )
+            self.assertEqual(reason_code_attribution(code), expected)
         self.assertIsNone(reason_code_attribution("mystery"))
+        self.assertEqual(
+            classify(IncidentKind.TERMINAL_FAILURE, reason_code="mystery"),
+            (Attribution.UNKNOWN, "A9"),
+        )
 
     def test_a10_covers_escape_and_leftovers(self) -> None:
         self.assertEqual(
