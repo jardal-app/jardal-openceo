@@ -33,6 +33,8 @@ from objectives.engine import (
     ObjectiveLimitReached,
     ObjectiveRejected,
     ObjectiveEnv,
+    boot_resume_decision,
+    boot_resume_one,
     create_objective,
     convert_ticket,
     plan_objective,
@@ -1467,6 +1469,208 @@ class SharedScratchRootTests(unittest.TestCase):
             1, "goal", "capsule", repo,
             result_path=".openceo/objectives/OBJ-1/OBJECTIVE_CLOSURE.md")
         self.assertIn(f"{engine_mod.SCRATCH_DIRNAME}/status", prompt)
+
+
+class DeadQueuedHistoryTests(unittest.TestCase):
+    """Queued work blocked only by failed blockers is history (00396)."""
+
+    def test_dead_queued_is_history(self) -> None:
+        objective = {"objective_id": "OBJ-1",
+                     "conversion_source_task_id": "shell-1"}
+        zombie = _child("kid-zomb", "queued", dev=True)
+        zombie["blocked_by"] = ["kid-fail"]
+        children = [_child("shell-1", "converted", dev=True),
+                    _child("kid-fail", "failed", dev=True),
+                    zombie,
+                    _child("kid-1", "completed", dev=True)]
+        verdict = verify_delivery(objective, children)
+        self.assertEqual(verdict["open_gaps"], [])
+        self.assertEqual(verdict["data_gaps"], [])
+        self.assertTrue(verdict["ok"])
+        self.assertEqual(verdict["dead_children"], ["kid-zomb"])
+        self.assertEqual(verdict["failed_children"], ["kid-fail"])
+
+    def test_queued_behind_live_blocker_stays_open(self) -> None:
+        objective = {"objective_id": "OBJ-1",
+                     "conversion_source_task_id": "shell-1"}
+        zombie = _child("kid-zomb", "queued", dev=True)
+        zombie["blocked_by"] = ["kid-live"]
+        children = [_child("shell-1", "converted", dev=True),
+                    _child("kid-live", "in_progress", dev=True),
+                    zombie]
+        verdict = verify_delivery(objective, children)
+        self.assertFalse(verdict["ok"])
+        self.assertIn("kid-zomb: still queued", verdict["open_gaps"])
+        self.assertEqual(verdict["dead_children"], [])
+
+    def test_queued_unblocked_stays_open(self) -> None:
+        objective = {"objective_id": "OBJ-1",
+                     "conversion_source_task_id": "shell-1"}
+        children = [_child("shell-1", "converted", dev=True),
+                    _child("kid-wait", "queued", dev=True)]
+        verdict = verify_delivery(objective, children)
+        self.assertFalse(verdict["ok"])
+        self.assertIn("kid-wait: still queued", verdict["open_gaps"])
+        self.assertEqual(verdict["dead_children"], [])
+
+    def test_queued_behind_unknown_blocker_stays_open(self) -> None:
+        objective = {"objective_id": "OBJ-1",
+                     "conversion_source_task_id": "shell-1"}
+        zombie = _child("kid-zomb", "queued", dev=True)
+        zombie["blocked_by"] = ["kid-ghost"]
+        children = [_child("shell-1", "converted", dev=True), zombie]
+        verdict = verify_delivery(objective, children)
+        self.assertFalse(verdict["ok"])
+        self.assertIn("kid-zomb: still queued", verdict["open_gaps"])
+        self.assertEqual(verdict["dead_children"], [])
+
+
+class BootResumeDecisionTests(unittest.TestCase):
+    """Pure boot-resume call: resume_fresh, replan, park or leave."""
+
+    def _objective(self, **over: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "objective_id": "OBJ-1",
+            "conversion_source_task_id": "shell-1",
+            "status": "active", "final_reviews": 0,
+            "waiting_reason": None,
+        }
+        base.update(over)
+        return base
+
+    def _clean(self) -> list[dict[str, Any]]:
+        return [_child("shell-1", "converted", dev=True),
+                _child("kid-1", "completed", dev=True)]
+
+    def test_orphaned_clean_review_resumes_fresh(self) -> None:
+        call = boot_resume_decision(
+            self._objective(status="final_review", final_reviews=1),
+            self._clean(), 2)
+        self.assertEqual(call["action"], "resume_fresh")
+
+    def test_orphaned_gapped_review_with_budget_replans(self) -> None:
+        children = self._clean() + [_child("kid-wait", "queued", dev=True)]
+        call = boot_resume_decision(
+            self._objective(status="final_review", final_reviews=1),
+            children, 2)
+        self.assertEqual(call["action"], "replan")
+
+    def test_orphaned_gapped_review_exhausted_parks(self) -> None:
+        children = self._clean() + [_child("kid-wait", "queued", dev=True)]
+        call = boot_resume_decision(
+            self._objective(status="final_review", final_reviews=2),
+            children, 2)
+        self.assertEqual(call["action"], "park")
+
+    def test_stalled_clean_resumes_fresh(self) -> None:
+        call = boot_resume_decision(
+            self._objective(status="waiting", final_reviews=2,
+                            waiting_reason="stalled: max_final_reviews "
+                                           "reached (§9.6)"),
+            self._clean(), 2)
+        self.assertEqual(call["action"], "resume_fresh")
+
+    def test_stalled_gapped_stays_parked(self) -> None:
+        children = self._clean() + [_child("kid-wait", "queued", dev=True)]
+        call = boot_resume_decision(
+            self._objective(status="waiting", final_reviews=2,
+                            waiting_reason="stalled: max_final_reviews "
+                                           "reached (§9.6)"),
+            children, 2)
+        self.assertEqual(call["action"], "leave")
+
+    def test_other_parks_and_active_stay(self) -> None:
+        for objective in (
+                self._objective(status="active"),
+                self._objective(status="waiting",
+                                waiting_reason="data_gaps: kid-1: missing"),
+                self._objective(status="closed")):
+            call = boot_resume_decision(objective, self._clean(), 2)
+            self.assertEqual(call["action"], "leave")
+
+
+class BootResumeOneTests(unittest.IsolatedAsyncioTestCase):
+    """One boot-resume application over in-memory stores (00396)."""
+
+    def _env(self, objective: dict[str, Any],
+             tasks: list[dict[str, Any]],
+             notices: list[tuple[str, str]]) -> ObjectiveEnv:
+        store = InMemoryObjectiveStore()
+        store.docs[str(objective["objective_id"])] = dict(objective)
+        by_id = {str(row["task_id"]): dict(row) for row in tasks}
+
+        async def notify(ref: str, text: str) -> None:
+            notices.append((ref, text))
+
+        return ObjectiveEnv(
+            objectives=store,
+            tasks=InMemoryTaskLister(by_id),
+            create_ticket=AsyncMock(return_value=None),
+            patch_task=AsyncMock(),
+            executor=MagicMock(), quota=MagicMock(), slots=MagicMock(),
+            reviews=None, inbox=None, notify=notify,
+            repo=Path("/tmp"),
+            objectives_cfg={"max_final_reviews": 2})
+
+    def _clean(self) -> list[dict[str, Any]]:
+        return [_child("shell-1", "converted", dev=True),
+                _child("kid-1", "completed", dev=True)]
+
+    async def test_resume_fresh_resets_notifies_and_plans(self) -> None:
+        notices: list[tuple[str, str]] = []
+        objective = {"objective_id": "OBJ-1",
+                     "conversion_source_task_id": "shell-1",
+                     "status": "waiting", "final_reviews": 2,
+                     "waiting_reason": "stalled: max_final_reviews "
+                                       "reached (§9.6)"}
+        env = self._env(objective, self._clean(), notices)
+        plan = AsyncMock(return_value={"ok": True, "action": "planned"})
+        with patch.object(engine_mod, "plan_objective", new=plan):
+            result = await boot_resume_one(env, "OBJ-1")
+        self.assertEqual(result["action"], "resume_fresh")
+        stored = await env.objectives.get_objective("OBJ-1")
+        assert stored is not None
+        self.assertEqual(stored["status"], "active")
+        self.assertEqual(stored["final_reviews"], 0)
+        self.assertIsNone(stored["waiting_reason"])
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0][0], "shell-1")
+        plan.assert_awaited_once_with(env, "OBJ-1")
+
+    async def test_leave_touches_nothing(self) -> None:
+        notices: list[tuple[str, str]] = []
+        objective = {"objective_id": "OBJ-1",
+                     "conversion_source_task_id": "shell-1",
+                     "status": "active", "final_reviews": 0,
+                     "waiting_reason": None}
+        env = self._env(objective, self._clean(), notices)
+        plan = AsyncMock(return_value={"ok": True})
+        with patch.object(engine_mod, "plan_objective", new=plan):
+            result = await boot_resume_one(env, "OBJ-1")
+        self.assertEqual(result["action"], "leave")
+        self.assertEqual(notices, [])
+        plan.assert_not_awaited()
+        stored = await env.objectives.get_objective("OBJ-1")
+        assert stored is not None
+        self.assertEqual(stored["status"], "active")
+
+    async def test_park_escalates_hopeless_orphan(self) -> None:
+        notices: list[tuple[str, str]] = []
+        objective = {"objective_id": "OBJ-1",
+                     "conversion_source_task_id": "shell-1",
+                     "status": "final_review", "final_reviews": 2,
+                     "waiting_reason": None}
+        children = self._clean() + [_child("kid-wait", "queued", dev=True)]
+        env = self._env(objective, children, notices)
+        plan = AsyncMock(return_value={"ok": True})
+        with patch.object(engine_mod, "plan_objective", new=plan):
+            result = await boot_resume_one(env, "OBJ-1")
+        self.assertEqual(result["reason"], "stalled")
+        plan.assert_not_awaited()
+        self.assertEqual(len(notices), 1)
+        stored = await env.objectives.get_objective("OBJ-1")
+        assert stored is not None
+        self.assertEqual(stored["status"], "waiting")
 
 
 if __name__ == "__main__":

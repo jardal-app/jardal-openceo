@@ -405,6 +405,27 @@ async def lifespan(_: FastAPI):
             await repo.close_orphan_tier_s_runs()
         except Exception:
             logger.warning("Tier S orphan-run reconcile failed", exc_info=True)
+        # One bounded pass, never a sweep loop: objectives orphaned in
+        # final_review by the restart, and stalled objectives whose
+        # deterministic wedge cleared, resume into a fresh episode
+        # (TASK-2026-00396). Backgrounded: planning cycles run headless
+        # and must not block readiness. Never fails boot.
+        try:
+            resume_task = asyncio.create_task(
+                objective_service.boot_resume_objectives())
+
+            def _resume_done(task: asyncio.Task) -> None:
+                try:
+                    logger.info("Objective boot resume: %s", task.result())
+                except Exception:
+                    logger.warning("Objective boot resume failed",
+                                   exc_info=True)
+
+            resume_task.add_done_callback(_resume_done)
+            app.state.objective_boot_resume = resume_task
+        except Exception:
+            logger.warning("Objective boot resume failed to schedule",
+                           exc_info=True)
         # One bounded pass: requeue interrupted work for this boot only; the
         # dispatcher admits it on its startup cycle (TASK-2026-00247).
         try:

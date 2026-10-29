@@ -506,6 +506,54 @@ class ObjectiveService:
         return await engine_mod.plan_objective(
             self.env_for(project), objective_id)
 
+    async def boot_resume_objectives(
+        self, limit: int = 100,
+    ) -> dict[str, Any]:
+        """Run one bounded boot-resume pass (TASK-2026-00396).
+
+        The lifespan schedules this once per boot, in background: each
+        orphaned or parked objective is reconsidered through
+        :func:`engine.boot_resume_one` and resumes only when the
+        deterministic check proves its wedge cleared. One objective
+        never breaks the pass for the rest.
+        """
+        if self._repo is None:
+            return {"ok": False, "reason": "no-store"}
+        summary: dict[str, Any] = {
+            "resumed": [], "replanned": [], "parked": [],
+            "left": 0, "skipped": [], "errors": [],
+        }
+        rows = await self._repo.list_boot_resumable_objectives(limit)
+        for row in rows:
+            objective_id = str((row or {}).get("objective_id") or "")
+            if not objective_id:
+                continue
+            try:
+                project = str((row or {}).get("project") or "")
+                if not project or not self._config.has_project(project):
+                    summary["skipped"].append(objective_id)
+                    continue
+                result = await engine_mod.boot_resume_one(
+                    self.env_for(project), objective_id)
+            except Exception:  # noqa: BLE001 - isolated per objective
+                logger.warning("Boot resume failed for %s",
+                               objective_id, exc_info=True)
+                summary["errors"].append(objective_id)
+                continue
+            action = str(result.get("action") or "leave")
+            if action == "resume_fresh":
+                summary["resumed"].append(objective_id)
+            elif action == "replan":
+                summary["replanned"].append(objective_id)
+            elif result.get("reason") == "stalled":
+                summary["parked"].append(objective_id)
+            elif result.get("ok"):
+                summary["left"] += 1
+            else:
+                summary["errors"].append(objective_id)
+        summary["ok"] = True
+        return summary
+
     async def plan_return(
         self,
         objective_id: str,
