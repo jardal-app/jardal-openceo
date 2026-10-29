@@ -44,6 +44,12 @@ scripts/openceo-core-host.sh restart     # rearranque canónico; nunca `python m
 scripts/openceo-core-host.sh status      # verifica instancia única + dueño del puerto
 ```
 
+`restart` solo despliega desde un commit limpio: escribe el SHA en
+`.runtime/RELEASE` (`{sha, dirty}`) y aborta con cambios rastreados; el
+override explícito `OPENCEO_ALLOW_DIRTY=1` arranca dejando `dirty=true`
+registrado. El core expone esa identidad en `/health` (`release`) y en el
+log de arranque (TASK-2026-00367).
+
 **Instancia única (obligatorio)**: solo un openceo-core por host. El lifespan tiene efectos globales y uvicorn lo ejecuta antes de bindear: una segunda instancia corrompe el estado y muere con `Errno 98`. `main.py` toma un flock en `.runtime/openceo-core-host.lock` y muere con exit 3 si está tomado. No habilitar el script y la unit systemd a la vez.
 
 ---

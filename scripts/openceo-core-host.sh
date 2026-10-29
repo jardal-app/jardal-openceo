@@ -8,6 +8,7 @@ VENV_PY="$ROOT_DIR/.venv/bin/python"
 RUNTIME_DIR="$ROOT_DIR/.runtime"
 PID_FILE="$RUNTIME_DIR/openceo-core-host.pid"
 LOG_FILE="$RUNTIME_DIR/openceo-core-host.log"
+RELEASE_FILE="$RUNTIME_DIR/RELEASE"
 
 mkdir -p "$RUNTIME_DIR"
 
@@ -89,6 +90,12 @@ start() {
   if [[ ! -x "$VENV_PY" ]]; then
     echo "Missing virtualenv python at $VENV_PY"
     echo "Run: scripts/setup.sh"
+    return 1
+  fi
+  # Identidad de release (TASK-2026-00367): solo se despliega desde un
+  # commit limpio. Con cambios rastreados aborta, salvo override explícito
+  # OPENCEO_ALLOW_DIRTY=1, que deja dirty=true registrado en RELEASE.
+  if ! bash "$ROOT_DIR/scripts/write-release.sh" "$ROOT_DIR" "$RUNTIME_DIR"; then
     return 1
   fi
   "$VENV_PY" "$ROOT_DIR/scripts/sync-mcp-config.py" || echo "WARN: MCP config sync failed"
@@ -181,6 +188,9 @@ status() {
     return 2
   fi
   echo "$pid" >"$PID_FILE"
+  if [[ -f "$RELEASE_FILE" ]]; then
+    echo "release: $(cat "$RELEASE_FILE")"
+  fi
   echo "openceo-core host is running (pid $pid) on port ${OPENCEO_PORT}."
 }
 

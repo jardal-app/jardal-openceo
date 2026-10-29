@@ -43,6 +43,12 @@ Full suite (~8 min): `./.venv/bin/python -m pytest tests/ -q`
 scripts/openceo-core-host.sh restart|status
 ```
 
+`restart` deploys only from a clean tree: it writes the SHA to
+`.runtime/RELEASE` (`{sha, dirty}`) and aborts on tracked changes; the
+explicit override `OPENCEO_ALLOW_DIRTY=1` starts with `dirty=true`
+recorded. The core exposes that identity in `/health` (`release`) and in
+the boot log (TASK-2026-00367).
+
 ### Tier S executor contract
 
 **Scope: this contract applies ONLY when your prompt names you a Tier S executor (builder/reviewer). Owner sessions follow CLAUDE.md §9 instead; executors never follow §9.**
