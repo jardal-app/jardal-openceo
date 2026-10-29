@@ -21,7 +21,7 @@ La direccion de arquitectura asigna el trabajo empresarial y la contabilidad a J
 | Guia visual del dashboard | [DESIGN.md](DESIGN.md) |
 | Conocimiento tematico para futuras sesiones | [hub del vault](../jardal-knowledge/vault/projects/jardal/jardal-openceo/jardal-openceo.md) |
 
-La [referencia completa](docs/ARCHITECTURE_REFERENCE_2026.md) conserva las 2.064 lineas del README anterior, mas una advertencia de lectura. Incluye decisiones, disenos futuros, ejemplos y detalles de implementacion: abrir solo la seccion pertinente. El codigo y `STATUS.md` prevalecen cuando describa un comportamiento o estado antiguo. El vault es una ayuda de navegacion en esta VM; los contratos detallados permanecen en `docs/` para no depender del vault.
+La [referencia completa](docs/ARCHITECTURE_REFERENCE_2026.md) conserva las 2.064 lineas del README anterior, mas una advertencia de lectura. Incluye decisiones, disenos futuros, ejemplos y detalles de implementacion: abrir solo la seccion pertinente. El codigo y `STATUS.md` prevalecen cuando describa un comportamiento o estado antiguo. El repo conserva la arquitectura vigente y las referencias tecnicas esenciales; el vault guarda razonamientos, decisiones y aprendizajes. Los planes, borradores y evidencias de tickets siguen el ciclo temporal de `docs/work/`, con el checklist global de conservacion antes de eliminarlos. Un contrato permanece en el repo solo mientras sea una referencia tecnica esencial y mantenida.
 
 ## Mapa del sistema
 
