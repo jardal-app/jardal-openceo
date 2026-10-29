@@ -400,7 +400,7 @@ async def ensure_erp_group(
         return None
     try:
         source = await env.tasks.get_task(source_id)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     name = erp_group_name(source)
     if not name:
@@ -560,7 +560,7 @@ async def _adopt_mission_proposal(
 
     try:
         mission = await store.get_mission(mission_id)
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning("mission %s unreadable (convert stands)",
                        mission_id)
         return
@@ -569,7 +569,7 @@ async def _adopt_mission_proposal(
     try:
         await missions_mod.record_objective_linked(
             store, mission_id, objective_id)
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning("mission ledger failed for %s (convert stands)",
                        mission_id)
     patch = missions_mod.adopt_proposal(mission, acceptance or [])
@@ -624,7 +624,7 @@ async def _adopt_mission_proposal(
             "question_task_id": question_id,
             "question_deadline": str(checkpoint.get("deadline") or ""),
         })
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning("mission adoption failed for %s (convert stands)",
                        mission_id)
 
@@ -702,7 +702,7 @@ async def convert_ticket(
         try:
             await env.objectives.patch_objective(
                 objective_id, {"mission_id": mission_id})
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning("mission link failed for %s (convert "
                            "stands): %s", objective_id, mission_id)
         await _adopt_mission_proposal(env, mission_id, objective_id,
@@ -812,7 +812,7 @@ def _planner_skill_metrics() -> dict[str, str] | None:
                     f"{skill_metrics_mod.success_rate(metrics):.0%} "
                     f"verified over {metrics.uses} uses")
         return notes or None
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -830,7 +830,7 @@ def _planner_skills() -> tuple[str, dict[str, list[str]]]:
         by_agent = load_all_role_skills(catalog)
         index = skills_index_for_planner(
             by_agent, _planner_skill_metrics())
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("planner skills unavailable, skipping skill "
                        "check this cycle: %s", exc)
         return "", {}
@@ -850,7 +850,7 @@ def _planner_playbooks(
     """
     try:
         books = playbooks_mod.load_playbooks(repo)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("playbook index unavailable, skipping playbook "
                        "check this cycle: %s", exc)
         return "", None
@@ -866,7 +866,7 @@ def _planner_catalog() -> Catalog | None:
     """
     try:
         return load_catalog()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("planner catalog unavailable, registry lines stay "
                        "bare this cycle: %s", exc)
         return None
@@ -897,7 +897,7 @@ def _stage_agent_details(
             try:
                 profile = load_role_profile(
                     Path(str(card.profile)).stem, root)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("agent detail for %s without profile: %s",
                                name, exc)
         target = folder / f"{name}.md"
@@ -1228,7 +1228,7 @@ def _planner_prompt(
 async def _task_exists(env: ObjectiveEnv, task_id: str) -> bool:
     try:
         return await env.tasks.get_task(task_id) is not None
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -1767,7 +1767,7 @@ async def _plan_objective_inner(
         prompt = base_prompt + "\n\n" + _planner_retry_prompt(errors, env.repo)
     try:
         await env.executor.cleanup("objective_planner")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
     if errors or result is None:
         return await _objective_park(
@@ -2008,7 +2008,7 @@ async def _mission_guide_section(
         return ""
     try:
         mission = await store.get_mission(mission_id)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return ""
     if mission is None:
         return ""
@@ -2125,7 +2125,7 @@ async def _plan_pedido_inner(
                   "Fix it and rewrite the same OUTPUT file.")
     try:
         await env.executor.cleanup("objective_planner")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
     if errors or result is None:
         params = dict(ticket.get("params") or {})
@@ -2421,7 +2421,7 @@ async def _pending_spend_state(
         return "gone", None
     try:
         question = await env.tasks.get_task(question_id)
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning("spend-hold question %s unreadable; keeping the hold",
                        question_id)
         return "wait", None
@@ -2574,7 +2574,7 @@ async def _objective_park(
                 f"Objective {objective.get('objective_id')} parked "
                 f"({reason}): {str(detail)[:160]}"
             )
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
     return {"ok": False, "reason": reason, "detail": detail}
 
@@ -2700,7 +2700,7 @@ async def _apply_contract_completions(
             continue
         try:
             current = await env.tasks.get_task(task_id)
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning("completion target %s unreadable; skipping",
                            task_id)
             continue
@@ -2922,7 +2922,7 @@ async def _create_planned_tickets(
             for fp in item.includes_findings:
                 try:
                     await inbox_mod.mark_assigned(env.inbox, str(fp), task_id)
-                except Exception:
+                except Exception:  # noqa: BLE001, S112
                     continue
     return created
 
@@ -2988,7 +2988,7 @@ async def on_ticket_closed(
             return {"ok": True, "action": "enqueuer-continues",
                     "ready": len(ready)}
         return await plan_objective(env, objective_id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         if env.notify is not None:
             await env.notify(objective_id, f"objective trigger failed: {exc}")
         return {"ok": False, "reason": str(exc)[:300]}
@@ -3214,7 +3214,7 @@ async def verify_evidence(
             continue
         try:
             report = await verifier(item)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             gaps.append(f"{short}: verifier error: {type(exc).__name__}")
             continue
         if not isinstance(report, Mapping):
@@ -3606,7 +3606,7 @@ async def _persist_final_review(
                   "tier": str(outcome.get("tier") or ""),
                   "spend": outcome.get("spend") or {},
                   "project": objective.get("project")}))
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass  # telemetry persistence never fails a review
 
 
@@ -3628,7 +3628,7 @@ async def _inbox_final_finding(
                 task_id=str(objective.get("conversion_source_task_id") or ""),
                 run_id=f"final-{objective.get('objective_id')}", round_no=0,
                 anchor=findings_mod._anchor_text(anchor) if anchor else ""))
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
 
 
@@ -3695,7 +3695,7 @@ async def _close_objective(
     first = await env.executor.run("closer", prompt, env.repo, timeout_s)
     try:
         await env.executor.cleanup("closer")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
     text = _read(result_path)
     verdicts = parse_closure(text) if first.returncode == 0 else {}
@@ -3710,7 +3710,7 @@ async def _close_objective(
             env.repo, timeout_s))
         try:
             await env.executor.cleanup("closer")
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
         text = _read(result_path)
         verdicts = parse_closure(text) if attempts[-1].returncode == 0 else {}
@@ -3761,7 +3761,7 @@ async def _arbitrate_final(
         verdicts = await env.quota.check([account] if account else [])
         quota_ok = all(getattr(verdict, "ok", True)
                        for verdict in verdicts.values())
-    except Exception:
+    except Exception:  # noqa: BLE001
         quota_ok = False
     if not arbiter or not account or not quota_ok:
         return True  # no arbitration possible: reproduce it (§9.7)
@@ -3773,7 +3773,7 @@ async def _arbitrate_final(
         env.repo, timeout_s)
     try:
         await env.executor.cleanup("arbiter")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
     if result.returncode != 0:
         return True
@@ -3898,7 +3898,7 @@ async def _finish_objective(
             await missions_mod.record_objective_closed(
                 getattr(env, "missions", None), mission_id,
                 objective_id)
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning("mission ledger failed for %s (close stands)",
                            mission_id)
     if env.ceo_wake is not None:
@@ -3911,7 +3911,7 @@ async def _finish_objective(
             )
         try:
             env.ceo_wake(reason)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
     parent_id = str(objective.get("conversion_source_task_id") or "")
     if parent_id:
@@ -3946,7 +3946,7 @@ async def _finish_objective(
     if env.vault:
         try:
             await knowledge_mod.write_objective_note(env, objective)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             if env.notify is not None:
                 await env.notify(
                     ref, f"vault note failed (close stands): {exc}")
@@ -3959,7 +3959,7 @@ async def _finish_objective(
                 env, objective_id, "close",
                 agents=env.planner_cfg.get("agents", {}) or {},
                 skills=hook_skills)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("playbook proposal failed for %s (close "
                            "stands): %s", objective_id, exc)
     return {"ok": True, "action": "closed", "objective_id": objective_id}

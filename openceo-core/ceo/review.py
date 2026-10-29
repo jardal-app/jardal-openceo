@@ -194,7 +194,7 @@ async def _objective_digest(
     objective_id = str(objective.get("objective_id") or "")
     try:
         children = await env.tasks.list_by_objective(objective_id)
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning("CEO: children of %s unreadable", objective_id)
         children = None
     if children is None:
@@ -260,7 +260,7 @@ async def _objective_digest(
         digest["tier_c_late_failure_rate"] = (
             engine_mod.tier_c_late_failure_rate(objective.get("tier_c"))
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         digest["tier_c_late_failure_rate"] = None
     rows = list(children)[:CEO_CHILDREN_PER_OBJECTIVE] \
         if children is not None else None
@@ -284,7 +284,7 @@ async def _mission_digest(
         objective_id = str(item.get("objective_id") or "")
         try:
             objective = await env.objectives.get_objective(objective_id)
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning("CEO: mission objective %s unreadable",
                            objective_id)
             objective = None
@@ -296,7 +296,7 @@ async def _mission_digest(
         children.append({"objective_id": objective_id, "status": status})
         try:
             tickets = await env.tasks.list_by_objective(objective_id)
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning("CEO: children of %s unreadable", objective_id)
             tickets = None
         if tickets is not None:
@@ -307,7 +307,7 @@ async def _mission_digest(
     if shell_id:
         try:
             shell = await env.tasks.get_task(shell_id)
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning("CEO: mission shell %s unreadable", shell_id)
             shell = None
         if isinstance(shell, Mapping):
@@ -317,7 +317,7 @@ async def _mission_digest(
     if question_id:
         try:
             question = await env.tasks.get_task(question_id)
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning("CEO: mission question %s unreadable",
                            question_id)
             question = None
@@ -982,7 +982,7 @@ async def _act_on_decision(
         try:
             result = await env.close_mission(
                 mission_id, reason=str(decision.summary))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {
                 "ok": False, "action": "error",
                 "reason": f"mission close failed: {exc}",
@@ -1024,7 +1024,7 @@ async def _act_on_decision(
             if env.missions is not None:
                 try:
                     mission = await env.missions.get_mission(mission_id)
-                except Exception:
+                except Exception:  # noqa: BLE001
                     mission = None
                 group = (str((mission or {}).get("erp_group_ref") or "")
                          .strip())
@@ -1104,14 +1104,14 @@ async def _expire_mission_questions(
             continue
         try:
             question = await env.tasks.get_task(question_id)
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning("CEO: mission question %s unreadable",
                            question_id)
             continue
         try:
             overdue = missions_mod.mission_question_expired(
                 question, moment)
-        except Exception:
+        except Exception:  # noqa: BLE001, S112
             continue
         if not overdue:
             continue
@@ -1189,7 +1189,7 @@ async def run_review(
                 timeout_s,
             )
             model_runs += 1
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             errors = [f"ceo run failed: {exc}"]
             current_prompt = prompt
             continue
@@ -1216,7 +1216,7 @@ async def run_review(
             break
     try:
         await env.executor.cleanup(CEO_EXECUTOR_ROLE)
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
 
     if decision is None and any(

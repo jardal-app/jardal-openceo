@@ -340,7 +340,7 @@ async def propose_playbook(env: Any, objective_id: str, trigger: str, *,
             pass
         await env.executor.run("objective_planner", prompt, repo,
                                timeout_s)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("playbook proposal run failed for %s: %s",
                        objective_id, exc)
         return {"ok": False, "action": "proposal_error",
@@ -348,7 +348,7 @@ async def propose_playbook(env: Any, objective_id: str, trigger: str, *,
     finally:
         try:
             await env.executor.cleanup("objective_planner")
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
     try:
         text = target.read_text(encoding="utf-8") \

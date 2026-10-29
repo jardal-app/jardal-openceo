@@ -55,7 +55,7 @@ class ConfigLoader:
                             return (int(num), name.lower())
                         except (ValueError, TypeError):
                             pass
-                except Exception:
+                except Exception:  # noqa: BLE001, S110
                     pass
             return (9999, name.lower())
 
@@ -109,7 +109,7 @@ class ConfigLoader:
         try:
             with cfg_path.open("r", encoding="utf-8") as fh:
                 data = yaml.safe_load(fh) or {}
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return [f"{project}/project.yaml: unreadable ({exc})"]
         if not isinstance(data, dict):
             return [f"{project}/project.yaml: top level must be a mapping"]

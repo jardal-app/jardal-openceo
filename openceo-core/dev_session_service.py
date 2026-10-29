@@ -220,7 +220,7 @@ class DevSessionService:
 
                 try:
                     await self._tmux.wait_until_ready(project=project, timeout=45)
-                except Exception:
+                except Exception:  # noqa: BLE001
                     logger.warning("tmux session '%s' started but initial readiness check failed", tmux_name)
                 session_doc.status = DevSessionStatus.WAITING_USER
 
@@ -635,7 +635,7 @@ class DevSessionService:
                 if session.get("status") != DevSessionStatus.RUNNING.value:
                     return
                 await self._run_tmux_turn(session, instruction)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             updated = await self._repo.patch_dev_session(
                 session_id,
                 {

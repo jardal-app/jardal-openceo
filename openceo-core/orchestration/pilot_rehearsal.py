@@ -524,7 +524,7 @@ async def run_pilot_rehearsal(config: RehearsalConfig) -> RehearsalEvidence:
         try:
             await issuer.authenticate(badge)
             evidence.badge["revoked"] = False
-        except Exception:
+        except Exception:  # noqa: BLE001
             evidence.badge["revoked"] = True
 
     denied_probe = gateway.call(_OUT_OF_BOX_TOOL, to="nobody@x.invalid")

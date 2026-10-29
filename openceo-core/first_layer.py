@@ -481,7 +481,7 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
                 raw_content = re.sub(r"\n?```$", "", raw_content)
 
             parsed = json.loads(raw_content)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("FirstLayerGateway classification failed: %s", exc)
             return False, ""
 
@@ -565,7 +565,7 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
                 proj = target_task.get("project", target_proj)
                 try:
                     await self.task_service.retry_task(task_id)
-                except Exception:
+                except Exception:  # noqa: BLE001, S110
                     pass
                 msg = spoken_reply or f"Reintentando ticket #{t_num} en {proj} en segundo plano."
                 return True, msg
@@ -581,7 +581,7 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
                     source="voice",
                     requester=user_id,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 return True, (
                     "No pudimos crear el objetivo en "
                     f"{target_proj}: {str(exc)[:160]}. ¿Lo replanteamos?")
@@ -600,7 +600,7 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
                     source="voice",
                     requester=user_id,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 return True, (
                     "No pudimos crear la misión en "
                     f"{target_proj}: {str(exc)[:160]}. ¿La replanteamos?")
@@ -703,7 +703,7 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
                         )
                         target_tmux = created.get("tmux_session_name") or f"openceo-dev-{target_proj}"
                         await self.repo.set_active_dev_chat_session(user_id, created["session_id"], target_proj)
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         target_tmux = f"openceo-dev-{target_proj}"
                         if not tmux_runtime.has_session_name(target_tmux):
                             tmux_runtime.create_generic_session(target_tmux)
@@ -923,14 +923,14 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
             if provider_param:
                 try:
                     p_hint = DevProvider(provider_param.lower())
-                except Exception:
+                except Exception:  # noqa: BLE001, S110
                     pass
 
             # Sync active project in user context if switching to a new project
             if target_proj != ctx["selected_project"]:
                 try:
                     await self.project_service.select_project(user_id=user_id, project=target_proj)
-                except Exception:
+                except Exception:  # noqa: BLE001, S110
                     pass
 
             # Check if there is already an active dev session running for this project
@@ -970,7 +970,7 @@ Responde SIEMPRE en formato JSON estricto con esta estructura:
                         session_id=active_s_id,
                         payload=DevSessionControlRequest(user_id=user_id, action=SessionControlAction.CANCEL),
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001, S110
                     pass
                 await self.repo.clear_active_dev_chat_session(user_id)
                 return True, f"Sesión dev de {active_s_proj} cerrada y cancelada."

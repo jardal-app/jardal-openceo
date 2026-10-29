@@ -125,7 +125,7 @@ def _clean(value: Any) -> str | None:
 def _project_repos(company_config: Any, project: str) -> list[dict[str, Any]]:
     try:
         loaded = company_config.load_project(project)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return []
     if not isinstance(loaded, dict):
         return []
@@ -152,7 +152,7 @@ def resolve_repo_project(company_config: Any, repo: str) -> str | None:
         return None
     try:
         projects = sorted(company_config.available_projects())
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     for project in projects:
         for entry in _project_repos(company_config, project):
@@ -202,7 +202,7 @@ def classify_action(
     if project:
         try:
             known = company_config.has_project(project)
-        except Exception:
+        except Exception:  # noqa: BLE001
             known = False
         if not known:
             return {

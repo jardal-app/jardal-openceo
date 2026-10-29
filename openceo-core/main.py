@@ -204,7 +204,7 @@ def _dispatcher_repo_for(project: str) -> str | None:
     """Execution repo for the dispatcher lock peek (advisory only)."""
     try:
         project_config = config_loader.load_project(project)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     return execution_repo_for_project_config(project_config)
 
@@ -1237,7 +1237,7 @@ async def jardal_erp_events(
                                                  "error": str(exc)[:300]})
         raise HTTPException(status_code=getattr(exc, "status_code", None) or 400,
                             detail=str(exc)[:300]) from None
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         await store.put_inbox(event["event_id"], {"status": "failed", "type": event["type"],
                                                  "aggregate_id": event["aggregate_id"],
                                                  "error": str(exc)[:300]})
@@ -1614,7 +1614,7 @@ async def bulk_add_users(
                 },
             )
             assigned += 1
-        except Exception:
+        except Exception:  # noqa: BLE001
             failed += 1
 
     return {"assigned": assigned, "failed": failed, "user_id": user_id}
@@ -1651,7 +1651,7 @@ async def bulk_remove_users(
                 },
             )
             removed += 1
-        except Exception:
+        except Exception:  # noqa: BLE001
             failed += 1
 
     return {"removed": removed, "failed": failed, "user_id": user_id}
@@ -3258,7 +3258,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
         realtime_hub.disconnect(websocket)
-    except Exception:
+    except Exception:  # noqa: BLE001
         realtime_hub.disconnect(websocket)
 
 
@@ -4193,7 +4193,7 @@ async def _infer_dev_intent_with_llm(
                 HumanMessage(content=context),
             ]
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
     parsed = _parse_json_object(str(getattr(response, "content", "") or ""))

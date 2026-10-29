@@ -7,6 +7,7 @@ No global polling: bounded drains plus directed replay only.
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -18,6 +19,8 @@ from business.errors import (
     BusinessUnavailable,
     BusinessValidationError,
 )
+
+logger = logging.getLogger(__name__)
 
 INBOUND_TYPES = frozenset({
     "approval.decision",
@@ -280,6 +283,9 @@ async def deliver_outbound(client: Any, entry: dict[str, Any]) -> dict[str, Any]
         await client.request("POST", "/api/v1/integrations/openceo/events",
                              body=body, key=entry["event_id"])
     except Exception as exc:
+        logger.warning(
+            "outbound event %s not delivered: %s", entry.get("event_id"),
+            classify_delivery_error(exc), exc_info=True)
         return {"delivered": False, "outcome": classify_delivery_error(exc), "error": str(exc)[:300]}
     return {"delivered": True, "outcome": "sent"}
 

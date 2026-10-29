@@ -161,9 +161,9 @@ class RateMonitor:
                 try:
                     session.kill_session()
                     logger.info("Reaped pre-fence monitor session '%s'", name)
-                except Exception:
+                except Exception:  # noqa: BLE001, S110
                     pass
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
 
         # Monitor sessions need interactive REPLs so slash commands
@@ -229,7 +229,7 @@ class RateMonitor:
         name = self._monitor_session_name(provider)
         try:
             session = self.server.sessions.get(session_name=name)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return ""
         if session is None:
             return ""
@@ -237,7 +237,7 @@ class RateMonitor:
         try:
             raw = pane.capture_pane(start=-lines, end="-", join_wrapped=True)
             return "\n".join(raw)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return ""
 
     def close_monitor_sessions(self) -> None:
@@ -248,7 +248,7 @@ class RateMonitor:
                 if session is not None:
                     session.kill()
                     logger.info("Killed monitor session '%s'", name)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
 
     # ------------------------------------------------------------------
@@ -359,7 +359,7 @@ class RateMonitor:
             if candidate <= now:
                 candidate += timedelta(days=1)
             return candidate
-        except Exception:
+        except Exception:  # noqa: BLE001
             return now + timedelta(hours=5)
 
     @staticmethod
@@ -386,7 +386,7 @@ class RateMonitor:
             if candidate < now - timedelta(days=1):
                 candidate = candidate.replace(year=now.year + 1)
             return candidate
-        except Exception:
+        except Exception:  # noqa: BLE001
             return now + timedelta(days=7)
 
     @staticmethod
@@ -452,7 +452,7 @@ class RateMonitor:
             if candidate <= now:
                 candidate += timedelta(days=1)
             return candidate
-        except Exception:
+        except Exception:  # noqa: BLE001
             return now + timedelta(hours=5)
 
     # ------------------------------------------------------------------

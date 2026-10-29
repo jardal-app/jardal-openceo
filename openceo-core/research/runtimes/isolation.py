@@ -606,7 +606,7 @@ def _probe_unshare() -> bool:
             check=False,
         )
         return result.returncode == 0
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 

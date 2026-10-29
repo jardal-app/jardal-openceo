@@ -1080,7 +1080,7 @@ def check_catalog(root: str | Path | None = None) -> CatalogStatus:
         catalog = load_catalog(base)
     except CatalogError as exc:
         return CatalogStatus(False, str(base), 0, "", str(exc))
-    except Exception as exc:  # fail closed on anything unexpected too
+    except Exception as exc:  # fail closed on anything unexpected too  # noqa: BLE001
         return CatalogStatus(False, str(base), 0, "",
                              f"unexpected loader failure ({exc})")
     return CatalogStatus(True, str(base), len(catalog.agents),

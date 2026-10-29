@@ -900,7 +900,7 @@ class ResearchSession:
                     partial_text=self._partial_text))
             except SessionBlocked:
                 raise
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 attempt = ProviderTurn(
                     text="", complete=False, error_text=str(exc),
                     failure_stage="before_response")
@@ -1015,7 +1015,7 @@ class ResearchSession:
                     resume=resumed,
                     applied_tools=tuple(self._ledger.values()),
                     partial_text=self._partial_text))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 attempt = ProviderTurn(
                     text="", complete=False, error_text=str(exc),
                     failure_stage="before_response")

@@ -678,6 +678,18 @@ def run_reviews(c: dict, t: dict, s: Settings) -> list[str]:
     return reports
 
 
+RUFF_SCOPE = ("openceo-core/", "automatico.py")
+
+
+def verify_ruff() -> tuple[bool, str]:
+    """TASK-2026-00369 (§16.6): el gate ruff falla con cualquier infracción nueva."""
+    code, out = sh([str(PYTHON), "-m", "ruff", "check", "--config",
+                    "ruff.toml", *RUFF_SCOPE], 300)
+    if code != 0:
+        return False, "ruff gate rojo:\n" + out[-2000:]
+    return True, "ruff OK"
+
+
 def verify_knowledge(c: dict, t: dict) -> tuple[bool, str]:
     if not c["knowledge"]:
         return True, ""
@@ -736,6 +748,9 @@ def verify_code(c: dict, t: dict) -> tuple[bool, str]:
                     "-q"], 900)
     if code != 0:
         return False, "tests rojos:\n" + out[-2000:]
+    ok, why = verify_ruff()
+    if not ok:
+        return False, why
     ok, why = verify_knowledge(c, t)
     if not ok:
         return False, why

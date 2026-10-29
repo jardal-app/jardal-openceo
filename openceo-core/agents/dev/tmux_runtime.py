@@ -96,7 +96,7 @@ class TmuxRuntime:
         try:
             session = self.server.sessions.get(session_name=tmux_session_name)
             return session is not None
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
     def start_session(
@@ -224,7 +224,7 @@ class TmuxRuntime:
 
         try:
             session = self.server.sessions.get(session_name=info.tmux_session_name)
-        except Exception:
+        except Exception:  # noqa: BLE001
             session = None
 
         if session is None:
@@ -392,7 +392,7 @@ class TmuxRuntime:
             return TmuxTurnResult(False, "", False, error="planner_session_missing")
         try:
             session = self.server.sessions.get(session_name=info.tmux_session_name)
-        except Exception:
+        except Exception:  # noqa: BLE001
             session = None
         if session is None:
             return TmuxTurnResult(False, "", False, error="planner_session_missing")
@@ -457,7 +457,7 @@ class TmuxRuntime:
 
         try:
             session = self.server.sessions.get(session_name=info.tmux_session_name)
-        except Exception:
+        except Exception:  # noqa: BLE001
             session = None
 
         if session is None:
@@ -656,7 +656,7 @@ class TmuxRuntime:
 
         try:
             session = self.server.sessions.get(session_name=info.tmux_session_name)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
         if session is None:
             return False
@@ -736,7 +736,7 @@ class TmuxRuntime:
             name = self._session_name(project)
             try:
                 session = self.server.sessions.get(session_name=name)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return ""
             if session is None:
                 return ""
@@ -745,7 +745,7 @@ class TmuxRuntime:
 
         try:
             session = self.server.sessions.get(session_name=info.tmux_session_name)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return ""
         if session is None:
             return ""
@@ -761,7 +761,7 @@ class TmuxRuntime:
 
         try:
             session = self.server.sessions.get(session_name=info.tmux_session_name)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
         if session is None:
             return False
@@ -780,7 +780,7 @@ class TmuxRuntime:
             if session is not None:
                 session.kill()
                 logger.info("Killed tmux session '%s'", name)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to kill tmux session '%s': %s", name, exc)
 
     def close_all(self) -> None:
@@ -791,9 +791,9 @@ class TmuxRuntime:
                     try:
                         session.kill()
                         logger.info("Killed tmux session '%s'", session.name)
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001
                         logger.warning("Failed to kill tmux session '%s': %s", session.name, exc)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
         self._sessions.clear()
 
@@ -818,7 +818,7 @@ class TmuxRuntime:
                     ),
                     "last_lines": content,
                 }
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
         return result
 
@@ -826,7 +826,7 @@ class TmuxRuntime:
         """Return every tmux session name currently visible to the server."""
         try:
             return [str(session.name) for session in self.server.sessions]
-        except Exception:
+        except Exception:  # noqa: BLE001
             return []
 
     def list_all_host_sessions(self) -> list[dict[str, Any]]:
@@ -848,7 +848,7 @@ class TmuxRuntime:
                             if line.strip():
                                 last_line = line.strip()
                                 break
-                except Exception:
+                except Exception:  # noqa: BLE001, S110
                     pass
                 results.append(
                     {
@@ -859,7 +859,7 @@ class TmuxRuntime:
                         "last_line": last_line,
                     }
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to list all host tmux sessions: %s", exc)
         return results
 
@@ -873,7 +873,7 @@ class TmuxRuntime:
                     if max_lines and len(lines) > max_lines:
                         lines = lines[-max_lines:]
                     return "\n".join(lines)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to capture pane for '%s': %s", session_name, exc)
         return None
 
@@ -885,7 +885,7 @@ class TmuxRuntime:
                     pane = s.active_window.active_pane
                     pane.send_keys(keys, enter=enter)
                     return True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to send keys to '%s': %s", session_name, exc)
         return False
 
@@ -907,7 +907,7 @@ class TmuxRuntime:
                 kwargs["window_command"] = command
             self.server.new_session(**kwargs)
             return True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to create generic tmux session '%s': %s", session_name, exc)
             return False
 
@@ -923,7 +923,7 @@ class TmuxRuntime:
                     for project in stale:
                         del self._sessions[project]
                     return True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to kill tmux session '%s': %s", session_name, exc)
         return False
 
@@ -983,9 +983,9 @@ class TmuxRuntime:
                         tmux_session.kill()
                         actions[project] = "orphan_killed"
                         logger.info("Killed orphan tmux session '%s'", tmux_session.name)
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001
                         logger.warning("Failed to kill orphan tmux session '%s': %s", tmux_session.name, exc)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("tmux reconciliation failed: %s", exc)
 
         return actions
@@ -999,7 +999,7 @@ class TmuxRuntime:
             if max_lines and len(lines) > max_lines:
                 lines = lines[-max_lines:]
             return "\n".join(lines)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return ""
 
     @staticmethod
@@ -1246,7 +1246,7 @@ class TmuxRuntime:
             return False
         try:
             return bool(completion_check())
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.debug("Completion check failed: %s", exc)
             return False
 

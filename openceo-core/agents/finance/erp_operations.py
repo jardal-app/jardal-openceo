@@ -211,7 +211,7 @@ async def scope_summary_erp(adapter: Any, *, company: str, cost_center: str | No
             f"{(Decimal(str(totals['debit'])) - Decimal(str(totals['credit']))):.2f}"
         debit = f"{Decimal(str(totals['debit'])):.2f}"
         credit = f"{Decimal(str(totals['credit'])):.2f}"
-    except Exception:
+    except Exception:  # noqa: BLE001
         return {
             "as_of": report.get("as_of"),
             "company": company,

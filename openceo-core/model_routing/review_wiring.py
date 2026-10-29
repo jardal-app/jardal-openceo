@@ -465,7 +465,7 @@ def _resolve_instance_models(
         return None
     try:
         found = read_instance_models()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         write_audit_event(
             store, run_id, "review_instance_unlisted", str(exc)[:200])
         logger.warning("free-router instance listing unavailable: %s", exc)

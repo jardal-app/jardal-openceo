@@ -91,7 +91,7 @@ class SecretarySessionManager:
 
         try:
             result = await self._gated_send(task, project_config, payload, attachments)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             output.steps.append(self._step("send_email", "failed", str(exc)))
             output.status = TaskStatus.FAILED
             output.error = str(exc)

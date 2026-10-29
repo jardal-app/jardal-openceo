@@ -1473,7 +1473,7 @@ class WorkflowService:
         for path in sorted([*base.rglob("*.yaml"), *base.rglob("*.yml")]):
             try:
                 workflow = self._parse_workflow_yaml(path.read_text(encoding="utf-8"), source=str(path))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("Skipping invalid workflow %s: %s", path, exc)
                 continue
             workflow["path"] = str(path)
@@ -1655,7 +1655,7 @@ def _evaluate_when(value: Any, context: dict[str, Any]) -> bool:
         expr = _TEMPLATE_RE.sub(lambda m: repr(_lookup_context(m.group(1), context)), value)
         try:
             return bool(eval(expr, {"__builtins__": {}}, {}))
-        except Exception:
+        except Exception:  # noqa: BLE001
             return _truthy(_resolve_value(value, context))
     return _truthy(value)
 

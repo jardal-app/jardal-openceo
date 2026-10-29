@@ -300,7 +300,7 @@ def check_mcp_identity() -> Check:
 
     try:
         box, _ = asyncio.run(_probe())
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return Check("mcp-identity", False, f"{exc}"[:300])
     return Check("mcp-identity", True,
                  f"operations ve {len(box)} tools, fuera de caja denegado, "
@@ -359,7 +359,7 @@ def check_roster_clis(
     try:
         needed = required_binaries(
             config if config is not None else _live_config())
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return Check("roster-clis", False, f"config ilegible: {exc}"[:200])
     missing = [name for name in needed
                if (not exists(name) if name.startswith("/")
@@ -434,7 +434,7 @@ def check_health(
 
     try:
         status = (get or _live_get)(f"http://127.0.0.1:{port}/health")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return Check("health", False, f"sin respuesta: {exc}"[:200])
     if status != 200:
         return Check("health", False, f"health devolvio {status}")

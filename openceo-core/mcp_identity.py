@@ -600,7 +600,7 @@ class MCPIdentityMiddleware(Middleware):  # type: ignore[misc]
         try:
             request = get_http_request()
             headers = dict(getattr(request, "headers", {}) or {})
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             raise McpAuthError(f"No request to authenticate ({exc})")
         if bearer_from_headers(headers) is None:
             return None

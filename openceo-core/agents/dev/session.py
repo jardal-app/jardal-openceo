@@ -341,6 +341,8 @@ def _dev_vault_index(
     try:
         return build_vault_index(project_config)
     except Exception:
+        logger.warning("vault index unavailable; prompt runs without it",
+                       exc_info=True)
         return ""
 
 
@@ -648,6 +650,8 @@ class DevSessionManager:
                 checkout_and_update_objective_branch(
                     repo, objective_id, base)
             except Exception as exc:
+                logger.warning("objective branch %s unusable; parking",
+                               objective_id, exc_info=True)
                 return DevExecutionOutput(
                     status=TaskStatus.WAITING,
                     waiting_reason=f"needs_owner: merge_conflict: {exc}",
@@ -1095,7 +1099,8 @@ class DevSessionManager:
                             invalid_reason=str(outcome.get("reason") or ""),
                             meta=meta))
                 except Exception:
-                    pass  # telemetry persistence never fails a round
+                    logger.warning("review telemetry persistence failed",
+                                   exc_info=True)
 
     async def _maybe_simple_review(
         self,
@@ -2049,6 +2054,7 @@ class DevSessionManager:
                     f"({result.get('reason')}"
                     f"{': ' + detail[:200] if detail else ''}).")
         except Exception as exc:
+            logger.exception("planner replan failed")
             return f" Planner replan failed: {exc}"
 
     async def _record_tier_c_event(
@@ -2278,6 +2284,8 @@ class DevSessionManager:
         try:
             mandate = self._config_loader.load_company_mandate()
         except Exception:
+            logger.warning("company mandate unreadable; continuing without it",
+                           exc_info=True)
             mandate = None
 
         return ObjectiveEnv(
@@ -3059,6 +3067,7 @@ class DevSessionManager:
         except FileNotFoundError:
             return ProcessRunResult(False, "", f"Command not found: {command[0]}", None)
         except Exception as exc:
+            logger.exception("coding command failed unexpectedly")
             return ProcessRunResult(False, "", f"Command execution error: {exc}", None)
         finally:
             if process is not None and process.returncode is None:

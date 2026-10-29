@@ -21,6 +21,9 @@ dev:
   gates:
     - { name: compile, cmd: "python3 -m py_compile openceo-core/main.py openceo-core/first_layer.py openceo-core/project_service.py openceo-core/db/mongo.py", timeout_minutes: 5, required: true }
     - { name: tier_s_focused, cmd: "./.venv/bin/python -m pytest tests/test_tier_s_contract.py tests/test_tier_s_final.py -q", timeout_minutes: 15, required: true }
+    # TASK-2026-00369 (§16.6): ningún except amplio nuevo traga errores en
+    # silencio (ruff BLE001/S110/S112/E722; ver ruff.toml y requirements-dev.txt).
+    - { name: ruff_swallowed_exceptions, cmd: "./.venv/bin/python -m ruff check --config ruff.toml openceo-core/ automatico.py", timeout_minutes: 5, required: true }
   # How the orchestrator RUNS a frozen oracle after the build (policy §24,
   # TASK-2026-00178): {refs} expands to the shell-quoted oracle refs
   # (path or path::node). Without it a frozen oracle is hash-protected only.

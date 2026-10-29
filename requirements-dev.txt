@@ -1,0 +1,4 @@
+# Development-only dependencies (never required at runtime).
+# TASK-2026-00369: ruff enforces the swallowed-exception gate
+# (ruff.toml: BLE001, S110, S112, E722 over openceo-core/ and automatico.py).
+ruff==0.17.3

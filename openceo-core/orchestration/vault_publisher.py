@@ -204,7 +204,7 @@ async def _evidence_ok(
                 return True, False, ""
             try:
                 found = await ticket_exists(ticket)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return False, True, (
                     f"ticket evidence {ticket!r} unverifiable; retry later")
             if found is True:
@@ -272,7 +272,7 @@ def _publish_one(
         code, out = _git(vault_repo, "ls-files", "--error-unmatch", rel,
                          timeout_s=config.git_timeout_s)
         tracked = code == 0
-    except Exception:
+    except Exception:  # noqa: BLE001
         return "deferred", "vault git unavailable; retry later", None
     if proposal.action == "create" and tracked:
         return "rejected", "note already exists; use action update", None
@@ -299,7 +299,7 @@ def _publish_one(
         try:
             blob = hashlib.sha1(
                 b"blob %d\0" % len(original or b"") + (original or b"")).hexdigest()
-        except Exception:
+        except Exception:  # noqa: BLE001
             blob = ""
         if proposal.base_version not in {current_commit, blob}:
             return "deferred", "note version changed since the proposal; retry later", None

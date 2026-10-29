@@ -462,7 +462,7 @@ def _first_visible_in_scopes(
             try:
                 locator.wait_for(state="visible", timeout=per_try)
                 return locator
-            except Exception:
+            except Exception:  # noqa: BLE001, S112
                 continue
     raise RuntimeError(f"No encontré {description}.")
 

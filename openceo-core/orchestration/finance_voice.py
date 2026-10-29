@@ -75,7 +75,7 @@ async def run_finance_skill(
             source=str(workflow_path))
         outcome = await wiring.workflow_service.execute_task_workflow(
             task, workflow)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("Finance skill run failed: %s", exc)
         return ("No pude resolver eso con finanzas ahora mismo. "
                 "Lo intentamos de nuevo.")

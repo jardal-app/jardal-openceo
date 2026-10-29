@@ -30,7 +30,7 @@ class RealtimeHub:
         for ws in self._connections:
             try:
                 await ws.send_json(message)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 dead.append(ws)
 
         for ws in dead:

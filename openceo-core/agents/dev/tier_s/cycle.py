@@ -493,6 +493,7 @@ class TierSCycle:
                 outcome, cost_runs=self._cost_delta(ctx),
                 params=dict(ctx.ticket.get("params") or {}))
         except Exception as exc:  # fail explicit, resumable, lock always freed
+            logger.exception("tier-s cycle failed; parking as transient")
             detail = f"{type(exc).__name__}: {exc}"[:500]
             parked = await self._park(
                 ctx, "transient", detail,
@@ -796,6 +797,8 @@ class TierSCycle:
                     f"{base}^{{commit}}").returncode != 0:
                 return None
         except Exception:  # no resume is always safe: a fresh run follows
+            logger.warning("tier-s resume lookup failed; fresh run follows",
+                           exc_info=True)
             return None
         return run
 
@@ -975,11 +978,14 @@ class TierSCycle:
         try:
             await self._exec.cleanup(role)
         except Exception:
-            pass
+            logger.warning("tier-s executor cleanup failed for %s", role,
+                           exc_info=True)
         try:
             objective = await objectives_mod.convert_ticket(
                 self._objective_env, ctx.ticket, cause, sizing)
         except Exception as exc:
+            logger.warning("tier-s conversion failed; parking for owner",
+                           exc_info=True)
             await self._park(
                 ctx, "needs_owner", f"conversion failed: {exc}",
                 patch_run=True, drop_branch=True)
@@ -1725,7 +1731,8 @@ class TierSCycle:
                 invalid_reason=str(outcome.get("reason") or ""),
                 meta=meta))
         except Exception:
-            pass  # telemetry persistence never fails a round
+            logger.warning("tier-s telemetry persistence failed",
+                           exc_info=True)
 
     async def _muse_fix(
         self,
@@ -1915,6 +1922,8 @@ class TierSCycle:
                         anchor=findings_mod._anchor_text(anchor)
                         if anchor else ""))
             except Exception:
+                logger.warning("tier-s inbox record failed; skipping",
+                               exc_info=True)
                 continue
             if fp not in ctx.inbox_fps:
                 ctx.inbox_fps.append(fp)
@@ -1943,6 +1952,8 @@ class TierSCycle:
                     run_id=ctx.run_id, round_no=round_no,
                     anchor=findings_mod._anchor_text(anchor) if anchor else ""))
         except Exception:
+            logger.warning("tier-s out-of-scope record failed",
+                           exc_info=True)
             return
         if fp not in ctx.inbox_fps:
             ctx.inbox_fps.append(fp)
@@ -1968,7 +1979,8 @@ class TierSCycle:
                 if fp not in ctx.inbox_fps:
                     ctx.inbox_fps.append(fp)
             except Exception:
-                pass
+                logger.warning("tier-s disputed record failed",
+                               exc_info=True)
         await self._evaluate_promotions(ctx)
 
     async def _evaluate_promotions(self, ctx: _Ctx) -> None:
@@ -1981,6 +1993,8 @@ class TierSCycle:
             try:
                 entry = await self._inbox.get_entry(fp)
             except Exception:
+                logger.warning("tier-s inbox entry %s unreadable; skipping",
+                               fp[:12], exc_info=True)
                 continue
             if entry is None or not inbox_mod.promotion_ready(
                     entry, ctx.inbox_rule or None):
@@ -1997,6 +2011,8 @@ class TierSCycle:
             try:
                 created = await self._create_ticket(payload)
             except Exception as exc:
+                logger.warning("inbox promotion failed for %s",
+                               fp[:12], exc_info=True)
                 await self._say(
                     ctx, f"inbox promotion failed for {fp[:12]}: {exc}")
                 continue
@@ -2006,7 +2022,8 @@ class TierSCycle:
                     await inbox_mod.mark_promoted(
                         self._inbox, fp, task_id, attribution)
                 except Exception:
-                    pass
+                    logger.warning("tier-s mark_promoted failed for %s",
+                                   fp[:12], exc_info=True)
                 ctx.metrics.setdefault("promoted", []).append(
                     {"fp": fp, "task_id": task_id})
 
@@ -2037,6 +2054,8 @@ class TierSCycle:
                 try:
                     detail = await env.tasks.get_task(origin_id) or {}
                 except Exception:
+                    logger.warning("tier-s attribution read failed for %s",
+                                   origin_id, exc_info=True)
                     detail = {}
                 params = detail.get("params") or {} \
                     if isinstance(detail, Mapping) else {}
@@ -2074,9 +2093,12 @@ class TierSCycle:
                         severity=str(entry.get("severity_max") or ""),
                         detail=f"{entry.get('_id')}: {short}")
                 except Exception:
-                    pass
+                    logger.warning("tier-s record_tier_c failed",
+                                   exc_info=True)
             return result
         except Exception:
+            logger.warning("tier-s attribution failed; returning None",
+                           exc_info=True)
             return None
 
     # -- round helpers -----------------------------------------------------------
@@ -2229,6 +2251,8 @@ class TierSCycle:
             await objectives_mod.on_ticket_closed(
                 self._objective_env, ctx.ticket, close)
         except Exception as exc:  # triggers never fail a close
+            logger.warning("objective trigger failed (close stands)",
+                           exc_info=True)
             await self._say(ctx, f"objective trigger failed: {exc}")
 
     @staticmethod
@@ -2254,6 +2278,8 @@ class TierSCycle:
             await knowledge_mod.write_ticket_note(
                 env, ctx.ticket, decisions, handoff[:3000])
         except Exception as exc:
+            logger.warning("vault note failed (close stands)",
+                           exc_info=True)
             await self._say(ctx, f"vault note failed (close stands): {exc}")
 
     def _archive(self, ctx: _Ctx) -> None:
@@ -2358,6 +2384,7 @@ class TierSCycle:
                 "autorun": False,
             })
         except Exception as exc:
+            logger.warning("owner question failed", exc_info=True)
             await self._say(ctx, f"owner question failed: {exc}")
             return outcome
         question_id = str((created or {}).get("task_id") or "")
@@ -2437,13 +2464,16 @@ class TierSCycle:
             try:
                 await self._exec.cleanup(role)
             except Exception:
+                logger.warning("tier-s cleanup failed for %s", role,
+                               exc_info=True)
                 continue
         if ctx.lock_held:
             try:
                 await self._locks.release(
                     str(ctx.repo), f"tier-s:{ctx.run_id}")
             except Exception:
-                pass
+                logger.warning("tier-s lock release failed for %s",
+                               ctx.run_id, exc_info=True)
             ctx.lock_held = False
         # Release the repo guard on every exit: only a string active_repo
         # means live work (db/mongo.py contract). Parks and terminals keep
@@ -2453,7 +2483,8 @@ class TierSCycle:
         try:
             await self._runs.patch_run(ctx.run_id, {"active_repo": None})
         except Exception:
-            pass
+            logger.warning("tier-s active_repo release failed for %s",
+                           ctx.run_id, exc_info=True)
 
     async def _say(self, ctx: _Ctx, text: str) -> None:
         if self._notify is not None:
