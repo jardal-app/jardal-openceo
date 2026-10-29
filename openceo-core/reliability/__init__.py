@@ -5,7 +5,7 @@ attribution and global configuration. Only capture.py, supervisor.py,
 endpoint.py, exposures.py and deadlines.py do I/O (Mongo insert/upsert,
 local spool, backoff sleeps, Unix socket, one asyncio timer plus
 fail-open ticket deadline patches); guard stays pure. The ticket publisher
-belongs to a later child.
+turns diagnosable Problems into hunter tickets behind the Owner queue.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from . import fingerprint as fingerprint
 from . import guard as guard
 from . import invariants as invariants
 from . import models as models
+from . import publisher as publisher
 from . import sanitize as sanitize
 from . import supervisor as supervisor
 from . import worker as worker
