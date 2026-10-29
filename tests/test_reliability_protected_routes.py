@@ -476,7 +476,9 @@ class AutomaticoGateTests(unittest.TestCase):
             if "reliability.protected_routes" in sys.modules else routes
         with unittest.mock.patch.object(
                 module, "collect_diff",
-                return_value=(sorted(FILES), b"fake-diff-bytes")):
+                return_value=(sorted(FILES), b"fake-diff-bytes")), \
+            mock.patch.object(automatico, "_routes_gate_enabled",
+                              return_value=True):
             ok, why = automatico.routes_gate_verify(child, ticket)
         self.assertFalse(ok)
         self.assertIn("SIN APROBACIÓN VERIFICADA".lower(),
@@ -515,7 +517,9 @@ class AutomaticoGateTests(unittest.TestCase):
             # integrated diff matches the approved digest: green
             with mock.patch.object(
                     module, "collect_diff",
-                    return_value=(sorted(FILES), b"fake-diff-bytes")):
+                    return_value=(sorted(FILES), b"fake-diff-bytes")), \
+                mock.patch.object(automatico, "_routes_gate_enabled",
+                                  return_value=True):
                 self.assertEqual(automatico.routes_gate_verify(child, ticket),
                                  (True, ""))
 
@@ -535,10 +539,68 @@ class AutomaticoGateTests(unittest.TestCase):
             if "reliability.protected_routes" in sys.modules else routes
         with mock.patch.object(
                 module, "collect_diff",
-                return_value=(["automatico.py"], b"changed-bytes")):
+                return_value=(["automatico.py"], b"changed-bytes")), \
+            mock.patch.object(automatico, "_routes_gate_enabled",
+                              return_value=True):
             ok, why = automatico.routes_gate_verify(child, ticket)
         self.assertFalse(ok)
         self.assertIn("deriva", why)
+
+    def test_verify_without_verdict_blocks_protected(self) -> None:
+        import automatico
+        import unittest.mock as mock
+
+        child = {"ticket": "TASK-2026-00389", "branch": "auto/x",
+                 "workspace": Path("/x")}
+        ticket: dict[str, Any] = {"phase": "close", "note": "",
+                                  "base": {"openceo": "abc"}}
+        module = sys.modules["reliability.protected_routes"] \
+            if "reliability.protected_routes" in sys.modules else routes
+        with mock.patch.object(
+                module, "collect_diff",
+                return_value=(["automatico.py"], b"late-protected-bytes")), \
+            mock.patch.object(automatico, "_routes_gate_enabled",
+                              return_value=True):
+            ok, why = automatico.routes_gate_verify(child, ticket)
+        self.assertFalse(ok)
+        self.assertIn("Aprobar el diff", why)
+        self.assertIn("automatico.py", why)
+
+    def test_verify_without_verdict_allows_unprotected(self) -> None:
+        import automatico
+        import unittest.mock as mock
+
+        child = {"ticket": "TASK-2026-00389", "branch": "auto/x",
+                 "workspace": Path("/x")}
+        ticket: dict[str, Any] = {"phase": "close", "note": "",
+                                  "base": {"openceo": "abc"}}
+        module = sys.modules["reliability.protected_routes"] \
+            if "reliability.protected_routes" in sys.modules else routes
+        with mock.patch.object(
+                module, "collect_diff",
+                return_value=(["openceo-core/main.py"], b"plain-bytes")), \
+            mock.patch.object(automatico, "_routes_gate_enabled",
+                              return_value=True):
+            self.assertEqual(automatico.routes_gate_verify(child, ticket),
+                             (True, ""))
+
+    def test_verify_gate_off_allows_despite_verdict(self) -> None:
+        import automatico
+        import unittest.mock as mock
+
+        child = {"ticket": "TASK-2026-00389", "branch": "auto/x",
+                 "workspace": Path("/x")}
+        ticket: dict[str, Any] = {
+            "phase": "close", "note": "", "base": {"openceo": "abc"},
+            "routes_verdict": {"digest": DIGEST, "routes": ["automatico.py"],
+                               "approval_id": "apr-diff-1",
+                               "human_action": "Aprobar el diff x"}}
+        self.assertFalse(RELIABILITY_DEFAULTS.get("routes_gate", {}).get(
+            "enabled", False))
+        with mock.patch.object(automatico, "_routes_gate_enabled",
+                               return_value=False):
+            self.assertEqual(automatico.routes_gate_verify(child, ticket),
+                             (True, ""))
 
 
 if __name__ == "__main__":

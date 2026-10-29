@@ -591,10 +591,9 @@ def routes_gate_verify(c: dict, t: dict) -> tuple[bool, str]:
     """Backstop determinista tras el cierre: el diff integrado en main exige
     aprobación verificada del Owner. (True, "") autoriza; (False, motivo)
     devuelve el ticket a close con la human_action."""
-    verdict = t.get("routes_verdict") or {}
-    if not verdict.get("digest"):
-        return True, ""
     try:
+        if not _routes_gate_enabled():
+            return True, ""
         module = _routes_module()
         assert module is not None
         base = (t.get("base") or {}).get("openceo", "")
@@ -604,6 +603,11 @@ def routes_gate_verify(c: dict, t: dict) -> tuple[bool, str]:
         if not touched:
             return True, ""
         digest = module.diff_digest(files, diff)
+        verdict = t.get("routes_verdict") or {}
+        if not verdict.get("digest"):
+            human_action = module.human_action_for(digest, touched)
+            return False, ("diff en rutas protegidas sin aprobación "
+                           f"verificada: {human_action}")
         if digest != verdict.get("digest"):
             return False, (f"el diff integrado deriva del aprobado "
                            f"({digest[:12]}): pide aprobación del nuevo diff")
