@@ -3273,6 +3273,22 @@ class TaskService:
             else:
                 task_status = str(task.get("status") or "") or None
                 mirror_state = "execution_gone"
+        if actual == "Completed":
+            try:
+                from reliability import verification as _verification
+                _db = getattr(getattr(self, "_repo", None), "db", None)
+                _problems = None
+                if _db is not None and hasattr(_db, "__getitem__"):
+                    try:
+                        _problems = _db["reliability_problems"]
+                    except Exception:
+                        _problems = None
+                if _problems is not None:
+                    await _verification.note_ticket_completed(
+                        task or {}, name, _problems)
+            except Exception:
+                logger.warning(
+                    "Hunter fix registration failed", exc_info=True)
         self._enqueue_visibility(
             str((task or {}).get("task_id") or "") or None, name, f"transition:{target}"
         )

@@ -28,6 +28,7 @@ from typing import Any, Awaitable, Callable
 
 from . import capture as _capture
 from . import diagnosis_exec as _diagnosis_exec
+from . import verification as _verification
 from .capture import _scope_for as _capture_scope
 from .config import RELIABILITY_DEFAULTS
 from .fingerprint import FINGERPRINT_VERSION, problem_key
@@ -579,6 +580,29 @@ async def _process(
         problem["status"] = ProblemStatus.OPEN.value
         problem["mute"] = {"reason": None, "actor": None, "until": None}
         problem["version"] = int(problem.get("version", 1)) + 1
+    if str(problem.get("status") or "") in (
+            ProblemStatus.VERIFYING.value, ProblemStatus.RESOLVED.value):
+        try:
+            fix = problem.get("fix") if isinstance(
+                problem.get("fix"), dict) else {}
+            release = incident.get("release") if isinstance(
+                incident.get("release"), dict) else {}
+            if not bool(incident.get("from_reliability_ticket")) \
+                    and str(fix.get("deployed_release") or "") \
+                    and str(release.get("sha") or "") \
+                    == str(fix.get("deployed_release")):
+                checked = await _maybe_await(_verification.check_incident(
+                    problem, incident, release_contains_fix=True,
+                    problems=problems, ticket_sink=None, now=moment))
+                if checked.get("status") == "regressed":
+                    await _maybe_await(_mark_processed(incidents, incident))
+                    outcome.update({"problem": problem_id,
+                                    "reason": "regressed_same_release",
+                                    "problem_update": checked.get(
+                                        "problem_update")})
+                    return outcome
+        except Exception:
+            logger.warning("verification fast path failed", exc_info=True)
     live: list[dict[str, Any]] = []
     if incidents is not None:
         live = await _find_incidents(

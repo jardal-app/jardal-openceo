@@ -440,6 +440,14 @@ async def lifespan(_: FastAPI):
                     runtime_dir=_repo_root / ".runtime"))
             await _reliability_exposures.record_exposure(
                 repo, "core_process")
+            from reliability import verification as _reliability_verification
+            await _reliability_verification.evaluate_release(
+                repo.db["reliability_problems"],
+                repo.db["reliability_exposures"],
+                str(_release.get("sha") or ""),
+                incidents=_reliability_coll,
+                repo_root=_repo_root,
+                scope="engine")
         except Exception:
             logger.warning("Reliability startup reconcile failed", exc_info=True)
         # DeadlineWatch (TASK-2026-00383, §7): indexes plus the single
