@@ -509,15 +509,24 @@ async def _run_exact_skill(
     except Exception as exc:
         logger.warning("exact skill %s engine run failed: %s",
                        skill_name, exc, exc_info=True)
-        return _failed(agent_name, flow_params, f"skill {skill_name}",
-                       error=f"workflow {workflow_id} raised "
-                             f"{type(exc).__name__}: {exc}",
-                       verdict=AgentResult(
-                           resultado=AgentOutcome.BLOQUEADO,
-                           motivo=f"workflow {workflow_id} raised "
-                                  f"{type(exc).__name__}"),
-                       cost_runs=[_exact_skill_run(
-                           time.monotonic() - started)])
+        module = _loop_brake()
+        if module is not None:
+            await module.record_async(
+                wiring.repo, kind="exception", component="generic_agent",
+                task_id=str(task.get("task_id") or ""), phase=agent_name,
+                exc_type=type(exc).__name__, exc_text=str(exc)[:300],
+                message=f"unhandled: {exc}"[:500])
+        return await _reliability_finish_agent(
+            agent_name, task, _failed(
+                agent_name, flow_params, f"skill {skill_name}",
+                error=f"workflow {workflow_id} raised "
+                      f"{type(exc).__name__}: {exc}",
+                verdict=AgentResult(
+                    resultado=AgentOutcome.BLOQUEADO,
+                    motivo=f"workflow {workflow_id} raised "
+                           f"{type(exc).__name__}"),
+                cost_runs=[_exact_skill_run(
+                    time.monotonic() - started)]), wiring)
     status = str(outcome.status or "")
     runs = [_exact_skill_run(time.monotonic() - started)]
     if status == TaskStatus.COMPLETED.value:
@@ -536,20 +545,21 @@ async def _run_exact_skill(
             out_params.update({key: value
                                for key, value in outcome.params.items()
                                if key != "agent_result"})
-        return {
-            "selected_agent": agent_name,
-            "status": TaskStatus.COMPLETED.value,
-            "steps": [_step("generic_agent", "ok",
-                            f"exact skill {skill_name} via workflow "
-                            f"{workflow_id}"),
-                      *list(outcome.steps or [])],
-            "params": out_params,
-            "last_response_summary": summary,
-            "error": None,
-            "result_comment": (f"{agent_name}: hecho ({workflow_id}): "
-                               f"{summary}"),
-            cost_mod.COST_RUNS_KEY: runs,
-        }
+        return await _reliability_finish_agent(
+            agent_name, task, {
+                "selected_agent": agent_name,
+                "status": TaskStatus.COMPLETED.value,
+                "steps": [_step("generic_agent", "ok",
+                                f"exact skill {skill_name} via workflow "
+                                f"{workflow_id}"),
+                          *list(outcome.steps or [])],
+                "params": out_params,
+                "last_response_summary": summary,
+                "error": None,
+                "result_comment": (f"{agent_name}: hecho ({workflow_id}): "
+                                   f"{summary}"),
+                cost_mod.COST_RUNS_KEY: runs,
+            }, wiring)
     if status == TaskStatus.FAILED.value:
         detail = str(outcome.error or outcome.last_response_summary or ""
                      ).strip() or f"workflow {workflow_id} failed"
@@ -561,23 +571,25 @@ async def _run_exact_skill(
                          cost_runs=runs)
         failed["result_comment"] = (
             f"{agent_name}: bloqueado ({workflow_id}): {detail}")
-        return failed
-    return {
-        "selected_agent": agent_name,
-        "status": TaskStatus.WAITING.value,
-        "steps": [_step("generic_agent", "waiting",
-                        f"exact skill {skill_name} via workflow "
-                        f"{workflow_id}: {outcome.waiting_reason or status}"),
-                  *list(outcome.steps or [])],
-        "params": dict(flow_params) if outcome.params is None
-        else {**flow_params, **outcome.params},
-        "last_response_summary": outcome.last_response_summary,
-        "error": outcome.error,
-        "waiting_reason": str(outcome.waiting_reason or status),
-        "resume_at": None,
-        "result_comment": None,
-        cost_mod.COST_RUNS_KEY: runs,
-    }
+        return await _reliability_finish_agent(
+            agent_name, task, failed, wiring)
+    return await _reliability_finish_agent(
+        agent_name, task, {
+            "selected_agent": agent_name,
+            "status": TaskStatus.WAITING.value,
+            "steps": [_step("generic_agent", "waiting",
+                            f"exact skill {skill_name} via workflow "
+                            f"{workflow_id}: {outcome.waiting_reason or status}"),
+                      *list(outcome.steps or [])],
+            "params": dict(flow_params) if outcome.params is None
+            else {**flow_params, **outcome.params},
+            "last_response_summary": outcome.last_response_summary,
+            "error": outcome.error,
+            "waiting_reason": str(outcome.waiting_reason or status),
+            "resume_at": None,
+            "result_comment": None,
+            cost_mod.COST_RUNS_KEY: runs,
+        }, wiring)
 
 
 def _exact_skill_run(duration_s: float) -> dict[str, Any]:
@@ -675,8 +687,18 @@ async def _run_llm(
         skill_outputs=declared_outputs, skill_evidence=declared_evidence,
         skill_source=skill_source)
     try:
-        result = await executor.run(agent_name, prompt, workdir,
-                                    wiring.timeout_s)
+        try:
+            result = await executor.run(agent_name, prompt, workdir,
+                                        wiring.timeout_s)
+        except Exception as exc:
+            module = _loop_brake()
+            if module is not None:
+                await module.record_async(
+                    wiring.repo, kind="exception", component="generic_agent",
+                    task_id=task_id, phase=agent_name,
+                    exc_type=type(exc).__name__, exc_text=str(exc)[:300],
+                    message=f"unhandled: {exc}"[:500])
+            raise
     finally:
         try:
             await executor.cleanup(agent_name)
@@ -700,39 +722,45 @@ async def _run_llm(
                 resultado=AgentOutcome.BLOQUEADO,
                 motivo=(f"run crashed (returncode {result.returncode}); "
                         f"the agent claimed hecho: {verdict.motivo}"))
-        return _failed(agent_name, run_params, "LLM run", error=detail,
-                       verdict=verdict, cost_runs=runs)
+        return await _reliability_finish_agent(
+            agent_name, task, _failed(
+                agent_name, run_params, "LLM run", error=detail,
+                verdict=verdict, cost_runs=runs), wiring)
     if truncated:
         motivo = (f"agent output truncated "
                   f"({usage.get('stdout_chars', '?')} chars), verdict "
                   "unreadable")
         if verdict is not None:
             motivo += f"; last parsed claim: {verdict.motivo}"
-        return _failed(agent_name, run_params, "LLM run",
-                       error=motivo,
-                       verdict=AgentResult(
-                           resultado=AgentOutcome.BLOQUEADO, motivo=motivo),
-                       cost_runs=runs)
+        return await _reliability_finish_agent(
+            agent_name, task, _failed(
+                agent_name, run_params, "LLM run", error=motivo,
+                verdict=AgentResult(
+                    resultado=AgentOutcome.BLOQUEADO, motivo=motivo),
+                cost_runs=runs), wiring)
     if verdict is None:
         summary = (result.output_tail or "").strip() or "ok"
         legacy_params = dict(run_params)
         legacy_params.pop(SCHEDULED_WAIT_COUNT_KEY, None)
-        return {
-            "selected_agent": agent_name,
-            "status": TaskStatus.COMPLETED.value,
-            "steps": [_step("generic_agent", "ok",
-                            "LLM run completed without a verdict (legacy)")],
-            "params": legacy_params,
-            "last_response_summary": summary[:500],
-            "error": None,
-            "result_comment": f"{agent_name}: {summary[:500]}",
-            cost_mod.COST_RUNS_KEY: runs,
-        }
+        return await _reliability_finish_agent(
+            agent_name, task, {
+                "selected_agent": agent_name,
+                "status": TaskStatus.COMPLETED.value,
+                "steps": [_step("generic_agent", "ok",
+                                "LLM run completed without a verdict (legacy)")],
+                "params": legacy_params,
+                "last_response_summary": summary[:500],
+                "error": None,
+                "result_comment": f"{agent_name}: {summary[:500]}",
+                cost_mod.COST_RUNS_KEY: runs,
+            }, wiring)
     try:
         resume_at = scheduled_resume(verdict)
     except ValueError as exc:
-        return _failed(agent_name, run_params, "LLM run",
-                       error=str(exc), verdict=verdict, cost_runs=runs)
+        return await _reliability_finish_agent(
+            agent_name, task, _failed(
+                agent_name, run_params, "LLM run",
+                error=str(exc), verdict=verdict, cost_runs=runs), wiring)
     if resume_at is not None:
         declines = max(scheduled_wait_declines(task.get("params")),
                        scheduled_wait_declines(run_params)) + 1
@@ -748,30 +776,164 @@ async def _run_llm(
             out.update(last_response_summary=verdict.motivo,
                        result_comment=f"{agent_name}: {reason}")
             out[cost_mod.COST_RUNS_KEY] = runs
-            return out
+            return await _reliability_finish_agent(
+                agent_name, task, out, wiring)
         reason = f"scheduled_wait: {verdict.motivo}"
         out = _waiting(agent_name, reason, waited_params)
         out.update(resume_at=resume_at, last_response_summary=verdict.motivo,
                    result_comment=f"{agent_name}: {reason}; resume_at={resume_at.isoformat()}")
         out[cost_mod.COST_RUNS_KEY] = runs
-        return out
+        return await _reliability_finish_agent(
+            agent_name, task, out, wiring)
     if verdict.resultado is AgentOutcome.HECHO:
         out_params = {**run_params,
                       "agent_result": verdict.model_dump(mode="json")}
         out_params.pop(SCHEDULED_WAIT_COUNT_KEY, None)
-        return {
-            "selected_agent": agent_name,
-            "status": TaskStatus.COMPLETED.value,
-            "steps": [_step("generic_agent", "ok",
-                            f"LLM run verdict: hecho ({verdict.motivo})")],
-            "params": out_params,
-            "last_response_summary": verdict.motivo,
-            "error": None,
-            "result_comment": f"{agent_name}: hecho: {verdict.motivo}",
-            cost_mod.COST_RUNS_KEY: runs,
-        }
-    return _failed(agent_name, run_params, "LLM run",
-                   error=verdict.motivo, verdict=verdict, cost_runs=runs)
+        return await _reliability_finish_agent(
+            agent_name, task, {
+                "selected_agent": agent_name,
+                "status": TaskStatus.COMPLETED.value,
+                "steps": [_step("generic_agent", "ok",
+                                f"LLM run verdict: hecho ({verdict.motivo})")],
+                "params": out_params,
+                "last_response_summary": verdict.motivo,
+                "error": None,
+                "result_comment": f"{agent_name}: hecho: {verdict.motivo}",
+                cost_mod.COST_RUNS_KEY: runs,
+            }, wiring)
+    return await _reliability_finish_agent(
+        agent_name, task, _failed(
+            agent_name, run_params, "LLM run",
+            error=verdict.motivo, verdict=verdict, cost_runs=runs), wiring)
+
+
+def _loop_brake():
+    """Shared capture/brake helper; None when unavailable (fail-open)."""
+    try:
+        from reliability import loop_brake as module
+        return module
+    except Exception:
+        logger.warning("reliability loop brake unavailable (fail-open)",
+                       exc_info=True)
+        return None
+
+
+async def _reliability_finish_agent(
+    agent_name: str, task: dict[str, Any], out: dict[str, Any],
+    wiring: GenericAgentWiring,
+) -> dict[str, Any]:
+    """Attempt-boundary capture plus ProgressGuard (shadow by default).
+
+    The guard state lands in ``out["params"]`` next to the verdict, so the
+    funnel persists both in the same atomic write. Shadow would-stops record
+    a ``stall`` with ``shadow=true`` and let the loop continue; enforce stops
+    park the ticket as stalled with no resume. Only validated ``hecho``
+    verdicts emit the §4.3 milestone, and only the orchestrator emits it.
+    """
+    module = _loop_brake()
+    if module is None:
+        return out
+    params = out.get("params")
+    if not isinstance(params, dict):
+        params = {}
+        out["params"] = params
+    milestones = module.take_milestones(params)
+    module.take_capture_hint(params)
+    status = str(out.get("status") or "")
+    reason = str(out.get("waiting_reason") or "")
+    error = str(out.get("error") or "")
+    agent_result = params.get("agent_result")
+    verdict_result = ""
+    if isinstance(agent_result, dict):
+        verdict_result = str(agent_result.get("resultado") or "")
+    executed = True
+    marker = "failed"
+    capture: dict[str, Any] | None = None
+    if status == TaskStatus.COMPLETED.value:
+        marker = "hecho"
+        if verdict_result == "hecho":
+            milestones.append(module.MILESTONE_AGENT_HECHO)
+        elif verdict_result:
+            marker = verdict_result
+    elif status == TaskStatus.WAITING.value:
+        if reason.startswith("scheduled_wait:") \
+                and out.get("resume_at") is not None:
+            executed = False
+            marker = "waiting:scheduled"
+        elif "needs_owner: scheduled_wait" in reason:
+            marker = "brake_exhausted:scheduled_wait"
+            capture = {"kind": "brake_exhausted", "brake": "scheduled_wait"}
+        else:
+            executed = False
+            marker = f"waiting:{reason[:60]}".strip()
+    else:
+        marker = verdict_result if verdict_result in ("bloqueado", "no_aplica") \
+            else "terminal_failure"
+        capture = {"kind": "terminal_failure"}
+    task_id = str(task.get("task_id") or "")
+    attempt_id = module.next_attempt_id(task_id, params)
+    result_sig = module.make_result_sig(agent_name, marker)
+    deliverables: list[str] = []
+    evidence = ""
+    if isinstance(agent_result, dict):
+        raw_items = agent_result.get("entregables")
+        if isinstance(raw_items, list):
+            deliverables = [str(item) for item in raw_items
+                            if str(item).strip()]
+        evidence = str(agent_result.get("evidencia") or "")
+    work_fp, fp_complete = module.generic_work_fp(deliverables, evidence)
+    mode = module.guard_mode(module.GENERIC_PRODUCER)
+    now = module.utcnow_iso()
+    for milestone in dict.fromkeys(milestones):
+        module.evaluate_attempt(
+            params, producer=module.GENERIC_PRODUCER, phase=agent_name,
+            attempt_id=attempt_id, result_sig=result_sig, work_fp=work_fp,
+            fp_complete=fp_complete, executed=executed,
+            milestone=milestone, mode=mode, now=now)
+    decision = module.evaluate_attempt(
+        params, producer=module.GENERIC_PRODUCER, phase=agent_name,
+        attempt_id=attempt_id, result_sig=result_sig, work_fp=work_fp,
+        fp_complete=fp_complete, executed=executed, mode=mode, now=now)
+    module.brake_record(params, decision, mode=mode, now=now)
+    if decision.get("brake_error"):
+        await module.record_async(
+            wiring.repo, kind="exception", component="reliability",
+            task_id=task_id, attempt_id=attempt_id, phase=agent_name,
+            exc_text=str(decision["brake_error"])[:300],
+            message="progress guard failed open; the loop continues"[:300])
+    if capture is not None:
+        reason_code = module.terminal_reason_code(
+            error or verdict_result)
+        await module.record_async(
+            wiring.repo, kind=str(capture["kind"]),
+            component="generic_agent", task_id=task_id,
+            attempt_id=attempt_id, phase=agent_name,
+            brake=capture.get("brake"),
+            reason_code=str(capture.get("brake") or reason_code),
+            message=(error or verdict_result)[:500] or None)
+    if decision.get("incident"):
+        await module.record_async(
+            wiring.repo, kind="stall", component="generic_agent",
+            task_id=task_id, attempt_id=attempt_id, phase=agent_name,
+            guard_rule=str(decision.get("rule") or ""),
+            result_signature=result_sig,
+            shadow=bool(decision.get("shadow", True)),
+            message=f"progress brake {decision.get('rule')} "
+                    f"({decision.get('action')})"[:300])
+    if decision.get("action") == "stop":
+        rule = str(decision.get("rule") or "")
+        out["status"] = TaskStatus.WAITING.value
+        out["waiting_reason"] = (
+            f"stalled_no_progress: {rule} for '{agent_name}'. "
+            "Motivo: el freno nativo detuvo el bucle tras intentos sin "
+            "avance. Condición de reanudación: entregables nuevos o "
+            "evidencia nueva validada; solo el Owner u otro actor "
+            "autorizado rearma el freno.")
+        out["resume_at"] = None
+        out["result_comment"] = (
+            f"{agent_name}: stalled_no_progress ({rule}): sin avance; "
+            "rearme solo por el Owner u otro actor autorizado.")
+    return out
 
 
 def _failed(agent_name: str, params: dict[str, Any], where: str, *,
