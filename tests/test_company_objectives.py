@@ -362,6 +362,34 @@ class AdmissionTests(unittest.IsolatedAsyncioTestCase):
         assert stored is not None
         self.assertEqual(stored["status"], "active")
 
+    async def test_failed_history_does_not_fill_the_cap(self) -> None:
+        repo = _scratch_repo(self)
+        tasks = {f"kid-{n}": {"task_id": f"kid-{n}", "title": "w",
+                              "status": "failed", "objective_id": "OBJ-1"}
+                 for n in range(6)}
+        env, planner, _created, _patches, _notices = _env_for(
+            self, repo, [_plan_result(_dev_ticket())], tasks=tasks)
+        await self._active(env, "OBJ-1", "proj", "one")
+        result = await plan_objective(env, "OBJ-1")
+        self.assertTrue(result["ok"])
+        self.assertEqual(planner.runs, 1)
+
+    async def test_dead_queued_does_not_fill_the_cap(self) -> None:
+        repo = _scratch_repo(self)
+        tasks: dict[str, dict[str, Any]] = {
+            "kid-f": {"task_id": "kid-f", "title": "w",
+                      "status": "failed", "objective_id": "OBJ-1"}}
+        for n in range(6):
+            tasks[f"kid-{n}"] = {
+                "task_id": f"kid-{n}", "title": "w", "status": "queued",
+                "objective_id": "OBJ-1", "blocked_by": ["kid-f"]}
+        env, planner, _created, _patches, _notices = _env_for(
+            self, repo, [_plan_result(_dev_ticket())], tasks=tasks)
+        await self._active(env, "OBJ-1", "proj", "one")
+        result = await plan_objective(env, "OBJ-1")
+        self.assertTrue(result["ok"])
+        self.assertEqual(planner.runs, 1)
+
 
 def _mirrored(task_id: str, name: str | None, **overrides: Any) -> dict[str, Any]:
     task: dict[str, Any] = {"task_id": task_id, "title": "t",
