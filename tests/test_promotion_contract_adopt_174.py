@@ -244,6 +244,7 @@ class ApplyCompletionsTests(unittest.IsolatedAsyncioTestCase):
             notify=AsyncMock(),
             repo=Path.cwd(),
             dispatcher_wake=wakes,
+            review_cfg={"free_router": {"enabled": False}},
         )
         return env, wakes
 
@@ -534,6 +535,7 @@ class _PlanningTaskService(FakeTaskService):
                 {"label": "r-b", "family": "fb", "priority": 20},
             ]),
             dispatcher_wake=self.wakes,
+            review_cfg={"free_router": {"enabled": False}},
         )
         result = await plan_objective(env, objective_id)
         stored = await objectives.get_objective(objective_id)
@@ -701,6 +703,7 @@ class PromotionAdoptionTests(unittest.IsolatedAsyncioTestCase):
                 {"label": "r-a", "family": "fa", "priority": 10},
                 {"label": "r-b", "family": "fb", "priority": 20},
             ]),
+            review_cfg={"free_router": {"enabled": False}},
         )
         closed = await engine_mod.run_final_review(env, "obj_1")
         self.assertTrue(closed["ok"])

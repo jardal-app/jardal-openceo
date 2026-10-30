@@ -2716,6 +2716,7 @@ class DevSessionManager:
             repo=repo_path,
             roles=wiring["roles"],
             pool=list(parse_pool(wiring["pool"])),
+            pool_raw=list(wiring["pool"]),
             review_cfg=wiring["review_cfg"],
             objectives_cfg=objectives_cfg,
             planner_cfg=wiring["planner_cfg"],

@@ -526,8 +526,10 @@ def _cycle_parts() -> tuple[dict[str, Any], dict[str, Any], list[GateSpec]]:
         "budgets": dict(BUDGETS_DEFAULTS),
         "timeouts": dict(TIMEOUTS_DEFAULTS),
         "waiting": dict(WAITING_DEFAULTS),
+        # Static pool pinned: quorum mechanics, not live routing (00403).
         "review": {"min_available_families": 1, "round1_parallel": 2,
-                   "round2_parallel": 2},
+                   "round2_parallel": 2,
+                   "free_router": {"enabled": False}},
         "auto_merge": True,
         "base_branch": "main",
         "budget_exclude": [],
@@ -812,6 +814,7 @@ def _final_env(repo: Path, tasks: dict[str, dict[str, Any]],
         notify=notify,
         repo=repo,
         pool=review_mod.parse_pool(pool),
+        review_cfg={"free_router": {"enabled": False}},
     )
     return env, reviews, created
 
@@ -976,7 +979,7 @@ def _mongo_available() -> bool:
         client.admin.command("ping")
         client.close()
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 - probe returns bool
         return False
 
 

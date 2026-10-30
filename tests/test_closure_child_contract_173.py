@@ -28,7 +28,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 CORE = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE) not in sys.path:
@@ -159,6 +159,10 @@ def _close_env(repo: Path, tasks: dict[str, dict[str, Any]],
         notify=notify,
         repo=repo,
         pool=parse_pool(_POOL),
+        # Static pool pinned: these tests target close mechanics, not
+        # routing (TASK-2026-00403 covers the dynamic assembly).
+        pool_raw=list(_POOL),
+        review_cfg={"free_router": {"enabled": False}},
     )
     return env, created
 
@@ -352,6 +356,91 @@ class InternalTicketPreservesContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.params["target_agent"], "dev")
         self.assertEqual(request.agent_hint, AgentName.DEV)
         self.assertEqual(request.acceptance, ["reproducir el problema"])
+
+
+class FinalReviewRoutingTests(unittest.IsolatedAsyncioTestCase):
+    """Dynamic pool assembly in objective final review (00403)."""
+
+    async def test_assembly_called_with_final_run_id(self) -> None:
+        env, _created, _fake, _tasks = \
+            await ClosureChildContractTests._world(
+                self, "OBJ-ROUTE", [REPORT, CLEAN_REPORT],
+                ["F1: REAL — confirmed on tracked.txt:2\n"])
+        real = engine_mod.wiring_mod.assemble_review_pool
+        with patch.object(engine_mod.wiring_mod, "assemble_review_pool",
+                          wraps=real) as spy:
+            result = await run_final_review(env, "OBJ-ROUTE")
+        self.assertEqual(result["action"], "fix-tickets")
+        spy.assert_called_once()
+        _args, kwargs = spy.call_args
+        self.assertEqual(kwargs["run_id"], "final-OBJ-ROUTE")
+        self.assertEqual(kwargs["round"], "0")
+        self.assertEqual(kwargs["builder_family"], "muse")
+        self.assertEqual(kwargs["review_cfg"],
+                         {"free_router": {"enabled": False}})
+        self.assertTrue(str(kwargs["receipts_dir"]).endswith(
+            "objectives/OBJ-ROUTE/review_receipts"))
+
+    async def test_routing_error_parks_config(self) -> None:
+        from model_routing.review_wiring import ReviewRoutingError
+        env, _c, _f, _t = await ClosureChildContractTests._world(
+            self, "OBJ-CFG", [REPORT, CLEAN_REPORT],
+            ["F1: REAL — confirmed on tracked.txt:2\n"])
+        with patch.object(
+                engine_mod.wiring_mod, "assemble_review_pool",
+                side_effect=ReviewRoutingError("no snapshot")):
+            result = await run_final_review(env, "OBJ-CFG")
+        self.assertEqual(result["reason"], "config")
+        stored = await env.objectives.get_objective("OBJ-CFG")
+        assert stored is not None
+        self.assertEqual(stored["status"], "waiting")
+        self.assertTrue(
+            str(stored["waiting_reason"]).startswith("config:"))
+
+
+class RoutedReviewerTests(unittest.IsolatedAsyncioTestCase):
+    """Fallback rotation across ranked models (00403)."""
+
+    async def test_fallback_rotates_until_valid(self) -> None:
+        from model_routing import review_wiring as wiring_mod
+        slot = SimpleNamespace(label="free-review-1", priority=10)
+        invalid = {"valid": False, "kind": "cooling_down",
+                   "reason": "quota"}
+        run_attempt = AsyncMock(side_effect=[invalid, {"valid": True}])
+        slots = SimpleNamespace(set_slot=AsyncMock())
+        nxt = SimpleNamespace(deployment_id="d2")
+        derived = SimpleNamespace(label="free-review-1", priority=10)
+        with patch.object(wiring_mod, "plan_fallback",
+                          return_value=nxt) as fallback, \
+             patch.object(wiring_mod, "sync_executor_pool") as sync, \
+             patch.object(wiring_mod, "dynamic_entry",
+                          return_value={"label": "free-review-1"}), \
+             patch.object(wiring_mod, "derive_slot",
+                          return_value=derived):
+            outcome = await engine_mod._run_routed_reviewer(
+                run_attempt, routing=SimpleNamespace(),
+                slots=slots, executor=SimpleNamespace(),
+                slot=slot, attempt=1, previous=None)
+        self.assertTrue(outcome["valid"])
+        self.assertEqual(run_attempt.await_count, 2)
+        fallback.assert_called_once()
+        sync.assert_called_once()
+        run_attempt.assert_awaited_with(derived, None)
+
+    async def test_no_fallback_returns_outcome(self) -> None:
+        from model_routing import review_wiring as wiring_mod
+        slot = SimpleNamespace(label="free-review-1", priority=10)
+        invalid = {"valid": False, "kind": "denied", "reason": "cap"}
+        run_attempt = AsyncMock(return_value=invalid)
+        with patch.object(wiring_mod, "plan_fallback",
+                          return_value=None):
+            outcome = await engine_mod._run_routed_reviewer(
+                run_attempt, routing=SimpleNamespace(),
+                slots=SimpleNamespace(set_slot=AsyncMock()),
+                executor=SimpleNamespace(), slot=slot, attempt=1,
+                previous=None)
+        self.assertFalse(outcome["valid"])
+        run_attempt.assert_awaited_once_with(slot, None)
 
 
 if __name__ == "__main__":

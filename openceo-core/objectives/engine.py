@@ -36,7 +36,7 @@ import re
 import shutil
 import subprocess
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
@@ -45,13 +45,14 @@ from catalog import (Catalog, agent_detail_text, load_all_role_skills,
                      load_catalog, load_role_profile,
                      skills_index_for_planner, suggestable_skills)
 from company_mandate import principles_prompt_section
+from model_routing import review_wiring as wiring_mod
 from objectives.money_guide import routing_guide_section
 from orchestration import findings as findings_mod
 from orchestration import inbox as inbox_mod
 from orchestration import knowledge as knowledge_mod
 from orchestration import review as review_mod
 from orchestration import skill_metrics as skill_metrics_mod
-from orchestration.live import TIMEOUT_RETURNCODE
+from orchestration.live import TIMEOUT_RETURNCODE, ProcessExecutor
 from objectives import planner_models as planner_mod
 from objectives import plan_spend as spend_mod
 from objectives import playbooks as playbooks_mod
@@ -142,6 +143,11 @@ class ObjectiveEnv:
     repo: Path
     roles: dict[str, Any] = field(default_factory=dict)
     pool: list[review_mod.ReviewSlot] = field(default_factory=list)
+    # Raw reviewer entries behind ``pool`` (TASK-2026-00403): the final
+    # review assembles the round pool from these so the free-router can
+    # swap static OpenCode entries for ranked dynamic slots. Empty in
+    # bare unit envs: assembly then falls back to the static pool.
+    pool_raw: list[dict[str, Any]] = field(default_factory=list)
     review_cfg: dict[str, Any] = field(default_factory=dict)
     objectives_cfg: dict[str, Any] = field(default_factory=dict)
     # Single global planner config (global objective_planner block: engine,
@@ -3373,10 +3379,24 @@ def boot_resume_decision(
     ``final_review`` objective is always orphaned at boot (no review
     task survives a restart); a ``stalled`` park resumes only when its
     wedge provably cleared, into a fresh review episode. Still-wedged
-    stalls stay parked silently: they already escalated.
+    stalls stay parked silently: they already escalated. An ``active``
+    objective with clean delivery is an orphaned cycle (no healthy
+    objective rests there with nothing in flight), so it replans;
+    spend-gated objectives keep their own trigger (00403).
     """
     status = str(objective.get("status") or "")
     reviews = int(objective.get("final_reviews") or 0)
+    pending = objective.get("pending_plan")
+    if isinstance(pending, dict) and pending:
+        return {"action": "leave", "reason": "spend approval pending"}
+    if status == "active":
+        verdict = verify_delivery(objective, children)
+        gaps = list(verdict["open_gaps"]) + list(verdict["data_gaps"])
+        if gaps:
+            return {"action": "leave",
+                    "reason": "active with open work"}
+        return {"action": "resume_fresh",
+                "reason": "active with clean delivery: orphaned cycle"}
     if status == "final_review":
         verdict = verify_delivery(objective, children)
         gaps = list(verdict["open_gaps"]) + list(verdict["data_gaps"])
@@ -3441,6 +3461,44 @@ async def boot_resume_one(
             f"({action}): {call.get('reason')}.")
     plan = await plan_objective(env, objective_id)
     return {"ok": True, "action": action, "plan": plan}
+
+
+async def _run_routed_reviewer(
+    run_attempt: Callable[..., Awaitable[dict[str, Any]]],
+    *,
+    routing: Any,
+    slots: Any,
+    executor: Any,
+    slot: review_mod.ReviewSlot,
+    attempt: int,
+    previous: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """One routed attempt: retry across ranked models until valid (00403).
+
+    Mirrors the dev-round fallback loop (``session.py``): each failure
+    rotates the slot to the next ranked target over the same snapshot
+    and prompt. Receipt reuse stays dev-only: objective heads change
+    per episode.
+    """
+    outcome = await run_attempt(slot, previous)
+    last = previous
+    while not outcome.get("valid"):
+        kind = str(outcome.get("kind") or "")
+        last_kind = str((last or {}).get("kind") or "")
+        nxt = wiring_mod.plan_fallback(
+            routing, slot.label, outcome_kind=kind,
+            text=str(outcome.get("reason") or ""),
+            timeout_repeat=(kind == "timeout"
+                            and last_kind == "timeout"))
+        if nxt is None:
+            break
+        await slots.set_slot(slot.label, {"status": "available"})
+        wiring_mod.sync_executor_pool(executor, [
+            wiring_mod.dynamic_entry(slot.label, slot.priority, nxt)])
+        last = outcome
+        outcome = await run_attempt(
+            wiring_mod.derive_slot(slot, nxt), None)
+    return outcome
 
 
 async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]:
@@ -3550,8 +3608,31 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
         + "\nScope: anchor acceptance met? contracts between tickets fit? "
           "regressions across the set? Same report format as ticket rounds."
     )
+    scratch = objective_scratch(env.repo, objective_id)
+    try:
+        assembly = wiring_mod.assemble_review_pool(
+            list(env.pool_raw), review_cfg=env.review_cfg,
+            run_id=f"final-{objective_id}", round="0",
+            builder_family="muse",
+            receipts_dir=scratch / "review_receipts")
+    except wiring_mod.ReviewRoutingError as exc:
+        return await _objective_park(
+            env, objective, "config", f"free-router: {exc}"[:300])
+    routing = assembly.routing
+    if routing is not None:
+        pool = review_mod.parse_pool(assembly.raw_pool)
+        prefer: Sequence[str] = tuple(assembly.prefer_families)
+        review_executor: Any = ProcessExecutor(
+            pool=list(assembly.raw_pool))
+        run_env = replace(env, executor=review_executor)
+    else:
+        pool = env.pool
+        prefer = ()
+        review_executor = None
+        run_env = env
     plan = await review_mod.select_round(
-        env.pool, env.slots, 3, builder_family="muse",
+        pool, env.slots, 3, builder_family="muse",
+        prefer_families=prefer,
         cascade_enabled=review_mod.cascade_enabled(
             env.review_cfg.get("cascade")))
 
@@ -3560,31 +3641,43 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
         attempt: int,
         previous: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
-        return await _run_final_reviewer(
-            env, slot, request, head, objective, attempt=attempt,
-            previous=previous, review_no=reviews + 1)
+        async def run_attempt(
+            current: review_mod.ReviewSlot,
+            tried: Mapping[str, Any] | None,
+        ) -> dict[str, Any]:
+            return await _run_final_reviewer(
+                run_env, current, request, head, objective,
+                attempt=attempt, previous=tried,
+                review_no=reviews + 1)
+        if routing is None or slot.label not in routing.states:
+            return await run_attempt(slot, previous)
+        return await _run_routed_reviewer(
+            run_attempt, routing=routing, slots=env.slots,
+            executor=review_executor, slot=slot, attempt=attempt,
+            previous=previous)
 
     critical = any(
         isinstance(child, Mapping)
         and str(child.get("priority") or "").lower() == "critical"
         for child in children)
     cascade = review_mod.arm_premium_slots(
-        env.executor, env.pool, env.review_cfg.get("cascade"), critical)
+        run_env.executor, pool, env.review_cfg.get("cascade"), critical)
     try:
         result = await review_mod.run_quorum_round(
-            env.pool, env.slots, plan, run_one, builder_family="muse",
+            pool, env.slots, plan, run_one, builder_family="muse",
             quorum=int(env.review_cfg.get("quorum", 2)),
             recovery=env.review_cfg.get("recovery"),
             cascade=cascade)
     finally:
-        review_mod.disarm_premium_slots(env.executor, env.pool)
+        review_mod.disarm_premium_slots(run_env.executor, pool)
+        if routing is not None:
+            routing.close()
     if not result.met:
         return await _objective_park(
             env, objective, "no_quorum",
             f"final review without quorum: {result.summary() or 'empty pool'}")
     verdicts = result.verdicts
     consolidated = findings_mod.consolidate(verdicts)
-    scratch = objective_scratch(env.repo, objective_id)
     scratch.mkdir(parents=True, exist_ok=True)
     (scratch / "OBJECTIVE_FINDINGS.md").write_text(
         findings_mod.render_findings(consolidated, 0, head,

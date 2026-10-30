@@ -240,7 +240,8 @@ def _project_config(repo: Path) -> dict[str, Any]:
             "roles": {"closer": {"command": ["true"]},
                       "arbiter": {"command": ["true"]}},
             "reviewers": [dict(slot) for slot in _POOL],
-            "review": {"quorum": 2},
+            # Static pool pinned: close mechanics, not routing (00403).
+            "review": {"quorum": 2, "free_router": {"enabled": False}},
             "timeouts_minutes": {"closer": 15, "arbiter": 10},
         },
     }

@@ -172,6 +172,9 @@ def _env_for(test: unittest.TestCase, repo: Path,
         notify=notify,
         repo=repo,
         objectives_cfg=dict(objectives_cfg or {}),
+        # Static pool pinned: these tests target engine mechanics,
+        # not routing (TASK-2026-00403 covers the dynamic assembly).
+        review_cfg={"free_router": {"enabled": False}},
         planner_cfg={
             "timeout_minutes": 15,
             "policy_path": str(policy),
@@ -1579,14 +1582,33 @@ class BootResumeDecisionTests(unittest.TestCase):
             children, 2)
         self.assertEqual(call["action"], "leave")
 
-    def test_other_parks_and_active_stay(self) -> None:
+    def test_other_parks_stay(self) -> None:
         for objective in (
-                self._objective(status="active"),
                 self._objective(status="waiting",
                                 waiting_reason="data_gaps: kid-1: missing"),
+                self._objective(status="waiting",
+                                waiting_reason="config: free-router: boom"),
                 self._objective(status="closed")):
             call = boot_resume_decision(objective, self._clean(), 2)
             self.assertEqual(call["action"], "leave")
+
+    def test_active_clean_resumes_fresh(self) -> None:
+        call = boot_resume_decision(
+            self._objective(status="active"), self._clean(), 2)
+        self.assertEqual(call["action"], "resume_fresh")
+
+    def test_active_gapped_stays(self) -> None:
+        children = self._clean() + [_child("kid-wait", "queued", dev=True)]
+        call = boot_resume_decision(
+            self._objective(status="active"), children, 2)
+        self.assertEqual(call["action"], "leave")
+
+    def test_spend_gated_stays(self) -> None:
+        call = boot_resume_decision(
+            self._objective(status="active",
+                            pending_plan={"question": "q"}),
+            self._clean(), 2)
+        self.assertEqual(call["action"], "leave")
 
 
 class BootResumeOneTests(unittest.IsolatedAsyncioTestCase):
@@ -1643,7 +1665,8 @@ class BootResumeOneTests(unittest.IsolatedAsyncioTestCase):
                      "conversion_source_task_id": "shell-1",
                      "status": "active", "final_reviews": 0,
                      "waiting_reason": None}
-        env = self._env(objective, self._clean(), notices)
+        children = self._clean() + [_child("kid-wait", "queued", dev=True)]
+        env = self._env(objective, children, notices)
         plan = AsyncMock(return_value={"ok": True})
         with patch.object(engine_mod, "plan_objective", new=plan):
             result = await boot_resume_one(env, "OBJ-1")
