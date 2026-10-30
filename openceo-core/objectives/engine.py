@@ -1635,9 +1635,7 @@ async def _plan_objective_inner(
     cfg = env.objectives_cfg
     planner_cfg = env.planner_cfg
     tickets = await env.tasks.list_by_objective(objective_id)
-    active = [item for item in tickets
-              if str(item.get("status")) not in TERMINAL_TICKET_STATUS
-              and str(item.get("status")) != "converted"]
+    active = _brake_active_children(tickets)
     if len(tickets) >= int(cfg.get("max_tickets", 20)):
         # Cost brake, not an owner decision (TASK-2026-00118): no new
         # tickets are planned, but open work keeps running and the next
@@ -2525,9 +2523,7 @@ async def apply_approved_plan(
                 "detail": str(exc)[:300]}
     cfg = env.objectives_cfg
     tickets = await env.tasks.list_by_objective(objective_id)
-    active = [item for item in tickets
-              if str(item.get("status")) not in TERMINAL_TICKET_STATUS
-              and str(item.get("status")) != "converted"]
+    active = _brake_active_children(tickets)
     if len(tickets) >= int(cfg.get("max_tickets", 20)):
         await env.objectives.patch_objective(
             objective_id, {"pending_plan": None})
@@ -3168,6 +3164,24 @@ def _is_dead_queued(
                 != FAILED_HISTORY_STATUS:
             return False
     return True
+
+
+def _brake_active_children(
+    tickets: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """In-flight children for the admission brake (TASK-2026-00406).
+
+    Failed tickets are settled history (never slots), like terminal
+    ones, and dead-queued work (blocked only by failed blockers) can
+    never run: counting either wedges planning once history fills the
+    cap. Fail-closed: unknown or live blockers stay in flight.
+    """
+    by_id = {str(item.get("task_id") or ""): item for item in tickets}
+    return [item for item in tickets
+            if str(item.get("status")) not in TERMINAL_TICKET_STATUS
+            and str(item.get("status")) != FAILED_HISTORY_STATUS
+            and str(item.get("status")) != "converted"
+            and not _is_dead_queued(by_id, item)]
 
 
 def verify_delivery(
