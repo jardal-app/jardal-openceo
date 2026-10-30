@@ -18,6 +18,7 @@ dev:
   default_provider: muse
   branch_pattern: "{session_id}-{slug}"
   auto_push: false
+  auto_merge: false
   create_pr: true
   pr_body: auto
 
