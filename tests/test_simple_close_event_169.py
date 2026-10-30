@@ -40,6 +40,7 @@ from agents.dev.session import (  # noqa: E402
     DevSessionManager,
     _SimpleBranch,
 )
+from agents.dev.tier_s.cycle import TierSCycle as RealTierSCycle  # noqa: E402
 from objectives import engine as engine_mod  # noqa: E402
 from objectives.service import ObjectiveService  # noqa: E402
 from orchestration.live import ExecResult  # noqa: E402
@@ -639,7 +640,8 @@ class SessionCloseContractTests(unittest.IsolatedAsyncioTestCase):
         manager = DevSessionManager(Settings(), MagicMock())
         outcome = SimpleNamespace(status="completed", run_id="ts-x",
                                   reason="", detail="", branch="tier-s/x",
-                                  commit_sha="deadbeef", resume_at=None)
+                                  commit_sha="deadbeef", resume_at=None,
+                                  params=None)
         project_config = {
             "project": {"repos": [{"local_path": str(repo)}]},
             "dev": {},
@@ -650,6 +652,8 @@ class SessionCloseContractTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("agents.dev.session.TierSCycle") as cycle_cls:
             cycle_cls.return_value.run = AsyncMock(return_value=outcome)
+            cycle_cls.config_from_project.side_effect = (
+                RealTierSCycle.config_from_project)
             output = await manager._run_tier_s(task, project_config, {})
 
         self.assertEqual(output.status, TaskStatus.COMPLETED)
@@ -663,7 +667,7 @@ class SessionCloseContractTests(unittest.IsolatedAsyncioTestCase):
         outcome = SimpleNamespace(status="completed", run_id="ts-x",
                                   reason="converted", detail="OBJ-1",
                                   branch="tier-s/x", commit_sha="",
-                                  resume_at=None)
+                                  resume_at=None, params=None)
         project_config = {
             "project": {"repos": [{"local_path": str(repo)}]},
             "dev": {},
@@ -673,6 +677,8 @@ class SessionCloseContractTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("agents.dev.session.TierSCycle") as cycle_cls:
             cycle_cls.return_value.run = AsyncMock(return_value=outcome)
+            cycle_cls.config_from_project.side_effect = (
+                RealTierSCycle.config_from_project)
             output = await manager._run_tier_s(task, project_config, {})
 
         self.assertEqual(output.status, TaskStatus.CONVERTED)

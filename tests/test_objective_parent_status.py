@@ -23,7 +23,7 @@ if str(CORE) not in sys.path:
 
 from agents.dev.session import DevSessionManager
 from objectives import engine as objectives_mod
-from agents.dev.tier_s.cycle import CycleOutcome
+from agents.dev.tier_s.cycle import CycleOutcome, TierSCycle as RealTierSCycle
 from objectives.engine import (
     InMemoryObjectiveStore,
     InMemoryTaskLister,
@@ -125,6 +125,8 @@ class ObjectiveParentStatusTests(unittest.IsolatedAsyncioTestCase):
                 "project": "p"}
         with patch("agents.dev.session.TierSCycle") as cycle_cls:
             cycle_cls.return_value.run = AsyncMock(return_value=outcome)
+            cycle_cls.config_from_project.side_effect = (
+                RealTierSCycle.config_from_project)
             output = await manager._run_tier_s(task, project_config, {})
 
         self.assertEqual(output.status, TaskStatus.CONVERTED)
