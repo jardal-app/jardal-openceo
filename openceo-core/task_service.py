@@ -7496,7 +7496,7 @@ class TaskService:
         ticket: dict[str, Any],
         session_params: Any,
     ) -> None:
-        """Return a persisted FAILED verdict to the planner (00202/00204).
+        """Return a persisted FAILED ticket to the planner (00202/00204).
 
         Single post-persist return, mirroring the §9.4 close: the run's
         fresh ``agent_result`` (parsed or legacy-mapped) decides. A
@@ -7504,21 +7504,17 @@ class TaskService:
         verdict on a relaunched ticket (``returns_from`` tag) parks
         capability_gap instead — or, for a loose ticket with no
         objective to park on, stays failed with its return history for
-        the CEO reactive review. Skipped without a verdict, after a
-        dev material failure (§29 already replanned), on cancellation
-        and without objective wiring. Never fails the run.
+        the CEO reactive review. An objective ticket failed with no
+        verdict at all returns once the same way (TASK-2026-00406):
+        otherwise the objective never learns the branch died and
+        rests wedged. Skipped after a dev material failure (§29
+        already replanned), on cancellation, with an unusable verdict
+        dict, and for loose tickets without a verdict. Never fails
+        the run.
         """
         try:
             fresh = session_params \
                 if isinstance(session_params, dict) else {}
-            verdict = fresh.get("agent_result")
-            if not isinstance(verdict, dict):
-                return
-            resultado = str(verdict.get("resultado") or "")
-            if resultado not in {"bloqueado", "no_aplica"}:
-                return
-            if fresh.get("material_failure") is not None:
-                return  # dev §29 already replanned this failure
             task_id = str(ticket.get("task_id") or "")
             if self._repo is not None and task_id:
                 try:
@@ -7531,38 +7527,66 @@ class TaskService:
                         current.get("status") or "") == \
                         TaskStatus.CANCELLED.value:
                     return
+            verdict = fresh.get("agent_result")
+            has_verdict = isinstance(verdict, dict)
+            resultado = str(verdict.get("resultado") or "") \
+                if has_verdict else ""
+            verdict_return = has_verdict and \
+                resultado in {"bloqueado", "no_aplica"}
+            if fresh.get("material_failure") is not None:
+                return  # dev §29 already replanned this failure
             objective_id = str(ticket.get("objective_id") or "")
             if not objective_id:
+                if not verdict_return:
+                    return
                 await self._trigger_loose_return(
                     ticket, fresh, verdict, task_id, resultado)
                 return
             service = getattr(self, "_objective_service", None)
             if service is None:
                 return
-            entry = {
-                "task_id": task_id,
-                "title": str(ticket.get("title") or ""),
-                "agent": str(ticket.get("agent") or ""),
-                "resultado": resultado,
-                "motivo": str(verdict.get("motivo") or "")[:500],
-                "necesidad": str(verdict.get("necesidad") or "")[:500],
-            }
+            if verdict_return:
+                assert isinstance(verdict, dict)
+                entry = {
+                    "task_id": task_id,
+                    "title": str(ticket.get("title") or ""),
+                    "agent": str(ticket.get("agent") or ""),
+                    "resultado": resultado,
+                    "motivo": str(verdict.get("motivo") or "")[:500],
+                    "necesidad": str(verdict.get("necesidad") or "")[:500],
+                }
+                actor = f"Agent {resultado}"
+            elif has_verdict:
+                return  # unusable verdict dict: preserved no-op
+            else:
+                motivo = str(ticket.get("error") or fresh.get("error")
+                             or ticket.get("last_response_summary")
+                             or "")[:500]
+                entry = {
+                    "task_id": task_id,
+                    "title": str(ticket.get("title") or ""),
+                    "agent": str(ticket.get("agent") or ""),
+                    "resultado": "failed",
+                    "motivo": motivo,
+                    "necesidad": "",
+                }
+                actor = "Ticket failed without verdict"
             if fresh.get("returns_from"):
                 outcome = await service.park_return_gap(
                     objective_id, entry)
-                note = (f"Agent {resultado} after one replan: parked "
+                note = (f"{actor} after one replan: parked "
                         f"capability_gap ({outcome.get('reason')}). "
                         f"Motivo: {entry['motivo']}")
             else:
                 outcome = await service.plan_return(objective_id, entry)
                 if outcome.get("ok"):
-                    note = (f"Agent {resultado}: returned once to the "
+                    note = (f"{actor}: returned once to the "
                             f"planner "
                             f"({outcome.get('tickets_created', 0)} "
                             f"ticket(s)). Motivo: {entry['motivo']}")
                 else:
                     detail = str(outcome.get("detail") or "").strip()
-                    note = (f"Agent {resultado}: return replan parked "
+                    note = (f"{actor}: return replan parked "
                             f"({outcome.get('reason')}"
                             f"{': ' + detail[:200] if detail else ''}). "
                             f"Motivo: {entry['motivo']}")

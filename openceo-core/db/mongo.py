@@ -1327,15 +1327,17 @@ class MongoRepository:
     async def list_boot_resumable_objectives(
         self, limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """Objectives a restart may resume: orphaned reviews + parks.
+        """Objectives a restart may resume: actives, reviews + parks.
 
         Backs the objective boot resume (TASK-2026-00396): ``final_review``
         rows are orphaned by definition at boot, ``waiting`` rows resume
-        only when the deterministic check proves their wedge cleared.
+        only when the deterministic check proves their wedge cleared,
+        and ``active`` rows ride along so clean orphans resume while
+        gapped ones are left alone (TASK-2026-00406).
         Bounded by `limit`, never a sweep.
         """
         rows = self.dev_objectives.find(
-            {"status": {"$in": ["final_review", "waiting"]}},
+            {"status": {"$in": ["active", "final_review", "waiting"]}},
             sort=[("created_at", ASCENDING)],
         ).limit(limit)
         return [self._clean(row) async for row in rows]

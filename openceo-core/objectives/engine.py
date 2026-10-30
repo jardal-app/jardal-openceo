@@ -230,8 +230,11 @@ class InMemoryObjectiveStore:
     async def list_boot_resumable_objectives(
         self, limit: int = 100,
     ) -> list[dict[str, Any]]:
+        # ``active`` rows ride along: the decision leaves gapped ones
+        # alone and only clean orphans resume (TASK-2026-00406).
         return [dict(doc) for doc in self.docs.values()
-                if doc.get("status") in ("final_review", "waiting")][:limit]
+                if doc.get("status") in (
+                    "active", "final_review", "waiting")][:limit]
 
 
 class MongoObjectiveStore:

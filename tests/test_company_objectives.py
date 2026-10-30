@@ -1696,5 +1696,21 @@ class BootResumeOneTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["status"], "waiting")
 
 
+class BootResumableListTests(unittest.IsolatedAsyncioTestCase):
+    """The boot pass sees orphaned actives too (TASK-2026-00406)."""
+
+    async def test_list_includes_active_review_and_waiting(self) -> None:
+        store = InMemoryObjectiveStore()
+        for oid, status in (("OBJ-A", "active"),
+                            ("OBJ-R", "final_review"),
+                            ("OBJ-W", "waiting"),
+                            ("OBJ-C", "closed")):
+            store.docs[oid] = {"objective_id": oid, "status": status}
+        rows = await store.list_boot_resumable_objectives()
+        self.assertEqual(
+            {row["objective_id"] for row in rows},
+            {"OBJ-A", "OBJ-R", "OBJ-W"})
+
+
 if __name__ == "__main__":
     unittest.main()

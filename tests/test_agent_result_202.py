@@ -631,9 +631,39 @@ class TriggerReturnHookTests(unittest.IsolatedAsyncioTestCase):
         params.update(overrides)
         return params
 
-    async def test_no_verdict_is_ignored(self) -> None:
-        stub, service, ticket = self._stub()
+    async def test_no_verdict_loose_is_ignored(self) -> None:
+        stub, service, ticket = self._stub(objective_id="")
         await TaskService._trigger_objective_return(stub, ticket, {})
+        service.plan_return.assert_not_called()
+        service.park_return_gap.assert_not_called()
+        stub.comment_on_ticket.assert_not_called()
+
+    async def test_no_verdict_wired_plans_once(self) -> None:
+        stub, service, ticket = self._stub()
+        ticket["error"] = "Agent tier_c died: boom"
+        await TaskService._trigger_objective_return(stub, ticket, {})
+        service.plan_return.assert_awaited_once()
+        service.park_return_gap.assert_not_called()
+        args = service.plan_return.await_args.args
+        self.assertEqual(args[0], "OBJ-1")
+        self.assertEqual(args[1]["task_id"], "task-1")
+        self.assertEqual(args[1]["resultado"], "failed")
+        self.assertIn("boom", args[1]["motivo"])
+        stub.comment_on_ticket.assert_awaited_once()
+
+    async def test_no_verdict_wired_replacement_parks(self) -> None:
+        stub, service, ticket = self._stub()
+        await TaskService._trigger_objective_return(
+            stub, ticket, {"returns_from": "task-0"})
+        service.park_return_gap.assert_awaited_once()
+        service.plan_return.assert_not_called()
+        stub.comment_on_ticket.assert_awaited_once()
+
+    async def test_unusable_verdict_dict_is_ignored(self) -> None:
+        stub, service, ticket = self._stub()
+        params = {"agent_result": {"resultado": "otro",
+                                   "motivo": "confused"}}
+        await TaskService._trigger_objective_return(stub, ticket, params)
         service.plan_return.assert_not_called()
         service.park_return_gap.assert_not_called()
         stub.comment_on_ticket.assert_not_called()
