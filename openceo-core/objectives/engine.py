@@ -3772,6 +3772,8 @@ async def _run_final_reviewer(
             worktree, timeout_s)
         outcome.update(elapsed_s=float(result.elapsed_s or 0.0),
                        exit_code=result.returncode)
+        outcome["account"] = review_mod.executed_account(
+            slot, result.slot)
         after = await asyncio.to_thread(
             review_mod.worktree_snapshot, worktree)
         if before and after and before != after:

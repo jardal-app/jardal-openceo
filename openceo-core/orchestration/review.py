@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
 import shutil
 import subprocess
@@ -104,7 +105,9 @@ TIER_BY_PROVIDER = {
 ACCOUNT_COMMAND_PROVIDERS = frozenset({"agy", "gemini"})
 
 
-def with_resolved_command(spec: Mapping[str, Any]) -> dict[str, Any]:
+def with_resolved_command(
+    spec: Mapping[str, Any], *, pick_pool: bool = False,
+) -> dict[str, Any]:
     """Copy of a pool entry with the executable command. Fail-closed.
 
     Account-selected slots resolve ``[account]`` (validated against
@@ -113,6 +116,10 @@ def with_resolved_command(spec: Mapping[str, Any]) -> dict[str, Any]:
     account pass through untouched. Single origin for both the
     selection side (:func:`parse_pool`) and the executor (live
     ``review:`` roles), so both always agree on the account.
+
+    ``account_pool`` (TASK-2026-00413) lists equivalent accounts the
+    executor draws from per run (``pick_pool=True``); selection keeps
+    the configured default. Pool members validate like the account.
     """
     out = dict(spec)
     account = str(out.get("account") or "").strip()
@@ -126,6 +133,17 @@ def with_resolved_command(spec: Mapping[str, Any]) -> dict[str, Any]:
         raise ReviewerConfigError(
             f"review slot {out.get('label')!r}: unknown agy account "
             f"{account!r} (known: {', '.join(known)})")
+    pool = [str(name).strip()
+            for name in out.get("account_pool") or []]
+    pool = [name for name in pool if name]
+    for candidate in pool:
+        if candidate not in known:
+            raise ReviewerConfigError(
+                f"review slot {out.get('label')!r}: unknown pool account "
+                f"{candidate!r} (known: {', '.join(known)})")
+    if pick_pool and pool:
+        account = random.choice(pool)
+        out["account"] = account
     command = out.get("command") or []
     if isinstance(command, str):
         command = [command]
@@ -136,6 +154,20 @@ def with_resolved_command(spec: Mapping[str, Any]) -> dict[str, Any]:
             f"contradicts account {account!r}")
     out["command"] = [account, *command[1:]] if command else [account]
     return out
+
+
+def executed_account(slot: ReviewSlot, result_slot: str | None) -> str:
+    """Per-attempt account identity (TASK-2026-00413).
+
+    The executor reports the account it ran, else the slot label: a
+    reported value differing from the label is a picked pool account
+    and wins; otherwise the parsed account stands, so non-pool
+    outcomes keep their exact values.
+    """
+    executed = str(result_slot or "").strip()
+    if executed and executed != slot.label:
+        return executed
+    return slot.account
 
 
 def parse_pool(raw: Sequence[Mapping[str, Any]] | None) -> list[ReviewSlot]:
