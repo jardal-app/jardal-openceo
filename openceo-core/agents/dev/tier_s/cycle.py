@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
+from agents.dev.production_deploy import normalize_deploy, run_production_step
 from agents.dev.routing import resolve_coding_tool
 from agents.dev.tier_s_contract import (
     parse_plan_observations,
@@ -188,6 +189,7 @@ class _Ctx:
     pool_resume_at: str | None = None
     vault_index: str = ""
     knowledge_prefix: str = ""
+    deploy: dict[str, Any] = field(default_factory=dict)
 
 
 def _utcnow_iso() -> str:
@@ -508,6 +510,7 @@ class TierSCycle:
             "inbox_rule": dict(inbox_cfg.get("promotion", {}) or {}),
             "fix_tiers": dict(review.get("fix_ticket_tiers", {}) or {}),
             "auto_merge": bool(dev.get("auto_merge", True)),
+            "deploy": dict(dev.get("deploy", {}) or {}),
             "base_branch": base_branch,
             "budget_exclude": list(dev.get("budget_exclude", []) or []),
             "knowledge_prefix": knowledge_target_prefix(cfg),
@@ -539,6 +542,7 @@ class TierSCycle:
             timeouts=dict(cycle_cfg.get("timeouts", TIMEOUTS_DEFAULTS)),
             waiting_cfg=dict(cycle_cfg.get("waiting", WAITING_DEFAULTS)),
             auto_merge=bool(cycle_cfg.get("auto_merge", True)),
+            deploy=dict(cycle_cfg.get("deploy", {}) or {}),
             budget_exclude=list(cycle_cfg.get("budget_exclude", []) or []),
             gate_specs=list(gate_specs) if gate_specs is not None
             else gate_mod.load_gates(dev_cfg),
@@ -2293,6 +2297,7 @@ class TierSCycle:
             return await self._park(
                 ctx, "needs_owner", routes_block,
                 patch_run=True)
+        production = None
         if ctx.auto_merge:
             merged, conflict = self._merge(ctx)
             if not merged:
@@ -2302,6 +2307,12 @@ class TierSCycle:
             self._drop_branch(ctx)
             if self._push is not None:
                 await self._push(ctx.repo, ctx.base_branch)
+            # Post-merge production step (TASK-2026-00415): publish the
+            # base and apply the project's deploy mode (no-op push when
+            # _push already published it).
+            production = await asyncio.to_thread(
+                run_production_step, ctx.repo, ctx.base_branch,
+                normalize_deploy(ctx.deploy))
         await self._runs.patch_run(ctx.run_id, {
             "status": "completed", "head_sha": ctx.final_sha,
             "metrics": ctx.metrics, "gates": ctx.gate_runs,
@@ -2320,9 +2331,11 @@ class TierSCycle:
         branch_note = (f"merged into {ctx.base_branch}"
                        if ctx.auto_merge else f"branch kept: {ctx.branch}")
         review_note = self._review_summary(ctx)
+        production_note = (f" Production: {production.summary}."
+                           if production is not None else "")
         await self._say(
             ctx, f"Tier S cycle closed: {branch_note}, {ctx.final_sha[:12]}, "
-            f"{len(files)} files. {review_note}")
+            f"{len(files)} files. {review_note}{production_note}")
         return CycleOutcome(
             status="completed", run_id=ctx.run_id, branch=ctx.branch,
             commit_sha=ctx.final_sha)

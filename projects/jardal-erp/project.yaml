@@ -12,6 +12,11 @@ dev:
   branch_pattern: "{session_id}-{slug}"
   auto_push: false
   auto_merge: true
+  # Post-merge production (TASK-2026-00415): v2 follows the versioned
+  # release train in docs/RELEASE.md (manual, non-idempotent migrations);
+  # the engine delivers to origin/main and never touches production.
+  deploy:
+    mode: none
   create_pr: true
   providers:
     muse:

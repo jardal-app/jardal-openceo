@@ -19,6 +19,7 @@ from .review_policy import (REVIEW_OFF, resolve_review, review_wait_reason,
                             stamp_effective_review)
 from .routing import (ROUTING_MISSING_REASON, TIER_C_CHAIN, RoutingDecision,
                       resolve_coding_tool, select_tier_c_link)
+from .production_deploy import normalize_deploy, run_production_step
 from .tier_oracle import (
     freeze_oracle,
     oracle_run_plan,
@@ -2067,6 +2068,17 @@ class DevSessionManager:
                     return output
             self._drop_simple_branch(branch)
             branch_note = f"merged into {branch.base}"
+            if auto_merge:
+                # Post-merge production step (TASK-2026-00415): with
+                # auto_merge the base is main (no objective branch exists),
+                # so publish it and apply the project's deploy mode.
+                production = await asyncio.to_thread(
+                    run_production_step, repo, branch.base,
+                    normalize_deploy(dev_cfg.get("deploy")))
+                branch_note += f"; production: {production.summary}"
+                output.steps.append(self._step(
+                    "production", "ok" if production.ok else "error",
+                    production.detail))
         else:
             branch_note = (f"branch kept: {branch.branch} "
                            "(open a PR; policy auto_merge=false, §12)")

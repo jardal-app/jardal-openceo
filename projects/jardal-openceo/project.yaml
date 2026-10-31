@@ -17,6 +17,12 @@ dev:
   pr_body: auto
   # Tier S v2 (F1/F2): merge policy + orchestrator gates (design §11/§12).
   auto_merge: true
+  # Post-merge production (TASK-2026-00415): the engine delivers to
+  # origin/main; activation (service restart) stays a manual Owner step
+  # (CLAUDE.md §9): restarting the orchestrator mid-flight would kill
+  # live sessions.
+  deploy:
+    mode: none
   budget_exclude: []
   gates:
     - { name: compile, cmd: "python3 -m py_compile openceo-core/main.py openceo-core/first_layer.py openceo-core/project_service.py openceo-core/db/mongo.py", timeout_minutes: 5, required: true }
