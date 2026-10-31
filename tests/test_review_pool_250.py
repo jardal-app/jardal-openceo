@@ -185,8 +185,7 @@ class RealPoolTests(unittest.TestCase):
         self.assertEqual(slot["account"], "agyd")
         self.assertNotIn("command", slot)
         self.assertEqual(slot["headless_args"],
-                         ["--model", "gemini-3.8-flash-high",
-                          "--effort", "high", "--print"])
+                         ["--model", "gemini-3.8-flash-high", "--print"])
         self.assertEqual(slot["model"], "gemini-3.8-flash-high")
 
     def test_opencode_candidates_active_with_script_ids(self) -> None:
