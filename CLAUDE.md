@@ -99,6 +99,7 @@ Los CLI del roster leen `AGENTS.md` directamente. El resto de este archivo es el
 Una sesión no termina con el código listo: termina con el ticket cerrado en su ciclo completo. En orden:
 
 1. **Merge a `main` + push** (`git checkout main && git merge --no-ff <rama> && git push origin main`).
+Orden permanente del Owner (2026-10-31, TASK-2026-00419): en sesiones del Owner, el push fast-forward al upstream con commits ordenados por el Owner está pre-autorizado; no pedir palabra por push. No aplica a ejecutores Tier S (solo el orquestador commitea/mergea).
 2. **Servicio reiniciado** (`scripts/openceo-core-host.sh restart` + `status` + smoke).
 3. **Ticket en su estado final** (`Completed` con `evidence`; `Pending Review` solo con `human_action` que únicamente el Owner puede dar; `Working` con `reason` si sigue abierto; cancelar trabajo del Owner exige citar su orden). Borrar la rama tras el merge.
 4. **Docs temporales eliminados** (`docs/work/TASK-2026-000NN-tema.md` tras el checklist; informar en una línea).
