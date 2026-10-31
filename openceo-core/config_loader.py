@@ -346,6 +346,11 @@ class ConfigLoader:
             f"{project}/project.yaml: {err}"
             for err in validate_oracle_config(dev)
         )
+        from agents.dev.production_deploy import validate_deploy_config
+        errors.extend(
+            f"{project}/project.yaml: {err}"
+            for err in validate_deploy_config(dev)
+        )
         return errors
 
     def company_mandate_path(self) -> Path:
@@ -413,6 +418,15 @@ class ConfigLoader:
                 # Tier S merge policy (design §12, F2): the engine integrates
                 # on close when true. Only the Tier S engine reads it.
                 "auto_merge": True,
+                # Post-merge production step (TASK-2026-00415): after an
+                # auto-merge to the base, the engine publishes the base
+                # and applies the deploy mode. none = no production
+                # target (delivery to origin/<base> plus a receipt).
+                "deploy": {
+                    "mode": "none",
+                    "cmd": "",
+                    "timeout_minutes": 10,
+                },
                 "budget_exclude": [],
                 # Tier S gates (design §11, F1): run by the orchestrator on every
                 # tier. Empty = none configured (telemetry note, not a block).
