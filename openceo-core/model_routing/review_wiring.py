@@ -124,9 +124,9 @@ FREE_REVIEW_PROFILE = "free-review"
 #: Stable labels of the ranking-fed slots; models rotate under them.
 REVIEW_SLOT_LABELS = ("free-review-1", "free-review-2")
 
-#: Same priorities the static mimo/nemotron slots hold today, so S
-#: round 1 keeps dsh first and its priority order otherwise.
-REVIEW_SLOT_PRIORITIES = (4, 5)
+#: Same priorities the static mimo/nemotron slots hold today, so
+#: round 1 keeps the free pair first and its priority order otherwise.
+REVIEW_SLOT_PRIORITIES = (1, 1)
 
 ROUND2_POLICIES = ("reuse_best_plus_novel", "four_distinct", "reuse_top_two")
 DEFAULT_ROUND2_POLICY = "reuse_best_plus_novel"
