@@ -184,8 +184,9 @@ class RealPoolTests(unittest.TestCase):
         self.assertEqual(slot["label"], "gemini")
         self.assertEqual(slot["account"], "agyd")
         self.assertNotIn("command", slot)
-        self.assertEqual(slot["headless_args"], ["--print"])
-        self.assertEqual(slot["model"], "gemini")
+        self.assertEqual(slot["headless_args"],
+                         ["--model", "gemini-3.8-flash-high", "--print"])
+        self.assertEqual(slot["model"], "gemini-3.8-flash-high")
 
     def test_opencode_candidates_active_with_script_ids(self) -> None:
         reviewers, _cfg = _real_reviewers()
@@ -210,7 +211,7 @@ class RealPoolTests(unittest.TestCase):
              if item["active"] and not item.get("extra")),
             key=lambda item: (item["priority"], item["label"]))
         self.assertEqual([item["label"] for item in active[:3]],
-                         ["dsh", "mimo", "nemotron"])
+                         ["mimo", "nemotron", "gemini"])
         self.assertEqual(cfg["quorum"], 2)
         self.assertEqual(cfg["distinct_by"], "family")
         self.assertEqual(cfg["round1_parallel"], 3)

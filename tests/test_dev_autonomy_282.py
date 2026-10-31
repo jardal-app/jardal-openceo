@@ -228,11 +228,11 @@ async def test_s_build_checkpoint_and_wait_survive_session_mapping(repo):
     assert (await cycle._resume_point("t", repo))["run_id"] == "run"
 
 
-def test_expired_accounts_are_retained_but_disabled():
+def test_expired_qwen_slots_removed():
     root = Path(__file__).resolve().parents[1]
     config = ConfigLoader(Settings(_env_file=None, PROJECTS_DIR=str(root / "projects"))).load_project("jardal-openceo")
     slots = {s["label"]: s for s in config["review"]["reviewers"]}
-    assert not slots["qwen-max"]["active"] and not slots["qwen-glm"]["active"]
+    assert "qwen-max" not in slots and "qwen-glm" not in slots
     assert slots["reserve-glm-5.3-flash-free"]["active"]
     assert config["dev"]["providers"]["codex"]["command"][0].endswith("codexj")
     service = DevSessionService.__new__(DevSessionService)
