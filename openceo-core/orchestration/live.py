@@ -256,7 +256,7 @@ class ProcessExecutor:
                               output_tail=f"role {role} is disabled")
         if role.startswith("review:"):
             try:
-                spec = with_resolved_command(spec)
+                spec = with_resolved_command(spec, pick_pool=True)
             except ReviewerConfigError as exc:
                 return ExecResult(
                     returncode=1, elapsed_s=0.0,

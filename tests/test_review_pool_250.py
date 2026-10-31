@@ -91,6 +91,41 @@ class AccountResolutionTests(unittest.TestCase):
         self.assertEqual(slot.family, "gemini")
         self.assertEqual(slot.command, ("agy2",))
 
+    def test_pool_pick_distributes_over_accounts(self) -> None:
+        spec = _gemini_spec(
+            account_pool=["agyd", "agyj", "agy2"])
+        seen = {review_mod.with_resolved_command(
+            spec, pick_pool=True)["account"] for _ in range(300)}
+        self.assertEqual(seen, {"agyd", "agyj", "agy2"})
+
+    def test_pool_pick_sets_command_account(self) -> None:
+        resolved = review_mod.with_resolved_command(
+            _gemini_spec(account_pool=["agyj"]), pick_pool=True)
+        self.assertEqual(resolved["account"], "agyj")
+        self.assertEqual(resolved["command"], ["agyj"])
+
+    def test_no_pick_keeps_configured_account(self) -> None:
+        resolved = review_mod.with_resolved_command(
+            _gemini_spec(account_pool=["agyd", "agyj", "agy2"]))
+        self.assertEqual(resolved["account"], "agyd")
+        self.assertEqual(resolved["command"], ["agyd"])
+
+    def test_unknown_pool_account_fails_closed(self) -> None:
+        with self.assertRaises(review_mod.ReviewerConfigError) as raised:
+            review_mod.with_resolved_command(
+                _gemini_spec(account_pool=["agyd", "agy9"]),
+                pick_pool=True)
+        self.assertIn("agy9", str(raised.exception))
+
+    def test_executed_account_prefers_pool_pick(self) -> None:
+        (slot,) = review_mod.parse_pool([_gemini_spec()])
+        self.assertEqual(
+            review_mod.executed_account(slot, "agy2"), "agy2")
+        self.assertEqual(
+            review_mod.executed_account(slot, "gemini"), "agyd")
+        self.assertEqual(
+            review_mod.executed_account(slot, ""), "agyd")
+
     def test_parse_pool_rejects_bad_account(self) -> None:
         with self.assertRaises(review_mod.ReviewerConfigError):
             review_mod.parse_pool([_gemini_spec(account="nope")])
@@ -187,6 +222,7 @@ class RealPoolTests(unittest.TestCase):
         self.assertEqual(slot["headless_args"],
                          ["--model", "gemini-3.8-flash-high", "--print"])
         self.assertEqual(slot["model"], "gemini-3.8-flash-high")
+        self.assertEqual(slot["account_pool"], ["agyd", "agyj", "agy2"])
 
     def test_opencode_candidates_active_with_script_ids(self) -> None:
         reviewers, _cfg = _real_reviewers()
