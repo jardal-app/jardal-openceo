@@ -2965,6 +2965,17 @@ class TicketCloseContext:
     handoff_excerpt: str = ""
 
 
+def _park_resumes_on_close(objective: Mapping[str, Any]) -> bool:
+    """Only capability_gap parks resume on a child close (00430).
+
+    Other parks keep their own trigger (owner answer, ERP fix, spend
+    approval, boot wedge check); each close fires once, so a resume
+    consumes a distinct completion and the loop stays bounded.
+    """
+    return objective.get("status") == "waiting" and str(
+        objective.get("waiting_reason") or "").startswith("capability_gap")
+
+
 async def on_ticket_closed(
     env: ObjectiveEnv,
     ticket: Mapping[str, Any],
@@ -2972,15 +2983,29 @@ async def on_ticket_closed(
 ) -> dict[str, Any]:
     """Triggers + capsule recompile after an objective ticket closes (§9.4).
 
-    Never raises: trigger failures are notified, never fatal to the close.
+    A close under a capability_gap park resumes it: the completion is
+    terminal evidence the park never considered (TASK-2026-00430).
+    Never raises: trigger failures are notified, never fatal.
     """
     objective_id = str(ticket.get("objective_id") or "")
     if not objective_id:
         return {"ok": True, "action": "no-objective"}
     try:
         objective = await env.objectives.get_objective(objective_id)
-        if objective is None or objective.get("status") != "active":
+        if objective is None:
             return {"ok": True, "action": "objective-not-active"}
+        if objective.get("status") != "active":
+            if not _park_resumes_on_close(objective):
+                return {"ok": True, "action": "objective-not-active"}
+            await env.objectives.patch_objective(objective_id, {
+                "status": "active", "waiting_reason": None})
+            if env.notify is not None:
+                await env.notify(
+                    _notify_ref(objective),
+                    f"Objective {objective_id} resumed: child evidence "
+                    "arrived while parked (capability_gap).")
+            objective = await env.objectives.get_objective(objective_id) \
+                or objective
         if close is not None:
             await _absorb_close(env, objective, close)
             objective = await env.objectives.get_objective(objective_id) or objective
@@ -3379,9 +3404,9 @@ def _closer_no_verdict_detail(
 
 
 #: Waiting reasons the boot resume reconsiders (TASK-2026-00396):
-#: loop-guard stalls whose wedge may have cleared. Other parks
-#: (erp_error, data_gaps, capability_gap) need their own trigger and
-#: stay parked.
+#: loop-guard stalls whose wedge may have cleared. Other parks stay
+#: parked at boot: erp_error/data_gaps need their trigger, and
+#: capability_gap resumes on child close (TASK-2026-00430).
 _BOOT_RESUMABLE_PARKS = frozenset({"stalled"})
 
 
