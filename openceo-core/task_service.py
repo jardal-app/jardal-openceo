@@ -7444,6 +7444,52 @@ class TaskService:
     # called ``RateMonitor.can_launch_ticket``, retired in favour of
     # ``RateMonitor.admission_for_ticket`` (tier-aware reserves + reason).
 
+    async def _attribute_objective_child(
+        self, ticket: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Adopt the ERP-group objective for a closing child (00430).
+
+        Manual children file under the objective group but carry no
+        ``objective_id``; without it their closes never reach the
+        planner. Resolve ``parent_task`` to the ``converted`` group
+        ticket and adopt its objective (one patch). Fail-open: any
+        miss or error returns the ticket unchanged, never breaks
+        the close.
+        """
+        if not isinstance(ticket, dict) or ticket.get("objective_id"):
+            return ticket
+        task_id = str(ticket.get("task_id") or "")
+        parent = str(self._visibility_mirror(ticket).get("parent_task")
+                     or "").strip()
+        if not task_id or not parent:
+            return ticket
+        repo = getattr(self, "_repo", None)
+        lookup = getattr(repo, "find_task_by_business_name", None)
+        if repo is None or not callable(lookup):
+            return ticket
+        try:
+            group = await lookup(parent)
+        except Exception:  # noqa: BLE001
+            logger.warning("objective attribution lookup failed for %s",
+                           task_id, exc_info=True)
+            return ticket
+        if not isinstance(group, dict):
+            return ticket
+        objective_id = str(group.get("objective_id") or "").strip()
+        if not objective_id:
+            return ticket
+        if str(group.get("status") or "") != TaskStatus.CONVERTED.value:
+            return ticket
+        try:
+            await repo.patch_task(task_id, {"objective_id": objective_id})
+        except Exception:  # noqa: BLE001
+            logger.warning("objective attribution patch failed for %s",
+                           task_id, exc_info=True)
+            return ticket
+        attributed = dict(ticket)
+        attributed["objective_id"] = objective_id
+        return attributed
+
     async def _trigger_objective_close(
         self,
         ticket: dict[str, Any],
@@ -7460,6 +7506,7 @@ class TaskService:
         the close.
         """
         try:
+            ticket = await self._attribute_objective_child(ticket)
             fresh = session_params \
                 if isinstance(session_params, dict) else {}
             if fresh.get("_objective_close_notified"):
