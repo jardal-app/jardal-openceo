@@ -1336,3 +1336,9 @@ Trabajo de infraestructura hecho **fuera de OpenCEO** (en `/home/develop/deploym
 - Nuevo provider `muse` en `DevProvider` + patrón tmux + `MUSE_CLI_PATH`/`MUSE_DEFAULT_ARGS`; `sync-mcp-config.py` escribe `openceo-internal` también en `~/.config/muse/settings.json`.
 - Verificación: `tests/test_tier_s_contract.py` 15 passed; smoke tmux del builder OK (`muse-spark-1.3-contributor · max · YOLO`); un `muse exec` mínimo confirmó modelo y MCP `openceo_internal` visibles.
 - Pendiente: `scripts/openceo-core-host.sh restart` para que el código nuevo aplique en el servicio. TASK-2026-00078 (adaptador OpenCode) y TASK-2026-00030 siguen su propio curso; no se ejecutaron pilotos Tier S (gasto).
+
+## 2026-11-01 — Fix: capability_gap parks resume on child close (TASK-2026-00430)
+
+- `on_ticket_closed` reanuda objetivos `waiting/capability_gap` al cerrar un hijo (evidencia terminal nueva); otros parks conservan su trigger. Cierres de hijos ERP manuales adoptan `objective_id` vía grupo `converted` (fail-open).
+- Caso real MIS-4804F506: OBJ-0ED0BA24 aparcado 20h por 401 OAuth; tras el fix, redelivery del cierre 471 → objetivo activo + planner creó #477 (S1 fundación UI, tier_c, autorun). Hijos 465/468/469 cancelados superseded; 470 pendiente orden Owner (escalado TASK-2026-00431).
+- Merge a9c29f6 pusheado; servicio en release a9c29f6 dirty=true (cambios ajenos sin commit intactos). Tests: 6 nuevos + suites área/company/gate verdes.
