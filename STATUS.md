@@ -1342,3 +1342,11 @@ Trabajo de infraestructura hecho **fuera de OpenCEO** (en `/home/develop/deploym
 - `on_ticket_closed` reanuda objetivos `waiting/capability_gap` al cerrar un hijo (evidencia terminal nueva); otros parks conservan su trigger. Cierres de hijos ERP manuales adoptan `objective_id` vía grupo `converted` (fail-open).
 - Caso real MIS-4804F506: OBJ-0ED0BA24 aparcado 20h por 401 OAuth; tras el fix, redelivery del cierre 471 → objetivo activo + planner creó #477 (S1 fundación UI, tier_c, autorun). Hijos 465/468/469 cancelados superseded; 470 pendiente orden Owner (escalado TASK-2026-00431).
 - Merge a9c29f6 pusheado; servicio en release a9c29f6 dirty=true (cambios ajenos sin commit intactos). Tests: 6 nuevos + suites área/company/gate verdes.
+
+## 2026-11-02 — Fix: roles de solo lectura en su rol; timeout propio final (TASK-2026-00443)
+
+- Contrato por rol (`orchestration/role_contracts.py`) aplicado por `ProcessExecutor` a planner, objective_planner, plan_reviewer, revisores del pool, arbiter, closer y ceo_reviewer: leer y escribir solo el artefacto nombrado; sin tests, builds, código, tickets ni web. Builder sin cambios. Roles de solo lectura sin el CLAUDE.md global del Owner (overlay vacío sobre `~/.claude/CLAUDE.md`).
+- Timeout propio (rc 124) final para roles de solo lectura; el planner Tier S aparca `needs_owner` en vez de relanzar cada 15 min. Planner 40 min (Opus max, plan sin tope de longitud). Sin sesión del planner si el plan review no trae observaciones verificadas.
+- codexj vuelve a funcionar en el sandbox: CODEX_HOME por run (tmpfs, entradas ro, `auth.json` rw); antes moría al arrancar y los plan reviews se saltaban en silencio.
+- Traza sin contenido de los roles claude en `metrics.sessions[].usage.trace` (herramientas, ejecutables, turnos, tokens, effort); se descartó grabar el stream crudo.
+- Merges 99e0017 y a9dcde2 pusheados; servicio en release a9dcde2 dirty=true (WIP ajeno de TASK-2026-00428 intacto). Tests: 21 nuevos; suites relacionadas 1247 verdes y 12 fallos preexistentes idénticos a la base limpia; 9 mutaciones detectadas; verificación bwrap no generativa. Resume del 480 armado a las 19:14:39 UTC.
