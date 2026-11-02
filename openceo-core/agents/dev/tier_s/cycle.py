@@ -309,8 +309,12 @@ def _complete_handoff(
 
 
 def _plan_retry_prompt(errors: str, signal: str, repo: Path) -> str:
+    hint = ""
+    if "bad FILES line" in errors:
+        hint = ("FILES lines use exactly: - <path> "
+                "(<create|modify|delete>) — <why>.\n")
     return knowledge_mod.with_preamble(
-        f"Your PLAN.md is invalid: {errors}\nFix it in place "
+        f"Your PLAN.md is invalid: {errors}\n{hint}Fix it in place "
         f"and emit {signal} again.", repo, "en")
 
 
@@ -2931,6 +2935,9 @@ class TierSCycle:
             "ACCEPTANCE/FILES with create|modify|delete + why/CONTRACTS/DECISIONS/"
             "STEPS/ESTIMATE files=<n> lines=<n>/OUT_OF_SCOPE) and emit "
             f"{SIGNALS['plan_ready']} in .openceo/status.\n"
+            "FILES lines use exactly: - <path> (<create|modify|delete>) — "
+            "<why>, e.g. - apps/web/src/auth/login.ts (create) — login "
+            "screen per DESIGN.md.\n"
             "Decide open questions yourself and record them in DECISIONS; only "
             "use [OWNER] when the ticket explicitly marks a decision so."
         )
