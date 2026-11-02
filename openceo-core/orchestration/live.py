@@ -66,6 +66,7 @@ from orchestration.role_muse import (
     render_card_argv,
     settings_overlay_bytes,
 )
+from orchestration import session_trace
 from orchestration.role_contracts import is_read_only, with_role_contract
 from orchestration.role_opencode import (
     OPENCODE_OVERLAY_RELPATH,
@@ -131,6 +132,11 @@ OUTPUT_CAP_CHARS = 40000
 
 #: Conventional timeout exit code (telemetry only; engines treat != 0 alike).
 TIMEOUT_RETURNCODE = 124
+
+
+def _trace_usage(trace_dir: Path | None) -> dict[str, Any]:
+    trace = session_trace.summarize(trace_dir) if trace_dir else {}
+    return {"trace": trace} if trace else {}
 
 
 def executor_timed_out(result: ExecResult) -> bool:
@@ -450,6 +456,11 @@ class ProcessExecutor:
         if is_read_only(role):
             file_overlays = {**user_instruction_masks(),
                              **(file_overlays or {})}
+        trace_dir: Path | None = None
+        trace_ops: list[list[str]] = []
+        if str(spec.get("provider") or "") == "claude" and not hardened:
+            trace_dir, trace_ops = session_trace.prepare(
+                workdir, Path(os.path.expanduser("~")))
         try:
             if hardened:
                 plan = plan_reviewer(
@@ -468,7 +479,8 @@ class ProcessExecutor:
                                   extra_read_roots=spec.get(
                                       "extra_read_roots") or (),
                                   extra_write_roots=spec.get(
-                                      "extra_write_roots") or ())
+                                      "extra_write_roots") or (),
+                                  extra_ops=trace_ops)
         except (IsolationUnavailable, ValueError, OSError) as exc:
             if badge is not None and self._badge_provider is not None:
                 await self._badge_provider.revoke(badge)
@@ -522,7 +534,7 @@ class ProcessExecutor:
                     output_tail=(f"timeout after {timeout_s}s: "
                                  f"{' '.join(config_argv[:3])}"),
                     model=model, slot=slot,
-                    usage={"timeout": True})
+                    usage={"timeout": True, **_trace_usage(trace_dir)})
             stdout = (raw_out or b"").decode("utf-8", errors="replace")
             stderr = (raw_err or b"").decode("utf-8", errors="replace")
             returncode = int(process.returncode or 0)
@@ -537,7 +549,8 @@ class ProcessExecutor:
                 usage={"stdout_chars": len(stdout),
                        "stderr_chars": len(stderr),
                        "model_responded": model_responded(stdout, model),
-                       "truncated": truncated},
+                       "truncated": truncated,
+                       **_trace_usage(trace_dir)},
                 output_tail=text[:OUTPUT_CAP_CHARS],
                 model=model, slot=slot)
         finally:

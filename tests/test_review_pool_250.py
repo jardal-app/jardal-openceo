@@ -139,7 +139,7 @@ class LiveArgvTests(unittest.IsolatedAsyncioTestCase):
 
         def fake_plan(*, argv, workspace, base, overlay, config_args,
                       home_file_overlays=None, extra_read_roots=(),
-                      extra_write_roots=()):
+                      extra_write_roots=(), extra_ops=()):
             seen["argv"] = list(argv)
             seen["config_args"] = list(config_args)
             raise IsolationUnavailable("no bwrap here")
@@ -188,7 +188,7 @@ class LiveArgvTests(unittest.IsolatedAsyncioTestCase):
 
         def fake_plan(*, argv, workspace, base, overlay, config_args,
                       home_file_overlays=None, extra_read_roots=(),
-                      extra_write_roots=()):
+                      extra_write_roots=(), extra_ops=()):
             seen["called"] = True
             raise IsolationUnavailable("no bwrap here")
 

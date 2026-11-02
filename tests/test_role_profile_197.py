@@ -502,7 +502,7 @@ class LiveExecutorProfileTests(unittest.IsolatedAsyncioTestCase):
 
         def fake_plan(*, argv, workspace, base, overlay, config_args,
                       home_file_overlays=None, extra_read_roots=(),
-                      extra_write_roots=()):
+                      extra_write_roots=(), extra_ops=()):
             seen["config_args"] = list(config_args)
             seen["overlays"] = home_file_overlays
             seen["extra_read_roots"] = tuple(extra_read_roots)
