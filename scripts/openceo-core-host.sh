@@ -179,7 +179,8 @@ stop() {
       all="$all $target"
     fi
   done
-  all="$(echo "$all" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -un | tr '\n' ' ')"
+  # grep exits 1 with no pid; under pipefail that aborted stop/restart.
+  all="$(echo "$all" | tr ' ' '\n' | { grep -E '^[0-9]+$' || true; } | sort -un | tr '\n' ' ')"
   if [[ -z "${all// }" ]]; then
     if [[ -f "$PID_FILE" ]]; then
       echo "Stale pid file found."
