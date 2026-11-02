@@ -156,7 +156,9 @@ class LiveArgvTests(unittest.IsolatedAsyncioTestCase):
         config_args, argv, result = await self._argv(
             _gemini_spec(account="agyj"))
         self.assertEqual(config_args, ["agyj", "--output-format", "json", "--print"])
-        self.assertEqual(argv[-2:], ["--print", "review this"])
+        self.assertEqual(argv[-2], "--print")
+        self.assertTrue(argv[-1].startswith("ROLE CONTRACT: code reviewer"))
+        self.assertTrue(argv[-1].endswith("\n\nreview this"))
         self.assertEqual(argv[0], "agyj")
         self.assertEqual(result.slot, "agyj")
         self.assertEqual(result.model, "gemini")
@@ -178,7 +180,8 @@ class LiveArgvTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config_args[:4],
                          ["opencode", "run", "-m",
                           "opencode/nemotron-3-ultra-free"])
-        self.assertEqual(argv[-1], "review this")
+        self.assertTrue(argv[-1].startswith("ROLE CONTRACT: code reviewer"))
+        self.assertTrue(argv[-1].endswith("\n\nreview this"))
 
     async def test_misconfigured_reviewer_never_spawns(self) -> None:
         seen: dict[str, Any] = {}

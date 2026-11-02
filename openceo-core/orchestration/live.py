@@ -32,7 +32,11 @@ from model_routing.reviewer_isolation import (
 )
 from model_routing.reviewer_isolation import plan_reviewer
 from model_routing.secrets import SecretsError, load_router_secrets
-from orchestration.agent_sandbox import cleanup_sandbox_scratch, plan_agent
+from orchestration.agent_sandbox import (
+    cleanup_sandbox_scratch,
+    plan_agent,
+    user_instruction_masks,
+)
 from orchestration.role_claude import (
     CLAUDE_MCP_OVERLAY_RELPATH,
     CLAUDE_NO_AUTO_MEMORY_ENV,
@@ -62,6 +66,7 @@ from orchestration.role_muse import (
     render_card_argv,
     settings_overlay_bytes,
 )
+from orchestration.role_contracts import is_read_only, with_role_contract
 from orchestration.role_opencode import (
     OPENCODE_OVERLAY_RELPATH,
     opencode_config_bytes,
@@ -126,6 +131,12 @@ OUTPUT_CAP_CHARS = 40000
 
 #: Conventional timeout exit code (telemetry only; engines treat != 0 alike).
 TIMEOUT_RETURNCODE = 124
+
+
+def executor_timed_out(result: ExecResult) -> bool:
+    """Our wall-clock budget killed the role: not a provider failure."""
+    return (result.returncode == TIMEOUT_RETURNCODE
+            and bool((result.usage or {}).get("timeout")))
 
 
 def _reviewer_output(stdout: str, stderr: str, provider: str,
@@ -204,6 +215,7 @@ class ProcessExecutor:
             "planner", "plan_reviewer", "builder", "arbiter", "closer",
             "objective_planner", "ceo_reviewer",
         }
+        prompt = with_role_contract(role, prompt)
         elapsed = 0.0
         attempts: list[dict[str, Any]] = []
         for attempt in range(len(PROVIDER_RETRY_DELAYS) + 1):
@@ -219,8 +231,11 @@ class ProcessExecutor:
                 self._responded.add(key)
             attempts.append({"returncode": result.returncode,
                              "elapsed_s": result.elapsed_s})
+            # A read-only role keeps nothing between attempts, so a retry
+            # after our own timeout restarts from zero (TASK-2026-00443).
             if (result.returncode == 0 or not retryable_role
                     or attempt == len(PROVIDER_RETRY_DELAYS)
+                    or (executor_timed_out(result) and is_read_only(role))
                     or not transient_provider_error(
                         result.output_tail, responded=responded)):
                 usage = dict(result.usage or {})
@@ -432,6 +447,9 @@ class ProcessExecutor:
                     returncode=1, elapsed_s=0.0,
                     output_tail=misconfigured,
                     model=model, slot=slot)
+        if is_read_only(role):
+            file_overlays = {**user_instruction_masks(),
+                             **(file_overlays or {})}
         try:
             if hardened:
                 plan = plan_reviewer(

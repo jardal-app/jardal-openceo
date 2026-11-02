@@ -66,6 +66,7 @@ from orchestration.live import (
     ExecResult,
     Executor,
     QuotaChecker,
+    executor_timed_out,
 )
 from owner_channel import build_owner_question
 from agents.dev.tier_s.models import (
@@ -1171,6 +1172,17 @@ class TierSCycle:
             result = await self._exec.run("planner", prompt, ctx.repo, timeout_s)
             self._record_session(
                 ctx, "planner", "planner", result)
+            if executor_timed_out(result):
+                # A relaunch restarts from zero and burns the same budget
+                # again; the Owner decides (TASK-2026-00443).
+                await self._park(
+                    ctx, "needs_owner",
+                    f"planner exceeded its {timeout_s // 60}-min budget "
+                    "(not relaunched: every attempt restarts from zero); "
+                    "raise tier_s.timeouts_minutes.planner or split the "
+                    "ticket",
+                    patch_run=True, drop_branch=True)
+                return None
             if result.returncode != 0:
                 reset_min = _limit_reset_resume_min(result.output_tail)
                 transient = (reset_min is not None
@@ -1253,13 +1265,17 @@ class TierSCycle:
             self._read_artifact(ctx, "PLAN_REVIEW.md")) if review.returncode == 0 else []
         verified = [obs for obs in observations
                     if verify_plan_anchor(obs, plan_path, ctx.repo)]
-        response = await self._exec.run(
-            "planner", self._plan_response_prompt(ctx, verified),
-            ctx.repo, timeout_s)
-        self._record_session(ctx, "planner", "planner", response)
-        responses = parse_plan_responses(
-            self._read_artifact(ctx, "PLAN_RESPONSE.md")) if response.returncode == 0 else {}
-        missing, _dup = plan_response_gaps(verified, responses)
+        responses: dict[int, list[str]] = {}
+        missing: list[int] = []
+        # Nothing to answer: no planner session just to emit a signal.
+        if verified:
+            response = await self._exec.run(
+                "planner", self._plan_response_prompt(ctx, verified),
+                ctx.repo, timeout_s)
+            self._record_session(ctx, "planner", "planner", response)
+            responses = parse_plan_responses(
+                self._read_artifact(ctx, "PLAN_RESPONSE.md")) if response.returncode == 0 else {}
+            missing, _dup = plan_response_gaps(verified, responses)
         if missing:
             retry = await self._exec.run(
                 "planner",

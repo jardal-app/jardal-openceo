@@ -45,6 +45,7 @@ __all__ = [
     "sandbox_env",
     "sandboxed_shell_command",
     "ticket_dir",
+    "user_instruction_masks",
     "vault_project_read_root",
 ]
 
@@ -81,6 +82,14 @@ _HOME_CRED_RW_FILES = (
     ".claude/.credentials.json",
     ".claude-j/.credentials.json",
 )
+#: User-level instruction files the CLIs auto-load (the Owner's session
+#: rules). Read-only roles run with them masked (TASK-2026-00443).
+USER_INSTRUCTION_FILES = (
+    ".claude/CLAUDE.md", ".claude-j/CLAUDE.md",
+    ".codex/AGENTS.md", ".codex-j/AGENTS.md",
+    ".gemini/GEMINI.md", ".gemini-j/GEMINI.md", ".gemini-2/GEMINI.md",
+    ".config/opencode/AGENTS.md", ".qwen/QWEN.md",
+)
 _HOME_SYMLINKS = (".local/bin/codex", ".local/bin/claude",
                   ".local/bin/kimi")
 _HOME_TMPFS = (
@@ -106,6 +115,13 @@ _HOME_PROFILE_FILES = {
 #: agy binary → home subdir holding its state (account dirs come from
 #: the agy translator; bare ``agy`` shares the default dir).
 _GEMINI_BINARY_SUBDIRS = {"agyj": ".gemini-j", "agy2": ".gemini-2"}
+
+#: codex wrapper → its CODEX_HOME, plus the entries a run reads from it.
+#: auth.json rides read-write: codex rewrites it on token refresh.
+_CODEX_BINARY_SUBDIRS = {"codexj": ".codex-j"}
+_CODEX_READ_ENTRIES = ("config.toml", "version.json", "models_cache.json",
+                       "installation_id", "plugins")
+_CODEX_AUTH_FILE = "auth.json"
 
 _WALK_PRUNE_DIRS = frozenset({
     ".git", ".venv", "node_modules", "__pycache__", ".pytest_cache",
@@ -181,6 +197,29 @@ def ensure_sandbox_scratch(workspace: Path) -> Path:
     except OSError:
         pass
     return scratch
+
+
+def user_instruction_masks(home: Path | None = None) -> dict[str, bytes]:
+    """Empty ``home_file_overlays`` over the real user instruction files.
+
+    Each path resolves on the host first, so all the CLI aliases that
+    symlink one shared file mask that file once.
+    """
+    root = Path(home) if home is not None else Path(os.path.expanduser("~"))
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError:
+        return {}
+    masks: dict[str, bytes] = {}
+    for entry in USER_INSTRUCTION_FILES:
+        try:
+            real = (root / entry).resolve(strict=True)
+            relative = real.relative_to(resolved_root)
+        except (OSError, ValueError):
+            continue
+        if real.is_file():
+            masks[relative.as_posix()] = b""
+    return masks
 
 
 def cleanup_sandbox_scratch(workspace: Path) -> None:
@@ -383,6 +422,32 @@ def _gemini_state_ops(home: Path, scratch: Path,
         except OSError:
             continue
         ops.append(["--bind", str(dst), str(src)])
+    return ops
+
+
+def _codex_state_ops(home: Path, argv: Sequence[str]) -> list[list[str]]:
+    """Per-run CODEX_HOME over the account dir (TASK-2026-00443).
+
+    The agent home never mounted ``~/.codex-j``, so codexj died at boot
+    ("CODEX_HOME ... does not exist"). codex writes sqlite state, logs and
+    sessions there: a tmpfs holds them for the run, the entries it reads
+    are bound read-only and only auth.json persists. Memories and the
+    user-level AGENTS.md stay out.
+    """
+    if not argv:
+        return []
+    subdir = _CODEX_BINARY_SUBDIRS.get(Path(str(argv[0])).name)
+    account_dir = home / subdir if subdir else None
+    if account_dir is None or not account_dir.is_dir():
+        return []
+    ops = [["--tmpfs", str(account_dir)]]
+    for name in _CODEX_READ_ENTRIES:
+        entry = account_dir / name
+        if entry.exists() and not entry.is_symlink():
+            ops.append(["--ro-bind", str(entry), str(entry)])
+    auth = account_dir / _CODEX_AUTH_FILE
+    if auth.is_file() and not auth.is_symlink():
+        ops.append(["--bind", str(auth), str(auth)])
     return ops
 
 
@@ -589,6 +654,7 @@ def plan_agent(
     ops = _home_ops(host_home, opencode_state_rw, keep_dirs, keep_files)
     ops.extend(_snapshot_dsh_profile(overlay, scratch))
     ops.extend(_gemini_state_ops(host_home, scratch, full_argv))
+    ops.extend(_codex_state_ops(host_home, full_argv))
     config_ops = _config_path_roots(
         config_args if config_args is not None
         else ([full_argv[0]] if full_argv else []),

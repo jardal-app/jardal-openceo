@@ -460,7 +460,9 @@ class ConfigLoader:
                         "backoff_minutes": [15, 30, 60],
                     },
                     "timeouts_minutes": {
-                        "planner": 20,
+                        # Opus max and uncapped plans; never retried on
+                        # timeout, so one budget is the cost (00443).
+                        "planner": 40,
                         "plan_review": 15,
                         "build": 60,
                         "fix": 30,
