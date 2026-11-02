@@ -164,6 +164,23 @@ def test_stop_delegates_to_systemd_when_managed(
         os.kill(int(pidfile.read_text().strip()), 0)  # sigue vivo si no lanza
 
 
+def test_stop_without_instance_exits_clean(
+    tmp_path: Path, systemctl_shim: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Nothing running: stop must not die under pipefail (TASK-2026-00448).
+
+    restart runs stop then start; a failing stop left the core down.
+    """
+    root = tmp_path / "root"
+    (root / "scripts").mkdir(parents=True)
+    script = root / "scripts" / HOST_SH.name
+    script.write_text(HOST_SH.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setenv("SHIM_CAT_RC", "1")  # no unit: script path
+    proc = _run(["bash", str(script), "stop"])
+    assert proc.returncode == 0, proc.stderr
+    assert "not running" in proc.stdout
+
+
 def test_status_reports_unit_active(
     systemctl_shim: Path, monkeypatch: pytest.MonkeyPatch
 ):
