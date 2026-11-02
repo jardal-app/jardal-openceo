@@ -30,6 +30,7 @@ from .tier_s.cycle import TierSCycle
 from .tier_s.gates import (baseline_blocked, gates_failed, handoff_gates_section,
                          load_gates, run_gate, run_gates)
 from .tier_s.models import GateSpec
+from .tier_s.plan import is_test_path
 from catalog import CatalogError, load_role_profile
 from mcp_identity import McpAuthError
 from objectives.money_guide import project_money_routing
@@ -882,8 +883,7 @@ class DevSessionManager:
                 deleted = int(fields[1]) if fields[1] != "-" else 0
             except ValueError:
                 continue
-            lowered = path.lower()
-            if lowered.startswith(("tests/", "test/")) or "/tests/" in lowered:
+            if is_test_path(path):
                 continue
             if any(fnmatch.fnmatch(path, pat) for pat in exclude):
                 continue

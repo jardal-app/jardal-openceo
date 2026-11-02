@@ -341,6 +341,8 @@ If a standalone Tier-S ticket does not fit, convert/decompose at Objective level
 
 If it already belongs to an Objective, replace it with smaller child tickets.
 
+A size conversion (plan over budget or the size brake) is not a material failure (§29): split along the converted plan and give each child the tier its own §27 check gives. A child that still carries an S criterion, such as an auth boundary (§19), stays Tier S; a narrower lower-tier child never drops it silently.
+
 Do not keep Tier-S sessions alive across packages/subplans.
 
 ## 31. Findings and late-failure attribution
