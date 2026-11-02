@@ -210,6 +210,26 @@ class PlanAgentTests(unittest.TestCase):
         idx = argv.index(str(state))
         self.assertEqual(argv[idx - 1], "--bind")
 
+    def test_claude_credentials_rebound_rw_for_refresh(self) -> None:
+        # TASK-2026-00442: OAuth refresh rewrites the credentials file.
+        for subdir in (".claude", ".claude-j"):
+            cred = self.home / subdir / ".credentials.json"
+            cred.parent.mkdir(parents=True, exist_ok=True)
+            cred.write_text("{}")
+        plan = self._plan(argv=["claudej", "--print", "prompt"])
+        argv = plan.argv
+        for subdir in (".claude", ".claude-j"):
+            idx = argv.index(str(self.home / subdir / ".credentials.json"))
+            self.assertEqual(argv[idx - 1], "--bind")
+
+    def test_reviewer_profile_gets_no_claude_credentials(self) -> None:
+        cred = self.home / ".claude-j" / ".credentials.json"
+        cred.parent.mkdir(parents=True, exist_ok=True)
+        cred.write_text("{}")
+        plan = self._plan(argv=["opencode", "run", "prompt"],
+                          home_profile="opencode")
+        self.assertNotIn(str(cred), plan.argv)
+
     def test_workspace_secrets_masked_when_present(self) -> None:
         (self.ws / ".env").write_text("K=V")
         (self.ws / ".runtime").mkdir()
