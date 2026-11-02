@@ -391,6 +391,26 @@ class AdmissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(launched, ["queued-1"])
         self.assertEqual(out["parked"], 0)
 
+    async def test_iso_string_resumes_honored_garbage_holds(self) -> None:
+        # TASK-2026-00439: Tier S parks store resume_at as ISO strings.
+        repo = _FakeRepo([
+            _ticket("future", project="p1", waiting_reason=WAIT_QUOTA,
+                    resume_at=(_NOW + timedelta(minutes=10)).isoformat()),
+            _ticket("past", project="p2", waiting_reason=WAIT_QUOTA,
+                    resume_at=(_NOW - timedelta(minutes=1)).isoformat()),
+            _ticket("past-z", project="p3", waiting_reason=WAIT_QUOTA,
+                    resume_at=(_NOW - timedelta(minutes=2)).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ")),
+            _ticket("garbage", project="p4", waiting_reason=WAIT_QUOTA,
+                    resume_at="not-a-datetime"),
+        ])
+        service = _FakeService(repo)
+        launched: list[str] = []
+        out = await _dispatcher(repo, service, launched).dispatch_cycle(now=_NOW)
+        await _drain()
+        self.assertEqual(launched, ["past", "past-z"])
+        self.assertEqual(out["parked"], 0)
+
     async def test_repo_lock_held_parks_with_repo_busy(self) -> None:
         repo = _FakeRepo([_ticket("queued-1", project="proj")])
         repo.locks["/repo/proj"] = {"holder": "other-task",

@@ -69,14 +69,25 @@ def priority_rank(value: Any) -> int:
 def _aware(moment: Any) -> datetime | None:
     """Normalize a stored datetime. Never crashes, never launches on garbage.
 
-    Legacy motor rows come back naive (UTC): assume UTC. A corrupt
-    non-datetime value holds (far future) with a warning instead of the old
-    tick-killing TypeError: the backup re-checks, so a fixed row recovers.
+    Legacy motor rows come back naive (UTC): assume UTC. ISO-8601
+    strings (Tier S parks) parse; a corrupt value holds (far future) with
+    a warning instead of the old tick-killing TypeError: the backup
+    re-checks, so a fixed row recovers.
     """
     if moment is None:
         return None
     if isinstance(moment, datetime):
         return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+    if isinstance(moment, str):
+        text = moment.strip()
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     logger.warning("Dispatcher: corrupt datetime %r treated as far future (hold)", moment)
     return _FAR_FUTURE
 
