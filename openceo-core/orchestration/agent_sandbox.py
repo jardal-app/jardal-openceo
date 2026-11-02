@@ -74,6 +74,13 @@ _HOME_FILES_RO = (
     ".local/bin/.muse-version", ".local/bin/.muse-release-info.json",
 )
 _HOME_FILE_GLOBS_RO = (".local/bin/muse-bin-*",)
+#: OAuth credential files rebound read-write over the ro home binds:
+#: the CLIs persist rotated access tokens by rewriting them, and a
+#: read-only bind turns every post-expiry run into a 401 (TASK-2026-00442).
+_HOME_CRED_RW_FILES = (
+    ".claude/.credentials.json",
+    ".claude-j/.credentials.json",
+)
 _HOME_SYMLINKS = (".local/bin/codex", ".local/bin/claude",
                   ".local/bin/kimi")
 _HOME_TMPFS = (
@@ -424,6 +431,11 @@ def _home_ops(home: Path, opencode_state_rw: bool,
                 if real.is_file():
                     ops.append(["--ro-bind", str(real), str(real)])
                     ops.append(["--symlink", str(real), str(link)])
+    if keep_files is None:
+        for entry in _HOME_CRED_RW_FILES:
+            path = home / entry
+            if path.is_file() and not path.is_symlink():
+                ops.append(["--bind", str(path), str(path)])
     for entry in _HOME_TMPFS:
         if entry == ".local/share/opencode" and opencode_state_rw:
             continue
