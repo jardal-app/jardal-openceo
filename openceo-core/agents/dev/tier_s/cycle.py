@@ -197,6 +197,22 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _resume_for_task(resume_at: str | None) -> datetime | str | None:
+    # The dispatcher due query only matches native datetimes; an ISO
+    # string park would hold forever (TASK-2026-00439). Unparseable
+    # input stays verbatim so the dispatcher holds it with a warning.
+    if not resume_at:
+        return None
+    text = resume_at.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return resume_at
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def _git(repo: Path, *args: str, timeout: int = 120) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args], cwd=repo, stdout=subprocess.PIPE,
@@ -2819,7 +2835,7 @@ class TierSCycle:
         await self._tasks.patch_task(task_id, {
             "status": TaskStatus.WAITING.value,
             "waiting_reason": f"{reason}: {detail}"[:500],
-            "resume_at": resume_at,
+            "resume_at": _resume_for_task(resume_at),
             "params": dict(ctx.ticket.get("params") or {}),
         })
         if drop_branch:
