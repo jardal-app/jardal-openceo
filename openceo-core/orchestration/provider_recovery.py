@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timedelta, timezone
 
 
 PROVIDER_RETRY_DELAYS = (300, 900, 1800)
@@ -50,3 +51,37 @@ def transient_provider_error(text: str, *, responded: bool = False) -> bool:
         "econnrefused", "etimedout", "timed out", "timeout", "fetch failed",
         "bad gateway", "internal server error", "gateway timeout",
     )) or bool(re.search(r"\b(?:429|500|502|503|504)\b", lowered))
+
+
+_LIMIT_RESET_RE = re.compile(
+    r"resets?(?:\s+at)?\s+(\d{1,2}):(\d{2})\s*([ap])\.?\s*m\.?"
+    r"\s*(\(UTC\)|UTC)?",
+    re.IGNORECASE,
+)
+
+
+def provider_limit_reset(
+    text: str, *, now: datetime | None = None,
+) -> datetime | None:
+    """Absolute reset clock from a quota-limit message (00438).
+
+    Matches "<limit> ... resets H:MMam/pm [(UTC)]" (e.g. a 5-hour
+    limit); returns the aware UTC reset or None when absent or
+    unparseable. A time already past today rolls to tomorrow.
+    """
+    lowered = str(text or "").lower()
+    if "limit" not in lowered:
+        return None
+    match = _LIMIT_RESET_RE.search(str(text or ""))
+    if match is None:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    if hour < 1 or hour > 12 or minute > 59:
+        return None
+    hour24 = (hour % 12) + (12 if match.group(3).lower() == "p" else 0)
+    moment = now or datetime.now(timezone.utc)
+    reset = moment.replace(hour=hour24, minute=minute, second=0,
+                           microsecond=0)
+    if reset <= moment:
+        reset += timedelta(days=1)
+    return reset
