@@ -82,6 +82,7 @@ from agents.dev.tier_s.models import (
 )
 from agents.dev.tier_s.plan import (
     Plan,
+    is_test_path,
     parse_plan,
     plan_declares_objective_needed,
     validate_plan,
@@ -268,8 +269,7 @@ def _diff_sizes(repo: Path, base_sha: str, exclude: Sequence[str]) -> tuple[int,
             deleted = int(deleted_s) if deleted_s != "-" else 0
         except ValueError:
             continue
-        lowered = path.lower()
-        if lowered.startswith(("tests/", "test/")) or "/tests/" in lowered:
+        if is_test_path(path):
             continue
         if any(fnmatch.fnmatch(path, pat) for pat in exclude):
             continue
@@ -279,8 +279,7 @@ def _diff_sizes(repo: Path, base_sha: str, exclude: Sequence[str]) -> tuple[int,
     for path in untracked.stdout.split("\0"):
         if not path or path == ".openceo" or path.startswith(".openceo/"):
             continue
-        lowered = path.lower()
-        if lowered.startswith(("tests/", "test/")) or "/tests/" in lowered:
+        if is_test_path(path):
             continue
         if any(fnmatch.fnmatch(path, pat) for pat in exclude):
             continue
@@ -292,6 +291,21 @@ def _diff_sizes(repo: Path, base_sha: str, exclude: Sequence[str]) -> tuple[int,
         files += 1
         lines += len(content.splitlines())
     return files, lines
+
+
+_SIZE_CONVERSION_NOTE = (
+    "Size conversion, not a material failure (routing policy §29/§30): "
+    "split the work along the plan below into smaller children; each "
+    "child keeps the tier its own §27 check gives, so an auth or security "
+    "boundary stays Tier S.")
+
+
+def _size_sizing(detail: str, plan_text: str) -> str:
+    """Sizing hint for a size conversion; the planner sees only its head."""
+    parts = [_SIZE_CONVERSION_NOTE, detail.strip()]
+    if plan_text.strip():
+        parts.append("PLAN.md (split basis):\n" + plan_text.strip())
+    return "\n".join(part for part in parts if part)
 
 
 def _handoff_word_count(text: str) -> int:
@@ -1143,6 +1157,24 @@ class TierSCycle:
         _git(ctx.repo, "checkout", "-q", ctx.base_branch)
         _git(ctx.repo, "branch", "-D", ctx.branch)
 
+    def _keep_oversize_build(self, ctx: _Ctx) -> tuple[str, str]:
+        """Commit the oversize build and its PLAN.md to ``oversize/<branch>``.
+
+        Returns (branch, diffstat), ("", "") when the commit fails.
+        """
+        kept = f"oversize/{ctx.branch}"
+        _git(ctx.repo, "add", "-A", "--", ".", ":!.openceo")
+        if (_tier_dir(ctx.repo) / "PLAN.md").is_file():
+            _git(ctx.repo, "add", "-f", "--", ".openceo/PLAN.md")
+        commit = _git(ctx.repo, *_git_identity(ctx.repo), "commit", "-qm",
+                      f"wip({ctx.ref}) oversize build (size brake)")
+        if commit.returncode != 0 or _git(
+                ctx.repo, "branch", "-f", kept, "HEAD").returncode != 0:
+            return "", ""
+        stat = _git(ctx.repo, "diff", "--stat=100", "--stat-count=20",
+                    ctx.base_sha, kept, "--", ".", ":!.openceo").stdout
+        return kept, stat.strip()
+
     def _changed_files(self, ctx: _Ctx) -> list[str]:
         proc = _git(ctx.repo, "diff", "--name-only", "-z", ctx.base_sha, "--", ".")
         names = [part for part in proc.stdout.split("\0") if part]
@@ -1216,7 +1248,9 @@ class TierSCycle:
             plan = parse_plan(plan_text) if plan_text else None
             validation = validate_plan(
                 plan, ctx.repo, int(ctx.budgets.get("files_per_ticket", 8)),
-                ctx.budget_exclude) if plan else None
+                ctx.budget_exclude,
+                budget_lines=int(ctx.budgets.get("lines_per_ticket", 400)),
+            ) if plan else None
             if plan is not None and validation is not None and validation.valid:
                 await self._runs.patch_run(ctx.run_id, {
                     "phase": "plan_review",
@@ -1229,15 +1263,15 @@ class TierSCycle:
                     ctx, tier_s_mod.MILESTONE_PLAN_READY)
                 return plan
             errors = "; ".join(validation.errors) if validation else "no PLAN.md"
-            if "file budget exceeded" in errors:
+            if "budget exceeded" in errors:
                 if self._objective_env is not None:
                     await self._convert(
-                        ctx, f"plan exceeds file budget ({errors})",
-                        plan_text or "", "planner")
+                        ctx, f"plan exceeds the size budget ({errors})",
+                        _size_sizing("", plan_text or ""), "planner")
                     return None
                 await self._park(
                     ctx, "needs_owner",
-                    f"plan exceeds file budget ({errors}; "
+                    f"plan exceeds the size budget ({errors}; "
                     "no objective env wired)",
                     patch_run=True, drop_branch=True)
                 return None
@@ -1402,19 +1436,25 @@ class TierSCycle:
         brake = (int(ctx.budgets.get("hard_brake_factor", 2))
                  * int(ctx.budgets.get("lines_per_ticket", 400)))
         if lines_real > brake:
+            plan_text = self._read_artifact(ctx, "PLAN.md")
+            kept, stat = self._keep_oversize_build(ctx)
             _git(ctx.repo, "reset", "--hard", "-q", ctx.base_sha)
             _git(ctx.repo, "clean", "-fdq")
+            if plan_text:  # the reset drops the copy committed on the kept branch
+                (_tier_dir(ctx.repo) / "PLAN.md").write_text(
+                    plan_text, encoding="utf-8")
+            cause =(f"size brake: {lines_real} non-test lines > {brake} "
+                     + (f"(build kept on branch {kept})" if kept
+                        else "(work discarded: keeping the build failed)"))
             if self._objective_env is not None:
+                detail = (f"Build kept on branch {kept}: git diff "
+                          f"{ctx.base_sha[:12]}..{kept}; full plan: git show "
+                          f"{kept}:.openceo/PLAN.md\n{stat}") if kept else ""
                 await self._convert(
-                    ctx,
-                    f"size brake: {lines_real} lines > {brake} "
-                    "(work discarded)",
-                    "", "builder")
+                    ctx, cause, _size_sizing(detail, plan_text), "builder")
                 return False
             await self._park(
-                ctx, "needs_owner",
-                f"size brake: {lines_real} lines > {brake} "
-                "(work discarded; no objective env wired)",
+                ctx, "needs_owner", f"{cause}; no objective env wired",
                 patch_run=True, drop_branch=True)
             return False
         ctx.build_sha = (self._commit(ctx, f"wip({ctx.ref}) build")
@@ -2999,7 +3039,9 @@ class TierSCycle:
             "Otherwise write .openceo/PLAN.md (§16.1: TICKET/OBJECTIVE/GOAL/"
             "ACCEPTANCE/FILES with create|modify|delete + why/CONTRACTS/DECISIONS/"
             "STEPS/ESTIMATE files=<n> lines=<n>/OUT_OF_SCOPE) and emit "
-            f"{SIGNALS['plan_ready']} in .openceo/status.\n"
+            f"{SIGNALS['plan_ready']} in .openceo/status. ESTIMATE is "
+            "required and counts non-test lines; a plan over the budget "
+            "converts before any build.\n"
             "FILES lines use exactly: - <path> (<create|modify|delete>) — "
             "<why>, e.g. - apps/web/src/auth/login.ts (create) — login "
             "screen per DESIGN.md.\n"

@@ -1,8 +1,9 @@
 """Single-plan parsing and structural validation (design §6.2–§6.3, F2).
 
 No subplans: one ``PLAN.md`` per ticket (§16.1). Validation is pure Python —
-no LLM judges it. Line estimates are the planner's guess; the real line
-control happens on the git diff after the build (§6.6).
+no LLM judges it. The planner's line estimate is held to the budget here, so
+an oversized ticket converts before any build; the hard control stays on the
+git diff after the build (§6.6).
 """
 
 from __future__ import annotations
@@ -53,20 +54,20 @@ _STEP_RE = re.compile(r"^\d+\.\s+(.*)$")
 _FILE_RE = re.compile(r"^(\S+)\s+\((create|modify|delete)\)\s*[—–-]\s*(.+)$")
 _ESTIMATE_RE = re.compile(r"files\s*=\s*(\d+)\s+lines\s*=\s*(\d+)")
 
-#: Paths that never count toward the file budget (§13: "sin tests").
-_TEST_HINTS = ("tests/", "test/", "/tests/", "/test/", "conftest.py")
+_TEST_DIRS = frozenset({"tests", "test", "__tests__"})
+_TEST_NAME_RE = re.compile(r"^test_|_test\.|\.(test|spec)\.")
 
 
-def _is_test_path(path: str) -> bool:
-    lowered = path.replace("\\", "/").lower()
-    return (
-        lowered.startswith(("tests/", "test/"))
-        or "/tests/" in lowered
-        or "/test/" in lowered
-        or lowered.endswith("_test.py")
-        or lowered.startswith("test_")
-        or lowered == "conftest.py"
-    )
+def is_test_path(path: str) -> bool:
+    """True for test code: it never counts toward the size budgets (§13).
+
+    One rule for the plan validator and the size brake on the diff.
+    """
+    parts = path.replace("\\", "/").lower().split("/")
+    name = parts[-1]
+    return (any(part in _TEST_DIRS for part in parts[:-1])
+            or name == "conftest.py"
+            or bool(_TEST_NAME_RE.search(name)))
 
 
 def parse_plan(text: str) -> Plan:
@@ -156,8 +157,9 @@ def validate_plan(
     repo: Path,
     budget_files: int,
     budget_exclude: Sequence[str] = (),
+    budget_lines: int | None = None,
 ) -> PlanValidation:
-    """Structural validation (design §6.3): format, routes, file budget."""
+    """Structural validation (design §6.3): format, routes, size budget."""
     errors: list[str] = []
     if not plan.ticket:
         errors.append("missing TICKET")
@@ -169,6 +171,8 @@ def validate_plan(
         errors.append("missing FILES")
     if not plan.steps:
         errors.append("missing STEPS")
+    if plan.estimate_lines is None:
+        errors.append("missing ESTIMATE files=<n> lines=<n>")
 
     counted = 0
     for item in plan.files:
@@ -185,13 +189,18 @@ def validate_plan(
             errors.append(f"create over existing file: {item.path}")
         excluded = any(fnmatch.fnmatch(item.path, pat)
                        for pat in budget_exclude)
-        if not excluded and not _is_test_path(item.path):
+        if not excluded and not is_test_path(item.path):
             counted += 1
 
     if counted > budget_files:
         errors.append(
             f"file budget exceeded: {counted} files > {budget_files} "
             "(→ objective conversion, §6.3)")
+    if (budget_lines is not None and plan.estimate_lines is not None
+            and plan.estimate_lines > budget_lines):
+        errors.append(
+            f"line budget exceeded: {plan.estimate_lines} lines > "
+            f"{budget_lines} (→ objective conversion, §6.3)")
     return PlanValidation(valid=not errors, errors=tuple(errors),
                           files_counted=counted)
 
