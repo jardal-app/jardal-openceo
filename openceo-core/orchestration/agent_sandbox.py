@@ -117,11 +117,12 @@ _HOME_PROFILE_FILES = {
 _GEMINI_BINARY_SUBDIRS = {"agyj": ".gemini-j", "agy2": ".gemini-2"}
 
 #: codex wrapper → its CODEX_HOME, plus the entries a run reads from it.
-#: auth.json rides read-write: codex rewrites it on token refresh.
+#: Read-write: codex opens installation_id O_RDWR|O_CREAT at boot (EROFS kills
+#: its in-process app-server) and rewrites auth.json on token refresh.
 _CODEX_BINARY_SUBDIRS = {"codexj": ".codex-j"}
 _CODEX_READ_ENTRIES = ("config.toml", "version.json", "models_cache.json",
-                       "installation_id", "plugins")
-_CODEX_AUTH_FILE = "auth.json"
+                       "plugins")
+_CODEX_WRITE_ENTRIES = ("installation_id", "auth.json")
 
 _WALK_PRUNE_DIRS = frozenset({
     ".git", ".venv", "node_modules", "__pycache__", ".pytest_cache",
@@ -430,9 +431,9 @@ def _codex_state_ops(home: Path, argv: Sequence[str]) -> list[list[str]]:
 
     The agent home never mounted ``~/.codex-j``, so codexj died at boot
     ("CODEX_HOME ... does not exist"). codex writes sqlite state, logs and
-    sessions there: a tmpfs holds them for the run, the entries it reads
-    are bound read-only and only auth.json persists. Memories and the
-    user-level AGENTS.md stay out.
+    sessions there: a tmpfs holds them for the run, the entries it only
+    reads are bound read-only and the two it opens for writing persist.
+    Memories and the user-level AGENTS.md stay out.
     """
     if not argv:
         return []
@@ -445,9 +446,10 @@ def _codex_state_ops(home: Path, argv: Sequence[str]) -> list[list[str]]:
         entry = account_dir / name
         if entry.exists() and not entry.is_symlink():
             ops.append(["--ro-bind", str(entry), str(entry)])
-    auth = account_dir / _CODEX_AUTH_FILE
-    if auth.is_file() and not auth.is_symlink():
-        ops.append(["--bind", str(auth), str(auth)])
+    for name in _CODEX_WRITE_ENTRIES:
+        entry = account_dir / name
+        if entry.is_file() and not entry.is_symlink():
+            ops.append(["--bind", str(entry), str(entry)])
     return ops
 
 

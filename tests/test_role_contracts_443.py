@@ -218,16 +218,19 @@ class CodexHomeTests(unittest.TestCase):
             home = Path(tmp)
             account = home / ".codex-j"
             (account / "plugins").mkdir(parents=True)
-            for name in ("config.toml", "auth.json", "state_5.sqlite",
-                         "memories_1.sqlite", "history.jsonl"):
+            for name in ("config.toml", "auth.json", "installation_id",
+                         "state_5.sqlite", "memories_1.sqlite",
+                         "history.jsonl"):
                 (account / name).write_text("x", encoding="utf-8")
             (account / "AGENTS.md").symlink_to(home / "rules.md")
             ops = _codex_state_ops(home, ["codexj", "exec", "-"])
             self.assertEqual(ops[0], ["--tmpfs", str(account)])
             self.assertIn(["--ro-bind", str(account / "config.toml"),
                            str(account / "config.toml")], ops)
-            self.assertIn(["--bind", str(account / "auth.json"),
-                           str(account / "auth.json")], ops)
+            for writable in ("auth.json", "installation_id"):
+                self.assertIn(["--bind", str(account / writable),
+                               str(account / writable)], ops)
             mounted = {Path(op[-1]).name for op in ops[1:]}
-            self.assertEqual(mounted, {"config.toml", "plugins", "auth.json"})
+            self.assertEqual(mounted, {"config.toml", "plugins", "auth.json",
+                                       "installation_id"})
             self.assertEqual(_codex_state_ops(home, ["agyj", "--print"]), [])
