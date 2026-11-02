@@ -49,7 +49,8 @@ from objectives.agent_result import (
     scheduled_resume,
     scheduled_wait_declines,
 )
-from orchestration.provider_recovery import transient_provider_error
+from orchestration.provider_recovery import (
+    provider_limit_reset, transient_provider_error)
 from orchestration import findings as findings_mod
 from orchestration import inbox as inbox_mod
 from orchestration import knowledge as knowledge_mod
@@ -372,6 +373,25 @@ def _arbitration_fix_prompt(
         f"{fix[:300]}): {reason[:600]}\n"
         "Fix the code (no commits) and emit "
         "FIX_DONE_2 again.", repo, "en")
+
+
+#: Minutes past a provider reset clock before retrying (00438): covers
+#: clock skew and slow quota propagation on the provider side.
+_LIMIT_RESET_MARGIN_MIN = 5
+
+
+def _limit_reset_resume_min(output_tail: str) -> int | None:
+    """Minutes until provider reset plus margin, from limit text (00438).
+
+    Returns None when no reset clock parses: the caller keeps its
+    existing transient/config classification. A parsed reset always
+    wins over blind backoff (known wall-clock, not a gamble).
+    """
+    reset = provider_limit_reset(output_tail)
+    if reset is None:
+        return None
+    delta_min = (reset - datetime.now(timezone.utc)).total_seconds() / 60
+    return max(1, int(delta_min) + _LIMIT_RESET_MARGIN_MIN)
 
 
 class TierSCycle:
@@ -1021,8 +1041,12 @@ class TierSCycle:
         ctx.provider_parks += 1
         transient = transient_provider_error(
             result.output_tail, responded=bool((result.usage or {}).get("model_responded")))
+        reset_min = _limit_reset_resume_min(result.output_tail)
         resume_at = None
-        if transient and ctx.provider_parks <= 3:
+        if reset_min is not None:
+            resume_at = (datetime.now(timezone.utc) + timedelta(
+                minutes=reset_min)).isoformat()
+        elif transient and ctx.provider_parks <= 3:
             resume_at = (datetime.now(timezone.utc) + timedelta(
                 minutes=self._backoff(ctx, ctx.provider_parks - 1))).isoformat()
         detail = f"builder failed: {result.output_tail[-600:]}"
@@ -1132,10 +1156,19 @@ class TierSCycle:
             self._record_session(
                 ctx, "planner", "planner", result)
             if result.returncode != 0:
+                reset_min = _limit_reset_resume_min(result.output_tail)
+                transient = (reset_min is not None
+                             or transient_provider_error(result.output_tail))
+                if reset_min is not None:
+                    resume_min: int | None = reset_min
+                elif transient:
+                    resume_min = self._backoff(ctx, 0)
+                else:
+                    resume_min = None
                 await self._park(
-                    ctx, "transient" if transient_provider_error(result.output_tail) else "config",
+                    ctx, "transient" if transient else "config",
                     f"planner failed: {result.output_tail[-600:]}",
-                    resume_in_min=self._backoff(ctx, 0) if transient_provider_error(result.output_tail) else None,
+                    resume_in_min=resume_min,
                     patch_run=True, drop_branch=True)
                 return None
             status = _read_status(ctx.repo)
