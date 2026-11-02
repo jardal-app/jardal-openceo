@@ -87,7 +87,7 @@ REVIEW_DEFAULTS: dict[str, Any] = {
 #: planner timeout lives in the global objective_planner block
 #: (TASK-2026-00112), not here.
 TIMEOUTS_DEFAULTS: dict[str, int] = {
-    "planner": 20,
+    "planner": 40,
     "plan_review": 15,
     "build": 60,
     "fix": 30,  # F3
