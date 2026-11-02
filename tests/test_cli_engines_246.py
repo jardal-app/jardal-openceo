@@ -359,7 +359,7 @@ class LiveDispatchEnginesTest(unittest.IsolatedAsyncioTestCase):
 
         def fake_plan(*, argv, workspace, base, overlay, config_args,
                       home_file_overlays=None, extra_read_roots=(),
-                      extra_write_roots=()):
+                      extra_write_roots=(), extra_ops=()):
             seen["config_args"] = list(config_args)
             seen["overlays"] = dict(home_file_overlays or {})
             seen["env"] = dict(overlay)
