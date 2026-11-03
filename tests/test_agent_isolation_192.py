@@ -697,6 +697,24 @@ class TmuxShellDefaultsTests(unittest.TestCase):
         server.new_session.assert_not_called()
 
 
+class TmuxKillByNameTests(unittest.TestCase):
+    def test_kill_by_name_uses_live_kill(self) -> None:
+        from unittest.mock import MagicMock
+        from libtmux.exc import DeprecatedError
+        from agents.dev.tmux_runtime import TmuxRuntime
+        from settings import Settings
+        victim = MagicMock()
+        victim.name = "dev-jardal-erp"
+        victim.kill_session.side_effect = DeprecatedError(deprecated="Session.kill_session()", replacement="Session.kill()", version="0.30.0")
+        server = MagicMock()
+        server.sessions = [victim]
+        runtime = TmuxRuntime(Settings())
+        runtime._server = server
+        self.assertTrue(runtime.kill_by_name("dev-jardal-erp"))
+        victim.kill.assert_called_once_with()
+        victim.kill_session.assert_not_called()
+
+
 class RateMonitorFenceTests(unittest.TestCase):
     def _monitor(self, server):
         from unittest.mock import patch
@@ -736,8 +754,10 @@ class RateMonitorFenceTests(unittest.TestCase):
 
     def test_prefence_session_reaped_once(self) -> None:
         from unittest.mock import MagicMock, patch
+        from libtmux.exc import DeprecatedError
         from orchestration import agent_sandbox
         stale = MagicMock()
+        stale.kill_session.side_effect = DeprecatedError(deprecated="Session.kill_session()", replacement="Session.kill()", version="0.30.0")
         server = MagicMock()
         server.sessions.get.return_value = stale
         fresh = MagicMock()
@@ -753,7 +773,8 @@ class RateMonitorFenceTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 ensured.return_value = Path(tmp)
                 monitor._get_or_create_monitor_session("codex")
-        stale.kill_session.assert_called_once_with()
+        stale.kill.assert_called_once_with()
+        stale.kill_session.assert_not_called()
         self.assertIn("dev-monitor-codex", monitor._owned_sessions)
 
 

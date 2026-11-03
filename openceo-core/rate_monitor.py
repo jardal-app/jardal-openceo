@@ -159,7 +159,7 @@ class RateMonitor:
                 if name in self._owned_sessions:
                     return session
                 try:
-                    session.kill_session()
+                    session.kill()
                     logger.info("Reaped pre-fence monitor session '%s'", name)
                 except Exception:  # noqa: BLE001, S110
                     pass

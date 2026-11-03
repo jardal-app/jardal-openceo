@@ -916,7 +916,7 @@ class TmuxRuntime:
         try:
             for s in self.server.sessions:
                 if s.name == session_name:
-                    s.kill_session()
+                    s.kill()
                     stale = [project for project, info
                              in self._sessions.items()
                              if info.tmux_session_name == session_name]
