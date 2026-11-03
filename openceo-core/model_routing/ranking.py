@@ -85,7 +85,6 @@ _RANK_REQUIREMENTS = {
     ),
     "free-review": ProfileRequirements(
         needs_tools=True,
-        min_context_tokens=65536,
         confidentiality=Confidentiality.PUBLIC,
     ),
     "free-general": ProfileRequirements(

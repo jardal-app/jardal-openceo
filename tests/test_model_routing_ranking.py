@@ -363,7 +363,8 @@ def test_review_requires_tools_but_general_does_not():
 
 def test_context_floor_excludes_small_context():
     catalog = _catalog(_entry("example/small", context=8192))
-    assert router_ranking.rank_catalog("free-review", catalog).order == []
+    assert [item.canonical_model_id
+            for item in router_ranking.rank_catalog("free-review", catalog).order] == ["example/small"]
     assert router_ranking.rank_catalog("free-general", catalog).order == []
 
 

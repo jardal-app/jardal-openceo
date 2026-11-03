@@ -11,7 +11,8 @@ never name suffixes:
   docs pricing table, plus fresh serve evidence at zero cost. Direct
   HTTPS is policy-blocked (403 FreeTierError), so the evidence comes
   from a CLI run, which is the only allowed free path; the CLI auth
-  state itself is not checked.
+  state itself is not checked. Tools and context come from the list
+  metadata (capabilities.tools.supported, limit.context).
 - Groq, Gemini, NVIDIA: the account-level free tier from the manual
   terms record (no card, recurring, not a one-time credit) plus a valid
   key; the catalog stores the effective free-tier price (0.0), since
@@ -271,6 +272,25 @@ def _context_tokens(value: object) -> int | None:
     return None
 
 
+def _opencode_tools(item: Mapping[str, object]) -> bool:
+    """Tools flag from the list metadata; anything unclear stays False."""
+    capabilities = item.get("capabilities")
+    if not isinstance(capabilities, dict):
+        return False
+    tools = capabilities.get("tools")
+    if not isinstance(tools, dict):
+        return False
+    return tools.get("supported") is True
+
+
+def _opencode_context(item: Mapping[str, object]) -> int | None:
+    """Context window from the list metadata; unclear stays unknown."""
+    limit = item.get("limit")
+    if not isinstance(limit, dict):
+        return None
+    return _context_tokens(limit.get("context"))
+
+
 def is_terms_usable(terms: TermsFile, provider: str) -> bool:
     """Manual record present, fresh, free, recurring and card-free."""
     try:
@@ -461,6 +481,8 @@ def parse_opencode_models(
                 input_price=0.0 if offered else None,
                 output_price=0.0 if offered else None,
                 source="opencode-docs-pricing+probe",
+                context=_opencode_context(item),
+                tools=_opencode_tools(item),
             )
         )
     return entries

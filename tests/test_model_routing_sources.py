@@ -324,6 +324,36 @@ def test_opencode_naive_evidence_timestamp_fails_closed():
     assert deployment.free_verified is False
 
 
+def test_opencode_capabilities_come_from_list_metadata():
+    terms = _fresh_terms()
+    raw = {"data": [{
+        "id": "big-pickle", "object": "model",
+        "capabilities": {"tools": {"supported": True}},
+        "limit": {"context": 200000},
+    }]}
+    (entry,) = router_sources.parse_opencode_models(
+        raw, terms.opencode_free_models, terms)
+    assert entry.capabilities.tools is True
+    assert entry.capabilities.context_tokens == 200000
+
+
+def test_opencode_capabilities_missing_or_malformed_stay_blank():
+    terms = _fresh_terms()
+    cases = [
+        ({}, False, None),
+        ({"capabilities": {"tools": {"supported": "yes"}}}, False, None),
+        ({"capabilities": {"tools": {"supported": True}},
+          "limit": {"context": -5}}, True, None),
+        ({"capabilities": None, "limit": {"context": True}}, False, None),
+    ]
+    for extra, tools, context in cases:
+        raw = {"data": [{"id": "big-pickle", "object": "model", **extra}]}
+        (entry,) = router_sources.parse_opencode_models(
+            raw, terms.opencode_free_models, terms)
+        assert entry.capabilities.tools is tools
+        assert entry.capabilities.context_tokens is context
+
+
 def test_deployments_carry_manual_retention_and_confidentiality():
     terms = _fresh_terms({"groq": {"retention": "zero-30d", "confidentiality_allowed": ["public"]}})
     (entry,) = router_sources.parse_groq_models({"data": [{"id": "m"}]}, terms)
