@@ -1361,3 +1361,10 @@ Trabajo de infraestructura hecho **fuera de OpenCEO** (en `/home/develop/deploym
 - `scripts/openceo-core-host.sh`: `stop` sin instancia moría por `pipefail` (grep sin pid), y `restart` tras un `stop` dejaba el core parado.
 - Merges dc5e2b9 y f47e5f7 pusheados. Servicio arrancado a las 23:50 UTC en release dc5e2b9 dirty=true (WIP ajeno de TASK-2026-00428 intacto). Tests: 17 nuevos y 286 de las suites afectadas en verde; 4 mutaciones detectadas. `test_docs_path_contract` también falla en main limpio porque cita `openceo-core/.env`, que no está versionado.
 - Objetivo OBJ-0ED0BA24 reactivado: el 471 tiene ya criterios y artefactos, y hay un hijo Tier S nuevo, TASK-2026-00449, con los criterios de autenticación que perdió el 480. Su planner falló con 401 porque la credencial de claudej caducó a las 22:13 UTC; falta que el Owner vuelva a iniciar sesión.
+
+## 2026-11-03 — Fix: claudej renueva su sesión OAuth dentro del sandbox (TASK-2026-00450)
+
+- Causa del 401 cada ~8 h: antes de renovar, Claude Code 2.1.316 crea `<CLAUDE_CONFIG_DIR>/.oauth_refresh.lock`. Con `~/.claude-j` montado en solo lectura el candado fallaba (EROFS), el CLI no renovaba y la petición salía con el token caducado. TASK-2026-00442 (credencial en lectura-escritura) era necesario pero no suficiente.
+- `~/.claude` y `~/.claude-j` pasan a ser un tmpfs por run con las entradas reales en solo lectura encima y los enlaces simbólicos recreados (el enmascarado de TASK-2026-00443 sigue igual). `.credentials.json` sigue en lectura-escritura y compartido con el host, y `.claude.json` va como copia escribible por run.
+- Merge 6f02c33 pusheado. Servicio arrancado a las 00:37 UTC en release 6f02c33 dirty=true (WIP ajeno de TASK-2026-00428 intacto). Tests: 5 nuevos (uno con bwrap real), 242 de las suites del sandbox y Tier S en verde y 3 mutaciones detectadas. Prueba de humo con el home real y sin modelos: correcta.
+- TASK-2026-00449 relanzado a las 00:39 UTC (run ts-2fa365ff0ad6); el planner pasó la autenticación. La primera renovación real dentro del sandbox se espera después de las 08:21 UTC.
