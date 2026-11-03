@@ -145,6 +145,7 @@ def test_classify_http_ignores_date_retry_after():
     ("text", "error_class", "action"),
     [
         ("Daily free quota exhausted for this account", "daily_quota", "disable_provider"),
+        ("Free usage limit reached", "daily_quota", "disable_provider"),
         ("FreeTierError: only usable from within OpenCode", "daily_quota", "disable_provider"),
         ("Billing required: purchase credits to continue", "billing", "block_route"),
         ("402 Payment Required", "billing", "block_route"),

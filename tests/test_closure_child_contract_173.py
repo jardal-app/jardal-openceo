@@ -418,7 +418,8 @@ class RoutedReviewerTests(unittest.IsolatedAsyncioTestCase):
              patch.object(wiring_mod, "derive_slot",
                           return_value=derived):
             outcome = await engine_mod._run_routed_reviewer(
-                run_attempt, routing=SimpleNamespace(),
+                run_attempt, routing=SimpleNamespace(states={
+                    slot.label: SimpleNamespace(effective=SimpleNamespace())}),
                 slots=slots, executor=SimpleNamespace(),
                 slot=slot, attempt=1, previous=None)
         self.assertTrue(outcome["valid"])
@@ -433,9 +434,11 @@ class RoutedReviewerTests(unittest.IsolatedAsyncioTestCase):
         invalid = {"valid": False, "kind": "denied", "reason": "cap"}
         run_attempt = AsyncMock(return_value=invalid)
         with patch.object(wiring_mod, "plan_fallback",
-                          return_value=None):
+                          return_value=None), \
+             patch.object(wiring_mod, "derive_slot", return_value=slot):
             outcome = await engine_mod._run_routed_reviewer(
-                run_attempt, routing=SimpleNamespace(),
+                run_attempt, routing=SimpleNamespace(states={
+                    slot.label: SimpleNamespace(effective=SimpleNamespace())}),
                 slots=SimpleNamespace(set_slot=AsyncMock()),
                 executor=SimpleNamespace(), slot=slot, attempt=1,
                 previous=None)

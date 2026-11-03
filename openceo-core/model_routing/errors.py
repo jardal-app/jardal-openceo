@@ -146,7 +146,7 @@ def classify_http(
 
 _DAILY_QUOTA_MARKS = (
     "daily", "quota", "freeusagelimiterror", "provider.quota",
-    "free tier", "free-tier", "freetier",
+    "free tier", "free-tier", "freetier", "free usage limit",
 )
 
 _BILLING_MARKS = (

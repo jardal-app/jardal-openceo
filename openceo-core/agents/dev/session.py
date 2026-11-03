@@ -1579,6 +1579,7 @@ class DevSessionManager:
                  if self._repo is not None else InMemorySlotStore())
         reviews = (MongoReviewStore(self._repo)
                    if self._repo is not None else InMemoryReviewStore())
+        await wiring_mod.activate_routed_slots(routing, slots)
         plan = await review_mod.select_round(
             pool, slots, SIMPLE_REVIEW_COUNT,
             builder_family=builder_family,
@@ -1663,27 +1664,11 @@ class DevSessionManager:
                             verdicts=verdicts, valid=True, kind="valid",
                             receipt=receipt.to_dict())
                         return outcome
-            outcome = await run_attempt(slot, previous)
-            last = previous
-            while (routing is not None and slot.label in routing.states
-                   and not outcome.get("valid")):
-                kind = str(outcome.get("kind") or "")
-                last_kind = str((last or {}).get("kind") or "")
-                nxt = wiring_mod.plan_fallback(
-                    routing, slot.label, outcome_kind=kind,
-                    text=str(outcome.get("reason") or ""),
-                    timeout_repeat=(kind == "timeout"
-                                    and last_kind == "timeout"))
-                if nxt is None:
-                    break
-                await slots.set_slot(slot.label, {"status": "available"})
-                wiring_mod.sync_executor_pool(executor, [
-                    wiring_mod.dynamic_entry(
-                        slot.label, slot.priority, nxt)])
-                last = outcome
-                outcome = await run_attempt(
-                    wiring_mod.derive_slot(slot, nxt), None)
-            return outcome
+            if routing is None or slot.label not in routing.states:
+                return await run_attempt(slot, previous)
+            return await wiring_mod.run_routed_reviewer(
+                run_attempt, routing=routing, slots=slots,
+                executor=executor, slot=slot, previous=previous)
 
         try:
             result = await review_mod.run_quorum_round(

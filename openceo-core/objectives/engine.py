@@ -3515,32 +3515,9 @@ async def _run_routed_reviewer(
     attempt: int,
     previous: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    """One routed attempt: retry across ranked models until valid (00403).
-
-    Mirrors the dev-round fallback loop (``session.py``): each failure
-    rotates the slot to the next ranked target over the same snapshot
-    and prompt. Receipt reuse stays dev-only: objective heads change
-    per episode.
-    """
-    outcome = await run_attempt(slot, previous)
-    last = previous
-    while not outcome.get("valid"):
-        kind = str(outcome.get("kind") or "")
-        last_kind = str((last or {}).get("kind") or "")
-        nxt = wiring_mod.plan_fallback(
-            routing, slot.label, outcome_kind=kind,
-            text=str(outcome.get("reason") or ""),
-            timeout_repeat=(kind == "timeout"
-                            and last_kind == "timeout"))
-        if nxt is None:
-            break
-        await slots.set_slot(slot.label, {"status": "available"})
-        wiring_mod.sync_executor_pool(executor, [
-            wiring_mod.dynamic_entry(slot.label, slot.priority, nxt)])
-        last = outcome
-        outcome = await run_attempt(
-            wiring_mod.derive_slot(slot, nxt), None)
-    return outcome
+    return await wiring_mod.run_routed_reviewer(
+        run_attempt, routing=routing, slots=slots, executor=executor,
+        slot=slot, previous=previous)
 
 
 async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]:
@@ -3672,6 +3649,7 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
         prefer = ()
         review_executor = None
         run_env = env
+    await wiring_mod.activate_routed_slots(routing, env.slots)
     plan = await review_mod.select_round(
         pool, env.slots, 3, builder_family="muse",
         prefer_families=prefer,

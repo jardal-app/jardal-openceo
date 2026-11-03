@@ -1535,6 +1535,7 @@ class TierSCycle:
         wiring_mod.sync_executor_pool(self._exec, assembly1.raw_pool)
         pool1 = (review_mod.parse_pool(assembly1.raw_pool)
                  if assembly1.routing is not None else ctx.pool)
+        await wiring_mod.activate_routed_slots(assembly1.routing, self._slots)
         plan1 = await review_mod.select_round(
             pool1, self._slots,
             int(ctx.review_cfg.get("round1_parallel", 3)),
@@ -1575,6 +1576,7 @@ class TierSCycle:
         wiring_mod.sync_executor_pool(self._exec, assembly2.raw_pool)
         pool2 = (review_mod.parse_pool(assembly2.raw_pool)
                  if assembly2.routing is not None else ctx.pool)
+        await wiring_mod.activate_routed_slots(assembly2.routing, self._slots)
         plan2 = await review_mod.select_round(
             pool2, self._slots,
             int(ctx.review_cfg.get("round2_parallel", 2)),
@@ -1747,28 +1749,11 @@ class TierSCycle:
                             verdicts=verdicts, valid=True, kind="valid",
                             receipt=receipt.to_dict())
                         return outcome
-            outcome = await run_attempt(slot, previous)
-            last = previous
-            while (routing is not None and slot.label in routing.states
-                   and not outcome.get("valid")):
-                kind = str(outcome.get("kind") or "")
-                last_kind = str((last or {}).get("kind") or "")
-                nxt = wiring_mod.plan_fallback(
-                    routing, slot.label, outcome_kind=kind,
-                    text=str(outcome.get("reason") or ""),
-                    timeout_repeat=(kind == "timeout"
-                                    and last_kind == "timeout"))
-                if nxt is None:
-                    break
-                await self._slots.set_slot(
-                    slot.label, {"status": "available"})
-                wiring_mod.sync_executor_pool(self._exec, [
-                    wiring_mod.dynamic_entry(
-                        slot.label, slot.priority, nxt)])
-                last = outcome
-                outcome = await run_attempt(
-                    wiring_mod.derive_slot(slot, nxt), None)
-            return outcome
+            if routing is None or slot.label not in routing.states:
+                return await run_attempt(slot, previous)
+            return await wiring_mod.run_routed_reviewer(
+                run_attempt, routing=routing, slots=self._slots,
+                executor=self._exec, slot=slot, previous=previous)
 
         round_pool = pool if pool is not None else ctx.pool
         critical = (str(ctx.ticket.get("priority") or "").lower()

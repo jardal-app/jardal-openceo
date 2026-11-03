@@ -996,6 +996,8 @@ async def _plain_quorum_waves(
         slot = by_label.get(str(outcome.get("slot")))
         if slot is None or outcome.get("valid") or slot.family in covered:
             continue
+        if outcome.get("routing_exhausted"):
+            continue
         if str(outcome.get("kind") or "") not in RETRIABLE_KINDS:
             continue
         ok, _reason = slot_available(slot, await store.get_slot(slot.label))
@@ -1038,6 +1040,8 @@ async def _recover_quorum(
     tried_models: set[str] = set()
 
     def recoverable(outcome: Mapping[str, Any]) -> bool:
+        if outcome.get("routing_exhausted"):
+            return False
         kind = outcome.get("kind")
         return (kind in {"timeout", "cooling_down"}
                 or (kind == "slot_error"
@@ -1082,10 +1086,23 @@ async def _recover_quorum(
             if slot.extra or slot.family == builder_family:
                 return
             retryable = recoverable(outcome)
-            if outcome.get("kind") in {"malformed", "worktree"}:
+            if (not outcome.get("routing_exhausted")
+                    and outcome.get("kind") in {"malformed", "worktree"}):
                 retryable = local_attempt == 0
             if not retryable or local_attempt + 1 >= attempts_per_slot:
                 return
+            counted = _counted_families(
+                _valid_by_label(outcomes), reviewers, builder_family)
+            for reserve in pool:
+                if (reserve.label in scheduled or reserve.label in latest
+                        or reserve.extra or reserve.family == builder_family
+                        or reserve.family in counted
+                        or (reserve.model and reserve.model in tried_models)):
+                    continue
+                ok, _reason = slot_available(
+                    reserve, await store.get_slot(reserve.label))
+                if ok:
+                    return
             state = await store.get_slot(slot.label)
             if state.get("status") == "disabled":
                 return
@@ -1104,6 +1121,7 @@ async def _recover_quorum(
 
     batch = [*plan.reviewers, *plan.extras]
     while time.monotonic() < deadline:
+        scheduled = {slot.label for slot in batch}
         await asyncio.gather(*(run_slot(slot) for slot in batch))
         valid = _valid_by_label(outcomes)
         if quorum_met(valid, reviewers, builder_family, quorum):

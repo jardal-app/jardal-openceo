@@ -47,7 +47,7 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
                 pool, store, plan, run_one,
                 recovery={**RECOVERY, "max_wait_seconds": budget})
 
-    async def test_three_attempts_then_ranked_reserves_keep_successful_report(self):
+    async def test_ranked_reserves_precede_retries_and_keep_successful_report(self):
         pool = [review.ReviewSlot("deep", "deepseek", model="deep"),
                 review.ReviewSlot("agy2", "gemini"),
                 review.ReviewSlot("duplicate", "deepseek", model="deep-free", reserve_only=True),
@@ -62,12 +62,32 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         result = await self.run_round(pool, run_one)
         self.assertTrue(result.met)
         self.assertEqual([call for call in calls if call[0] == "agy2"],
-                         [("agy2", 1), ("agy2", 2), ("agy2", 3)])
+                         [("agy2", 1)])
         self.assertEqual(calls.count(("deep", 1)), 1)
         self.assertNotIn(("deep", 2), calls)
         self.assertNotIn(("duplicate", 1), calls)
         self.assertLess(calls.index(("minimax", 1)), calls.index(("mimo", 1)))
-        self.assertEqual(self.delays, [300, 300])
+        self.assertEqual(self.delays, [])
+
+    async def test_exhausted_router_uses_reserve_without_repeating_failed_model(self):
+        for kind in ("cooling_down", "timeout", "malformed"):
+            pool = [review.ReviewSlot("free", "alpha"),
+                    review.ReviewSlot("kept", "beta"),
+                    review.ReviewSlot("reserve", "gamma", reserve_only=True)]
+            calls = []
+
+            async def run_one(slot, attempt, previous):
+                calls.append((slot.label, attempt))
+                result = outcome(slot, attempt, valid=slot.label != "free", kind=kind)
+                if slot.label == "free":
+                    result["routing_exhausted"] = True
+                return result
+
+            result = await self.run_round(pool, run_one)
+            self.assertTrue(result.met)
+            self.assertEqual(calls.count(("free", 1)), 1)
+            self.assertNotIn(("free", 2), calls)
+            self.assertEqual(self.delays, [])
 
     async def test_recovers_after_hour_without_repeating_valid_reviewer(self):
         pool = [review.ReviewSlot("deep", "deepseek"), review.ReviewSlot("agyj", "gemini")]

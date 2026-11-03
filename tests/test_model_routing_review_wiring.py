@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -728,12 +728,12 @@ class ReceiptTests(unittest.TestCase):
 
 
 class FallbackTests(unittest.TestCase):
-    def _routing(self, base):
+    def _routing(self, base, order=None):
         with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(base / "cfg"),
                                      "XDG_STATE_HOME": str(base / "st")}):
             (base / "cfg").mkdir(exist_ok=True)
             (base / "st").mkdir(exist_ok=True)
-            _write_rankings(base, _order_abc())
+            _write_rankings(base, _order_abc() if order is None else order)
             assembly = wiring.assemble_review_pool(
                 _static_pool(), review_cfg={}, run_id="run-f",
                 round="1", builder_family="muse",
@@ -767,18 +767,17 @@ class FallbackTests(unittest.TestCase):
             finally:
                 routing.close()
 
-    def test_unclassified_slot_error_stays(self):
+    def test_unclassified_slot_error_rotates(self):
         self.assertEqual(
             classify_text("weird output without marks").error_class,
             "unclassified")
         with tempfile.TemporaryDirectory() as tmp:
             routing = self._routing(Path(tmp))
             try:
-                self.assertIsNone(wiring.plan_fallback(
+                self.assertIsNotNone(wiring.plan_fallback(
                     routing, "free-review-1", outcome_kind="slot_error",
                     text="weird output without marks"))
-                self.assertEqual(
-                    routing.store.errors_since(0.0), [])
+                self.assertEqual(len(routing.store.errors_since(0.0)), 1)
             finally:
                 routing.close()
 
@@ -795,41 +794,107 @@ class FallbackTests(unittest.TestCase):
             finally:
                 routing.close()
 
-    def test_first_timeout_stays_repeat_rotates(self):
+    def test_first_timeout_rotates(self):
         with tempfile.TemporaryDirectory() as tmp:
             routing = self._routing(Path(tmp))
             try:
-                self.assertIsNone(wiring.plan_fallback(
-                    routing, "free-review-1", outcome_kind="timeout",
-                    text="timeout after 900s", timeout_repeat=False))
                 nxt = wiring.plan_fallback(
                     routing, "free-review-1", outcome_kind="timeout",
-                    text="timeout after 900s", timeout_repeat=True)
+                    text="timeout after 900s")
                 assert nxt is not None
                 rows = routing.store.errors_since(0.0)
                 self.assertEqual(rows[0].error_class, "server_error")
             finally:
                 routing.close()
 
-    def test_forbidden_text_never_rotates(self):
+    def test_forbidden_route_rotates(self):
         with tempfile.TemporaryDirectory() as tmp:
             routing = self._routing(Path(tmp))
             try:
-                self.assertIsNone(wiring.plan_fallback(
+                self.assertIsNotNone(wiring.plan_fallback(
                     routing, "free-review-1", outcome_kind="slot_error",
                     text="provider.auth 403 forbidden"))
             finally:
                 routing.close()
 
-    def test_budget_caps_restarts(self):
+    def test_entire_chain_is_tried_once_and_last_failure_is_recorded(self):
         with tempfile.TemporaryDirectory() as tmp:
-            routing = self._routing(Path(tmp))
+            order = _order_abc() + [
+                _entry(rank, f"org/model-{rank}", f"family-{rank}",
+                       f"opencode/model-{rank}-free") for rank in range(4, 8)]
+            routing = self._routing(Path(tmp), order)
             try:
-                routing.states["free-review-1"].fallback_count = (
-                    wiring.REVIEW_FALLBACK_MAX)
+                chosen = []
+                for _ in range(5):
+                    nxt = wiring.plan_fallback(
+                        routing, "free-review-1", outcome_kind="slot_error",
+                        text="HTTP 503 unavailable")
+                    assert nxt is not None
+                    chosen.append(nxt.deployment_id)
+                self.assertEqual(len(set(chosen)), 5)
                 self.assertIsNone(wiring.plan_fallback(
-                    routing, "free-review-1", outcome_kind="disabled",
-                    text="model not found"))
+                    routing, "free-review-1", outcome_kind="slot_error",
+                    text="HTTP 503 unavailable"))
+                self.assertEqual(len(routing.store.errors_since(0.0)), 6)
+                self.assertIsNotNone(routing.store.cooldown_for(chosen[-1]))
+                self.assertEqual(routing.store.reservations("run-f", "1"), [
+                    row for row in routing.store.reservations("run-f", "1")
+                    if row.slot == "free-review-2"])
+            finally:
+                routing.close()
+
+    def test_quota_skips_all_models_of_failed_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            order = _order_abc() + [
+                _entry(4, "org/model-d", "delta", "groq/model-d", "groq")]
+            routing = self._routing(Path(tmp), order)
+            try:
+                nxt = wiring.plan_fallback(
+                    routing, "free-review-1", outcome_kind="cooling_down",
+                    text="429 Free usage limit reached")
+                assert nxt is not None
+                self.assertEqual(nxt.provider, "groq")
+                self.assertIsNotNone(routing.store.provider_blocked("opencode"))
+            finally:
+                routing.close()
+
+    def test_failed_deployment_is_not_retried_by_sibling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            order = _order_abc() + [
+                _entry(4, "org/model-d", "delta", "groq/model-d", "groq")]
+            routing = self._routing(Path(tmp), order)
+            try:
+                first = wiring.plan_fallback(
+                    routing, "free-review-1", outcome_kind="malformed",
+                    text="malformed report")
+                second = wiring.plan_fallback(
+                    routing, "free-review-2", outcome_kind="malformed",
+                    text="malformed report")
+                assert first is not None and second is not None
+                self.assertEqual(first.family_id, "gamma")
+                self.assertEqual(second.family_id, "delta")
+            finally:
+                routing.close()
+
+    def test_same_model_can_fail_over_to_another_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            order = _order_abc()
+            order[0]["backups"] = [
+                {"deployment_id": "nvidia/model-a", "provider": "nvidia"}]
+            routing = self._routing(Path(tmp), order)
+            try:
+                nxt = wiring.plan_fallback(
+                    routing, "free-review-1", outcome_kind="slot_error",
+                    text="503 upstream unavailable")
+                assert nxt is not None
+                self.assertEqual(nxt.deployment_id, "nvidia/model-a")
+                self.assertEqual(nxt.family_id, "alpha")
+                self.assertEqual(nxt.canonical_model_id, "org/model-a")
+                after = wiring.plan_fallback(
+                    routing, "free-review-1", outcome_kind="slot_error",
+                    text="503 upstream unavailable")
+                assert after is not None
+                self.assertEqual(after.family_id, "gamma")
             finally:
                 routing.close()
 
@@ -897,6 +962,66 @@ class FallbackTests(unittest.TestCase):
                 routing.close()
 
 
+class RoutedAttemptTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_deployment_does_not_inherit_stale_label_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            routing = FallbackTests()._routing(Path(tmp))
+            try:
+                slots = review_mod.InMemorySlotStore()
+                for label in (*routing.labels, "gemini"):
+                    await slots.set_slot(label, {"status": "disabled"})
+                await wiring.activate_routed_slots(routing, slots)
+                for label in routing.labels:
+                    self.assertEqual(await slots.get_slot(label), {"status": "available"})
+                self.assertEqual(await slots.get_slot("gemini"), {"status": "disabled"})
+            finally:
+                routing.close()
+
+    async def test_recovery_uses_effective_model_instead_of_original_slot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            routing = FallbackTests()._routing(Path(tmp))
+            try:
+                slot = review_mod.ReviewSlot(
+                    "free-review-1", "alpha", model="opencode/model-a-free")
+                nxt = wiring.plan_fallback(
+                    routing, slot.label, outcome_kind="slot_error",
+                    text="503 unavailable")
+                assert nxt is not None
+                run_attempt = AsyncMock(return_value={"valid": True})
+                result = await wiring.run_routed_reviewer(
+                    run_attempt, routing=routing,
+                    slots=review_mod.InMemorySlotStore(), executor=SimpleNamespace(),
+                    slot=slot, previous={"kind": "timeout"})
+                self.assertTrue(result["valid"])
+                current = run_attempt.await_args.args[0]
+                self.assertEqual(current.model, nxt.deployment_id)
+                self.assertEqual(current.family, nxt.family_id)
+                run_attempt.assert_awaited_once()
+            finally:
+                routing.close()
+
+    async def test_timeout_rotates_immediately_and_exhaustion_stops_retries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            routing = FallbackTests()._routing(Path(tmp))
+            try:
+                slot = review_mod.ReviewSlot(
+                    "free-review-1", "alpha", model="opencode/model-a-free")
+                run_attempt = AsyncMock(side_effect=[
+                    {"valid": False, "kind": "timeout", "reason": "timeout"},
+                    {"valid": False, "kind": "cooling_down", "reason": "429 quota"}])
+                with patch.object(review_mod.asyncio, "sleep", side_effect=AssertionError):
+                    result = await wiring.run_routed_reviewer(
+                        run_attempt, routing=routing,
+                        slots=review_mod.InMemorySlotStore(), executor=SimpleNamespace(),
+                        slot=slot, previous=None)
+                self.assertTrue(result["routing_exhausted"])
+                self.assertEqual([call.args[0].model for call in run_attempt.await_args_list],
+                                 ["opencode/model-a-free", "opencode/model-c-free"])
+                self.assertIsNotNone(routing.store.provider_blocked("opencode"))
+            finally:
+                routing.close()
+
+
 class Round2Tests(unittest.TestCase):
     def _setup(self, tmp):
         base = Path(tmp)
@@ -946,6 +1071,22 @@ class Round2Tests(unittest.TestCase):
                     candidates=candidates, store=store,
                     exclude_families=frozenset({"muse"}))
                 self.assertEqual(first.deployment_id, "opencode/model-a-free")
+                assert second is not None
+                self.assertEqual(second.family_id, "gamma")
+            finally:
+                store.close()
+
+    def test_failed_family_remains_eligible_for_another_provider_in_round_two(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, store, candidates = self._setup(tmp)
+            try:
+                r1 = wiring.R1Result(
+                    round_families=frozenset({"alpha", "deepseek"}),
+                    tried_families=frozenset({"alpha", "beta", "gamma"}))
+                first, second = wiring.select_round2_pair(
+                    policy="four_distinct", r1=r1,
+                    candidates=candidates, store=store)
+                self.assertEqual(first.family_id, "beta")
                 assert second is not None
                 self.assertEqual(second.family_id, "gamma")
             finally:

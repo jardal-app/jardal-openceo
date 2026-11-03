@@ -38,7 +38,7 @@ import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Container, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Container, Mapping, Sequence
 
 from model_routing import serve_evidence as router_serve_evidence
 from model_routing.availability import (
@@ -54,7 +54,7 @@ from model_routing.availability import (
     reserve_model,
     write_audit_event,
 )
-from model_routing.errors import ClassifiedError, classify_text, classify_timeout
+from model_routing.errors import ClassifiedError, classify_http, classify_text, classify_timeout
 from model_routing.external import (
     ExternalError,
     build_external_providers_config,
@@ -82,14 +82,13 @@ from model_routing.ranking import (
 )
 from model_routing.secrets import SecretsError, load_router_secrets
 from model_routing.selector import NoEligibleTarget, select_targets
-from orchestration.review import ReviewSlot
+from orchestration.review import ReviewSlot, SlotStore
 
 __all__ = [
     "DEFAULT_ROUND2_POLICY",
     "DEFAULT_SNAPSHOT_MAX_AGE_HOURS",
     "FREE_REVIEW_PROFILE",
     "HARDENED_MARK",
-    "REVIEW_FALLBACK_MAX",
     "REVIEW_SLOT_LABELS",
     "REVIEW_SLOT_PRIORITIES",
     "ROTATE_CLASSES",
@@ -108,6 +107,7 @@ __all__ = [
     "RoundRouting",
     "RoundSnapshot",
     "assemble_review_pool",
+    "activate_routed_slots",
     "build_receipt",
     "catalog_fallback_profile",
     "derive_slot",
@@ -122,6 +122,7 @@ __all__ = [
     "receipt_filenames",
     "record_receipt",
     "review_candidates",
+    "run_routed_reviewer",
     "select_round2_pair",
     "static_exclusions",
     "sync_executor_pool",
@@ -144,24 +145,15 @@ DEFAULT_ROUND2_POLICY = "reuse_best_plus_novel"
 #: stale to feed a round and the static pool takes over.
 DEFAULT_SNAPSHOT_MAX_AGE_HOURS = 30
 
-#: §11.6 restarts per slot per round; relief waves cover the rest.
-REVIEW_FALLBACK_MAX = 2
-
 #: Raw-spec marker the live executor honors with the §14.3 fence.
 HARDENED_MARK = "review_hardened"
 
 #: Families that never count toward the strict quorum (SPEC §11.2).
 UNVERIFIED_FAMILIES = frozenset({"", "unknown", "unknown-family", "anonymous"})
 
-#: §9.2 classes that rotate the reviewer to the next ranked model.
-#: ``forbidden`` stays out on purpose: a free-tier 403 signals the
-#: tool frontier, not a dead model, and rotating would burn models
-#: without diagnosing the config (TASK-2026-00288 handoff).
-#: ``bad_response`` stays out too: malformed reports retry on the
-#: same model through the existing retryable kinds.
 ROTATE_CLASSES = frozenset({
     "rate_limited", "daily_quota", "server_error", "auth", "billing",
-    "not_found", "tools_unsupported", "context_exceeded", "stream_cut",
+    "not_found", "tools_unsupported", "context_exceeded", "stream_cut", "forbidden",
 })
 
 
@@ -851,7 +843,7 @@ def select_round2_pair(
         raise ReviewRoutingError(
             f"unknown round2_policy {policy!r} (known: {', '.join(ROUND2_POLICIES)})")
     base = frozenset(exclude_families)
-    used = base | set(r1.round_families) | set(r1.tried_families)
+    used = base | set(r1.round_families)
     if name == "four_distinct":
         return _select_four_distinct(
             r1, candidates, store, base=base, used=used)
@@ -1103,30 +1095,30 @@ def plan_fallback(
     *,
     outcome_kind: str,
     text: str,
-    timeout_repeat: bool = False,
     responded: bool = False,
 ) -> Candidate | None:
     """One §11.6 step: record, release, reserve the next model, restart.
 
     Returns the next candidate the caller restarts alone on the same
     snapshot and prompt, or None when this failure must not rotate
-    (same-model retry, inspection and fail-safe classes) or when the
-    chain or the per-label budget is exhausted. A reservation race
+    (inspection and fail-safe classes) or when the chain is exhausted.
+    Each deployment is tried once per round. A reservation race
     skips to the next family instead of sharing one (T04).
     """
     state = routing.states.get(label)
-    if state is None or state.fallback_count >= REVIEW_FALLBACK_MAX:
+    if state is None:
         return None
     kind = outcome_kind or ""
-    if kind == "timeout" and not timeout_repeat:
-        return None
     if kind == "timeout":
         classified = classify_timeout(responded=responded)
     else:
         classified = classify_text(text or "")
+        if (classified.error_class == "unclassified"
+                and ("403" in text or "forbidden" in text.lower())):
+            classified = classify_http(403, detail=text)
     rotate = classified.error_class in ROTATE_CLASSES or (
-        classified.error_class == "unclassified"
-        and kind in {"cooling_down", "disabled"})
+        classified.error_class in {"unclassified", "bad_response"}
+        and kind in {"cooling_down", "disabled", "slot_error", "malformed"})
     if not rotate:
         return None
     effective = state.effective
@@ -1135,9 +1127,10 @@ def plan_fallback(
         deployment_id=effective.deployment_id, model=effective.deployment_id,
         classified=classified, run_id=routing.run_id, excerpt=text or "")
     release_reservation(routing.store, routing.run_id, routing.round, label)
-    skip_families = set(routing.round_families) | state.tried_families
-    skip_canonicals = set(state.tried_canonicals)
-    skip_deployments = set(state.tried_deployments)
+    skip_families = set(routing.round_families)
+    skip_canonicals: set[str] = set()
+    skip_deployments = set().union(
+        *(item.tried_deployments for item in routing.states.values()))
     for _ in range(len(routing.candidates) + 1):
         try:
             nxt = get_next_candidate(
@@ -1174,11 +1167,48 @@ def plan_fallback(
             routing.store, routing.run_id, "review_fallback",
             f"{label}: {effective.deployment_id} -> {nxt.deployment_id} "
             f"({classified.error_class})")
+        logger.warning("Reviewer %s rotating %s -> %s (%s)", label,
+                       effective.deployment_id, nxt.deployment_id,
+                       classified.error_class)
         return nxt
     write_audit_event(
         routing.store, routing.run_id, "review_fallback_exhausted",
         f"{label}: {effective.deployment_id} ({classified.error_class})")
     return None
+
+
+async def run_routed_reviewer(
+    run_attempt: Callable[..., Awaitable[dict[str, Any]]],
+    *,
+    routing: RoundRouting,
+    slots: Any,
+    executor: Any,
+    slot: ReviewSlot,
+    previous: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Run the effective model and rotate failures without a retry delay."""
+    current = derive_slot(slot, routing.states[slot.label].effective)
+    outcome = await run_attempt(current, previous)
+    while not outcome.get("valid"):
+        nxt = plan_fallback(
+            routing, slot.label,
+            outcome_kind=str(outcome.get("kind") or ""),
+            text=str(outcome.get("reason") or ""))
+        if nxt is None:
+            outcome["routing_exhausted"] = True
+            break
+        await slots.set_slot(slot.label, {"status": "available"})
+        sync_executor_pool(executor, [
+            dynamic_entry(slot.label, slot.priority, nxt)])
+        outcome = await run_attempt(derive_slot(slot, nxt), None)
+    return outcome
+
+
+async def activate_routed_slots(routing: RoundRouting | None, slots: SlotStore) -> None:
+    """Clear stale label failures; routing already gated the selected deployments."""
+    if routing is not None:
+        for label in routing.labels:
+            await slots.set_slot(label, {"status": "available"})
 
 
 def dynamic_entry(label: str, priority: int, candidate: Candidate) -> dict[str, Any]:
@@ -1389,7 +1419,7 @@ def assemble_review_pool(
         candidates=candidates, labels=tuple(labels), states=states,
         round_families=(static_fams if r1 is None
                         else frozenset({builder_family.strip().lower()})
-                        | set(r1.round_families) | set(r1.tried_families)),
+                        | set(r1.round_families)),
         receipts_dir=Path(receipts_dir))
     write_audit_event(
         store, run_id, "review_round_assembled",
