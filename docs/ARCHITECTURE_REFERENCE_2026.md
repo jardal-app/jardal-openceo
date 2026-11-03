@@ -1072,7 +1072,7 @@ Skills and playbooks in git; knowledge in the vault; work in Jardal ERP; executi
 
 ## Internal Scheduler — Recurring Tasks & Reminders
 
-Scheduling agent execution belongs to OpenCEO, independent of n8n. The reference mechanism is Horizon's persisted triggers and reactive timer in `openceo-core/horizon/triggers.py`. Broader recurring-workflow support must use the same scheduling principles; Jardal ERP retains business workflow scheduling within its own domain.
+Scheduling agent execution belongs to OpenCEO, independent of n8n. The reference mechanism is Horizon's persisted triggers and reactive timer in `openceo-core/horizon/triggers.py`. Broader recurring-workflow support must use the same scheduling principles under a single global reactive schedule: one kernel controls all execution wake-ups, while each domain (dispatcher tickets, Horizon, research, CEO loop) keeps its own agenda of future tasks that wakes through it — never an isolated timer of its own (TASK-2026-00440); Jardal ERP retains business workflow scheduling within its own domain.
 
 ### Schedule Schema (MongoDB)
 
@@ -1117,7 +1117,7 @@ If the CEO doesn't find a crystallized workflow, it enters the normal tiers. If 
 3. It claims a bounded set of due jobs, executes the registered workflow, records the result, and persists the next occurrence when appropriate.
 4. A bounded startup recovery handles interrupted work. No periodic full-collection scan, external API sweep, or second watcher repeats the originating side effect.
 
-The `WaitingTaskScheduler` retry loop was retired by TASK-2026-00113 (the F3 dispatcher in `openceo-core/dispatcher.py` follows this same reactive pattern); it is not the pattern for new Jardal ERP, knowledge, or recurring-work integrations.
+The `WaitingTaskScheduler` retry loop was retired by TASK-2026-00113 (the F3 dispatcher in `openceo-core/dispatcher.py` follows this same reactive pattern); it is not the pattern for new Jardal ERP, knowledge, or recurring-work integrations. The dispatcher backup trigger and the Horizon, research and CEO timers converge into that single global kernel; no new isolated timer (TASK-2026-00440).
 
 ### Personal vs Enterprise
 
