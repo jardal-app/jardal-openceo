@@ -8,12 +8,11 @@ by default with ``four_distinct`` and ``reuse_top_two`` configurable
 model over the same snapshot and prompt (§11.6); every valid report
 carries an extended receipt (§11.7).
 
-Only OpenCode-served routes feed review slots: reviewers run the
-``opencode`` CLI without credentials, so a ranked entry counts only
-when its primary route (or one backup) runs on the ``opencode``
-provider. Anything else (missing, expired or pair-less snapshot,
-disabled switch) falls back to today's static pool: ``mimo``,
-``nemotron`` and the ``reviewer_models.yaml`` reserves, unchanged.
+Free slots are dynamic-only (TASK-2026-00428): the pair comes from
+the frozen ``free-review`` ranking, else from a degraded order built
+over the live catalog, else the round blocks loud (``RoundBlocked``)
+instead of serving a stale hand-curated list. Paid OpenCode entries
+(``cascade_only``) are not free slots and always survive the merge.
 Non-free slots (dsh, claudep, gemini, muse-review) never change.
 
 Addendum v1.2 (TASK-2026-00306): when a v2 catalog is published next
@@ -25,9 +24,8 @@ from the same snapshot and prompt on the next eligible target when
 it fails recoverably. Group B credentials reach the fenced run
 through the audited handoff of ``reviewer_isolation`` (references in
 the config, values only in the process env, ``/proc`` denied to the
-review tools). Without a catalog the legacy OpenCode-only path above
-still serves; the manual list and ``reviewer_models.yaml`` stay as
-the respaldo.
+review tools). Without a catalog the legacy ranking-order path above
+still serves.
 """
 
 from __future__ import annotations
@@ -50,6 +48,7 @@ from model_routing.availability import (
     NoEligibleCandidate,
     ReservationConflict,
     get_next_candidate,
+    meets_profile,
     record_provider_error,
     release_reservation,
     reserve_model,
@@ -66,12 +65,21 @@ from model_routing.models import (
     CatalogEntry,
     Deployment,
     ProfileRanking,
+    RankedDeployment,
+    RankedEntry,
+    RankingProvenance,
     RankingsDocument,
+    RouterPolicy,
+    is_usable,
 )
 from model_routing.paths import catalog_path, rankings_path
 from model_routing.probes import read_instance_models
 from model_routing.publish import PublishError, load_catalog_doc
-from model_routing.ranking import fallback_chain, load_rankings
+from model_routing.ranking import (
+    fallback_chain,
+    load_rankings,
+    profile_requirements,
+)
 from model_routing.secrets import SecretsError, load_router_secrets
 from model_routing.selector import NoEligibleTarget, select_targets
 from orchestration.review import ReviewSlot
@@ -101,9 +109,11 @@ __all__ = [
     "RoundSnapshot",
     "assemble_review_pool",
     "build_receipt",
+    "catalog_fallback_profile",
     "derive_slot",
     "dynamic_entry",
     "free_router_settings",
+    "live_free_families",
     "load_round_snapshot",
     "load_valid_receipt",
     "native_review_targets",
@@ -124,8 +134,7 @@ FREE_REVIEW_PROFILE = "free-review"
 #: Stable labels of the ranking-fed slots; models rotate under them.
 REVIEW_SLOT_LABELS = ("free-review-1", "free-review-2")
 
-#: Same priorities the static mimo/nemotron slots hold today, so
-#: round 1 keeps the free pair first and its priority order otherwise.
+#: Top priority, so round 1 keeps the dynamic free pair first.
 REVIEW_SLOT_PRIORITIES = (1, 1)
 
 ROUND2_POLICIES = ("reuse_best_plus_novel", "four_distinct", "reuse_top_two")
@@ -269,8 +278,9 @@ def load_round_snapshot(
 ) -> RoundSnapshot | None:
     """Frozen free-review order, or None when nothing was published yet.
 
-    A missing file is the normal manual-list state, not an error.
-    Unreadable, invalid, undated or expired snapshots fail closed.
+    A missing file is not an error: the caller falls back to the
+    live catalog. Unreadable, invalid, undated or expired snapshots
+    fail closed.
     """
     target = Path(path) if path is not None else rankings_path()
     if not target.exists():
@@ -495,8 +505,11 @@ def _round_candidates(
     try:
         catalog = load_catalog_doc(target)
     except PublishError as exc:
-        raise ReviewRoutingError(
-            f"catalog {target} invalid: {exc}") from exc
+        write_audit_event(
+            store, run_id, "review_catalog_invalid",
+            f"{target}: {exc}"[:200])
+        logger.warning("free-router legacy ranking order: %s", exc)
+        return review_candidates(snapshot.profile)
     return native_review_targets(
         snapshot, catalog, store,
         exclusions=Exclusions(families=base_exclusions),
@@ -532,6 +545,88 @@ def static_exclusions(
         if family:
             excluded.add(family)
     return frozenset(excluded)
+
+
+def _is_free_opencode_entry(entry: Mapping[str, Any]) -> bool:
+    """Free static slots the dynamics replace; paid ones survive."""
+    if str(entry.get("provider") or "") != "opencode":
+        return False
+    if bool(entry.get("cascade_only", False)):
+        return False
+    return str(entry.get("cost_tier") or "free") == "free"
+
+
+def _drop_free_opencode(
+    marked: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Marked pool copy without the retired free static slots."""
+    return [dict(entry) for entry in marked
+            if isinstance(entry, Mapping)
+            and not _is_free_opencode_entry(entry)]
+
+
+def catalog_fallback_profile(
+    catalog: CatalogDocument,
+    policy: RouterPolicy | None = None,
+) -> ProfileRanking:
+    """Degraded free-review order over the live catalog (00428).
+
+    One entry per catalog entry with a usable free route; verified
+    routes first, then family and canonical id. Quality stays zero:
+    an honest unranked order, never mistaken for a ranking.
+    """
+    active = policy or RouterPolicy()
+    requirements = profile_requirements(FREE_REVIEW_PROFILE)
+    rows: list[tuple[bool, str, str, CatalogEntry, Deployment,
+                      list[RankedDeployment]]] = []
+    for entry in catalog.entries:
+        routes = [
+            deployment for deployment in entry.deployments
+            if (deployment.free_offered or deployment.free_verified)
+            and deployment.healthy
+            and is_usable(deployment, active)
+            and meets_profile(entry, deployment, requirements)[0]
+        ]
+        if not routes:
+            continue
+        routes.sort(key=lambda route: (
+            not route.free_verified, route.provider, route.deployment_id))
+        primary = routes[0]
+        backups = [RankedDeployment(deployment_id=route.deployment_id,
+                                    provider=route.provider)
+                   for route in routes[1:]]
+        rows.append((not primary.free_verified, entry.family_id,
+                     entry.canonical_model_id, entry, primary, backups))
+    rows.sort(key=lambda row: (row[0], row[1], row[2]))
+    order = [
+        RankedEntry(
+            rank=index + 1, canonical_model_id=row[3].canonical_model_id,
+            family_id=row[3].family_id,
+            primary=RankedDeployment(deployment_id=row[4].deployment_id,
+                                     provider=row[4].provider),
+            backups=row[5], quality=0.0, coverage=0.0)
+        for index, row in enumerate(rows)
+    ]
+    return ProfileRanking(
+        profile=FREE_REVIEW_PROFILE, order=order,
+        provenance=RankingProvenance(
+            catalog_snapshot="catalog-live", catalog_sha256="",
+            sources=["catalog-fallback"],
+            observed_at=datetime.now(timezone.utc).isoformat()))
+
+
+def live_free_families(
+    catalog_file: Path | None = None,
+) -> frozenset[str]:
+    """Distinct free families in the live catalog; empty when unreadable."""
+    try:
+        target = Path(catalog_file) if catalog_file is not None else catalog_path()
+        if not target.exists():
+            return frozenset()
+        profile = catalog_fallback_profile(load_catalog_doc(target))
+    except Exception:
+        return frozenset()
+    return frozenset(item.family_id for item in profile.order)
 
 
 @dataclass
@@ -1112,6 +1207,32 @@ def dynamic_entry(label: str, priority: int, candidate: Candidate) -> dict[str, 
 _dynamic_entry = dynamic_entry
 
 
+def _catalog_fallback_snapshot(
+    catalog_file: Path | None,
+) -> RoundSnapshot:
+    """Degraded snapshot over the live catalog (00428)."""
+    target = Path(catalog_file) if catalog_file is not None else catalog_path()
+    if not target.exists():
+        raise ReviewRoutingError(f"catalog {target} missing")
+    try:
+        catalog = load_catalog_doc(target)
+    except PublishError as exc:
+        raise ReviewRoutingError(
+            f"catalog {target} invalid: {exc}") from exc
+    profile = catalog_fallback_profile(catalog)
+    if not profile.order:
+        raise ReviewRoutingError(
+            f"catalog {target} publishes zero usable free routes")
+    document = RankingsDocument(
+        profiles={FREE_REVIEW_PROFILE: profile},
+        generator="catalog-fallback", catalog_snapshot="catalog-live",
+        catalog_sha256="")
+    return RoundSnapshot(
+        document=document, profile=profile, file_sha256="catalog-live",
+        catalog_snapshot="catalog-live",
+        generated_at=datetime.now(timezone.utc).isoformat())
+
+
 def _marked_static(raw_pool: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Static pool copy with the §14.3 fence marked on free slots."""
     marked: list[dict[str, Any]] = []
@@ -1143,48 +1264,70 @@ def assemble_review_pool(
     """Pool plus routing for one dev-review round.
 
     Ranking-fed when the switch is on and the frozen snapshot yields
-    a pair: static OpenCode entries give way to ``free-review-1/2``.
-    Every other shape (switch off, no snapshot, expired snapshot,
-    no pair) keeps the static pool; degraded shapes audit why.
-    Round 2 takes ``r1`` and the configured §11.3 policy; only
-    ``four_distinct`` without a four-family plan raises. With a
-    catalog next to the rankings the pair comes from the native_first
-    list (group A then group B); without one the legacy
-    OpenCode-only order still serves.
+    a pair: free static entries give way to ``free-review-1/2`` while
+    paid OpenCode entries survive. Without a usable snapshot the pair
+    comes from a degraded order over the live catalog; with no free
+    route anywhere the round blocks loud (``RoundBlocked``) instead
+    of serving a stale list. Round 2 takes ``r1`` and the configured
+    §11.3 policy; only ``four_distinct`` without a four-family plan
+    raises. With a catalog next to the rankings the pair comes from
+    the native_first list (group A then group B); without one the
+    legacy ranking order still serves.
     """
     settings = free_router_settings(review_cfg)
     static = _marked_static(raw_pool)
     if not settings["enabled"]:
-        return Assembly(
-            raw_pool=[dict(entry) for entry in raw_pool
-                      if isinstance(entry, Mapping)],
-            routing=None)
+        return Assembly(raw_pool=_drop_free_opencode(static), routing=None)
+    snapshot_error = ""
     try:
         snapshot = load_round_snapshot(
             rankings_path, max_age_hours=settings["snapshot_max_age_hours"])
     except ReviewRoutingError as exc:
-        logger.warning("free-router static fallback: %s", exc)
-        return Assembly(raw_pool=static, routing=None)
-    if snapshot is None:
-        return Assembly(raw_pool=static, routing=None)
+        snapshot = None
+        snapshot_error = str(exc)
     store = AvailabilityStore()
     static_fams = static_exclusions(raw_pool, builder_family=builder_family)
     base_exclusions = (static_fams if r1 is None
                        else frozenset({builder_family.strip().lower()}))
-    try:
-        candidates = _round_candidates(
-            snapshot, store, run_id, base_exclusions=base_exclusions,
+
+    def _candidates_from(
+        active: RoundSnapshot,
+    ) -> list[Candidate] | list[ReviewTarget]:
+        return _round_candidates(
+            active, store, run_id, base_exclusions=base_exclusions,
             catalog_file=catalog_file, router_secrets=router_secrets,
             instance_models=instance_models, auto_instance=auto_instance)
-    except NoReviewPair as exc:
-        write_audit_event(store, run_id, "review_pair_unavailable", str(exc)[:200])
-        logger.warning("free-router static fallback: %s", exc)
+
+    candidates: list[Candidate] | list[ReviewTarget] | None = None
+    catalog_error = ""
+    try:
+        if snapshot is not None:
+            try:
+                candidates = _candidates_from(snapshot)
+            except NoReviewPair as exc:
+                snapshot_error = str(exc)
+        if candidates is None:
+            try:
+                snapshot = _catalog_fallback_snapshot(catalog_file)
+            except ReviewRoutingError as exc:
+                catalog_error = str(exc)
+            else:
+                try:
+                    candidates = _candidates_from(snapshot)
+                except NoReviewPair as exc:
+                    catalog_error = str(exc)
+    except ReviewRoutingError:
         store.close()
-        return Assembly(raw_pool=static, routing=None)
-    except ReviewRoutingError as exc:
-        logger.warning("free-router static fallback: %s", exc)
+        raise
+    if candidates is None:
+        write_audit_event(
+            store, run_id, "review_pair_unavailable",
+            f"rankings: {snapshot_error or 'no pair'}; "
+            f"catalog: {catalog_error or 'no pair'}"[:200])
         store.close()
-        return Assembly(raw_pool=static, routing=None)
+        raise RoundBlocked(
+            f"no free reviewers (rankings: {snapshot_error or 'no pair'}; "
+            f"catalog: {catalog_error or 'no pair'})")
     try:
         if r1 is None:
             first_pick, second_pick = pick_pair(
@@ -1202,9 +1345,8 @@ def assemble_review_pool(
         raise
     except ReviewRoutingError as exc:
         write_audit_event(store, run_id, "review_pair_unavailable", str(exc)[:200])
-        logger.warning("free-router static fallback: %s", exc)
         store.close()
-        return Assembly(raw_pool=static, routing=None)
+        raise RoundBlocked(f"no servable free pair: {exc}") from exc
     picked = [item for item in pair if item is not None]
     labels = REVIEW_SLOT_LABELS[: len(picked)]
     for label in labels:
@@ -1216,9 +1358,9 @@ def assemble_review_pool(
              for label, item in zip(labels, picked)])
     except ReservationConflict as exc:
         write_audit_event(store, run_id, "review_reserve_conflict", str(exc)[:200])
-        logger.warning("free-router static fallback: %s", exc)
+        logger.warning("free-router transient conflict, non-free pool: %s", exc)
         store.close()
-        return Assembly(raw_pool=static, routing=None)
+        return Assembly(raw_pool=_drop_free_opencode(static), routing=None)
     states = {
         label: LabelState(
             requested=item, effective=item,
@@ -1234,7 +1376,7 @@ def assemble_review_pool(
     merged: list[dict[str, Any]] = []
     placed = False
     for entry in static:
-        if str(entry.get("provider") or "") == "opencode":
+        if _is_free_opencode_entry(entry):
             if not placed:
                 merged.extend(dynamics)
                 placed = True

@@ -94,7 +94,7 @@ class ValidateProjectTests(unittest.TestCase):
         self.assertTrue(all(item.get("family") for item in reviewers))
         active_families = {item["family"] for item in reviewers
                            if item["active"] and not item.get("extra")}
-        self.assertGreaterEqual(len(active_families), 3)
+        self.assertEqual(active_families, {"gemini", "openrouter"})
         self.assertEqual(cfg["review"]["roles"]["closer"]["account"], "muse")
         self.assertEqual(cfg["review"]["roles"]["arbiter"]["account"],
                          "claudej")

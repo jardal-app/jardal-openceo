@@ -619,8 +619,8 @@ class ConfigLoader:
                     },
                 },
                 "reviewers": [
-                    {"label": "mimo", "provider": "opencode", "model": "opencode/mimo-v2.6-flash-free", "family": "mimo", "priority": 1, "active": True, "cost_tier": "free", "quota": "reactive", "prompt_via": "argv", "command": ["opencode", "run", "-m", "opencode/mimo-v2.6-flash-free"]},
-                    {"label": "nemotron", "provider": "opencode", "model": "opencode/nemotron-3.5-super-vl-free", "family": "nemotron", "priority": 1, "active": True, "cost_tier": "free", "quota": "reactive", "prompt_via": "argv", "command": ["opencode", "run", "-m", "opencode/nemotron-3.5-super-vl-free"]},
+                    # TASK-2026-00428: no static free slots; the free pair is
+                    # dynamic-only (rankings, else live catalog, else loud).
                     {"label": "gemini", "provider": "gemini", "model": "gemini-3.8-flash-high", "family": "gemini", "account": "agyd", "account_pool": ["agyd", "agyj", "agy2"], "priority": 2, "active": True, "cost_tier": "own", "quota": "reactive", "prompt_via": "argv", "headless_args": ["--model", "gemini-3.8-flash-high", "--print"]},  # Owner order 00410/00412: agy second after the free pair. Slug pins model+effort (antigravity.google headless docs; agyd models); no --effort flag: the slug already embeds it and combining both conflicts on some AGY versions. Flags ride BEFORE --print: --print takes the prompt as its value, anything after it would be swallowed.
                     {"label": "dsh", "provider": "dsh", "model": "deepseek-v4.1-flash", "family": "deepseek", "priority": 3, "active": False, "cost_tier": "metered", "quota": "reactive", "prompt_via": "stdin", "command": ["node", "/home/develop/development/Jardal/jardal-deepseek-harness/apps/cli/lib/bin.js", "--profile", "headless", "-"], "env": {"DSH_HOME": "/home/develop/.dsh"}, "limit_patterns": [], "expired_patterns": []},  # Owner order 00410: disabled, credit reserved for orchestration; stays parked right after agy.
                     {"label": "claudep", "provider": "claude", "model": "deepseek-flash", "family": "deepseek", "priority": 4, "active": False, "quota": "reactive", "prompt_via": "argv", "command": ["claudep"], "headless_args": ["--print"]},  # deepseek reserve while dsh serves
@@ -750,8 +750,6 @@ class ConfigLoader:
                 "allowed_account_refs": [],
             },
         }
-        defaults["review"]["reviewers"].extend(
-            _reviewer_reserves(Path(__file__).resolve().parent.parent))
         return _deep_merge(defaults, cfg)
 
 
@@ -761,32 +759,6 @@ def _reliability_defaults() -> dict[str, Any]:
     from reliability.config import RELIABILITY_DEFAULTS
 
     return copy.deepcopy(RELIABILITY_DEFAULTS)
-
-
-def _reviewer_reserves(repo: Path) -> list[dict[str, Any]]:
-    path = repo / "catalog" / "reviewer_models.yaml"
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    entries = data.get("models") if isinstance(data, dict) else None
-    if not isinstance(entries, list) or not entries:
-        raise ValueError(f"{path}: models must be a nonempty ranked list")
-    slots = []
-    seen: set[str] = set()
-    for rank, entry in enumerate(entries):
-        model = str(entry.get("model") or "") if isinstance(entry, dict) else ""
-        family = str(entry.get("family") or "") if isinstance(entry, dict) else ""
-        if (not model.startswith("opencode/") or not family or model in seen
-                or not (model.endswith("-free") or model == "opencode/big-pickle")):
-            raise ValueError(f"{path}: invalid free reviewer at rank {rank + 1}")
-        seen.add(model)
-        slots.append({
-            "label": f"reserve-{model.split('/', 1)[1]}",
-            "provider": "opencode", "model": model, "family": family,
-            "priority": 100 + rank, "active": True, "reserve_only": True,
-            "extra": family == "anonymous",
-            "quota": "reactive", "prompt_via": "argv",
-            "command": ["opencode", "run", "--standalone", "--format", "json", "-m", model],
-        })
-    return slots
 
 
 def _planner_agents_from_catalog(

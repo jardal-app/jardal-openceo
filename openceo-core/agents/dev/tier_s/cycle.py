@@ -190,6 +190,7 @@ class _Ctx:
     failed_gates: set[str] = field(default_factory=set)
     parked_outcome: CycleOutcome | None = None
     pool_resume_at: str | None = None
+    catalog_file: Any | None = None  # preflight catalog override (tests)
     vault_index: str = ""
     knowledge_prefix: str = ""
     deploy: dict[str, Any] = field(default_factory=dict)
@@ -827,6 +828,9 @@ class TierSCycle:
         families = await review_mod.available_families(
             ctx.pool, self._slots,
             builder_family=self._builder_family(ctx))
+        families |= {name for name in wiring_mod.live_free_families(
+            ctx.catalog_file)
+            if name != self._builder_family(ctx)}
         need = int(ctx.review_cfg.get("min_available_families", 3))
         if len(families) < need:
             potential = set()

@@ -52,11 +52,9 @@ catálogos o modelos (`jardal-burnin-drill`, `launchpadlib-cache-clean`,
 
 ## 3. Consumidores actuales de modelos gratuitos
 
-- `catalog/reviewer_models.yaml` (ranking manual del Owner,
-  actualizado 2026-10-19): 10 entradas `opencode/...` con familia.
-  Incluye `minimax-m3.1-flash-free` y `longcat-2.5-preview-free`, que
-  ya no están en el catálogo vigente y el runtime salta por
-  disponibilidad (evidencia ya registrada en el ticket).
+- Free review slots (retirado 2026-11-01, TASK-2026-00428):
+  `catalog/reviewer_models.yaml` eliminado; el par free es solo
+  dinámico (ranking, si no catálogo live, si no bloqueo ruidoso).
 - `openceo-core/orchestration/review.py` (1061 líneas): pool de
   revisores, rondas con quórum, recuperación de slots y telemetría
   `round_telemetry` (`rounds[]` por run: slots, informes válidos,

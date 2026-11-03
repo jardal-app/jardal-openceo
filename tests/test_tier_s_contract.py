@@ -148,9 +148,8 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tier_s["roles"]["builder"]["account"], "muse")
         reviewers = cfg["review"]["reviewers"]
         by_label = {item["label"]: item for item in reviewers}
-        for label in ("mimo", "nemotron", "gemini"):
-            self.assertTrue(by_label[label]["active"], label)
-        for label in ("qwen-max", "qwen-glm"):
+        self.assertTrue(by_label["gemini"]["active"], "gemini")
+        for label in ("qwen-max", "qwen-glm", "mimo", "nemotron"):
             self.assertNotIn(label, by_label)
         self.assertFalse(by_label["dsh"]["active"])
         self.assertEqual(by_label["dsh"]["priority"], 3)
@@ -162,7 +161,7 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
                          "muse-review stays isolated: plain muse, never musej")
         active_families = {item["family"] for item in reviewers
                            if item["active"] and not item.get("extra")}
-        self.assertGreaterEqual(len(active_families), 3)
+        self.assertEqual(active_families, {"gemini", "openrouter"})
         tiers = loader.load_project("jardal-openceo")["dev"]["tiers"]
         self.assertEqual(tiers["tier_a"]["account"], "claudej")
         self.assertEqual(tiers["tier_b"]["account"], "codexj")

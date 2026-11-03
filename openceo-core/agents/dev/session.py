@@ -229,7 +229,7 @@ REVIEW_ROUND_PARAMS_KEY = "review_round"
 
 #: The simple round launches three reviewers with these families first;
 #: alternatives still fill in when preferred slots are unavailable.
-SIMPLE_REVIEW_PREFER_FAMILIES = ("nemotron", "mimo", "gemini")
+SIMPLE_REVIEW_PREFER_FAMILIES = ("gemini",)
 
 #: One round, three candidates, quorum of two independent families.
 SIMPLE_REVIEW_COUNT = 3

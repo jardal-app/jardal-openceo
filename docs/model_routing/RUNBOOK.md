@@ -122,9 +122,8 @@ with projects, prompts and verified sessions preserved (A11 replays
 it offline).
 
 1. Reviews: set `review.free_router.enabled: False`
-   (`config_loader.py`): the manual
-   `catalog/reviewer_models.yaml` list feeds the pool again,
-   entirely (`review_wiring.free_router_settings`).
+   (`config_loader.py`): rounds run on the non-free waves only
+   (no free slots; the manual list was retired in 00428).
 2. Research: set `RESEARCH_FREE_ROUTER_ENABLED=false`
    (`settings.py`): synthesis falls back to the static model
    (`research_wiring.research_router_settings`); verified

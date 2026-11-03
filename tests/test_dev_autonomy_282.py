@@ -233,7 +233,7 @@ def test_expired_qwen_slots_removed():
     config = ConfigLoader(Settings(_env_file=None, PROJECTS_DIR=str(root / "projects"))).load_project("jardal-openceo")
     slots = {s["label"]: s for s in config["review"]["reviewers"]}
     assert "qwen-max" not in slots and "qwen-glm" not in slots
-    assert slots["reserve-glm-5.3-flash-free"]["active"]
+    assert not [label for label in slots if label.startswith("reserve-")]
     assert config["dev"]["providers"]["codex"]["command"][0].endswith("codexj")
     service = DevSessionService.__new__(DevSessionService)
     with pytest.raises(ValueError, match="disabled"):
@@ -374,9 +374,28 @@ async def test_s_temporarily_cooling_pool_has_a_resume_date(repo):
     ctx = _Ctx(ticket={"task_id": "t"}, repo=repo, ref="t", run_id="run",
                branch="unused", base_branch="main", budgets={}, timeouts={},
                waiting_cfg={}, auto_merge=True, budget_exclude=[], gate_specs=[], roles={},
-               pool=[ReviewSlot("a", "one"), ReviewSlot("b", "two"), ReviewSlot("c", "three")])
+               pool=[ReviewSlot("a", "one"), ReviewSlot("b", "two"), ReviewSlot("c", "three")],
+               catalog_file=repo / "missing-catalog.json")
     assert await cycle._pool_gate(ctx)
     assert ctx.pool_resume_at
+
+
+@run_async
+async def test_pool_gate_counts_live_catalog_families(repo):
+    from orchestration.review import InMemorySlotStore, ReviewSlot
+    from test_model_routing_review_wiring import _catalog_entry, _write_catalog
+
+    path = _write_catalog(repo, [
+        _catalog_entry("fa", "org/a", "opencode/a-free", "opencode"),
+        _catalog_entry("fb", "org/b", "opencode/b-free", "opencode"),
+        _catalog_entry("fc", "org/c", "opencode/c-free", "opencode"),
+    ])
+    cycle = TierSCycle(InMemoryRunStore(), InMemoryLockStore(), InMemoryTaskStore(), MagicMock(), slots=InMemorySlotStore())
+    ctx = _Ctx(ticket={"task_id": "t"}, repo=repo, ref="t", run_id="run",
+               branch="unused", base_branch="main", budgets={}, timeouts={},
+               waiting_cfg={}, auto_merge=True, budget_exclude=[], gate_specs=[], roles={},
+               pool=[ReviewSlot("g", "gemini")], catalog_file=path)
+    assert await cycle._pool_gate(ctx) is None
 
 
 def test_scheduled_wait_cap_escalates_after_three_declines():

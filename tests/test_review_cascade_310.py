@@ -276,7 +276,7 @@ class CascadeConfigTests(unittest.TestCase):
         self.assertTrue(review_mod.cascade_enabled(review_cfg.get("cascade")))
         pool = review_mod.parse_pool(cfg["review"]["reviewers"])
         by_label = {slot.label: slot for slot in pool}
-        self.assertEqual(by_label["mimo"].cost_tier, "free")
+        self.assertNotIn("mimo", by_label)
         self.assertEqual(by_label["gemini"].cost_tier, "own")
         self.assertEqual(by_label["dsh"].cost_tier, "metered")
         self.assertEqual(by_label["muse-review"].cost_tier, "own")

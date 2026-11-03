@@ -439,7 +439,7 @@ class AssemblyTests(unittest.TestCase):
                                  if entry["label"] == "free-review-1")
                     self.assertEqual(first["model"], "opencode/model-a-free")
                     self.assertEqual(first["family"], "alpha")
-                    self.assertEqual(first["priority"], 4)
+                    self.assertEqual(first["priority"], 1)  # 00410: pair first
                     self.assertEqual(first["command"],
                                      ["opencode", "run", "-m",
                                       "opencode/model-a-free"])
@@ -494,7 +494,7 @@ class AssemblyTests(unittest.TestCase):
                 finally:
                     routing.close()
 
-    def test_switch_off_keeps_manual_list(self):
+    def test_switch_off_drops_free_statics(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(base / "cfg"),
@@ -507,28 +507,25 @@ class AssemblyTests(unittest.TestCase):
                     {"free_router": {"enabled": False}})
                 self.assertIsNone(assembly.routing)
                 labels = [entry["label"] for entry in assembly.raw_pool]
-                self.assertIn("mimo", labels)
+                self.assertNotIn("mimo", labels)
+                self.assertNotIn("nemotron", labels)
+                self.assertNotIn("reserve-minimax", labels)
                 self.assertNotIn("free-review-1", labels)
-                self.assertTrue(all("review_hardened" not in entry
-                                    for entry in assembly.raw_pool))
+                for keep in ("dsh", "claudep", "gemini", "muse-review"):
+                    self.assertIn(keep, labels)
 
-    def test_missing_snapshot_keeps_marked_static(self):
+    def test_missing_snapshot_and_catalog_blocks_loud(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(base / "cfg"),
                                          "XDG_STATE_HOME": str(base / "st")}):
                 (base / "cfg").mkdir()
                 (base / "st").mkdir()
-                assembly = self._assemble(base, _static_pool())
-                self.assertIsNone(assembly.routing)
-                by_label = {entry["label"]: entry
-                            for entry in assembly.raw_pool}
-                self.assertTrue(by_label["mimo"]["review_hardened"])
-                self.assertNotIn("review_hardened", by_label["gemini"])
-                self.assertFalse(
-                    (base / "st" / "free-router").exists())
+                with self.assertRaises(wiring.RoundBlocked) as raised:
+                    self._assemble(base, _static_pool())
+                self.assertIn("no free reviewers", str(raised.exception))
 
-    def test_no_pair_falls_back_static_with_audit(self):
+    def test_no_pair_blocks_loud_with_audit(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(base / "cfg"),
@@ -536,10 +533,8 @@ class AssemblyTests(unittest.TestCase):
                 (base / "cfg").mkdir()
                 (base / "st").mkdir()
                 _write_rankings(base, _order_abc()[:1])
-                assembly = self._assemble(base, _static_pool())
-                self.assertIsNone(assembly.routing)
-                labels = [entry["label"] for entry in assembly.raw_pool]
-                self.assertIn("mimo", labels)
+                with self.assertRaises(wiring.RoundBlocked):
+                    self._assemble(base, _static_pool())
                 probe = AvailabilityStore(
                     base / "st" / "free-router" / "availability.sqlite")
                 try:
@@ -550,7 +545,7 @@ class AssemblyTests(unittest.TestCase):
                     any(event == "review_pair_unavailable"
                         for _, event, _ in audit))
 
-    def test_reserve_conflict_falls_back_static(self):
+    def test_reserve_conflict_serves_nonfree_pool(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(base / "cfg"),
@@ -569,7 +564,10 @@ class AssemblyTests(unittest.TestCase):
                 assembly = self._assemble(base, _static_pool())
                 self.assertIsNone(assembly.routing)
                 labels = [entry["label"] for entry in assembly.raw_pool]
-                self.assertIn("mimo", labels)
+                self.assertNotIn("mimo", labels)
+                self.assertNotIn("nemotron", labels)
+                for keep in ("dsh", "claudep", "gemini", "muse-review"):
+                    self.assertIn(keep, labels)
 
     def test_bad_shape_parks_loud(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1326,7 +1324,7 @@ class SimpleRoundTests(unittest.IsolatedAsyncioTestCase):
                             if item["slot"] != "gemini"}
                 self.assertEqual(families, {"alpha", "beta"})
 
-    async def test_no_snapshot_uses_manual_list(self):
+    async def test_no_snapshot_or_catalog_parks_loud(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             with patch.dict(os.environ,
@@ -1335,12 +1333,12 @@ class SimpleRoundTests(unittest.IsolatedAsyncioTestCase):
                 (base / "cfg").mkdir()
                 (base / "st").mkdir()
                 reviewers = _SequencedReviewers()
-                await self._run(_static_pool(), reviewers)
-                self.assertEqual(
-                    set(reviewers.calls),
-                    {"review:nemotron", "review:mimo", "review:gemini"})
+                output, _, _ = await self._run(_static_pool(), reviewers)
+                self.assertEqual(output.status.name, "WAITING")
+                self.assertIn("no free reviewers", output.waiting_reason)
+                self.assertEqual(reviewers.calls, [])
 
-    async def test_switch_off_uses_manual_list(self):
+    async def test_switch_off_serves_nonfree_waves(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             with patch.dict(os.environ,
@@ -1350,12 +1348,14 @@ class SimpleRoundTests(unittest.IsolatedAsyncioTestCase):
                 (base / "st").mkdir()
                 _write_rankings(base, _order_abc())
                 reviewers = _SequencedReviewers()
+                modern = [entry for entry in _static_pool()
+                          if entry["provider"] != "opencode"]
                 await self._run(
-                    _static_pool(), reviewers,
+                    modern, reviewers,
                     review_cfg={"free_router": {"enabled": False}})
                 self.assertEqual(
                     set(reviewers.calls),
-                    {"review:nemotron", "review:mimo", "review:gemini"})
+                    {"review:dsh", "review:gemini"})
 
     async def test_fallback_restarts_only_failed_reviewer(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1746,7 +1746,7 @@ class TierSRoundTests(unittest.IsolatedAsyncioTestCase):
                     {item["canonical_model_id"] for item in receipts},
                     {"org/model-a", "org/model-b"})
 
-    async def test_t07_no_pair_runs_manual_list(self):
+    async def test_t07_no_pair_parks_loud(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             with patch.dict(os.environ,
@@ -1756,11 +1756,9 @@ class TierSRoundTests(unittest.IsolatedAsyncioTestCase):
                 (base / "st").mkdir()
                 _write_rankings(base, _order_abc()[:1])
                 outcome, ctx, fake, _ = await self._rounds()
-                self.assertIsNone(outcome)
-                r1_slots = {item["slot"]
-                            for item in ctx.rounds[0]["attempts"]}
-                self.assertIn("mimo", r1_slots)
-                self.assertNotIn("free-review-1", r1_slots)
+                self.assertEqual(outcome.status, "waiting")
+                self.assertEqual(outcome.reason, "config")
+                self.assertIn("no servable free pair", outcome.detail)
                 probe = AvailabilityStore(
                     base / "st" / "free-router" / "availability.sqlite")
                 try:
@@ -1987,3 +1985,111 @@ class TierSFullRunTests(unittest.IsolatedAsyncioTestCase):
         r2_receipts = [item["receipt"] for item in rounds[1]["attempts"]
                        if "receipt" in item]
         self.assertEqual(len(r2_receipts), 2)
+
+
+def _catalog_entry(family, canonical, deployment_id, provider, *,
+                   offered=True, verified=True, healthy=True,
+                   tools=True, context=131072):
+    return {
+        "family_id": family, "canonical_model_id": canonical,
+        "display_name": canonical,
+        "capabilities": {"tools": tools, "context_tokens": context},
+        "deployments": [{
+            "deployment_id": deployment_id, "provider": provider,
+            "route_type": ("opencode_native_free" if provider == "opencode"
+                           else "external_free"),
+            "allowed_client": ("opencode_only" if provider == "opencode"
+                               else "configured_opencode_or_gateway"),
+            "provider_id": provider,
+            "model_id": deployment_id.split("/", 1)[1],
+            "free_offered": offered, "free_verified": verified,
+            "healthy": healthy,
+            "approved_confidentiality": ["public"],
+        }],
+    }
+
+
+def _write_catalog(base, entries):
+    from model_routing.models import CATALOG_SCHEMA_VERSION
+    target = base / "cfg" / "free-router"
+    target.mkdir(parents=True, exist_ok=True)
+    path = target / "catalog.json"
+    path.write_text(json.dumps(
+        {"schema_version": CATALOG_SCHEMA_VERSION, "entries": entries}),
+        encoding="utf-8")
+    return path
+
+
+class CatalogFallbackTests(unittest.TestCase):
+    """Degraded live-catalog order (TASK-2026-00428)."""
+
+    def _entries(self):
+        return [
+            _catalog_entry("zebra", "org/zebra",
+                           "opencode/zebra-free", "opencode"),
+            _catalog_entry("alpha", "org/alpha",
+                           "opencode/alpha-free", "opencode",
+                           verified=False),
+            _catalog_entry("beta", "org/beta",
+                           "openrouter/org/beta:free", "openrouter"),
+            _catalog_entry("paid", "org/paid",
+                           "openrouter/org/paid", "openrouter",
+                           offered=False, verified=False, healthy=False),
+            _catalog_entry("notools", "org/notools",
+                           "opencode/notools-free", "opencode",
+                           tools=False),
+        ]
+
+    def test_verified_first_then_family_order(self):
+        from model_routing.publish import load_catalog_doc
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            path = _write_catalog(base, self._entries())
+            profile = wiring.catalog_fallback_profile(
+                load_catalog_doc(path))
+        self.assertEqual(
+            [item.canonical_model_id for item in profile.order],
+            ["org/beta", "org/zebra", "org/alpha"])
+        self.assertTrue(all(item.quality == 0.0 for item in profile.order))
+        self.assertEqual(profile.provenance.sources, ["catalog-fallback"])
+
+    def test_live_free_families(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            path = _write_catalog(base, self._entries())
+            self.assertEqual(
+                wiring.live_free_families(path),
+                frozenset({"alpha", "beta", "zebra"}))
+            self.assertEqual(
+                wiring.live_free_families(base / "missing.json"),
+                frozenset())
+
+    def test_paid_opencode_entry_survives_merge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(base / "cfg"),
+                                         "XDG_STATE_HOME": str(base / "st")}):
+                (base / "cfg").mkdir()
+                (base / "st").mkdir()
+                _write_rankings(base, _order_abc())
+                pool = _static_pool() + [{
+                    "label": "openrouter-paid", "provider": "opencode",
+                    "model": "openrouter/openai/gpt-oss-20b",
+                    "family": "openrouter", "priority": 5, "active": True,
+                    "cascade_only": True, "cost_tier": "metered",
+                    "prompt_via": "argv",
+                    "command": ["opencode", "run", "-m",
+                                "openrouter/openai/gpt-oss-20b"]}]
+                assembly = wiring.assemble_review_pool(
+                    pool, review_cfg={}, run_id="run-t04", round="1",
+                    builder_family="muse",
+                    receipts_dir=base / "receipts")
+                try:
+                    self.assertIsNotNone(assembly.routing)
+                    labels = [entry["label"] for entry in assembly.raw_pool]
+                    self.assertIn("free-review-1", labels)
+                    self.assertIn("openrouter-paid", labels)
+                    self.assertNotIn("mimo", labels)
+                finally:
+                    if assembly.routing is not None:
+                        assembly.routing.close()

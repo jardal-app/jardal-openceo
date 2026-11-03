@@ -227,30 +227,28 @@ class RealPoolTests(unittest.TestCase):
         self.assertEqual(slot["model"], "gemini-3.8-flash-high")
         self.assertEqual(slot["account_pool"], ["agyd", "agyj", "agy2"])
 
-    def test_opencode_candidates_active_with_script_ids(self) -> None:
+    def test_no_static_free_slots_only_dynamic_pair(self) -> None:
         reviewers, _cfg = _real_reviewers()
         by_label = {item["label"]: item for item in reviewers}
-        self.assertTrue(by_label["mimo"]["active"])
-        self.assertEqual(by_label["mimo"]["model"],
-                         "opencode/mimo-v2.6-flash-free")
-        self.assertEqual(by_label["mimo"]["command"],
-                         ["opencode", "run", "-m",
-                          "opencode/mimo-v2.6-flash-free"])
-        self.assertTrue(by_label["nemotron"]["active"])
-        self.assertEqual(by_label["nemotron"]["model"],
-                         "opencode/nemotron-3.5-super-vl-free")
-        families = {by_label["mimo"]["family"],
-                    by_label["nemotron"]["family"]}
-        self.assertEqual(families, {"mimo", "nemotron"})
+        self.assertNotIn("mimo", by_label)
+        self.assertNotIn("nemotron", by_label)
+        self.assertEqual(
+            [item["label"] for item in reviewers
+             if item.get("reserve_only")], [])
+        opencode = [item for item in reviewers
+                    if item["provider"] == "opencode"]
+        self.assertEqual([item["label"] for item in opencode],
+                         ["openrouter-paid"])
+        self.assertTrue(by_label["openrouter-paid"]["cascade_only"])
 
-    def test_s_active_top3_rounds_and_quorum(self) -> None:
+    def test_s_static_waves_and_quorum(self) -> None:
         reviewers, cfg = _real_reviewers()
         active = sorted(
             (item for item in reviewers
              if item["active"] and not item.get("extra")),
             key=lambda item: (item["priority"], item["label"]))
-        self.assertEqual([item["label"] for item in active[:3]],
-                         ["mimo", "nemotron", "gemini"])
+        self.assertEqual([item["label"] for item in active],
+                         ["gemini", "openrouter-paid"])
         self.assertEqual(cfg["quorum"], 2)
         self.assertEqual(cfg["distinct_by"], "family")
         self.assertEqual(cfg["round1_parallel"], 3)
@@ -324,18 +322,14 @@ class EligibilityTests(unittest.IsolatedAsyncioTestCase):
             pool, store, 3, builder_family="muse")
         self.assertEqual(plan.reviewers, ())
 
-    async def test_gemini_selectable_in_current_s_pool(self) -> None:
+    async def test_static_classic_capacity_is_agy_alone(self) -> None:
         reviewers, _cfg = _real_reviewers()
         pool = review_mod.parse_pool(reviewers)
         store = review_mod.InMemorySlotStore()
-        for label in ("qwen-max", "qwen-glm", "dsh"):
-            await store.set_slot(label, {"status": "cooling_down",
-                                        "until": "2999-01-01T00:00:00+00:00"})
         plan = await review_mod.select_round(
             pool, store, 3, builder_family="muse")
         labels = [slot.label for slot in plan.reviewers]
-        self.assertIn("gemini", labels)
-        self.assertEqual(len({slot.family for slot in plan.reviewers}), 3)
+        self.assertEqual(labels, ["gemini"])
 
     def test_quorum_counts_valid_independent_families_only(self) -> None:
         pool = _pool(("a", "fa", 1), ("b", "fb", 2), ("a2", "fa", 3),

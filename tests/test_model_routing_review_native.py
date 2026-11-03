@@ -378,15 +378,30 @@ class NativeSelectionTests(unittest.TestCase):
                 if assembly.routing is not None:
                     assembly.routing.close()
 
-    def test_invalid_catalog_falls_back_to_static(self):
+    def test_invalid_catalog_serves_legacy_ranking_order(self):
         with _round_env() as base:
             (base / "cfg" / "free-router" / "catalog.json").write_text(
                 "{not-json", encoding="utf-8")
             assembly = _assemble(base)
             try:
-                assert assembly.routing is None
+                assert assembly.routing is not None
                 labels = [item.get("label") for item in assembly.raw_pool]
-                assert "mimo" in labels
+                assert "free-review-1" in labels
+                assert "free-review-2" in labels
+                assert "mimo" not in labels
+            finally:
+                if assembly.routing is not None:
+                    assembly.routing.close()
+
+    def test_missing_rankings_serves_catalog_fallback(self):
+        with _round_env() as base:
+            (base / "cfg" / "free-router" / "rankings.json").unlink()
+            assembly = _assemble(base)
+            try:
+                assert assembly.routing is not None
+                labels = [item.get("label") for item in assembly.raw_pool]
+                assert "free-review-1" in labels
+                assert "free-review-2" in labels
             finally:
                 if assembly.routing is not None:
                     assembly.routing.close()
