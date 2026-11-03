@@ -9,7 +9,9 @@ one short lifecycle smoke.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -308,6 +310,46 @@ class LoopCycleTests(unittest.IsolatedAsyncioTestCase):
         await loop._cycle()
         self.assertEqual(runner.calls, [])
 
+    async def test_idle_cycle_consumes_debounced_pending_after_interval(
+        self,
+    ) -> None:
+        now = _utc(2026, 10, 8)
+        loop, repo, runner, cell = self._ready(now)
+        loop.wake("first incident")
+        await loop._cycle()
+        cell["now"] = now + timedelta(minutes=10)
+        loop.wake("second incident")
+        await loop._cycle()
+        self.assertEqual(len(runner.calls), 1)
+        # No new company event: the idle tick re-offers the debounced
+        # pendings once the reactive interval elapsed.
+        cell["now"] = now + timedelta(hours=2)
+        await loop._cycle()
+
+        self.assertEqual(len(runner.calls), 2)
+        kind, reasons = runner.calls[1]
+        self.assertEqual(kind, "reactive")
+        self.assertEqual(reasons, ["second incident"])
+        trigger = await repo.get_ceo_trigger()
+        assert trigger is not None
+        self.assertEqual(trigger["pending_reasons"], [])
+
+    async def test_idle_cycle_inside_interval_keeps_debounce(self) -> None:
+        now = _utc(2026, 10, 8)
+        loop, repo, runner, cell = self._ready(now)
+        loop.wake("first incident")
+        await loop._cycle()
+        cell["now"] = now + timedelta(minutes=10)
+        loop.wake("second incident")
+        await loop._cycle()
+        cell["now"] = now + timedelta(minutes=20)
+        await loop._cycle()
+
+        self.assertEqual(len(runner.calls), 1)
+        trigger = await repo.get_ceo_trigger()
+        assert trigger is not None
+        self.assertEqual(trigger["pending_reasons"], ["second incident"])
+
     async def test_wake_queue_is_bounded(self) -> None:
         now = _utc(2026, 10, 8)
         loop, _, _, _ = self._ready(now)
@@ -441,3 +483,96 @@ class ReliabilityWakeTests(unittest.IsolatedAsyncioTestCase):
         kind, noticed = runner.calls[0]
         self.assertEqual(kind, "reactive")
         self.assertEqual(noticed, ["Reliability engine:abc new_high"])
+
+
+class RouterAlertTests(unittest.IsolatedAsyncioTestCase):
+    """Fresh free-router alerts join review reasons (TASK-2026-00427)."""
+
+    def _ready(self, now: datetime, alerts: list[dict] | None = None):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        state = Path(tmp.name)
+        if alerts is not None:
+            with open(state / "alerts.jsonl", "w", encoding="utf-8") as handle:
+                for alert in alerts:
+                    handle.write(json.dumps(alert) + "\n")
+        repo = _FakeRepo({
+            "next_scheduled_at": now + timedelta(weeks=1),
+            "last_scheduled_at": now - timedelta(weeks=1),
+            "last_review_at": now - timedelta(weeks=1),
+            "last_kind": "scheduled",
+            "last_outcome": "do_nothing",
+            "last_reactive_at": None,
+            "pending_reasons": [],
+            "updated_at": now,
+        })
+        runner = _FakeRunner()
+        loop, _ = _loop_for(
+            self, repo, runner, now, router_state_dir=state)
+        return loop, runner
+
+    def _alert(self, now: datetime, kind: str, age: timedelta) -> dict:
+        return {
+            "ts": (now - age).isoformat(),
+            "kind": kind,
+            "source": "update",
+            "detail": "catalog.json publishes 668 entries with zero usable",
+        }
+
+    async def test_fresh_no_free_models_joins_reactive(self) -> None:
+        now = _utc(2026, 10, 8)
+        loop, runner = self._ready(
+            now, [self._alert(now, "no_free_models", timedelta(hours=1))])
+        loop.wake("first incident")
+        await loop._cycle()
+
+        self.assertEqual(len(runner.calls), 1)
+        kind, reasons = runner.calls[0]
+        self.assertEqual(kind, "reactive")
+        self.assertEqual(len(reasons), 2)
+        self.assertEqual(reasons[0], "first incident")
+        self.assertIn("no_free_models", reasons[1])
+
+    async def test_stale_alert_is_ignored(self) -> None:
+        now = _utc(2026, 10, 8)
+        loop, runner = self._ready(
+            now, [self._alert(now, "no_free_models", timedelta(days=2))])
+        loop.wake("first incident")
+        await loop._cycle()
+
+        self.assertEqual(len(runner.calls), 1)
+        _, reasons = runner.calls[0]
+        self.assertEqual(reasons, ["first incident"])
+
+    async def test_missing_alerts_file_is_ignored(self) -> None:
+        now = _utc(2026, 10, 8)
+        loop, runner = self._ready(now, None)
+        loop.wake("first incident")
+        await loop._cycle()
+
+        self.assertEqual(len(runner.calls), 1)
+        _, reasons = runner.calls[0]
+        self.assertEqual(reasons, ["first incident"])
+
+    async def test_fresh_refresh_failed_joins_scheduled(self) -> None:
+        now = _utc(2026, 10, 8)
+        loop, runner = self._ready(
+            now, [self._alert(now, "refresh_failed", timedelta(hours=2))])
+        trigger = {
+            "next_scheduled_at": now,
+            "last_scheduled_at": now - timedelta(weeks=1),
+            "last_review_at": now - timedelta(weeks=1),
+            "last_kind": "scheduled",
+            "last_outcome": "do_nothing",
+            "last_reactive_at": None,
+            "pending_reasons": [],
+            "updated_at": now,
+        }
+        loop._repo.trigger = trigger
+        await loop._cycle()
+
+        self.assertEqual(len(runner.calls), 1)
+        kind, reasons = runner.calls[0]
+        self.assertEqual(kind, "scheduled")
+        self.assertEqual(len(reasons), 1)
+        self.assertIn("refresh_failed", reasons[0])

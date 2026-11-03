@@ -15,6 +15,7 @@ import asyncio
 import logging
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,13 @@ MAX_QUEUED_REASONS = 50
 #: Sleep cap. Not polling: the clock-jump/suspend net, same as
 #: Horizon's (one single-doc read per hour while idle).
 MAX_SLEEP_SECONDS = 3600
+
+#: Free-router alert freshness. The 6 h refresh re-emits while the
+#: fault persists, so anything older saw at least one clean cycle.
+ROUTER_ALERT_MAX_AGE_HOURS = 12
+
+#: Router alert kinds that join review reasons (TASK-2026-00427).
+ROUTER_ALERT_KINDS = ("no_free_models", "refresh_failed")
 
 
 def _aware(moment: Any) -> datetime | None:
@@ -102,12 +110,14 @@ class CEOLoop:
             [str, list[str]], Awaitable[dict[str, Any]]
         ],
         now_fn: Callable[[], datetime] | None = None,
+        router_state_dir: Any = None,
     ) -> None:
         self._repo = repo
         self._settings = settings
         self._mandate_fn = mandate_fn
         self._review_runner = review_runner
         self._now = now_fn or (lambda: datetime.now(timezone.utc))
+        self._router_state_dir = router_state_dir
         self._job: asyncio.Task[Any] | None = None
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
@@ -286,6 +296,12 @@ class CEOLoop:
             await self._run_scheduled(trigger, reasons=reasons)
             return
         if not reasons:
+            # Idle tick with a debounced backlog: re-offer the persisted
+            # pendings so a burst with no follow-up event still gets its
+            # deferred review once the interval elapsed (merge dedupes;
+            # the check below keeps the debounce inside the interval).
+            reasons = _merge_reasons(trigger.get("pending_reasons"), [])
+        if not reasons:
             return
         last_reactive = _aware(trigger.get("last_reactive_at"))
         elapsed = (
@@ -310,6 +326,44 @@ class CEOLoop:
         reasons, self._queued = self._queued, []
         return [text for text in reasons if str(text or "").strip()]
 
+    def _router_reasons(self) -> list[str]:
+        """Fresh free-router alerts; never raises (fail-open).
+
+        The refresh already screams into alerts.jsonl, but nothing
+        reads it (TASK-2026-00427 went unnoticed for two days). One
+        file read piggybacked on an existing review, never a new poll.
+        """
+        if self._router_state_dir is None:
+            return []
+        try:
+            from model_routing.alerts import list_alerts
+        except Exception:
+            logger.warning("CEO: router alerts unreadable", exc_info=True)
+            return []
+        try:
+            alerts = list_alerts(Path(self._router_state_dir))
+        except Exception:
+            logger.warning("CEO: router alerts unreadable", exc_info=True)
+            return []
+        now = self._now()
+        cutoff = now - timedelta(hours=ROUTER_ALERT_MAX_AGE_HOURS)
+        latest: dict[str, str] = {}
+        for alert in alerts:
+            if alert.kind not in ROUTER_ALERT_KINDS:
+                continue
+            try:
+                moment = datetime.fromisoformat(alert.ts)
+            except ValueError:
+                continue
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            if moment < cutoff or moment > now:
+                continue
+            latest[alert.kind] = (
+                f"free-router {alert.kind} at {alert.ts}: {alert.detail}"
+            )
+        return [latest[kind] for kind in ROUTER_ALERT_KINDS if kind in latest]
+
     async def _note_review_exposure(self) -> None:
         """Count one CEO review; never raises (fail-open)."""
         try:
@@ -325,6 +379,7 @@ class CEOLoop:
     ) -> None:
         now = self._now()
         pending = _merge_reasons(trigger.get("pending_reasons"), reasons)
+        pending = _merge_reasons(pending, self._router_reasons())
         outcome = await self._review_runner("scheduled", pending)
         await self._note_review_exposure()
         trigger["last_scheduled_at"] = now
@@ -342,6 +397,7 @@ class CEOLoop:
     ) -> None:
         now = self._now()
         pending = _merge_reasons(trigger.get("pending_reasons"), reasons)
+        pending = _merge_reasons(pending, self._router_reasons())
         outcome = await self._review_runner("reactive", pending)
         await self._note_review_exposure()
         trigger["last_reactive_at"] = now

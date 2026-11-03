@@ -35,6 +35,7 @@ from db.mongo import MongoRepository
 from dev_session_service import DevSessionService
 from events import RealtimeHub
 from first_layer import FirstLayerGateway
+from model_routing.paths import state_dir as free_router_state_dir
 from graph import OpenCEOGraph
 from research.consumers import ConsumerRegistry
 from research.mcp_facade import build_research_mcp_facade
@@ -247,6 +248,7 @@ ceo_loop = CEOLoop(
     settings=settings,
     mandate_fn=ceo_service.current_mandate,
     review_runner=_run_ceo_review,
+    router_state_dir=free_router_state_dir(),
 )
 task_service.set_ceo_wake(ceo_loop.wake)
 objective_service.set_ceo_wake(ceo_loop.wake)

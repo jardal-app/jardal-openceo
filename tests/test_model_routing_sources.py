@@ -114,7 +114,7 @@ def test_terms_versioned_file_has_five_providers_and_big_pickle():
     terms = router_terms.load_terms()
     assert sorted(entry.provider for entry in terms.terms) == sorted(router_sources.PROVIDERS)
     assert "big-pickle" in terms.opencode_free_models.model_ids
-    anchor = date(2026, 10, 23)
+    anchor = date(2026, 11, 1)  # re-verification campaign TASK-2026-00427
     for entry in terms.terms:
         assert router_terms.is_fresh(entry.verified_at, terms.default_ttl_days, today=anchor)
 
