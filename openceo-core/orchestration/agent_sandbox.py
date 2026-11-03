@@ -21,6 +21,7 @@ when bwrap is missing instead of degrading silently.
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
@@ -82,6 +83,18 @@ _HOME_CRED_RW_FILES = (
     ".claude/.credentials.json",
     ".claude-j/.credentials.json",
 )
+#: Claude Code config dirs → their global config file. A token refresh
+#: first locks ``<dir>/.oauth_refresh.lock``: on a read-only dir the lock
+#: fails, the CLI skips the refresh and the run gets a 401
+#: (TASK-2026-00450). Each dir is a per-run tmpfs over its real entries.
+_CLAUDE_CONFIG_DIRS = {
+    ".claude": ".claude.json",
+    ".claude-j": ".claude-j/.claude.json",
+}
+#: Entries the per-run claude dir never binds read-only: the credentials
+#: (rebound rw below) and a host lock caught mid-refresh. The global
+#: config, when it lives in the dir, gets a writable copy instead.
+_CLAUDE_DIR_UNBOUND = frozenset({".credentials.json", ".oauth_refresh.lock"})
 #: User-level instruction files the CLIs auto-load (the Owner's session
 #: rules). Read-only roles run with them masked (TASK-2026-00443).
 USER_INSTRUCTION_FILES = (
@@ -467,6 +480,66 @@ def _reviewer_home_keep(profile: str, account: str | None) -> tuple[
     raise ValueError(f"unknown home profile: {profile!r}")
 
 
+def _claude_dir_ops(account_dir: Path, config: str) -> list[list[str]]:
+    """Per-run tmpfs dir over its real entries, bound read-only.
+
+    New files (the refresh lock) stay in the tmpfs and never reach the
+    host. Symlinks are recreated, not bound: an alias must keep resolving
+    to its real file, which is the one the instruction masks cover.
+    """
+    ops = [["--tmpfs", str(account_dir)]]
+    try:
+        children = sorted(account_dir.iterdir())
+    except OSError:
+        return [["--ro-bind", str(account_dir), str(account_dir)]]
+    skip = set(_CLAUDE_DIR_UNBOUND)
+    own_config = account_dir / Path(config).name
+    if Path(config).parent.name == account_dir.name \
+            and own_config.is_file() and not own_config.is_symlink():
+        skip.add(own_config.name)
+    for child in children:
+        if child.name in skip:
+            continue
+        if child.is_symlink():
+            ops.append(["--symlink", os.readlink(child), str(child)])
+        else:
+            ops.append(["--ro-bind", str(child), str(child)])
+    return ops
+
+
+def _claude_config_ops(home: Path, scratch: Path,
+                       keep_dirs: frozenset[str] | None) -> list[list[str]]:
+    """Writable per-run copies of the claude global config files.
+
+    A refresh may rewrite ``.claude.json`` (account profile) after the new
+    token is issued; a failed write there drops that token unsaved. The
+    copy takes those writes and is discarded with the scratch; an
+    unreadable or invalid file keeps a read-only bind.
+    """
+    ops: list[list[str]] = []
+    for account, config in _CLAUDE_CONFIG_DIRS.items():
+        if keep_dirs is not None and account not in keep_dirs:
+            continue
+        source = home / config
+        if source.is_symlink() or not source.is_file():
+            continue
+        try:
+            data = source.read_bytes()
+            json.loads(data)
+        except (OSError, ValueError):
+            ops.append(["--ro-bind", str(source), str(source)])
+            continue
+        copies = scratch / "claude-config"
+        copies.mkdir(parents=True, exist_ok=True)
+        os.chmod(copies, 0o700)
+        target = copies / f"{uuid.uuid4().hex}-{source.name}"
+        with open(target, "wb") as handle:
+            handle.write(data)
+        os.chmod(target, 0o600)
+        ops.append(["--bind", str(target), str(source)])
+    return ops
+
+
 def _home_ops(home: Path, opencode_state_rw: bool,
               keep_dirs: frozenset[str] | None = None,
               keep_files: frozenset[str] | None = None) -> list[list[str]]:
@@ -475,7 +548,10 @@ def _home_ops(home: Path, opencode_state_rw: bool,
         if keep_dirs is not None and entry not in keep_dirs:
             continue
         path = home / entry
-        if path.exists():
+        if entry in _CLAUDE_CONFIG_DIRS and path.is_dir() \
+                and not path.is_symlink():
+            ops.extend(_claude_dir_ops(path, _CLAUDE_CONFIG_DIRS[entry]))
+        elif path.exists():
             ops.append(["--ro-bind", str(path), str(path)])
     for entry in _HOME_FILES_RO:
         if keep_files is not None and entry not in keep_files:
@@ -654,6 +730,7 @@ def plan_agent(
     else:
         keep_dirs, keep_files = None, None
     ops = _home_ops(host_home, opencode_state_rw, keep_dirs, keep_files)
+    ops.extend(_claude_config_ops(host_home, scratch, keep_dirs))
     ops.extend(_snapshot_dsh_profile(overlay, scratch))
     ops.extend(_gemini_state_ops(host_home, scratch, full_argv))
     ops.extend(_codex_state_ops(host_home, full_argv))
