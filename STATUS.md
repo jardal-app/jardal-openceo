@@ -1352,3 +1352,12 @@ Trabajo de infraestructura hecho **fuera de OpenCEO** (en `/home/develop/deploym
 - Merges 99e0017 y a9dcde2 pusheados; servicio en release a9dcde2 dirty=true (WIP ajeno de TASK-2026-00428 intacto). Tests: 21 nuevos; suites relacionadas 1247 verdes y 12 fallos preexistentes idénticos a la base limpia; 9 mutaciones detectadas; verificación bwrap no generativa. Resume del 480 armado a las 19:14:39 UTC.
 - Run del 480 (ts-239e2e42b67a): arrancó solo a las 19:16; plan válido en 19 min (33 turnos, 128k tokens de salida, sin runners de tests ni builds en la traza); el builder superó el freno de tamaño (1646 > 800 líneas), el trabajo se descartó y el ticket se descompuso en el objetivo OBJ-0ED0BA24 (489–492, Tier C).
 - Arreglo de `installation_id` (merge 49cad2f) desplegado: servicio reiniciado a las 21:22 UTC sin runs en vuelo, release 49cad2f dirty=true (WIP ajeno de TASK-2026-00428).
+
+## 2026-11-02 — Fix: freno de tamaño de Tier S sin descartar trabajo (TASK-2026-00448)
+
+- Una regla de tests (`plan.is_test_path`) para el validador del plan, el freno de Tier S y el chequeo de tamaño de A/B/C: directorios `tests/`, `test/` y `__tests__/` a cualquier nivel, `*.test.*`, `*.spec.*`, `test_*`, `*_test.*` y `conftest.py`. Los frenos contaban como código `apps/web/test/*.test.tsx` (caso 480: 1.646 > 800).
+- `ESTIMATE files=<n> lines=<n>` obligatorio en PLAN.md y validado contra `lines_per_ticket`: un plan sobredimensionado convierte antes del builder, con el PLAN.md como sizing.
+- El freno post-build conserva el build y su PLAN.md en `oversize/<rama del ticket>` y pasa al replan la causa, la rama, el diffstat y el plan. Una conversión por tamaño no es fallo material (§29), y cada hijo conserva el tier que le dé §27 (§30 actualizado).
+- `scripts/openceo-core-host.sh`: `stop` sin instancia moría por `pipefail` (grep sin pid), y `restart` tras un `stop` dejaba el core parado.
+- Merges dc5e2b9 y f47e5f7 pusheados. Servicio arrancado a las 23:50 UTC en release dc5e2b9 dirty=true (WIP ajeno de TASK-2026-00428 intacto). Tests: 17 nuevos y 286 de las suites afectadas en verde; 4 mutaciones detectadas. `test_docs_path_contract` también falla en main limpio porque cita `openceo-core/.env`, que no está versionado.
+- Objetivo OBJ-0ED0BA24 reactivado: el 471 tiene ya criterios y artefactos, y hay un hijo Tier S nuevo, TASK-2026-00449, con los criterios de autenticación que perdió el 480. Su planner falló con 401 porque la credencial de claudej caducó a las 22:13 UTC; falta que el Owner vuelva a iniciar sesión.
