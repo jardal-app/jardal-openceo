@@ -255,3 +255,45 @@ class CodexHomeTests(unittest.TestCase):
             mounted = {Path(op[-1]).name for op in ops[1:]}
             self.assertEqual(mounted, {"config.toml", "auth.json",
                                        "installation_id", "models_cache.json"})
+
+    def test_motor_under_shadowed_home_is_reexposed(self) -> None:
+        # The standalone motor lives inside ~/.codex: the per-run tmpfs
+        # would hide it and `codex` would fall through to a stale system
+        # install (TASK-2026-00477).
+        from orchestration.agent_sandbox import _codex_state_ops
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            account = home / ".codex"
+            motor_bin = (account / "packages/standalone/releases/0.166.0/bin")
+            motor_bin.mkdir(parents=True)
+            (motor_bin / "codex").write_text("x", encoding="utf-8")
+            (home / ".local/bin").mkdir(parents=True)
+            (home / ".local/bin/codex").symlink_to(motor_bin / "codex")
+            (account / "config.toml").write_text("x", encoding="utf-8")
+            ops = _codex_state_ops(home, ["codexf", "exec"])
+            for level in ("packages", "packages/standalone",
+                          "packages/standalone/releases",
+                          "packages/standalone/releases/0.166.0",
+                          "packages/standalone/releases/0.166.0/bin"):
+                self.assertIn(["--tmpfs", str(account / level)], ops)
+            self.assertIn(["--ro-bind", str(motor_bin), str(motor_bin)], ops)
+
+    def test_motor_outside_shadowed_home_needs_no_ops(self) -> None:
+        # codexj's motor stays visible (its account dir is not ~/.codex),
+        # so no motor mounts are emitted (TASK-2026-00477).
+        from orchestration.agent_sandbox import _codex_state_ops
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            account = home / ".codex-j"
+            account.mkdir()
+            motor_bin = home / ".codex/packages/standalone/bin"
+            motor_bin.mkdir(parents=True)
+            (motor_bin / "codex").write_text("x", encoding="utf-8")
+            (home / ".local/bin").mkdir(parents=True)
+            (home / ".local/bin/codex").symlink_to(motor_bin / "codex")
+            (account / "config.toml").write_text("x", encoding="utf-8")
+            ops = _codex_state_ops(home, ["codexj", "exec", "-"])
+            self.assertNotIn(["--tmpfs", str(home / ".codex/packages")], ops)
+            self.assertFalse([op for op in ops
+                              if op[0] == "--ro-bind"
+                              and "packages" in op[-1]])

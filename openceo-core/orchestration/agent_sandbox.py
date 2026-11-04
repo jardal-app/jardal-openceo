@@ -443,6 +443,40 @@ def _gemini_state_ops(home: Path, scratch: Path,
     return ops
 
 
+def _codex_motor_ops(home: Path, account_dir: Path) -> list[list[str]]:
+    """Re-expose the live codex motor hidden by the per-run tmpfs.
+
+    ``~/.local/bin/codex`` may resolve inside the shadowed account dir
+    (the standalone install lives under ``~/.codex/packages``): without
+    this the recreated link dangles and ``codex`` falls through PATH to
+    a stale system install that cannot parse the model catalog
+    (TASK-2026-00477). Only the resolved ``bin/`` dir is exposed (binary
+    plus helper siblings, never sibling releases), over a tmpfs chain
+    that recreates each parent level. A motor outside the account dir
+    stays visible and needs nothing.
+    """
+    try:
+        real = (home / ".local/bin/codex").resolve()
+        anchor = account_dir.resolve()
+    except OSError:
+        return []
+    if not real.is_file():
+        return []
+    try:
+        rel = real.relative_to(anchor)
+    except ValueError:
+        return []
+    if len(rel.parts) < 2:
+        return [["--ro-bind", str(real), str(real)]]
+    ops: list[list[str]] = []
+    node = anchor
+    for part in rel.parent.parts:
+        node = node / part
+        ops.append(["--tmpfs", str(node)])
+    ops.append(["--ro-bind", str(real.parent), str(node)])
+    return ops
+
+
 def _codex_state_ops(home: Path, argv: Sequence[str]) -> list[list[str]]:
     """Per-run CODEX_HOME over the account dir (TASK-2026-00443).
 
@@ -467,6 +501,7 @@ def _codex_state_ops(home: Path, argv: Sequence[str]) -> list[list[str]]:
         entry = account_dir / name
         if entry.is_file() and not entry.is_symlink():
             ops.append(["--bind", str(entry), str(entry)])
+    ops.extend(_codex_motor_ops(home, account_dir))
     return ops
 
 

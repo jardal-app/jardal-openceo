@@ -1392,6 +1392,12 @@ Trabajo de infraestructura hecho **fuera de OpenCEO** (en `/home/develop/deploym
 
 ## 2026-11-04 — Sandbox codex: models_cache.json escribible-persistente (TASK-2026-00476)
 
-- El rechazo de gpt-6.1-sol a las 03:xx resultó transitorio: hola-mundo `codexf exec --ephemeral -` a las 10:12 UTC responde OK y refresca el caché (ya lista gpt-6.1-sol). Causa latente en el sandbox: models_cache.json iba en solo-lectura, codex logueaba EROFS y operaba con metadata fallback.
-- Fix: models_cache.json pasa de _CODEX_READ_ENTRIES a _CODEX_WRITE_ENTRIES (bind rw persistente al host, como auth.json/installation_id); config.toml, version.json y plugins siguen ro. Tests: los 2 casos CodexHomeTests exigen el bind rw; 15 + 71 checks en verde.
-- Despliegue y reanudación pendientes en este ticket: restart canónico y reencolado de ee0c2cdf (TASK-2026-00474).
+- El rechazo de gpt-6.1-sol parecía transitorio (hola-mundo en host a las 10:12 UTC OK), pero el reencolado volvió a fallar igual: causa latente en el sandbox, models_cache.json en solo-lectura (EROFS + metadata fallback). La raíz real resultó ser otra (ver 477 abajo); este fix queda como endurecimiento válido.
+- Fix: models_cache.json pasa de _CODEX_READ_ENTRIES a _CODEX_WRITE_ENTRIES (bind rw persistente al host, como auth.json/installation_id); config.toml, version.json y plugins siguen ro. Tests: los 2 casos CodexHomeTests exigen el bind rw; 15 + 71 checks en verde. Desplegado en 5791f93.
+- Reencolado ee0c2cdf falló de nuevo con el mismo model_not_found → investigación 477.
+
+## 2026-11-04 — Sandbox codex: montar el motor vigente 0.166.0 (TASK-2026-00477, causa raíz del fallo tier_b)
+
+- El motor `~/.local/bin/codex` (0.166.0) vive dentro de `~/.codex/packages`; el tmpfs por ejecución lo ocultaba, el enlace colgaba y `codexf` caía a `/usr/bin/codex` 0.111.0, que no parsea el catálogo actual (`max` desconocido) → metadata fallback → la API rechaza gpt-6.1-sol con model_not_found. En host siempre funcionó (PATH encuentra 0.166.0 primero). Reproducido con bwrap real: `client_version="0.111.0"`.
+- Fix: `_codex_motor_ops` re-expone el `bin/` resuelto (binario + helpers, nunca releases vecinas) con cadena tmpfs por nivel + un ro-bind, solo cuando cae bajo el dir sombreado (caso codexf; codexj intacto). Tests: 2 casos nuevos CodexHomeTests; 17 + 71 checks en verde.
+- Verificación empírica: `codexf --version` en sandbox = 0.166.0; exec hola-mundo en sandbox = rc 0 con 0.166.0. Despliegue y reanudación de ee0c2cdf pendientes en este ticket.
