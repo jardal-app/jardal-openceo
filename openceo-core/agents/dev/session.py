@@ -14,6 +14,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .builder_contract import (
+    blocked_continuation_due,
+    blocked_continuation_prompt,
+    builder_environment_prompt,
+    kept_work_note,
+)
 from .review_links import ReviewLinksExtraction, apply_review_links_to_params, extract_review_links
 from .review_policy import (REVIEW_OFF, resolve_review, review_wait_reason,
                             stamp_effective_review)
@@ -622,34 +628,9 @@ class DevSessionManager:
         if tool == CodingTool.TIER_C:
             await self._record_tier_c_event(task, "started")
         code_result = await self._step_code(task, project_config, tool)
-        if code_result.cost_run is not None:
-            output.cost_runs.append(code_result.cost_run)
-        output.steps.append(code_result.step)
-        output.coding_session_id = code_result.session_id
-        output.coding_session_title = code_result.session_title
-        output.last_prompt_sent = code_result.prompt
-        output.last_response_summary = code_result.summary
-        output.params = apply_review_links_to_params(
-            task.get("params"),
-            code_result.review_links,
-        )
-        output.params = dict(output.params if output.params is not None else task.get("params") or {})
-        output.params.pop("dev_checkpoint", None)
-        output.params.pop("agent_result", None)
-        output.params.pop(SCHEDULED_WAIT_COUNT_KEY, None)
-        if code_result.agent_result is not None:
-            output.params["agent_result"] = code_result.agent_result
-        if code_result.executor_link:
-            # The Tier C chain link that ran this ticket (policy §25/§32):
-            # the chain is availability, not selection, so the link is
-            # recorded per ticket. The funnel replaces ``params``, so start
-            # from the full set (never a partial dict).
-            params = dict(output.params if output.params is not None
-                          else (task.get("params") or {}))
-            params["executor_link"] = code_result.executor_link
-            output.params = params
-            await self._record_tier_c_event(
-                task, "executor", executor_link=code_result.executor_link)
+        await self._absorb_code_result(task, output, code_result)
+        code_result = await self._continue_blocked_candidate(
+            task, project_config, tool, branch, output, code_result)
         if code_result.waiting_reason:
             if branch is not None:
                 self._drop_simple_branch(branch)
@@ -678,7 +659,8 @@ class DevSessionManager:
             # in params for the post-persist return (TASK-2026-00202).
             return await self._reliability_finish(
                 task, tool, branch, self._return_agent_verdict(
-                    task, tool, branch, code_result, output.params))
+                    task, tool, branch, code_result, output.params,
+                    prior_steps=output.steps, cost_runs=output.cost_runs))
 
         if branch is None:
             if resolve_review(task).mode != REVIEW_OFF:
@@ -689,6 +671,97 @@ class DevSessionManager:
         return await self._reliability_finish(task, tool, branch,
             await self._finish_simple_tool(
                 task, project_config, tool, output, branch))
+
+    async def _absorb_code_result(
+        self,
+        task: dict[str, Any],
+        output: DevExecutionOutput,
+        code_result: CodingStepResult,
+        *, first_turn: bool = True,
+    ) -> None:
+        """Fold one builder turn into the run output (cost, trail, params)."""
+        if code_result.cost_run is not None:
+            output.cost_runs.append(code_result.cost_run)
+        output.steps.append(code_result.step)
+        output.coding_session_id = code_result.session_id
+        output.coding_session_title = code_result.session_title
+        output.last_prompt_sent = code_result.prompt
+        output.last_response_summary = code_result.summary
+        base = output.params if output.params is not None else task.get("params")
+        output.params = apply_review_links_to_params(
+            base, code_result.review_links)
+        output.params = dict(
+            output.params if output.params is not None else base or {})
+        output.params.pop("dev_checkpoint", None)
+        output.params.pop("agent_result", None)
+        output.params.pop("kept_work", None)
+        output.params.pop(SCHEDULED_WAIT_COUNT_KEY, None)
+        if code_result.agent_result is not None:
+            output.params["agent_result"] = code_result.agent_result
+        if code_result.executor_link:
+            # The Tier C chain link that ran this ticket (policy §25/§32):
+            # the chain is availability, not selection, so the link is
+            # recorded per ticket. The funnel replaces ``params``, so start
+            # from the full set (never a partial dict).
+            params = dict(output.params)
+            params["executor_link"] = code_result.executor_link
+            output.params = params
+            if first_turn:
+                await self._record_tier_c_event(
+                    task, "executor", executor_link=code_result.executor_link)
+
+    @staticmethod
+    def _builder_gate_context(
+        dev_cfg: Mapping[str, Any],
+    ) -> tuple[list[GateSpec], str]:
+        """Gates and oracle command the orchestrator runs for the builder."""
+        try:
+            gates = load_gates(dev_cfg)
+        except ValueError:
+            gates = []
+        oracle_cmd = dev_cfg.get("oracle_cmd")
+        return gates, oracle_cmd if isinstance(oracle_cmd, str) else ""
+
+    async def _continue_blocked_candidate(
+        self,
+        task: dict[str, Any],
+        project_config: dict[str, Any],
+        tool: CodingTool,
+        branch: _SimpleBranch | None,
+        output: DevExecutionOutput,
+        code_result: CodingStepResult,
+    ) -> CodingStepResult:
+        """One more builder turn on the same tree before a bloqueado discards it.
+
+        The builder is told the sandbox facts and the gates, then answers
+        again: hecho goes on to the gates; bloqueado, an error or a turn
+        without verdict leave the original verdict standing. One turn only.
+        """
+        if (branch is None or code_result.error or code_result.waiting_reason
+                or not blocked_continuation_due(code_result.agent_result, True)
+                or not self._simple_changed_files(branch)):
+            return code_result
+        if await self._task_cancelled(str(task.get("task_id") or "")):
+            return code_result
+        gates, oracle_cmd = self._builder_gate_context(
+            project_config.get("dev", {}) or {})
+        output.steps.append(self._step(
+            "blocked_continuation", "ok",
+            "bloqueado with work in the tree: one continuation turn "
+            "(sandbox facts and gates) before the candidate is set aside"))
+        follow = await self._step_code(
+            task, project_config, tool,
+            prompt_prefix=blocked_continuation_prompt(
+                code_result.agent_result or {}, gates, oracle_cmd))
+        if (follow.error or follow.waiting_reason
+                or follow.agent_result is None):
+            if follow.cost_run is not None:
+                output.cost_runs.append(follow.cost_run)
+            output.steps.append(follow.step)
+            return code_result
+        await self._absorb_code_result(
+            task, output, follow, first_turn=False)
+        return follow
 
     # -- simple-tier git flow (F5, §10/§12) -------------------------------------
 
@@ -704,11 +777,66 @@ class DevSessionManager:
             stderr=subprocess.PIPE, text=True, errors="replace",
             timeout=timeout)
 
-    def _reset_and_drop_branch(self, branch: _SimpleBranch) -> None:
-        """Reset the work branch to base and drop it (declined/failed)."""
+    def _keep_candidate(
+        self, branch: _SimpleBranch, kind: str,
+    ) -> dict[str, Any] | None:
+        """Commit the candidate to ``<kind>/<work branch>`` before a discard.
+
+        The builder leaves its work uncommitted, so a reset destroys it.
+        Returns the kept-work record; None when there is nothing to keep
+        or git refuses (the caller then drops as before).
+        """
+        repo = branch.repo
+        git = self._simple_git
+        try:
+            if git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() \
+                    == branch.branch:
+                git(repo, "add", "-A", "--", ".", ":!.openceo")
+                if git(repo, "diff", "--cached", "--quiet").returncode != 0:
+                    if (repo / ".openceo" / "HANDOFF.md").is_file():
+                        git(repo, "add", "-f", "--", ".openceo/HANDOFF.md")
+                    name = git(repo, "config", "user.name").stdout.strip()
+                    email = git(repo, "config", "user.email").stdout.strip()
+                    identity = [] if name and email else [
+                        "-c", "user.name=OpenCEO",
+                        "-c", "user.email=openceo@jardal.app"]
+                    if git(repo, *identity, "commit", "-qm",
+                           f"wip({branch.ref}) {kind} candidate",
+                           "--no-verify", "--no-gpg-sign").returncode != 0:
+                        return None
+            head = git(repo, "rev-parse",
+                       f"refs/heads/{branch.branch}").stdout.strip()
+            if not head or head == branch.base_sha:
+                return None
+            kept = f"{kind}/{branch.branch}"
+            if git(repo, "branch", "-f", kept, head).returncode != 0:
+                return None
+            stat = git(repo, "diff", "--stat=100", "--stat-count=20",
+                       branch.base_sha, kept, "--", ".", ":!.openceo"
+                       ).stdout.strip()
+            files = [path for path in git(
+                repo, "diff", "--name-only", branch.base_sha, kept,
+                "--", ".", ":!.openceo").stdout.splitlines() if path]
+        except (OSError, subprocess.SubprocessError):
+            logger.warning("keeping the candidate of %s failed",
+                           branch.branch, exc_info=True)
+            return None
+        return {"branch": kept, "kind": kind, "base_sha": branch.base_sha,
+                "head_sha": head, "files": len(files), "diffstat": stat[:1500]}
+
+    def _reset_and_drop_branch(
+        self, branch: _SimpleBranch, kind: str = "discarded",
+    ) -> dict[str, Any] | None:
+        """Keep the candidate, reset the work branch to base and drop it.
+
+        Declined/failed work never dies with the branch: the kept-work
+        record names where it lives (None when there was nothing to keep).
+        """
+        kept = self._keep_candidate(branch, kind)
         self._simple_git(branch.repo, "reset", "--hard", "-q", branch.base_sha)
         self._simple_git(branch.repo, "clean", "-fdq")
         self._drop_simple_branch(branch)
+        return kept
 
     def _open_simple_branch(
         self,
@@ -808,6 +936,28 @@ class DevSessionManager:
     def _drop_simple_branch(self, branch: _SimpleBranch) -> None:
         self._simple_git(branch.repo, "checkout", "-q", branch.base)
         self._simple_git(branch.repo, "branch", "-D", branch.branch)
+
+    def _park_branch_for_wait(
+        self, task: dict[str, Any], output: DevExecutionOutput,
+        branch: _SimpleBranch,
+    ) -> None:
+        """Keep the built candidate across a wait that resumes.
+
+        Dropping the branch there threw the whole build away and the
+        resume rebuilt from scratch (TASK-2026-00478). A checkpoint keeps
+        the branch and its params so the next run restores it; when git
+        refuses, the old drop stands.
+        """
+        params = dict(output.params if isinstance(output.params, dict)
+                      else (task.get("params") or {}))
+        try:
+            self._save_simple_checkpoint(branch, params)
+        except (ValueError, OSError, subprocess.SubprocessError):
+            logger.warning("wait checkpoint failed for %s; dropping the branch",
+                           branch.branch, exc_info=True)
+            self._drop_simple_branch(branch)
+            return
+        output.params = params
 
     def _save_simple_checkpoint(
         self, branch: _SimpleBranch, params: dict[str, Any] | None,
@@ -1516,7 +1666,7 @@ class DevSessionManager:
         try:
             pool = review_mod.parse_pool(pool_raw)
         except review_mod.ReviewerConfigError as exc:
-            self._drop_simple_branch(branch)
+            self._park_branch_for_wait(task, output, branch)
             output.status = TaskStatus.WAITING
             output.waiting_reason = f"config: review pool: {exc}"
             return output
@@ -1565,7 +1715,7 @@ class DevSessionManager:
                 round="1", builder_family=builder_family,
                 receipts_dir=repo / ".openceo" / "review_receipts")
         except wiring_mod.ReviewRoutingError as exc:
-            self._drop_simple_branch(branch)
+            self._park_branch_for_wait(task, output, branch)
             output.status = TaskStatus.WAITING
             output.waiting_reason = f"config: free-router: {exc}"
             return output
@@ -1713,7 +1863,7 @@ class DevSessionManager:
                     f"{waits} attempts: {result.summary()} "
                     f"(branch kept: {branch.branch})")
                 return output
-            self._drop_simple_branch(branch)
+            self._park_branch_for_wait(task, output, branch)
             output.status = TaskStatus.WAITING
             output.waiting_reason = (
                 f"review_no_quorum: {result.summary()}")
@@ -1910,7 +2060,7 @@ class DevSessionManager:
         try:
             specs = load_gates(dev_cfg)
         except ValueError as exc:
-            self._drop_simple_branch(branch)
+            self._park_branch_for_wait(task, output, branch)
             output.status = TaskStatus.WAITING
             output.waiting_reason = f"config: gates: {exc}"
             return output
@@ -2253,10 +2403,18 @@ class DevSessionManager:
         branch: _SimpleBranch | None,
         code_result: CodingStepResult,
         params_base: dict[str, Any] | None = None,
+        *, prior_steps: list[dict[str, Any]] | None = None,
+        cost_runs: list[dict[str, Any]] | None = None,
     ) -> DevExecutionOutput:
         verdict = dict(code_result.agent_result or {})
         params = dict(params_base if params_base is not None else task.get("params") or {})
         params["agent_result"] = verdict
+        # A continuation turn adds a step and a cost run to the first turn's:
+        # the return carries the whole trail, never just the last turn.
+        trail = (list(prior_steps) if prior_steps is not None
+                 else [code_result.step])
+        runs = (list(cost_runs) if cost_runs is not None
+                else ([code_result.cost_run] if code_result.cost_run else []))
         try:
             resume_at = scheduled_resume(AgentResult.model_validate(verdict))
         except ValueError as exc:
@@ -2280,8 +2438,8 @@ class DevSessionManager:
                     status=TaskStatus.WAITING, coding_tool=tool,
                     waiting_reason=reason, params=params,
                     last_response_summary=reason,
-                    steps=[code_result.step, self._step("scheduled_wait", "waiting", reason)],
-                    cost_runs=([code_result.cost_run] if code_result.cost_run else []))
+                    steps=[*trail, self._step("scheduled_wait", "waiting", reason)],
+                    cost_runs=runs)
             if branch is not None:
                 self._save_simple_checkpoint(branch, params)
             reason = f"scheduled_wait: {verdict['motivo']}"
@@ -2289,16 +2447,21 @@ class DevSessionManager:
                 status=TaskStatus.WAITING, coding_tool=tool,
                 waiting_reason=reason, resume_at=resume_at, params=params,
                 last_response_summary=reason,
-                steps=[code_result.step, self._step("scheduled_wait", "waiting", reason)],
-                cost_runs=([code_result.cost_run] if code_result.cost_run else []))
-        if branch is not None:
-            self._reset_and_drop_branch(branch)
+                steps=[*trail, self._step("scheduled_wait", "waiting", reason)],
+                cost_runs=runs)
         resultado = str(verdict.get("resultado") or "")
+        kept = (self._reset_and_drop_branch(
+            branch, "blocked" if resultado == "bloqueado" else "declined")
+            if branch is not None else None)
         motivo = str(verdict.get("motivo") or "")
         necesidad = str(verdict.get("necesidad") or "").strip()
         tier_label = tool.value if isinstance(tool, CodingTool) else str(tool)
-        branch_note = "work branch dropped" if branch is not None \
-            else "no work branch"
+        if branch is None:
+            branch_note = "no work branch"
+        elif kept is not None:
+            branch_note = f"work branch dropped, {kept_work_note(kept)}"
+        else:
+            branch_note = "work branch dropped"
         evidence = (
             f"Agent {tier_label} returned {resultado} on "
             f"{self._simple_ref(task)}: {motivo}."
@@ -2311,6 +2474,9 @@ class DevSessionManager:
                 if isinstance(task.get("params"), dict) else {}
         params["agent_result"] = verdict
         params.pop(SCHEDULED_WAIT_COUNT_KEY, None)
+        params.pop("kept_work", None)
+        if kept is not None:
+            params["kept_work"] = kept
         if code_result.executor_link:
             params["executor_link"] = code_result.executor_link
         return DevExecutionOutput(
@@ -2318,11 +2484,9 @@ class DevSessionManager:
             coding_tool=tool if isinstance(tool, CodingTool) else None,
             error=evidence[:1500],
             last_response_summary=evidence,
-            steps=[code_result.step,
-                   self._step("agent_return", "failed", evidence)],
+            steps=[*trail, self._step("agent_return", "failed", evidence)],
             params=params,
-            cost_runs=([code_result.cost_run]
-                       if code_result.cost_run is not None else []),
+            cost_runs=runs,
         )
 
     async def _material_simple_failure(
@@ -2344,14 +2508,17 @@ class DevSessionManager:
         another tier and no same-tier requeue of the unchanged ticket.
         Without an objective there is no planner to invoke: the ticket
         fails terminally with evidence, like a code-step error.
-        ``prior_steps`` (oracle/gates rounds) lead the returned trail.
+        ``prior_steps`` (oracle/gates rounds) lead the returned trail. The
+        reset keeps the candidate on ``failed/<branch>`` and the planner is
+        told where (TASK-2026-00478).
         """
-        self._reset_and_drop_branch(branch)
+        kept = self._reset_and_drop_branch(branch, "failed")
         task_id = str(task.get("task_id") or "")
         tier_label = tool.value if isinstance(tool, CodingTool) else str(tool)
+        kept_note = f" ({kept_work_note(kept)})" if kept is not None else ""
         evidence = (
             f"Material {tier_label} failure on {self._simple_ref(task)}: "
-            f"{cause}. Candidate reset to {branch.base_sha[:12]}; "
+            f"{cause}. Candidate reset to {branch.base_sha[:12]}{kept_note}; "
             "no automatic retier.")
         # A business cancellation that landed mid-run wins over the
         # failure: failing the ticket and replanning would undo the
@@ -2373,7 +2540,9 @@ class DevSessionManager:
         if objective_id and not cancelled:
             evidence += await self._material_failure_replan(
                 task, project_config, branch.repo, objective_id,
-                tier_label, cause)
+                tier_label,
+                f"{cause}; {kept_work_note(kept)}" if kept is not None
+                else cause)
         if self._task_service is not None and task_id:
             try:
                 await self._task_service.comment_on_ticket(task_id, evidence)
@@ -2389,6 +2558,9 @@ class DevSessionManager:
                 if isinstance(task.get("params"), dict) else {}
         if branch.oracle_frozen is not None:
             params["oracle_frozen"] = branch.oracle_frozen
+        params.pop("kept_work", None)
+        if kept is not None:
+            params["kept_work"] = kept
         params["material_failure"] = {
             "tier": tier_label,
             "cause": cause[:500],
@@ -2853,6 +3025,7 @@ class DevSessionManager:
 
     async def _step_code(
         self, task: dict[str, Any], config: dict[str, Any], tool: CodingTool,
+        *, prompt_prefix: str = "",
     ) -> CodingStepResult:
         if self._settings.DEV_EXECUTION_MODE == "mock":
             return await self._step_code_once(task, config, tool)
@@ -2862,7 +3035,8 @@ class DevSessionManager:
         for attempt in range(len(PROVIDER_RETRY_DELAYS) + 1):
             result = await self._step_code_once(
                 task, config, tool, executor=executor,
-                prompt_prefix=PROVIDER_RESUME_PROMPT if attempt else "",
+                prompt_prefix=prompt_prefix + (
+                    PROVIDER_RESUME_PROMPT if attempt else ""),
                 responded=responded)
             if result.cost_run is not None:
                 elapsed += float(result.cost_run.get("duration_s") or 0)
@@ -3252,6 +3426,11 @@ class DevSessionManager:
             lines.extend(["", "REANUDACIÓN DE ESPERA PROGRAMADA",
                           json.dumps(previous, ensure_ascii=False),
                           "Verifica la condición pendiente y conserva los efectos ya confirmados."])
+        if isinstance((task.get("params") or {}).get("dev_checkpoint"), dict):
+            lines.extend(["", "REANUDACIÓN DESDE CHECKPOINT",
+                          "Tu trabajo previo ya está en el árbol de trabajo (git status y "
+                          "git diff) y .openceo/HANDOFF.md lo resume: verifica y completa "
+                          "lo que falte, no lo rehagas."])
 
         answer = (task.get("params") or {}).get("owner_answer") or {}
         if isinstance(answer, dict):
@@ -3330,7 +3509,10 @@ class DevSessionManager:
             lines.extend(["", proposal_prompt_for(
                 str(task.get("task_id") or ""),
                 project_prefix=knowledge_prefix)])
-        lines.extend(["", AGENT_RESULT_PROMPT])
+        gates, oracle_cmd = self._builder_gate_context(
+            config.get("dev", {}) or {})
+        lines.extend(["", builder_environment_prompt(gates, oracle_cmd),
+                      "", AGENT_RESULT_PROMPT])
 
         vault_index = _dev_vault_index(config)
         if vault_index:

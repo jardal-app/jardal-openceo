@@ -28,6 +28,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
+from agents.dev.builder_contract import (
+    blocked_continuation_due,
+    blocked_continuation_prompt,
+    builder_environment_prompt,
+)
 from agents.dev.production_deploy import normalize_deploy, run_production_step
 from agents.dev.routing import resolve_coding_tool
 from agents.dev.tier_s_contract import (
@@ -1346,22 +1351,41 @@ class TierSCycle:
     async def _build(self, ctx: _Ctx, plan: Plan) -> bool:
         ctx.brake_phase = "build"
         timeout_s = int(ctx.timeouts.get("build", 60)) * 60
-        result = await self._exec.run(
-            "builder", self._builder_prompt(ctx, plan), ctx.repo, timeout_s)
-        self._record_session(ctx, "builder", "builder", result)
-        current = _git(ctx.repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-        if current != ctx.branch:
-            await self._park(ctx, "needs_owner",
-                             f"builder left branch {ctx.branch} for {current}",
-                             patch_run=True)
-            return False
-        if result.returncode != 0:
-            await self._park_builder_failure(ctx, result)
-            return False
-        verdict = parse_agent_result(result.output_tail)
-        if verdict is None and "```agent-result" in result.output_tail:
-            await self._park_build(ctx, "config", "invalid builder agent-result")
-            return False
+        prompt = self._builder_prompt(ctx, plan)
+        # A bloqueado that leaves work in the tree earns one confirmation
+        # turn (TASK-2026-00478): only an explicit answer replaces it.
+        blocked: AgentResult | None = None
+        while True:
+            result = await self._exec.run(
+                "builder", prompt, ctx.repo, timeout_s)
+            self._record_session(ctx, "builder", "builder", result)
+            current = _git(
+                ctx.repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+            if current != ctx.branch:
+                await self._park(
+                    ctx, "needs_owner",
+                    f"builder left branch {ctx.branch} for {current}",
+                    patch_run=True)
+                return False
+            verdict = (parse_agent_result(result.output_tail)
+                       if result.returncode == 0 else None)
+            if blocked is not None:
+                verdict = verdict if verdict is not None else blocked
+                break
+            if result.returncode != 0:
+                await self._park_builder_failure(ctx, result)
+                return False
+            if verdict is None and "```agent-result" in result.output_tail:
+                await self._park_build(
+                    ctx, "config", "invalid builder agent-result")
+                return False
+            if verdict is None or not blocked_continuation_due(
+                    verdict.model_dump(mode="json"),
+                    bool(self._changed_files(ctx))):
+                break
+            blocked = verdict
+            prompt = blocked_continuation_prompt(
+                blocked.model_dump(mode="json"), ctx.gate_specs) + prompt
         if verdict is not None and verdict.resultado.value in {"bloqueado", "no_aplica"}:
             try:
                 resume_at = scheduled_resume(verdict)
@@ -3092,6 +3116,7 @@ class TierSCycle:
             f"and emit {SIGNALS['build_done']} in .openceo/status.\n"
             f"{knowledge_prompt}"
             f"Previous checkpoint (recheck; never repeat confirmed effects):\n{TierSCycle._read_artifact(ctx, 'WAIT.md')}\n"
+            + builder_environment_prompt(ctx.gate_specs) + "\n\n"
             + AGENT_RESULT_PROMPT
         )
         vault_index = getattr(ctx, "vault_index", "")

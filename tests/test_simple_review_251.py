@@ -306,7 +306,9 @@ class QuorumTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(checkpoint["phase"], "round")
         self.assertEqual(checkpoint["no_quorum_waits"], 1)
         self.assertEqual(
-            _git(repo, "branch", "--list", branch.branch), "")
+            output.params["dev_checkpoint"]["branch"], branch.branch)
+        self.assertEqual(
+            _git(repo, "branch", "--list", branch.branch), branch.branch)
 
     async def test_same_family_alias_cannot_fabricate_quorum(self) -> None:
         tmp = _repo()

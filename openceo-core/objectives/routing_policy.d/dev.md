@@ -325,6 +325,10 @@ words, never tool names: relaunch it with guidance in the ticket
 description, reassign it, split it, or return capability_gap. A
 second unresolved return parks capability_gap (code enforces the
 single return); the motivo is never checked against the catalog.
+A builder's unmerged work never dies with its verdict: a simple tier
+keeps it on a blocked/, declined/ or failed/ branch and names it in
+necesidad (TASK-2026-00478); relaunch or split from that branch
+instead of redoing the work.
 
 A loose ticket returns the same single way (TASK-2026-00204): its
 first bloqueado or no_aplica replans the pedido with the return
