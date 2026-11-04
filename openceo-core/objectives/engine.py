@@ -121,7 +121,8 @@ class ObjectiveStore(Protocol):
     async def list_boot_resumable_objectives(
         self, limit: int = 100) -> list[dict[str, Any]]: ...
     async def claim_recovery(
-        self, objective_id: str, due_at: Any) -> dict[str, Any] | None: ...
+        self, objective_id: str, due_at: Any, *,
+        count_attempt: bool = True) -> dict[str, Any] | None: ...
 
 
 class ObjectiveTaskLister(Protocol):
@@ -244,7 +245,7 @@ class InMemoryObjectiveStore:
                     "active", "final_review", "waiting")][:limit]
 
     async def claim_recovery(
-        self, objective_id: str, due_at: Any,
+        self, objective_id: str, due_at: Any, *, count_attempt: bool = True,
     ) -> dict[str, Any] | None:
         """Test double of the Mongo compare-and-set claim."""
         doc = self.docs.get(objective_id)
@@ -253,7 +254,9 @@ class InMemoryObjectiveStore:
         recovery = doc.get("recovery")
         if not isinstance(recovery, dict) or recovery.get("due_at") != due_at:
             return None
-        recovery["attempts"] = int(recovery.get("attempts") or 0) + 1
+        if count_attempt:
+            recovery["attempts"] = int(recovery.get("attempts") or 0) + 1
+        recovery.pop("deploy", None)
         recovery["last_attempt_at"] = _utcnow_iso()
         recovery["due_at"] = None
         doc["status"] = "active"
@@ -287,10 +290,10 @@ class MongoObjectiveStore:
         return await self._repo.list_boot_resumable_objectives(limit)
 
     async def claim_recovery(
-        self, objective_id: str, due_at: Any,
+        self, objective_id: str, due_at: Any, *, count_attempt: bool = True,
     ) -> dict[str, Any] | None:
         return await self._repo.claim_objective_recovery(
-            objective_id, due_at)
+            objective_id, due_at, count_attempt=count_attempt)
 
 
 class MongoObjectiveTaskLister:
@@ -1603,6 +1606,11 @@ class _PlanFlight:
 _PLAN_FLIGHTS: dict[str, _PlanFlight] = {}
 
 
+def planning_in_flight() -> bool:
+    """True while any objective planner runs (a restart would kill it)."""
+    return bool(_PLAN_FLIGHTS)
+
+
 async def plan_objective(
     env: ObjectiveEnv, objective_id: str,
     *,
@@ -2628,6 +2636,45 @@ async def apply_approved_plan(
     return outcome
 
 
+def _wake_recovery(env: ObjectiveEnv) -> None:
+    wake = getattr(env, "recovery_wake", None) or RECOVERY_WAKE
+    if wake is not None:
+        try:
+            wake()
+        except Exception:  # noqa: BLE001 - a wake never breaks the park
+            logger.warning("recovery wake failed", exc_info=True)
+
+
+async def _await_recovery_deploy(
+    env: ObjectiveEnv,
+    objective: Mapping[str, Any],
+    ticket: Mapping[str, Any],
+    close: "TicketCloseContext | None",
+) -> dict[str, Any]:
+    """Hold the objective until its merged recovery fix is live (00483).
+
+    Replanning now would run the mission on the code that parked it; the
+    recovery timer restarts the idle service and resumes it after boot.
+    """
+    objective_id = str(objective.get("objective_id"))
+    if close is not None:
+        await _absorb_close(env, objective, close)
+        objective = await env.objectives.get_objective(objective_id) \
+            or objective
+    await _recompile_capsule(env, objective)
+    ticket_id = str(ticket.get("task_id") or "")
+    await env.objectives.patch_objective(
+        objective_id, recovery_mod.deploy_park_patch(
+            objective, ticket_id, getattr(env, "objectives_cfg", None)))
+    _wake_recovery(env)
+    if env.notify is not None:
+        await env.notify(
+            _notify_ref(objective),
+            f"Objective {objective_id}: recovery fix {ticket_id} merged; "
+            "it resumes once the service restarts with the fix live.")
+    return {"ok": True, "action": "await-deploy", "ticket": ticket_id}
+
+
 async def _objective_park(
     env: ObjectiveEnv,
     objective: Mapping[str, Any],
@@ -2642,12 +2689,7 @@ async def _objective_park(
         patch.update(recovery)
     await env.objectives.patch_objective(
         str(objective.get("objective_id")), patch)
-    wake = getattr(env, "recovery_wake", None) or RECOVERY_WAKE
-    if wake is not None:
-        try:
-            wake()
-        except Exception:  # noqa: BLE001 - a wake never breaks the park
-            logger.warning("recovery wake failed", exc_info=True)
+    _wake_recovery(env)
     if env.notify is not None:
         await env.notify(
             _notify_ref(objective),
@@ -3062,6 +3104,21 @@ async def on_ticket_closed(
             return {"ok": True, "action": "objective-not-active"}
         is_recovery_ticket = str(
             (ticket.get("params") or {}).get("recovery_for") or "") == objective_id
+        if is_recovery_ticket:
+            if objective.get("status") not in ("waiting", "active"):
+                # A closed/cancelled objective is never resurrected.
+                return {"ok": True, "action": "objective-not-active"}
+            merged = list(close.files) if close is not None else []
+            if not merged:
+                merged = list((ticket.get("params") or {}).get(
+                    "modified_files") or [])
+            if close is not None:
+                # Its files are OpenCEO's, not the mission's key files.
+                close = replace(close, files=[])
+            if merged and recovery_mod.recovery_config(getattr(
+                    env, "objectives_cfg", None))["deploy_on_close"]:
+                return await _await_recovery_deploy(
+                    env, objective, ticket, close)
         if objective.get("status") != "active":
             if not (_park_resumes_on_close(objective) or is_recovery_ticket):
                 return {"ok": True, "action": "objective-not-active"}

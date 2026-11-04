@@ -9,9 +9,6 @@ import hashlib
 import inspect
 import logging
 import re
-import shutil
-import subprocess
-import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
@@ -375,9 +372,6 @@ class TaskService:
         self._config_loader = config_loader
         self._locks: dict[str, asyncio.Lock] = {}
         self._project_locks: dict[str, asyncio.Lock] = {}
-        # Deploy of a merged recovery fix (TASK-2026-00481): one pending
-        # task; it restarts only when no ticket is in progress.
-        self._recovery_deploy_task: asyncio.Task[None] | None = None
         self._notion_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._notion_worker: asyncio.Task[None] | None = None
         self._jardal_erp_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -4848,6 +4842,11 @@ class TaskService:
                     # the hook no-ops without a verdict.
                     await self._trigger_objective_return(
                         updated, graph_out.get("params"))
+                if final_status != TaskStatus.COMPLETED.value and (
+                        updated.get("params") or {}).get("recovery_for"):
+                    # A recovery ticket that did not land lets the timer
+                    # open the next round now (TASK-2026-00483).
+                    self._wake_objective_recovery()
                 # Any finished run frees its slot: dispatch event.
                 self._wake_dispatcher()
             return updated
@@ -7573,103 +7572,18 @@ class TaskService:
                     env_project = str(objective["project"])
             env = service.env_for(env_project)
             await on_ticket_closed(env, ticket, close)
-            if recovery_for:
-                self._schedule_recovery_deploy(
-                    str(ticket.get("project") or ""))
         except Exception:
             logger.warning("objective close trigger failed for %s",
                            ticket.get("task_id"), exc_info=True)
 
-    def _schedule_recovery_deploy(self, project: str) -> None:
-        """One pending deploy for a merged recovery fix (TASK-2026-00481)."""
-        running = getattr(self, "_recovery_deploy_task", None)
-        if running is not None and not running.done():
-            return
-        self._recovery_deploy_task = asyncio.create_task(
-            self._recovery_deploy(project))
-
-    def _recovery_config(self, project: str) -> dict[str, Any]:
-        loader = getattr(self, "_config_loader", None)
-        if loader is None:
-            return {}
-        try:
-            cfg = loader.load_project(
-                project or "jardal-openceo").get("objectives") or {}
-        except Exception:  # noqa: BLE001
-            return {}
-        recovery = cfg.get("recovery")
-        return dict(recovery) if isinstance(recovery, Mapping) else {}
-
-    async def _recovery_deploy(self, project: str) -> None:
-        """Restart the service once idle, so a merged engine fix applies.
-
-        Bounded checks, never a poll loop: grace + two retries. Restarting
-        with a ticket in progress would kill its session, so any active
-        ticket defers the deploy to the next boot/Owner restart.
-        """
-        cfg = self._recovery_config(project)
-        if not bool(cfg.get("deploy_on_close", True)):
-            return
-        try:
-            grace = max(0, int(cfg.get("deploy_grace_seconds", 5)))
-        except (TypeError, ValueError):
-            grace = 5
-        retries = cfg.get("deploy_retry_seconds")
-        if not isinstance(retries, (list, tuple)):
-            retries = [60, 300]
-        delays = [grace, *[max(0, int(value)) for value in retries
-                           if isinstance(value, (int, float))]]
-        for delay in delays:
-            if delay:
-                await asyncio.sleep(delay)
+    def _wake_objective_recovery(self) -> None:
+        wake = getattr(getattr(self, "_objective_service", None),
+                       "wake_recovery", None)
+        if callable(wake):
             try:
-                active = await self._repo.tasks.count_documents({
-                    "status": TaskStatus.IN_PROGRESS.value,
-                    "autorun": True,
-                    "coding_tool": {"$ne": None},
-                })
-            except Exception:  # noqa: BLE001 - an unreadable count never restarts
-                logger.warning("recovery deploy idle check failed",
-                               exc_info=True)
-                return
-            if active:
-                logger.info(
-                    "recovery deploy deferred: %s ticket(s) in progress",
-                    active)
-                continue
-            if await asyncio.to_thread(self._spawn_recovery_restart):
-                logger.warning(
-                    "recovery deploy: restarting the service to apply the "
-                    "merged recovery fix")
-            return
-        logger.info("recovery deploy left pending: service stayed busy")
-
-    def _spawn_recovery_restart(self) -> bool:
-        """Launch the canonical restart outside the service cgroup."""
-        root = Path(__file__).resolve().parents[1]
-        script = root / "scripts" / "openceo-core-host.sh"
-        if not script.is_file():
-            logger.warning("recovery deploy: %s not found", script)
-            return False
-        runner = shutil.which("systemd-run")
-        if runner:
-            cmd = [
-                runner, "--user", "--collect", "--on-active=2s",
-                "--unit", f"openceo-recovery-deploy-{uuid.uuid4().hex[:8]}",
-                str(script), "restart",
-            ]
-        else:
-            cmd = [str(script), "restart"]
-        try:
-            subprocess.Popen(  # noqa: S603 - fixed argv, own service script
-                cmd, cwd=str(root),
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, start_new_session=True)
-        except OSError:
-            logger.warning("recovery deploy: could not launch restart",
-                           exc_info=True)
-            return False
-        return True
+                wake()
+            except Exception:  # noqa: BLE001 - a wake never breaks a close
+                logger.warning("recovery wake failed", exc_info=True)
 
     async def _trigger_objective_return(
         self,

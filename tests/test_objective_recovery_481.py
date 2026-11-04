@@ -136,14 +136,17 @@ class FakeRepo:
         return [dict(row) for row in self.task_rows
                 if row.get("objective_id") == objective_id]
 
-    async def claim_objective_recovery(self, objective_id, due_at):
+    async def claim_objective_recovery(self, objective_id, due_at, *,
+                                       count_attempt=True):
         doc = self.docs.get(objective_id)
         if doc is None or doc.get("status") != "waiting":
             return None
         recovery = doc.get("recovery") or {}
         if recovery.get("due_at") != due_at:
             return None
-        recovery["attempts"] = int(recovery.get("attempts") or 0) + 1
+        if count_attempt:
+            recovery["attempts"] = int(recovery.get("attempts") or 0) + 1
+        recovery.pop("deploy", None)
         recovery["due_at"] = None
         doc["status"] = "active"
         doc["waiting_reason"] = None
@@ -334,8 +337,7 @@ async def _cross_project_close_scenario():
         env_for=MagicMock(return_value=env))
     stub = SimpleNamespace(
         _objective_service=service,
-        _attribute_objective_child=AsyncMock(side_effect=lambda row: row),
-        _schedule_recovery_deploy=MagicMock())
+        _attribute_objective_child=AsyncMock(side_effect=lambda row: row))
     ticket = {"task_id": "rec-1", "project": "jardal-openceo",
               "params": {"recovery_for": "OBJ-TEST"}}
     with patch("task_service.on_ticket_closed",
@@ -344,50 +346,6 @@ async def _cross_project_close_scenario():
     service.env_for.assert_called_once_with("jardal-erp")
     passed = closed.await_args.args[1]
     assert passed["objective_id"] == "OBJ-TEST"
-
-
-class TestRecoveryDeploy:
-    def _stub(self, active: int):
-        from task_service import TaskService
-
-        cfg = MagicMock()
-        cfg.load_project = MagicMock(return_value={"objectives": {"recovery": {
-            "deploy_on_close": True, "deploy_grace_seconds": 0,
-            "deploy_retry_seconds": [],
-        }}})
-        repo = SimpleNamespace(tasks=SimpleNamespace(
-            count_documents=AsyncMock(return_value=active)))
-        stub = SimpleNamespace(
-            _repo=repo, _config_loader=cfg, _settings=MagicMock(),
-            _recovery_config=lambda project: {
-                "deploy_on_close": True, "deploy_grace_seconds": 0,
-                "deploy_retry_seconds": [],
-            },
-            _spawn_recovery_restart=MagicMock(return_value=True))
-        return TaskService, stub
-
-    def test_restarts_only_when_idle(self) -> None:
-        TaskService, stub = self._stub(active=0)
-        asyncio.run(TaskService._recovery_deploy(stub, "jardal-openceo"))
-        stub._spawn_recovery_restart.assert_called_once()
-
-    def test_busy_service_defers(self) -> None:
-        TaskService, stub = self._stub(active=2)
-        asyncio.run(TaskService._recovery_deploy(stub, "jardal-openceo"))
-        stub._spawn_recovery_restart.assert_not_called()
-
-    def test_restart_uses_a_transient_unit_outside_the_cgroup(self) -> None:
-        from task_service import TaskService
-
-        stub = SimpleNamespace()
-        with patch("task_service.shutil.which", return_value="/usr/bin/systemd-run"), \
-             patch("task_service.subprocess.Popen") as popen:
-            assert TaskService._spawn_recovery_restart(stub) is True
-        cmd = popen.call_args.args[0]
-        assert cmd[0] == "/usr/bin/systemd-run"
-        assert "--on-active=2s" in cmd and str(
-            Path("scripts") / "openceo-core-host.sh") in " ".join(cmd)
-        assert popen.call_args.kwargs["start_new_session"] is True
 
 
 class TestRecoveryScheduler:

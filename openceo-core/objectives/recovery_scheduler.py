@@ -71,6 +71,9 @@ class RecoveryScheduler:
 
     async def _run(self) -> None:
         while not self._stopped:
+            # Cleared before the tick: a park written during the tick
+            # keeps its wake instead of sleeping until the old delay.
+            self._wake.clear()
             try:
                 tick = await self._service.recovery_tick()
                 delay = int(tick.get("next_seconds")
@@ -80,7 +83,6 @@ class RecoveryScheduler:
             except Exception:  # noqa: BLE001 - one bad objective never stops it
                 logger.warning("recovery tick failed", exc_info=True)
                 delay = recovery_mod.MAX_SLEEP_SECONDS
-            self._wake.clear()
             try:
                 await asyncio.wait_for(
                     self._wake.wait(),

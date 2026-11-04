@@ -15,6 +15,10 @@ opencode QA, live tmux panes) runs inside this fence:
   credentials, pasted token files, sibling checkouts, the vault, foreign
   /tmp, the service ``.env``/``.runtime``).
 
+Builders of ``dev.isolation: host`` projects run host-confined instead
+(:func:`plan_host_agent`): the whole host visible, role overlays kept, no
+privilege gain.
+
 No backend, no run: :func:`plan_agent` raises :class:`IsolationUnavailable`
 when bwrap is missing instead of degrading silently.
 """
@@ -28,7 +32,7 @@ import shutil
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from agents.dev.tier_s_contract import child_env
 from research.runtimes.base import IsolationUnavailable
@@ -40,6 +44,7 @@ __all__ = [
     "ensure_sandbox_scratch",
     "ensure_ticket_dir",
     "plan_agent",
+    "plan_host_agent",
     "project_isolation",
     "remove_ticket_dir",
     "runtime_base_dir",
@@ -161,11 +166,11 @@ def sandbox_available() -> bool:
 def project_isolation(dev_cfg: Mapping[str, Any] | None) -> str:
     """Execution fence for a project's builders: ``sandbox`` or ``host``.
 
-    ``dev.isolation: host`` runs the builder on the host user (real home,
-    toolchain, Docker and package caches; env still goes through the
-    ``child_env`` allowlist). It is a deliberate per-project exception to
-    the bwrap fence, for repos whose build/test toolchain the fence cannot
-    provide. Absent or malformed values keep the safe default.
+    ``dev.isolation: host`` runs the builder host-confined
+    (:func:`plan_host_agent`: real home, toolchain, Docker and package
+    caches, with role overlays and no privilege gain). It is a deliberate
+    per-project choice for trusted repos on the host stack whose tests the
+    sandbox cannot run. Absent or malformed values keep the safe default.
     """
     raw = str((dev_cfg or {}).get("isolation") or "sandbox").strip().lower()
     return raw if raw in ("sandbox", "host") else "sandbox"
@@ -838,26 +843,7 @@ def plan_agent(
         ops.append(["--bind", str(workdir), str(workdir)])
         _mask(workdir)
     if home_file_overlays:
-        overlay_dir = scratch / "overlays"
-        overlay_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(overlay_dir, 0o700)
-        run_tag = uuid.uuid4().hex
-        for index, key in enumerate(sorted(home_file_overlays)):
-            relpath = Path(str(key))
-            if relpath.is_absolute() or ".." in relpath.parts:
-                raise ValueError(
-                    f"overlay escapes the home dir: {key!r}")
-            content = home_file_overlays[key]
-            data = (content.encode("utf-8") if isinstance(content, str)
-                    else bytes(content))
-            # Unique per plan: concurrent runs in one workspace must
-            # never share the bind source (review 00003/F1).
-            target = overlay_dir / f"{run_tag}-{index}.overlay"
-            with open(target, "wb") as handle:
-                handle.write(data)
-            os.chmod(target, 0o600)
-            ops.append(["--ro-bind", str(target),
-                        str(host_home / relpath)])
+        ops.extend(_home_overlay_ops(scratch, host_home, home_file_overlays))
     ops.extend([str(token) for token in op] for op in extra_ops)
     return backend.plan(
         argv=list(argv),
@@ -868,6 +854,107 @@ def plan_agent(
         home_env=str(host_home),
         skip_worker_binds=True,
         extra_ops=ops,
+    )
+
+
+def _overlay_relpath(key: str) -> Path:
+    relpath = Path(str(key))
+    if relpath.is_absolute() or ".." in relpath.parts:
+        raise ValueError(f"overlay escapes the home dir: {key!r}")
+    return relpath
+
+
+def _home_overlay_ops(
+    scratch: Path, host_home: Path, overlays: Mapping[str, bytes | str],
+) -> list[list[str]]:
+    """Write each overlay 0600 into the run scratch and bind it read-only."""
+    overlay_dir = scratch / "overlays"
+    overlay_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(overlay_dir, 0o700)
+    run_tag = uuid.uuid4().hex
+    ops: list[list[str]] = []
+    for index, key in enumerate(sorted(overlays)):
+        relpath = _overlay_relpath(key)
+        content = overlays[key]
+        data = (content.encode("utf-8") if isinstance(content, str)
+                else bytes(content))
+        # Unique per plan: concurrent runs in one workspace must
+        # never share the bind source (review 00003/F1).
+        target = overlay_dir / f"{run_tag}-{index}.overlay"
+        with open(target, "wb") as handle:
+            handle.write(data)
+        os.chmod(target, 0o600)
+        ops.append(["--ro-bind", str(target), str(host_home / relpath)])
+    return ops
+
+
+#: Caller ops a host-confined run accepts (per-run trace dirs).
+_HOST_EXTRA_OPS = frozenset({"--bind", "--ro-bind"})
+
+
+def plan_host_agent(
+    *,
+    argv: Sequence[str],
+    workspace: Path | str,
+    base: Mapping[str, str],
+    overlay: Mapping[str, str] | None = None,
+    home: Path | None = None,
+    home_file_overlays: Mapping[str, bytes | str] | None = None,
+    extra_ops: Sequence[Sequence[str]] = (),
+) -> IsolationPlan:
+    """Host-confined run for ``dev.isolation: host`` builders.
+
+    The builder sees the whole host like a host process (toolchain,
+    Docker socket, package caches, the real home), yet keeps what the
+    fence guaranteed (TASK-2026-00483): role overlays shadow the global
+    engine config (badge-scoped MCP, skills), per-run trace binds apply,
+    the run dies with its parent, and no privilege can be gained. bwrap's
+    user namespace sets no_new_privs and maps root-owned files to the
+    overflow uid, so sudo, apt and setuid helpers refuse: nothing lands
+    on the system outside the user's own caches. Raises
+    :class:`IsolationUnavailable` without bwrap, like :func:`plan_agent`.
+    """
+    if not BubblewrapBackend().available:
+        raise IsolationUnavailable(
+            "bwrap is missing: refusing host-mode agent spawn")
+    workdir = Path(workspace)
+    if not workdir.is_dir():
+        raise ValueError(f"agent workspace is not a dir: {workdir}")
+    host_home = Path(home) if home is not None else Path(
+        os.path.expanduser("~"))
+    command = ["bwrap", "--die-with-parent", "--new-session",
+               "--dev-bind", "/", "/"]
+    if home_file_overlays:
+        for key in home_file_overlays:
+            # The root is shared: bwrap would create a missing bind
+            # target on the real filesystem instead of shadowing it.
+            if not (host_home / _overlay_relpath(key)).exists():
+                raise ValueError(
+                    f"overlay target missing on the host: {key!r}")
+        for op in _home_overlay_ops(ensure_sandbox_scratch(workdir),
+                                    host_home, home_file_overlays):
+            command.extend(op)
+    for op in extra_ops:
+        parts = [str(token) for token in op]
+        if not parts or parts[0] not in _HOST_EXTRA_OPS:
+            raise ValueError(f"unsupported host-mode op: {parts[:1]!r}")
+        command.extend(parts)
+    command.extend(["--chdir", str(workdir), "--",
+                    *[str(token) for token in argv]])
+    return IsolationPlan(
+        backend="bwrap-host",
+        argv=command,
+        env=sandbox_env(base, overlay),
+        cwd=str(workdir),
+        network="unrestricted",
+        filesystem_isolated=False,
+        egress_restricted=False,
+        notes=[
+            "Host filesystem, toolchain and Docker are visible; role "
+            "overlays and trace dirs bind per run.",
+            "no_new_privs in a user namespace: sudo, apt and setuid "
+            "helpers cannot gain privileges.",
+        ],
     )
 
 

@@ -1,10 +1,11 @@
-"""Builders on the host user per project (TASK-2026-00481).
+"""Builders on the host user per project (TASK-2026-00481, 00483).
 
 ``dev.isolation: host`` is the Owner-ordered exception to the bwrap
 fence for projects whose toolchain (Docker, package stores, caches) the
-fence cannot provide. The builder runs with the host user; the env still
-goes through the ``child_env`` allowlist. Reviewers and read-only roles
-keep the fence, and projects without the key stay sandboxed.
+fence cannot provide. The builder runs host-confined: the whole host is
+visible, the env still goes through the allowlist, role overlays apply
+and no privilege can be gained. Reviewers and read-only roles keep the
+fence, and projects without the key stay sandboxed.
 
 No models, no network, no Docker.
 """
@@ -166,7 +167,7 @@ class TestHostPrompt:
 
 
 class TestHostProcess:
-    def test_unsandboxed_run_skips_bwrap(self) -> None:
+    def test_host_run_skips_the_sandbox_fence(self) -> None:
         manager = _manager()
         with tempfile.TemporaryDirectory(prefix="host-run-") as tmp:
             with patch("orchestration.agent_sandbox.plan_agent",
@@ -178,7 +179,7 @@ class TestHostProcess:
         assert result.stdout.strip() == f"host:{tmp}"
         assert result.stderr == ""
 
-    def test_process_executor_host_mode_builder_skips_bwrap(self) -> None:
+    def test_process_executor_host_mode_builder_skips_the_sandbox(self) -> None:
         script = Path(tempfile.mkdtemp(prefix="host-exec-")) / "run.sh"
         script.write_text("#!/bin/sh\nprintf 'cwd:%s\\n' \"$PWD\"\n"
                           "printf 'prompt:%s\\n' \"$1\"\n", encoding="utf-8")

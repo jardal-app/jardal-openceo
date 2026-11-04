@@ -32,10 +32,10 @@ from model_routing.reviewer_isolation import (
 )
 from model_routing.reviewer_isolation import plan_reviewer
 from model_routing.secrets import SecretsError, load_router_secrets
-from agents.dev.tier_s_contract import child_env
 from orchestration.agent_sandbox import (
     cleanup_sandbox_scratch,
     plan_agent,
+    plan_host_agent,
     user_instruction_masks,
 )
 from orchestration.role_claude import (
@@ -468,17 +468,19 @@ class ProcessExecutor:
         if host_run and not self._host_noted:
             self._host_noted = True
             logger.warning(
-                "Builder runs on the host user (dev.isolation: host): "
-                "no bwrap fence for %s", workdir)
+                "Builder runs host-confined (dev.isolation: host) in %s",
+                workdir)
         trace_dir: Path | None = None
         trace_ops: list[list[str]] = []
-        if str(spec.get("provider") or "") == "claude" and not hardened \
-                and not host_run:
+        if str(spec.get("provider") or "") == "claude" and not hardened:
             trace_dir, trace_ops = session_trace.prepare(
                 workdir, Path(os.path.expanduser("~")))
         try:
             if host_run:
-                plan = None
+                plan = plan_host_agent(argv=full_argv, workspace=workdir,
+                                       base=os.environ, overlay=overlay,
+                                       home_file_overlays=file_overlays,
+                                       extra_ops=trace_ops)
             elif hardened:
                 plan = plan_reviewer(
                     argv=full_argv, workspace=workdir, base=os.environ,
@@ -509,14 +511,9 @@ class ProcessExecutor:
             if badge is not None and self._badge_provider is not None:
                 await self._badge_provider.revoke(badge)
             raise
-        if plan is not None:
-            run_argv = plan.argv
-            run_cwd = plan.cwd
-            run_env = plan.env
-        else:
-            run_argv = list(full_argv)
-            run_cwd = str(workdir)
-            run_env = child_env(os.environ, overlay)
+        run_argv = plan.argv
+        run_cwd = plan.cwd
+        run_env = plan.env
         started = time.monotonic()
         process = None
         try:

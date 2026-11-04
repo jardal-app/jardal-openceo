@@ -11,6 +11,11 @@ number of attempts; the executor-side scheduler lives in
 No polling: the due time is written with the park and a single timer
 wakes for the nearest one. The planner still runs only through
 ``plan_objective`` (spend gate, plan flights and CEO review untouched).
+
+A recovery ticket that merged a fix parks its objective as
+``recovery_deploy`` (TASK-2026-00483): the mission resumes only once the
+service restarted with the fix live, or on the running code after a
+bounded wait, never on the code that parked it.
 """
 from __future__ import annotations
 
@@ -19,7 +24,10 @@ from typing import Any, Mapping
 
 __all__ = [
     "DEFAULT_RECOVERY",
+    "DEPLOY_REASON",
     "RECOVERABLE_REASONS",
+    "deploy_park_patch",
+    "deploy_retry_due",
     "park_reason",
     "recovery_decision",
     "recovery_park_patch",
@@ -54,7 +62,17 @@ DEFAULT_RECOVERY: dict[str, Any] = {
     # A recovery ticket that fails gets one more with the failure evidence;
     # past this the objective stays parked for the CEO/Owner signal.
     "max_tickets": 2,
+    # A merged recovery fix is made live by restarting the service while
+    # it is idle; the objective waits for that restart, checking every
+    # ``deploy_retry_minutes``, and resumes on the running code after
+    # ``deploy_max_wait_minutes`` rather than wait forever.
+    "deploy_on_close": True,
+    "deploy_retry_minutes": 10,
+    "deploy_max_wait_minutes": 120,
 }
+
+#: Park reason while a merged recovery fix waits for its restart.
+DEPLOY_REASON = "recovery_deploy"
 
 #: Hard cap for the scheduler sleep, and the minimum wake after a due
 #: instant already passed (never a busy loop).
@@ -113,7 +131,15 @@ def recovery_config(objectives_cfg: Mapping[str, Any] | None) -> dict[str, Any]:
         cfg["ticket_project"] = DEFAULT_RECOVERY["ticket_project"]
     if cfg.get("ticket_tier") not in ("tier_a", "tier_b", "tier_c"):
         cfg["ticket_tier"] = DEFAULT_RECOVERY["ticket_tier"]
+    for key, low, high in (("max_tickets", 0, 10),
+                           ("deploy_retry_minutes", 1, 240),
+                           ("deploy_max_wait_minutes", 1, 24 * 60)):
+        try:
+            cfg[key] = max(low, min(high, int(cfg[key])))
+        except (TypeError, ValueError):
+            cfg[key] = DEFAULT_RECOVERY[key]
     cfg["enabled"] = bool(cfg.get("enabled", True))
+    cfg["deploy_on_close"] = bool(cfg.get("deploy_on_close", True))
     return cfg
 
 
@@ -155,6 +181,10 @@ def recovery_park_patch(
         "last_park_at": _iso(moment),
         "last_attempt_at": existing.get("last_attempt_at"),
         "ticket_id": existing.get("ticket_id"),
+        # The ticket budget spans the objective's life: dropping the round
+        # here reopened round 1 forever (TASK-2026-00483).
+        "ticket_round": int(existing.get("ticket_round") or 0),
+        "ticket_at": existing.get("ticket_at"),
     }
     if existing.get("exhausted"):
         return {"recovery": {**base, "exhausted": True, "due_at": None}}
@@ -185,6 +215,70 @@ def recovery_initial_patch(
         objectives_cfg, now)
 
 
+def deploy_park_patch(
+    objective: Mapping[str, Any],
+    ticket_id: str,
+    objectives_cfg: Mapping[str, Any] | None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Park that holds the objective until its merged fix is live.
+
+    Due at once (the timer deploys if the service is idle); a fresh retry
+    budget, since the fix changed what the next plan runs on.
+    """
+    cfg = recovery_config(objectives_cfg)
+    moment = _now(now)
+    existing = objective.get("recovery")
+    existing = dict(existing) if isinstance(existing, Mapping) else {}
+    deadline = moment + timedelta(minutes=int(cfg["deploy_max_wait_minutes"]))
+    return {
+        "status": "waiting",
+        "waiting_reason": f"{DEPLOY_REASON}: {ticket_id}",
+        "recovery": {
+            **existing,
+            "attempts": 0, "exhausted": False, "last_reason": None,
+            "due_at": _iso(moment),
+            "deploy": {"ticket_id": ticket_id,
+                       "requested_at": _iso(moment),
+                       "deadline": _iso(deadline)},
+        },
+    }
+
+
+def deploy_retry_due(objectives_cfg: Mapping[str, Any] | None,
+                     now: datetime | None = None) -> str:
+    """Next idle check of a deploy park, as a persisted ISO instant."""
+    cfg = recovery_config(objectives_cfg)
+    return _iso(_now(now) + timedelta(
+        minutes=int(cfg["deploy_retry_minutes"])))
+
+
+def _deploy_decision(
+    recovery: Mapping[str, Any],
+    moment: datetime,
+    booted_at: datetime | None,
+    idle: bool,
+) -> dict[str, Any]:
+    deploy = recovery.get("deploy")
+    deploy = dict(deploy) if isinstance(deploy, Mapping) else {}
+    requested = parse_due(deploy.get("requested_at"))
+    if requested is None:
+        return {"action": "resume", "reason": "deploy record missing"}
+    if booted_at is not None and booted_at > requested:
+        return {"action": "resume",
+                "reason": "service restarted after the fix merged"}
+    due = parse_due(recovery.get("due_at"))
+    if due is not None and moment < due:
+        return {"action": "none", "reason": "not due"}
+    deadline = parse_due(deploy.get("deadline"))
+    if deadline is not None and moment >= deadline:
+        return {"action": "resume",
+                "reason": "deploy wait expired: resuming on the running code"}
+    if idle:
+        return {"action": "deploy", "reason": "service idle"}
+    return {"action": "defer", "reason": "service busy"}
+
+
 def recovery_decision(
     objective: Mapping[str, Any],
     active_children: int,
@@ -192,8 +286,15 @@ def recovery_decision(
     *,
     ticket_open: bool = False,
     now: datetime | None = None,
+    booted_at: datetime | None = None,
+    idle: bool = False,
 ) -> dict[str, Any]:
-    """``none`` | ``retry`` | ``ticket`` for one waiting objective."""
+    """One waiting objective: ``none`` | ``retry`` | ``ticket``, and for a
+    ``recovery_deploy`` park ``deploy`` | ``defer`` | ``resume``.
+
+    ``booted_at`` is this process's start and ``idle`` whether a restart
+    would kill nothing in flight; only deploy parks read them.
+    """
     cfg = recovery_config(objectives_cfg)
     if not cfg["enabled"]:
         return {"action": "none", "reason": "recovery disabled"}
@@ -203,14 +304,19 @@ def recovery_decision(
             and objective.get("pending_plan"):
         return {"action": "none", "reason": "spend approval pending"}
     reason = park_reason(objective)
-    if reason not in RECOVERABLE_REASONS:
-        return {"action": "none", "reason": f"park {reason or '<empty>'}"}
     recovery = objective.get("recovery")
     recovery = dict(recovery) if isinstance(recovery, Mapping) else {}
+    if reason == DEPLOY_REASON:
+        return _deploy_decision(recovery, _now(now), booted_at, idle)
+    if reason not in RECOVERABLE_REASONS:
+        return {"action": "none", "reason": f"park {reason or '<empty>'}"}
     attempts = int(recovery.get("attempts") or 0)
     if recovery.get("exhausted") or attempts >= int(cfg["max_attempts"]):
         if ticket_open:
             return {"action": "none", "reason": "recovery ticket open"}
+        if int(recovery.get("ticket_round") or 0) >= int(cfg["max_tickets"]):
+            return {"action": "none",
+                    "reason": "recovery ticket budget spent"}
         return {"action": "ticket", "reason": reason}
     if active_children > 0:
         return {"action": "none", "reason": "children still active"}
@@ -231,7 +337,7 @@ def recovery_seconds_to_next(
     for objective in objectives:
         if str(objective.get("status") or "") != "waiting":
             continue
-        if park_reason(objective) not in RECOVERABLE_REASONS:
+        if park_reason(objective) not in RECOVERABLE_REASONS | {DEPLOY_REASON}:
             continue
         due = parse_due((objective.get("recovery") or {}).get("due_at")) \
             if isinstance(objective.get("recovery"), Mapping) else None

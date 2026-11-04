@@ -124,8 +124,6 @@ from rate_monitor import RateMonitor
 from settings import Settings
 from state import CodingTool, TaskStatus
 
-from .tier_s_contract import child_env
-
 logger = logging.getLogger(__name__)
 
 #: Typed wait reason when the project's config is invalid (Tier S design §15).
@@ -807,6 +805,23 @@ class DevSessionManager:
             stderr=subprocess.PIPE, text=True, errors="replace",
             timeout=timeout)
 
+    @classmethod
+    def _foreign_changes_branch(cls, repo: Path) -> str:
+        """Branch holding uncommitted tracked changes not made by a ticket.
+
+        ``""`` when the tree is clean, unreadable, or on a ``tier/`` branch
+        (this orchestrator's own interrupted run keeps its resume path).
+        """
+        head = cls._simple_git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+        branch = head.stdout.strip() if head.returncode == 0 else ""
+        if branch.startswith("tier/"):
+            return ""
+        status = cls._simple_git(repo, "--no-optional-locks", "status",
+                                 "--porcelain", "--untracked-files=no")
+        if status.returncode != 0 or not status.stdout.strip():
+            return ""
+        return branch or "HEAD"
+
     def _keep_candidate(
         self, branch: _SimpleBranch, kind: str,
     ) -> dict[str, Any] | None:
@@ -877,6 +892,17 @@ class DevSessionManager:
     ) -> "_SimpleBranch | DevExecutionOutput":
         """Open the ticket work branch (+ baseline gates, §10/§12)."""
         dev_cfg = project_config.get("dev", {}) or {}
+        foreign = self._foreign_changes_branch(repo)
+        if foreign:
+            # Simple tiers branch in place: someone else's uncommitted work
+            # would ride into this ticket's branch (TASK-2026-00483).
+            return DevExecutionOutput(
+                status=TaskStatus.WAITING,
+                waiting_reason=(f"{REPO_BUSY_REASON}: {repo} has uncommitted "
+                                f"changes on {foreign}"),
+                resume_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+                params=task.get("params") if isinstance(task.get("params"), dict) else None,
+            )
         checkpoint = (task.get("params") or {}).get("dev_checkpoint")
         if isinstance(checkpoint, dict):
             return self._restore_simple_checkpoint(repo, checkpoint, task)
@@ -3668,13 +3694,12 @@ class DevSessionManager:
         home_file_overlays: dict[str, bytes] | None = None,
         extra_read_roots: Sequence[str | Path] = (),
     ) -> "ProcessRunResult":
-        plan = None
-        if sandbox:
-            from orchestration.agent_sandbox import (
-                cleanup_sandbox_scratch, plan_agent,
-            )
-            from research.runtimes.base import IsolationUnavailable
-            try:
+        from orchestration.agent_sandbox import (
+            cleanup_sandbox_scratch, plan_agent, plan_host_agent,
+        )
+        from research.runtimes.base import IsolationUnavailable
+        try:
+            if sandbox:
                 plan = plan_agent(
                     argv=[str(token) for token in command],
                     workspace=cwd or os.getcwd(),
@@ -3683,9 +3708,15 @@ class DevSessionManager:
                                  else [str(command[0])] if command else []),
                     home_file_overlays=home_file_overlays,
                     extra_read_roots=extra_read_roots)
-            except (IsolationUnavailable, ValueError, OSError) as exc:
-                return ProcessRunResult(
-                    False, "", f"sandbox refused: {exc}", None)
+            else:
+                plan = plan_host_agent(
+                    argv=[str(token) for token in command],
+                    workspace=cwd or os.getcwd(),
+                    base=os.environ, overlay=env,
+                    home_file_overlays=home_file_overlays)
+        except (IsolationUnavailable, ValueError, OSError) as exc:
+            return ProcessRunResult(
+                False, "", f"sandbox refused: {exc}", None)
         process = None
         try:
             stdin_target = (
@@ -3693,21 +3724,13 @@ class DevSessionManager:
                 if stdin_payload is not None
                 else asyncio.subprocess.DEVNULL
             )
-            if plan is None:
-                run_argv: list[str] = command
-                run_cwd: str | None = cwd
-                run_env: dict[str, str] | None = child_env(os.environ, env)
-            else:
-                run_argv = plan.argv
-                run_cwd = plan.cwd
-                run_env = plan.env
             process = await asyncio.create_subprocess_exec(
-                *run_argv,
+                *plan.argv,
                 stdin=stdin_target,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=run_cwd,
-                env=run_env,
+                cwd=plan.cwd,
+                env=plan.env,
             )
             input_bytes = None if stdin_payload is None else stdin_payload.encode("utf-8")
             stdout, stderr = await asyncio.wait_for(
@@ -3728,8 +3751,7 @@ class DevSessionManager:
                 except ProcessLookupError:
                     pass
                 await process.wait()
-            if plan is not None:
-                cleanup_sandbox_scratch(cwd or os.getcwd())
+            cleanup_sandbox_scratch(cwd or os.getcwd())
 
         output = (stdout or b"").decode("utf-8", errors="replace").strip()
         err = (stderr or b"").decode("utf-8", errors="replace").strip()

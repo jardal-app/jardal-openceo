@@ -10,6 +10,7 @@ promotion (F5) — comes through :class:`ObjectiveService`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from catalog import (
 )
 from objectives import missions as missions_mod
 from objectives import playbooks as playbooks_mod
+from objectives import recovery_deploy as deploy_mod
 from objectives import recovery_policy as recovery_mod
 from objectives.delivery_verification import generic_agent_verifiers
 from objectives.money_guide import project_money_routing
@@ -204,6 +206,9 @@ class ObjectiveService:
         self._rate_monitor = rate_monitor
         self._ceo_wake: Any | None = None
         self._recovery_wake: Any | None = None
+        # This process's code is what a deploy park waits for: a park
+        # requested before this instant is live now (TASK-2026-00483).
+        self._booted_at = datetime.now(timezone.utc)
 
     def set_recovery_wake(self, wake: Any | None) -> None:
         """Inject the recovery scheduler wake (TASK-2026-00481)."""
@@ -211,6 +216,11 @@ class ObjectiveService:
         # Dev-flow envs are built outside this service; the single timer
         # registers process-wide so their parks also wake it.
         engine_mod.RECOVERY_WAKE = wake
+
+    def wake_recovery(self) -> None:
+        """Nudge the recovery timer (a recovery ticket ended)."""
+        if self._recovery_wake is not None:
+            self._recovery_wake()
 
     def set_ceo_wake(self, wake: Any | None) -> None:
         """Inject the CEO loop wake (objective parked/closed events).
@@ -647,33 +657,60 @@ class ObjectiveService:
         """
         retried: list[str] = []
         ticketed: list[str] = []
+        deployed: list[str] = []
         next_due: Any = None
+        idle: bool | None = None
         candidates = await self.recovery_candidates()
         for candidate in candidates:
             objective = candidate["objective"]
+            objective_id = candidate["objective_id"]
+            if idle is None and recovery_mod.park_reason(objective) \
+                    == recovery_mod.DEPLOY_REASON:
+                idle = await self._deploy_idle()
             decision = recovery_mod.recovery_decision(
                 objective,
                 candidate["active_children"],
                 candidate["objectives_cfg"],
                 ticket_open=candidate["ticket_open"],
+                booted_at=self._booted_at,
+                idle=bool(idle),
             )
             action = str(decision.get("action") or "none")
-            if action == "retry":
-                result = await self.recover_objective(candidate["objective_id"])
+            due_after: Any = None
+            if action in ("retry", "resume"):
+                result = await self.recover_objective(objective_id)
                 if result.get("ok"):
-                    retried.append(candidate["objective_id"])
+                    retried.append(objective_id)
             elif action == "ticket":
-                result = await self.open_recovery_ticket(
-                    candidate["objective_id"])
+                result = await self.open_recovery_ticket(objective_id)
                 if result.get("ok"):
-                    ticketed.append(candidate["objective_id"])
+                    ticketed.append(objective_id)
+            elif action in ("deploy", "defer"):
+                spawned = action == "deploy" and await asyncio.to_thread(
+                    deploy_mod.spawn_service_restart)
+                # A restart that never came, or a busy service, checks
+                # again later; the boot after a real restart resumes it.
+                due_after = recovery_mod.deploy_retry_due(
+                    candidate["objectives_cfg"])
+                await self._repo.patch_objective(objective_id, {"recovery": {
+                    **dict(objective.get("recovery") or {}),
+                    "due_at": due_after}})
+                if spawned:
+                    deployed.append(objective_id)
+                    logger.warning(
+                        "Recovery deploy: restarting the idle service so "
+                        "objective %s resumes on its merged fix",
+                        objective_id)
             elif str(decision.get("reason") or "") == "not due":
-                due = (objective.get("recovery") or {}).get("due_at") \
+                due_after = (objective.get("recovery") or {}).get("due_at") \
                     if isinstance(objective.get("recovery"), Mapping) else None
-                parsed = recovery_mod.parse_due(due)
-                if parsed is not None and (next_due is None
-                                           or parsed < next_due):
-                    next_due = parsed
+            parsed = recovery_mod.parse_due(due_after)
+            if parsed is not None and (next_due is None or parsed < next_due):
+                next_due = parsed
+            if deployed:
+                # This process ends in seconds: starting a planner or a
+                # second restart now would only be killed mid-flight.
+                break
         now = datetime.now(timezone.utc)
         if next_due is None:
             delay = recovery_mod.MAX_SLEEP_SECONDS
@@ -682,10 +719,28 @@ class ObjectiveService:
             delay = max(recovery_mod.MIN_SLEEP_SECONDS,
                         min(recovery_mod.MAX_SLEEP_SECONDS, delay))
         return {"ok": True, "retried": retried, "ticketed": ticketed,
-                "next_seconds": delay}
+                "deployed": deployed, "next_seconds": delay}
+
+    async def _deploy_idle(self) -> bool:
+        """True when a restart kills no run and deploys a clean ``main``."""
+        if self._repo is None or engine_mod.planning_in_flight():
+            return False
+        try:
+            busy = await self._repo.tasks.count_documents({
+                "status": "in_progress", "autorun": {"$ne": False}})
+        except Exception:  # noqa: BLE001 - an unreadable count never restarts
+            logger.warning("recovery deploy idle check failed", exc_info=True)
+            return False
+        if busy:
+            return False
+        return await asyncio.to_thread(deploy_mod.live_checkout_ready)
 
     async def recover_objective(self, objective_id: str) -> dict[str, Any]:
-        """Claim one due park and replan it (single winner, never twice)."""
+        """Claim one due park and replan it (single winner, never twice).
+
+        A retry spends an attempt; a deploy park resuming on its live fix
+        (or on the running code after the wait) does not.
+        """
         if self._repo is None:
             return {"ok": False, "reason": "no-store"}
         objective = await self._repo.get_objective(objective_id)
@@ -701,15 +756,18 @@ class ObjectiveService:
             children = []
         decision = recovery_mod.recovery_decision(
             objective, len(engine_mod._brake_active_children(children)), cfg,
-            ticket_open=await self._recovery_ticket_open(objective_id))
-        if decision.get("action") != "retry":
+            ticket_open=await self._recovery_ticket_open(objective_id),
+            booted_at=self._booted_at)
+        action = decision.get("action")
+        if action not in ("retry", "resume"):
             return {"ok": False, "reason": str(decision.get("reason") or "")}
         recovery = objective.get("recovery")
         due_at = (recovery or {}).get("due_at") \
             if isinstance(recovery, Mapping) else None
         store = (MongoObjectiveStore(self._repo) if self._repo is not None
                  else InMemoryObjectiveStore())
-        claimed = await store.claim_recovery(objective_id, due_at)
+        claimed = await store.claim_recovery(
+            objective_id, due_at, count_attempt=action == "retry")
         if claimed is None:
             return {"ok": False, "reason": "claim-lost"}
         env = self.env_for(project)
@@ -722,10 +780,10 @@ class ObjectiveService:
                 f"automatic recovery planning failed: {exc}")
             return {"ok": False, "reason": "plan-error",
                     "detail": str(exc)[:300]}
-        logger.info("Objective %s recovered automatically (attempt %s)",
-                    objective_id, (claimed.get("recovery") or {}).get(
-                        "attempts"))
-        return {"ok": True, "action": "retried", "plan": plan}
+        logger.info("Objective %s recovered automatically (%s: %s)",
+                    objective_id, action, decision.get("reason"))
+        return {"ok": True, "action": "retried" if action == "retry"
+                else "resumed", "plan": plan}
 
     async def open_recovery_ticket(self, objective_id: str) -> dict[str, Any]:
         """Create the musej recovery ticket once the retry budget is spent."""
@@ -761,8 +819,15 @@ class ObjectiveService:
             logger.warning("Recovery ticket budget spent for objective %s",
                            objective_id)
             return {"ok": False, "reason": "ticket-budget"}
+        previous: Mapping[str, Any] | None = None
+        previous_id = str(recovery.get("ticket_id") or "")
+        if previous_id and round_no > 1:
+            try:
+                previous = await self._repo.get_task(previous_id)
+            except Exception:  # noqa: BLE001 - the evidence is optional
+                previous = None
         description = self._recovery_ticket_description(
-            objective, project, children, recovery)
+            objective, project, children, recovery, previous)
         payload = {
             "source": "spillover",
             "source_id": f"objective-recovery:{objective_id}:{round_no}",
@@ -822,9 +887,19 @@ class ObjectiveService:
     def _recovery_ticket_description(
         self, objective: Mapping[str, Any], project: str,
         children: list[Mapping[str, Any]], recovery: Mapping[str, Any],
+        previous: Mapping[str, Any] | None = None,
     ) -> str:
-        gaps = objective.get("capability_gap") or {}
-        gap_text = str(gaps.get("summary") or "")[:900]             if isinstance(gaps, Mapping) else ""
+        gaps = objective.get("capability_gap")
+        gap_text = (str(gaps.get("summary") or "")[:900]
+                    if isinstance(gaps, Mapping) else "")
+        previous_text = ""
+        if isinstance(previous, Mapping) and previous:
+            outcome = (previous.get("error") or previous.get("waiting_reason")
+                       or previous.get("last_response_summary") or "")
+            previous_text = (
+                f"RONDA DE RECUPERACIÓN ANTERIOR: {previous.get('task_id')} "
+                f"[{previous.get('status')}] {str(outcome)[:400]}\n"
+                "No repitas ese enfoque: parte de su HANDOFF y de su fallo.")
         failed = [item for item in children
                   if str(item.get("status")) in ("failed", "waiting")]
         evidence: list[str] = []
@@ -857,6 +932,7 @@ ESTADO: {objective.get('status')} — {str(objective.get('waiting_reason') or ''
 INTENTOS AUTOMÁTICOS: {recovery.get('attempts')} (agotados)
 {('GAP DECLARADO: ' + gap_text) if gap_text else ''}
 {return_text}
+{previous_text}
 
 TICKETS FALLIDOS O EN ESPERA:
 {chr(10).join(evidence) if evidence else '- (sin hijos fallidos)'}
@@ -881,6 +957,7 @@ ACEPTACIÓN
 - Diagnóstico explícito y corrección (o propuesta exacta si el fix vive en
   el repo de la misión).
 - Tests dirigidos en verde y HANDOFF completo."""
+
     async def plan_return(
         self,
         objective_id: str,

@@ -34,9 +34,11 @@ _SANDBOX_FACTS = (
 
 _HOST_FACTS = (
     "Corres en el host con el usuario del orquestador: tienes el toolchain "
-    "del proyecto, Docker y los stores/cachés del host. El orquestador "
-    "ejecuta los gates al final; no repitas la suite global si el ticket "
-    "no lo pide."
+    "del proyecto, Docker y los stores/cachés del host. No hay sudo ni "
+    "instalación de paquetes del sistema (el kernel lo bloquea): las "
+    "dependencias van en el repo con su lockfile, nunca globales (npm -g, "
+    "pip --user, bun add -g). El orquestador ejecuta los gates al final; "
+    "no repitas la suite global si el ticket no lo pide."
 )
 
 _MOTIVO_CHARS = 600

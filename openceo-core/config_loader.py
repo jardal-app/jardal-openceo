@@ -712,11 +712,12 @@ class ConfigLoader:
                     "ticket_tier": "tier_c",
                     "ticket_max_open": 1,
                     "max_tickets": 2,
-                    # A merged recovery fix is deployed by restarting the
-                    # canonical service once no ticket is in progress.
+                    # A merged recovery fix parks its objective until the
+                    # idle service restarts with it (TASK-2026-00483); past
+                    # the max wait it resumes on the running code.
                     "deploy_on_close": True,
-                    "deploy_grace_seconds": 5,
-                    "deploy_retry_seconds": [60, 300],
+                    "deploy_retry_minutes": 10,
+                    "deploy_max_wait_minutes": 120,
                 },
             },
             # Autonomous company CEO (autonomy epic TASK-2026-00110,
