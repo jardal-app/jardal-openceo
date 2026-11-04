@@ -1004,6 +1004,7 @@ class TaskService:
                 logger.exception(
                     "Jardal ERP rechazo la transicion %s -> %s", item["name"], item["status"]
                 )
+                await self._record_status_outcome(item, pushed=False)
                 return
             else:
                 await self._record_status_outcome(item, pushed=True)
@@ -3465,7 +3466,8 @@ class TaskService:
                     # El ticket existe pero una transicion no se pudo empujar.
                     status = str(task.get("status") or "")
                     pending_status = str(mirror.get("pending_status") or "").strip()
-                    if queue is not None and pending_status:
+                    pushed = str(mirror.get("status_pushed") or "")
+                    if queue is not None and (pending_status or status != pushed):
                         item = {
                             "task_id": task.get("task_id"),
                             "name": mirror["name"],

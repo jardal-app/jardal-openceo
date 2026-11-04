@@ -924,7 +924,10 @@ class MongoRepository:
     async def list_tasks_needing_jardal_erp_sync(self, limit: int = 200) -> list[dict[str, Any]]:
         """Tickets con el enlace de negocio roto, para reconciliar al arrancar.
 
-        Solo mira tickets donde la integracion **ya intento** enlazar (existe
+        Casa nombre sin registrar, `pending_status` real y estado actual nunca
+        empujado (`status != status_pushed`: el push se perdio entre el cambio
+        y el envio, p. ej. un restart vacio la cola en memoria). Solo mira
+        tickets donde la integracion **ya intento** enlazar (existe
         `params._mirrors.erpnext`). NO hace backfill de los tickets historicos que nunca
         pasaron por Jardal ERP: eso inventaria registros de negocio hacia atras, que es justo
         lo que el contrato prohibe. Es reparacion de intentos propios, no migracion.
@@ -939,11 +942,15 @@ class MongoRepository:
             "$or": [
                 {"params._mirrors.business": {"$exists": True}, "$or": [
                     {"params._mirrors.business.name": {"$in": [None, ""]}},
-                    {"params._mirrors.business.pending_status": {"$ne": None}},
+                    {"params._mirrors.business.pending_status": {"$exists": True, "$nin": [None, ""]}},
+                    {"params._mirrors.business.name": {"$nin": [None, ""]},
+                     "$expr": {"$ne": ["$status", "$params._mirrors.business.status_pushed"]}},
                 ]},
                 {"params._mirrors.business": {"$exists": False}, "params._mirrors.erpnext": {"$exists": True}, "$or": [
                     {"params._mirrors.erpnext.name": {"$in": [None, ""]}},
-                    {"params._mirrors.erpnext.pending_status": {"$ne": None}},
+                    {"params._mirrors.erpnext.pending_status": {"$exists": True, "$nin": [None, ""]}},
+                    {"params._mirrors.erpnext.name": {"$nin": [None, ""]},
+                     "$expr": {"$ne": ["$status", "$params._mirrors.erpnext.status_pushed"]}},
                 ]},
             ],
             **mirror_exclusion_filter(),
