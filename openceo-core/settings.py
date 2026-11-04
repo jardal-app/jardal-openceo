@@ -26,7 +26,7 @@ class Settings(BaseSettings):
 
     # Dev coding providers
     CODEX_CLI_PATH: str = "/home/develop/.npm-global/bin/codex"
-    CODEXJ_CLI_PATH: str = "/home/develop/.local/bin/codexj"
+    CODEX_ACCOUNT_CLI_PATH: str = "/home/develop/.local/bin/codexf"
     CLAUDE_CODE_PATH: str = "clauded"
     GEMINI_CLI_PATH: str = "/home/develop/.local/bin/agyd"
     OPENCODE_CLI_PATH: str = "/home/develop/.opencode/bin/opencode"

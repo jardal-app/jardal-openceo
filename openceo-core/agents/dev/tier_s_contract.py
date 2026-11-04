@@ -124,10 +124,11 @@ def review_quorum(
 ) -> bool:
     """Two valid reports from two distinct model families.
 
-    Tier S design §7 (F0): codexj is out of code review, so any two pool
-    slots from distinct families form a quorum. ``families`` maps reviewer
-    label to its declared family from the global pool. Fail-closed: a
-    report whose label has no known family never counts toward quorum.
+    Tier S design §7 (F0): the codex plan-reviewer is out of code review,
+    so any two pool slots from distinct families form a quorum.
+    ``families`` maps reviewer label to its declared family from the
+    global pool. Fail-closed: a report whose label has no known family
+    never counts toward quorum.
     ``extra`` holds self-review slots (design v2 §7.3, e.g. ``muse-review``
     on a muse-built ticket): their reports arrive as information but never
     count toward quorum.
@@ -154,7 +155,7 @@ def review_quorum(
 
 @dataclass(frozen=True)
 class PlanObservation:
-    """One numbered codexj observation from PLAN_REVIEW.md."""
+    """One numbered plan-reviewer observation from PLAN_REVIEW.md."""
 
     id: int
     severity: str  # CRITICAL | WARN

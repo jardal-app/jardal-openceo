@@ -3048,7 +3048,7 @@ class DevSessionManager:
             )
         if tool == CodingTool.TIER_B:
             tier_cfg = tiers_cfg.get("tier_b") or {}
-            account = str(tier_cfg.get("account") or "codexj")
+            account = str(tier_cfg.get("account") or "codexf")
             provider_cfg = providers.get("codex", {}) or {}
             argv = self._ensure_codex_exec(self._with_model_args(
                 [account, "exec", "--ephemeral", "-"],

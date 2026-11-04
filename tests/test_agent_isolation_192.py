@@ -721,7 +721,7 @@ class RateMonitorFenceTests(unittest.TestCase):
         from settings import Settings
         import rate_monitor
         monitor = rate_monitor.RateMonitor(Settings(
-            CODEXJ_CLI_PATH="/bin/echo-codex",
+            CODEX_ACCOUNT_CLI_PATH="/bin/echo-codex",
             CLAUDE_CODE_PATH="/bin/echo-claude",
             MUSE_CLI_PATH="/bin/echo-muse"))
         monitor._server = server

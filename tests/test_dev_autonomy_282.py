@@ -234,7 +234,7 @@ def test_expired_qwen_slots_removed():
     slots = {s["label"]: s for s in config["review"]["reviewers"]}
     assert "qwen-max" not in slots and "qwen-glm" not in slots
     assert not [label for label in slots if label.startswith("reserve-")]
-    assert config["dev"]["providers"]["codex"]["command"][0].endswith("codexj")
+    assert config["dev"]["providers"]["codex"]["command"][0].endswith("codexf")
     service = DevSessionService.__new__(DevSessionService)
     with pytest.raises(ValueError, match="disabled"):
         service._resolve_command(DevProvider.GLM, config)

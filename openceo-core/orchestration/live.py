@@ -665,7 +665,7 @@ class RateMonitorQuota:
 
     #: Account → monitored provider. The claude monitor watches the default
     #: account (clauded), so claudej gates are approximate until the monitor
-    #: measures per account (§20-9); codex already measures codexj.
+    #: measures per account (§20-9); codex measures the spent account (codexf).
     ACCOUNT_PROVIDERS = {
         "claudej": "claude",
         "clauded": "claude",

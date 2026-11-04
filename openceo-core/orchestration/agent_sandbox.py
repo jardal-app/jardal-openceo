@@ -68,7 +68,8 @@ _HOME_DIRS_RO = (
 _HOME_FILES_RO = (
     ".claude.json",
     ".local/bin/muse", ".local/bin/musej",
-    ".local/bin/codexj", ".local/bin/claudej", ".local/bin/clauded",
+    ".local/bin/codexf", ".local/bin/codexj",
+    ".local/bin/claudej", ".local/bin/clauded",
     ".local/bin/claudep", ".local/bin/qwen",
     ".local/bin/agyd", ".local/bin/agyj", ".local/bin/agy2",
     ".local/bin/agy",
@@ -132,7 +133,9 @@ _GEMINI_BINARY_SUBDIRS = {"agyj": ".gemini-j", "agy2": ".gemini-2"}
 #: codex wrapper → its CODEX_HOME, plus the entries a run reads from it.
 #: Read-write: codex opens installation_id O_RDWR|O_CREAT at boot (EROFS kills
 #: its in-process app-server) and rewrites auth.json on token refresh.
-_CODEX_BINARY_SUBDIRS = {"codexj": ".codex-j"}
+#: ``~/.codex`` is also bound read-only with the home; codexf's per-run
+#: tmpfs over it shadows that bind (TASK-2026-00475).
+_CODEX_BINARY_SUBDIRS = {"codexf": ".codex", "codexj": ".codex-j"}
 _CODEX_READ_ENTRIES = ("config.toml", "version.json", "models_cache.json",
                        "plugins")
 _CODEX_WRITE_ENTRIES = ("installation_id", "auth.json")

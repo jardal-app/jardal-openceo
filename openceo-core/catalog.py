@@ -116,7 +116,7 @@ ENGINE_ACCOUNTS: dict[str, tuple[str, ...]] = {
     "muse-code": ("muse",),
     "claude-code": ("claudej",),
     "opencode": ("opencode",),
-    "codex-cli": ("codexj",),
+    "codex-cli": ("codexf",),  # codexj inactive since 2026-11-04 (TASK-2026-00475)
     "agy": ("agyd", "agyj", "agy2"),
 }
 

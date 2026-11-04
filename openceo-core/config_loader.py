@@ -473,7 +473,8 @@ class ConfigLoader:
                     # stay interchangeable via `account:` (+ command).
                     "roles": {
                         "planner": {"provider": "claude", "account": "claudej", "label": "claudej", "model": "opus", "effort": "max", "active": True, "command": ["claudej"], "headless_args": ["--print"], "prompt_via": "argv"},
-                        "plan-reviewer": {"provider": "codex", "account": "codexj", "label": "codexj", "model": "gpt-6.1-sol", "effort": "xhigh", "active": True, "command": ["codexj"], "headless_args": ["exec", "--ephemeral", "-"], "prompt_via": "stdin"},
+                        # codexj inactive: its subscription lapsed to free on 2026-11-02 (TASK-2026-00475).
+                        "plan-reviewer": {"provider": "codex", "account": "codexf", "label": "codexf", "model": "gpt-6.1-sol", "effort": "xhigh", "active": True, "command": ["codexf"], "headless_args": ["exec", "--ephemeral", "-"], "prompt_via": "stdin"},
                         "builder": {"provider": "muse", "account": "muse", "label": "muse", "model": "muse-spark-1.3-contributor", "effort": "max", "active": True, "command": ["musej", "exec", "--model", "muse-spark-1.3-contributor"], "prompt_via": "argv", "role_profile": "dev"},
                     },
                     # Review machinery (pool, rounds, inbox, fix tiers) and the
@@ -490,7 +491,7 @@ class ConfigLoader:
                     "tier_a": {"account": "claudej", "model": "opusplan", "effort": "xhigh",
                                "model_args": ["--model", "opusplan", "--effort", "xhigh"],
                                "role_profile": "dev"},
-                    "tier_b": {"account": "codexj", "model": "gpt-6.1-sol", "effort": "xhigh",
+                    "tier_b": {"account": "codexf", "model": "gpt-6.1-sol", "effort": "xhigh",
                                "model_args": [],
                                "role_profile": "dev"},
                     "tier_c": {"chain": ["muse", "dsh", "claudep"],

@@ -100,7 +100,7 @@ class ValidateProjectTests(unittest.TestCase):
                          "claudej")
         tiers = dev["tiers"]
         self.assertEqual(tiers["tier_a"]["account"], "claudej")
-        self.assertEqual(tiers["tier_b"]["account"], "codexj")
+        self.assertEqual(tiers["tier_b"]["account"], "codexf")
         self.assertEqual(tiers["tier_c"]["chain"], ["muse", "dsh", "claudep"])
 
     def test_tiers_section_is_rejected(self) -> None:
@@ -290,8 +290,8 @@ class LooseSessionDefaultsTests(unittest.TestCase):
 
     Product decision (2026-10-06, supersedes the F0 bare-muse default):
     every checked-in project resolves AUTO to musej (full access, like
-    codexj/claudej), and the explicit codex/claude entries run the
-    owner's account wrappers. codexj stays Tier S-only. Plain muse is
+    codexf/claudej), and the explicit codex/claude entries run the
+    owner's account wrappers. codexf stays Tier S-only. Plain muse is
     reserved for isolated sessions (read-only reviewers).
     """
 

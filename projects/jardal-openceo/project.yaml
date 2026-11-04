@@ -42,7 +42,7 @@ dev:
 
   providers:
     codex:
-      command: ["/home/develop/.local/bin/codexj"]
+      command: ["/home/develop/.local/bin/codexf"]
       cwd: /home/develop/development/Jardal/jardal-openceo
       env: {}
 

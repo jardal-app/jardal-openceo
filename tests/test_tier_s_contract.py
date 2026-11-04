@@ -137,14 +137,14 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("--yolo", command, name)
             reviewer = roles["plan-reviewer"]
             self.assertTrue(
-                any("codexj" in str(part) for part in reviewer["command"]),
-                f"{name}: plan-reviewer must run codexj",
+                any("codexf" in str(part) for part in reviewer["command"]),
+                f"{name}: plan-reviewer must run codexf",
             )
         cfg = loader.load_project("jardal-openceo")
         tier_s = cfg["dev"]["tier_s"]
         self.assertEqual(tier_s["min_available_families"], 3)
         self.assertEqual(tier_s["roles"]["planner"]["account"], "claudej")
-        self.assertEqual(tier_s["roles"]["plan-reviewer"]["account"], "codexj")
+        self.assertEqual(tier_s["roles"]["plan-reviewer"]["account"], "codexf")
         self.assertEqual(tier_s["roles"]["builder"]["account"], "muse")
         reviewers = cfg["review"]["reviewers"]
         by_label = {item["label"]: item for item in reviewers}
@@ -164,7 +164,7 @@ class TierSContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(active_families, {"gemini", "openrouter"})
         tiers = loader.load_project("jardal-openceo")["dev"]["tiers"]
         self.assertEqual(tiers["tier_a"]["account"], "claudej")
-        self.assertEqual(tiers["tier_b"]["account"], "codexj")
+        self.assertEqual(tiers["tier_b"]["account"], "codexf")
         self.assertEqual(tiers["tier_c"]["chain"], ["muse", "dsh", "claudep"])
         self.assertEqual(tiers["tier_c"]["muse"]["command"][0], "musej")
         # No checked-in project may carry routing or Tier S overrides.

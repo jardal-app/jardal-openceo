@@ -169,12 +169,12 @@ class RateMonitor:
         # Monitor sessions need interactive REPLs so slash commands
         # (/usage, /status) work. DEFAULT_ARGS may contain -p for
         # batch dev sessions — strip it and use interactive-only flags.
-        # Codex: measure the codexj account (owner 2026-10-04), the one
-        # Tier S actually spends — never the default codex login. No extra
-        # flags: the wrapper already carries bypass + model + effort, and a
-        # -c override wedges the TUI behind a blocking warning (00086).
+        # Codex: measure the account wrapper OpenCEO spends (codexf since
+        # codexj lapsed, TASK-2026-00475). No extra flags: the wrapper
+        # already carries bypass + model + effort, and a -c override wedges
+        # the TUI behind a blocking warning (00086).
         if provider == "codex":
-            cmd = self._settings.CODEXJ_CLI_PATH
+            cmd = self._settings.CODEX_ACCOUNT_CLI_PATH
         elif provider == "claude":
             path = self._settings.CLAUDE_CODE_PATH
             cmd = f"{path} --dangerously-skip-permissions"
