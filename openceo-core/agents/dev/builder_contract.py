@@ -84,6 +84,10 @@ def builder_environment_prompt(
         *_gates_intro(gates, oracle_cmd),
         "- No repliques la suite global: valida lo que cambiaste con las "
         "comprobaciones y los tests dirigidos que sí corren aquí.",
+        "- Tus entregables deben aparecer en git status: una ruta ignorada "
+        "por el repo (p. ej. docs/work/ donde está en .gitignore) no cuenta "
+        "como cambio y el orquestador no puede integrarla. Deja los informes "
+        "en una ruta versionada y el resumen en .openceo/HANDOFF.md.",
         limit,
     ]
     return "\n".join(lines)
