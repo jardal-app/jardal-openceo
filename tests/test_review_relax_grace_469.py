@@ -2,12 +2,13 @@
 
 Contract fixed here:
 
-- With the cascade on and ``relax_after_seconds`` set, once the valid
-  reports meet quorum counting extra/builder-family slots (muse-review)
-  and the strict quorum is still missing, the round waits only that
-  grace: then it cuts the reviewers still running (their tasks are
-  cancelled) and closes with the audited relaxed quorum, instead of
-  waiting for the 12 h recovery deadline.
+- With the cascade on and ``relax_after_seconds`` set, the grace starts
+  at the first counted (independent) valid report while the strict
+  quorum is missing. When it ends, an untried muse-review joins (A/B/C
+  rounds plan no extras), and once the relaxed quorum holds the round
+  cuts the reviewers still running (their tasks are cancelled) and
+  closes with the audited relaxed quorum, instead of waiting for the
+  12 h recovery deadline.
 - A strict quorum inside the grace wins (not relaxed); without the key,
   or while the relaxed quorum is not met, the classic wait stands.
 - The production default is 300 seconds.
@@ -49,12 +50,14 @@ def _outcome(slot: review.ReviewSlot, attempt: int, valid: bool) -> dict[str, An
 class RelaxGraceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.cancelled: list[str] = []
+        self.calls: list[str] = []
 
     def _run_one(self, *, valid: set[str], hang: set[str],
                  late_valid: set[str] = frozenset()):  # type: ignore[assignment]
         async def run_one(slot: review.ReviewSlot, attempt: int,
                           previous: Any) -> dict[str, Any]:
             del previous
+            self.calls.append(slot.label)
             if slot.label in hang:
                 try:
                     await asyncio.Event().wait()
@@ -68,11 +71,12 @@ class RelaxGraceTests(unittest.IsolatedAsyncioTestCase):
         return run_one
 
     async def _round(self, run_one: Any, cascade: dict[str, Any] | None,
-                     ) -> review.QuorumRound:
+                     *, include_extras: bool = True) -> review.QuorumRound:
         pool = _pool()
         store = review.InMemorySlotStore()
         plan = await review.select_round(
             pool, store, 2, builder_family="muse",
+            include_extras=include_extras,
             cascade_enabled=review.cascade_enabled(cascade))
         return await review.run_quorum_round(
             pool, store, plan, run_one, builder_family="muse", quorum=2,
@@ -92,6 +96,21 @@ class RelaxGraceTests(unittest.IsolatedAsyncioTestCase):
                    if item.get("relaxed")]
         self.assertEqual(relaxed, ["muse-review"])
         self.assertIn("relaxed quorum", result.note)
+
+    async def test_round_without_extras_launches_muse_when_grace_ends(self) -> None:
+        # A/B/C rounds plan no extras: muse-review joins only after the grace.
+        run_one = self._run_one(valid={"free-a", "muse-review"}, hang={"free-b"})
+
+        result = await asyncio.wait_for(
+            self._round(run_one, {"enabled": True, "relax_after_seconds": 0.05},
+                        include_extras=False),
+            timeout=5)
+
+        self.assertTrue(result.met)
+        self.assertTrue(result.relaxed)
+        self.assertEqual(self.calls.count("muse-review"), 1)
+        self.assertLess(self.calls.index("free-b"), self.calls.index("muse-review"))
+        self.assertEqual(self.cancelled, ["free-b"])
 
     async def test_strict_quorum_inside_grace_wins(self) -> None:
         run_one = self._run_one(valid={"free-a", "muse-review"}, hang=set(),
