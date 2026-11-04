@@ -7623,8 +7623,11 @@ class TaskService:
             if delay:
                 await asyncio.sleep(delay)
             try:
-                active = await self._repo.tasks.count_documents(
-                    {"status": TaskStatus.IN_PROGRESS.value})
+                active = await self._repo.tasks.count_documents({
+                    "status": TaskStatus.IN_PROGRESS.value,
+                    "autorun": True,
+                    "coding_tool": {"$ne": None},
+                })
             except Exception:  # noqa: BLE001 - an unreadable count never restarts
                 logger.warning("recovery deploy idle check failed",
                                exc_info=True)
