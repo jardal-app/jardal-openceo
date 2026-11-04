@@ -596,8 +596,12 @@ class ConfigLoader:
                     # 0.50/review under the 10.00 mandate bar (the
                     # prepaid credit size; never new money). The guard
                     # still refuses any cap above the threshold.
+                    # relax_after_seconds (Owner order 2026-11-04,
+                    # TASK-2026-00469): an available relaxed quorum stands
+                    # after this grace, not at the 12 h recovery deadline.
                     "cascade": {
                         "enabled": True,
+                        "relax_after_seconds": 300,
                         "paid_cap_usd": "0.50",
                         "paid_estimate_usd": "0.05",
                         "dsh_estimate_usd": "0.00",
