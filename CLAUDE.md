@@ -32,7 +32,7 @@ Hub: nota del proyecto en el vault; detalle bajo demanda, nunca el vault entero.
 - **Datos**: MongoDB (`tasks`, `dev_sessions`, `user_context`, `project_presets`, `task_reviews`, `workflow_runs`); negocio en Jardal ERP (§6)
 - **Voz y móvil**: LiveKit + Silero VAD + Groq Whisper + OpenAI TTS (`openceo-voice/`); Android Compose + LiveKit (`openceo-voice-android/`, build con `./gradlew assembleDebug`)
 - **Dashboard**: React 19 + Vite 6 + Tailwind v4 (`openceo-react/`)
-- **Coding providers**: `musej`/`muse` (muse-spark), `codexj`, `claudej`, `dsh`, `claudep`, `opencode`, Gemini con `agyd`/`agyj`/`agy2` (roster en `openceo-core/config_loader.py`)
+- **Coding providers**: `musej`/`muse` (muse-spark), `codexf` (`codexj` inactivo desde 2026-11-04), `claudej`, `dsh`, `claudep`, `opencode`, Gemini con `agyd`/`agyj`/`agy2` (roster en `openceo-core/config_loader.py`)
 
 ---
 

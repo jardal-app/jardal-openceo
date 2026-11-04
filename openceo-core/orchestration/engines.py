@@ -84,7 +84,7 @@ class EngineSpec:
 
 #: The seven selections (TASK-2026-00246): four single-account engines
 #: plus agy with its three Owner logins. Models mirror the wrapper pins
-#: where the wrapper pins one (musej, claudej, codexj); empty means the
+#: where the wrapper pins one (musej, claudej, codexf); empty means the
 #: account default. Must stay keyed exactly by ``catalog.KNOWN_ENGINES``
 #: (pinned in tests, single vocabulary).
 ENGINE_SPECS: dict[str, EngineSpec] = {
@@ -128,7 +128,7 @@ ENGINE_SPECS: dict[str, EngineSpec] = {
         family="codex",
         model="gpt-6.1-sol",
         effort="xhigh",
-        command=("codexj", "exec", "--ephemeral"),
+        command=("codexf", "exec", "--ephemeral"),
         headless_args=(),
         prompt_via="stdin",
         translator="codex",

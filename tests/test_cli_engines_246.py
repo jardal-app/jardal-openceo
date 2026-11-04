@@ -101,7 +101,7 @@ SELECTIONS = (
     ("muse-code", "muse"),
     ("claude-code", "claudej"),
     ("opencode", "opencode"),
-    ("codex-cli", "codexj"),
+    ("codex-cli", "codexf"),
     ("agy", "agyd"),
     ("agy", "agyj"),
     ("agy", "agy2"),
@@ -171,9 +171,9 @@ class ResolveEngineTest(unittest.TestCase):
     def test_params_override_wins(self) -> None:
         selection = resolve_engine(
             "muse-code", "muse",
-            {"engine": "codex-cli", "engine_account": "codexj"})
+            {"engine": "codex-cli", "engine_account": "codexf"})
         self.assertEqual(
-            EngineSelection("codex-cli", "codexj", "params"), selection)
+            EngineSelection("codex-cli", "codexf", "params"), selection)
 
     def test_account_only_override_keeps_card_via(self) -> None:
         # Review 00002/mimo-H3: via names the engine origin, so an
@@ -186,7 +186,7 @@ class ResolveEngineTest(unittest.TestCase):
     def test_engine_override_resets_foreign_card_account(self) -> None:
         selection = resolve_engine("agy", "agy2", {"engine": "codex-cli"})
         self.assertEqual(
-            EngineSelection("codex-cli", "codexj", "params"), selection)
+            EngineSelection("codex-cli", "codexf", "params"), selection)
 
     def test_unknown_engine_fails_without_fallback(self) -> None:
         with self.assertRaisesRegex(EngineResolutionError,
@@ -197,7 +197,7 @@ class ResolveEngineTest(unittest.TestCase):
 
     def test_foreign_account_fails(self) -> None:
         with self.assertRaisesRegex(EngineResolutionError, "agy2"):
-            resolve_engine("codex-cli", "codexj",
+            resolve_engine("codex-cli", "codexf",
                            {"engine_account": "agy2"})
         with self.assertRaisesRegex(EngineResolutionError, "agy2"):
             resolve_engine("codex-cli", "agy2", {})
@@ -222,7 +222,7 @@ class AvailabilityTest(unittest.TestCase):
 
     def test_probe_version_ok(self) -> None:
         binaries = {"muse-code": "musej", "claude-code": "claudej",
-                    "opencode": "opencode", "codex-cli": "codexj"}
+                    "opencode": "opencode", "codex-cli": "codexf"}
         for engine, account in SELECTIONS:
             with self.subTest(engine=engine, account=account):
                 proc = mock.Mock(returncode=0, stdout="v1\n", stderr="")
@@ -375,7 +375,7 @@ class LiveDispatchEnginesTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_codex_dispatch_carries_override_and_token(self) -> None:
         spec = {"provider": "codex",
-                "command": ["codexj", "exec", "--ephemeral"],
+                "command": ["codexf", "exec", "--ephemeral"],
                 "prompt_via": "stdin", "role_profile": "dev"}
         result, seen = await self._run(spec)
         self.assertIn("sandbox refused", result.output_tail)
@@ -389,7 +389,7 @@ class LiveDispatchEnginesTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_spec_env_wins_over_translator_env(self) -> None:
         spec = {"provider": "codex",
-                "command": ["codexj", "exec", "--ephemeral"],
+                "command": ["codexf", "exec", "--ephemeral"],
                 "prompt_via": "stdin", "role_profile": "dev",
                 "env": {CODEX_MCP_TOKEN_ENV: "owner-set"}}
         _result, seen = await self._run(spec)
@@ -467,7 +467,7 @@ class RoleSpecTest(unittest.TestCase):
             ("muse-code", "muse"): ("muse", ["musej"], "argv"),
             ("claude-code", "claudej"): ("claude", ["claudej"], "argv"),
             ("opencode", "opencode"): ("opencode", ["opencode"], "argv"),
-            ("codex-cli", "codexj"): ("codex", ["codexj"], "stdin"),
+            ("codex-cli", "codexf"): ("codex", ["codexf"], "stdin"),
             ("agy", "agyd"): ("agy", ["agyd"], "argv"),
             ("agy", "agyj"): ("agy", ["agyj"], "argv"),
             ("agy", "agy2"): ("agy", ["agy2"], "argv"),
@@ -574,7 +574,7 @@ class GenericRunEnginesTest(unittest.TestCase):
 
     def test_truncated_output_unreadable(self) -> None:
         wiring, _recorded, _calls, task = self._world(
-            "codex-cli", "codexj", hecho_stdout("late claim"),
+            "codex-cli", "codexf", hecho_stdout("late claim"),
             usage={"truncated": True, "stdout_chars": 99999})
         out = asyncio.run(run_generic_agent("operations", task, wiring))
         self.assertEqual(TaskStatus.FAILED.value, out["status"])
@@ -657,14 +657,14 @@ class EngineChangeTest(unittest.TestCase):
         self.assertEqual(
             "muse-code", first["params"][ATTEMPT_PARAMS_KEY]["engine"])
         catalog.agents["operations"].engine = "codex-cli"
-        catalog.agents["operations"].account = "codexj"
+        catalog.agents["operations"].account = "codexf"
         second, recorded = self._run(catalog)
         self.assertEqual(
             "codex-cli", second["params"][ATTEMPT_PARAMS_KEY]["engine"])
         self.assertEqual(
             "muse-code", first["params"][ATTEMPT_PARAMS_KEY]["engine"])
         specs = [call["spec"] for call in recorded if "spec" in call]
-        self.assertEqual(["codexj"], specs[0]["command"][:1])
+        self.assertEqual(["codexf"], specs[0]["command"][:1])
 
 
 class CardAccountTest(unittest.TestCase):

@@ -234,3 +234,22 @@ class CodexHomeTests(unittest.TestCase):
             self.assertEqual(mounted, {"config.toml", "plugins", "auth.json",
                                        "installation_id"})
             self.assertEqual(_codex_state_ops(home, ["agyj", "--print"]), [])
+
+    def test_codexf_gets_the_same_per_run_home_over_dot_codex(self) -> None:
+        # codexj lapsed and codexf took over (TASK-2026-00475).
+        from orchestration.agent_sandbox import _codex_state_ops
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            account = home / ".codex"
+            account.mkdir()
+            for name in ("config.toml", "auth.json", "installation_id",
+                         "AGENTS.md"):
+                (account / name).write_text("x", encoding="utf-8")
+            ops = _codex_state_ops(home, ["/x/.local/bin/codexf", "exec"])
+            self.assertEqual(ops[0], ["--tmpfs", str(account)])
+            for writable in ("auth.json", "installation_id"):
+                self.assertIn(["--bind", str(account / writable),
+                               str(account / writable)], ops)
+            mounted = {Path(op[-1]).name for op in ops[1:]}
+            self.assertEqual(mounted, {"config.toml", "auth.json",
+                                       "installation_id"})
