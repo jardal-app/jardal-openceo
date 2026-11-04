@@ -178,9 +178,10 @@ def recovery_initial_patch(
     reason = park_reason(objective)
     if reason not in RECOVERABLE_REASONS:
         return None
+    detail = str(objective.get("waiting_reason") or "").partition(":")[2] \
+        .strip() or str(objective.get("waiting_reason") or "")
     return recovery_park_patch(
-        dict(objective, recovery={}), reason,
-        str(objective.get("waiting_reason") or "")[:600],
+        dict(objective, recovery={}), reason, detail[:600],
         objectives_cfg, now)
 
 
