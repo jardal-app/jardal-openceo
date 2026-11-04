@@ -1576,29 +1576,31 @@ class BootResumeDecisionTests(unittest.TestCase):
     def test_orphaned_clean_review_resumes_fresh(self) -> None:
         call = boot_resume_decision(
             self._objective(status="final_review", final_reviews=1),
-            self._clean(), 2)
+            self._clean())
         self.assertEqual(call["action"], "resume_fresh")
 
     def test_orphaned_gapped_review_with_budget_replans(self) -> None:
         children = self._clean() + [_child("kid-wait", "queued", dev=True)]
         call = boot_resume_decision(
             self._objective(status="final_review", final_reviews=1),
-            children, 2)
+            children)
         self.assertEqual(call["action"], "replan")
 
-    def test_orphaned_gapped_review_exhausted_parks(self) -> None:
+    def test_orphaned_gapped_review_exhausted_replans(self) -> None:
+        # A spent budget no longer parks (TASK-2026-00468): open work
+        # replans and the final review handles the budget.
         children = self._clean() + [_child("kid-wait", "queued", dev=True)]
         call = boot_resume_decision(
             self._objective(status="final_review", final_reviews=2),
-            children, 2)
-        self.assertEqual(call["action"], "park")
+            children)
+        self.assertEqual(call["action"], "replan")
 
     def test_stalled_clean_resumes_fresh(self) -> None:
         call = boot_resume_decision(
             self._objective(status="waiting", final_reviews=2,
                             waiting_reason="stalled: max_final_reviews "
                                            "reached (§9.6)"),
-            self._clean(), 2)
+            self._clean())
         self.assertEqual(call["action"], "resume_fresh")
 
     def test_stalled_gapped_stays_parked(self) -> None:
@@ -1607,7 +1609,7 @@ class BootResumeDecisionTests(unittest.TestCase):
             self._objective(status="waiting", final_reviews=2,
                             waiting_reason="stalled: max_final_reviews "
                                            "reached (§9.6)"),
-            children, 2)
+            children)
         self.assertEqual(call["action"], "leave")
 
     def test_other_parks_stay(self) -> None:
@@ -1617,25 +1619,25 @@ class BootResumeDecisionTests(unittest.TestCase):
                 self._objective(status="waiting",
                                 waiting_reason="config: free-router: boom"),
                 self._objective(status="closed")):
-            call = boot_resume_decision(objective, self._clean(), 2)
+            call = boot_resume_decision(objective, self._clean())
             self.assertEqual(call["action"], "leave")
 
     def test_active_clean_resumes_fresh(self) -> None:
         call = boot_resume_decision(
-            self._objective(status="active"), self._clean(), 2)
+            self._objective(status="active"), self._clean())
         self.assertEqual(call["action"], "resume_fresh")
 
     def test_active_gapped_stays(self) -> None:
         children = self._clean() + [_child("kid-wait", "queued", dev=True)]
         call = boot_resume_decision(
-            self._objective(status="active"), children, 2)
+            self._objective(status="active"), children)
         self.assertEqual(call["action"], "leave")
 
     def test_spend_gated_stays(self) -> None:
         call = boot_resume_decision(
             self._objective(status="active",
                             pending_plan={"question": "q"}),
-            self._clean(), 2)
+            self._clean())
         self.assertEqual(call["action"], "leave")
 
 
@@ -1705,7 +1707,8 @@ class BootResumeOneTests(unittest.IsolatedAsyncioTestCase):
         assert stored is not None
         self.assertEqual(stored["status"], "active")
 
-    async def test_park_escalates_hopeless_orphan(self) -> None:
+    async def test_exhausted_gapped_orphan_replans(self) -> None:
+        # Formerly parked stalled with no exit (TASK-2026-00468).
         notices: list[tuple[str, str]] = []
         objective = {"objective_id": "OBJ-1",
                      "conversion_source_task_id": "shell-1",
@@ -1716,12 +1719,13 @@ class BootResumeOneTests(unittest.IsolatedAsyncioTestCase):
         plan = AsyncMock(return_value={"ok": True})
         with patch.object(engine_mod, "plan_objective", new=plan):
             result = await boot_resume_one(env, "OBJ-1")
-        self.assertEqual(result["reason"], "stalled")
-        plan.assert_not_awaited()
+        self.assertEqual(result["action"], "replan")
+        plan.assert_awaited_once_with(env, "OBJ-1")
         self.assertEqual(len(notices), 1)
         stored = await env.objectives.get_objective("OBJ-1")
         assert stored is not None
-        self.assertEqual(stored["status"], "waiting")
+        self.assertEqual(stored["status"], "active")
+        self.assertEqual(stored["final_reviews"], 2)
 
 
 class BootResumableListTests(unittest.IsolatedAsyncioTestCase):

@@ -521,7 +521,7 @@ class ObjectiveService:
         if self._repo is None:
             return {"ok": False, "reason": "no-store"}
         summary: dict[str, Any] = {
-            "resumed": [], "replanned": [], "parked": [],
+            "resumed": [], "replanned": [],
             "left": 0, "skipped": [], "errors": [],
         }
         rows = await self._repo.list_boot_resumable_objectives(limit)
@@ -546,8 +546,6 @@ class ObjectiveService:
                 summary["resumed"].append(objective_id)
             elif action == "replan":
                 summary["replanned"].append(objective_id)
-            elif result.get("reason") == "stalled":
-                summary["parked"].append(objective_id)
             elif result.get("ok"):
                 summary["left"] += 1
             else:

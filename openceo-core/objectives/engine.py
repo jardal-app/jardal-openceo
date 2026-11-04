@@ -3413,13 +3413,14 @@ _BOOT_RESUMABLE_PARKS = frozenset({"stalled"})
 def boot_resume_decision(
     objective: Mapping[str, Any],
     children: Sequence[Mapping[str, Any]],
-    max_final_reviews: int,
 ) -> dict[str, Any]:
-    """Pure boot-resume call: resume_fresh, replan, park or leave.
+    """Pure boot-resume call: resume_fresh, replan or leave.
 
     No I/O, no tokens: the deterministic delivery check decides. A
     ``final_review`` objective is always orphaned at boot (no review
-    task survives a restart); a ``stalled`` park resumes only when its
+    task survives a restart); with open work it replans even on a spent
+    review budget, which the final review handles without parking
+    (TASK-2026-00468). A ``stalled`` park resumes only when its
     wedge provably cleared, into a fresh review episode. Still-wedged
     stalls stay parked silently: they already escalated. An ``active``
     objective with clean delivery is an orphaned cycle (no healthy
@@ -3427,7 +3428,6 @@ def boot_resume_decision(
     spend-gated objectives keep their own trigger (00403).
     """
     status = str(objective.get("status") or "")
-    reviews = int(objective.get("final_reviews") or 0)
     pending = objective.get("pending_plan")
     if isinstance(pending, dict) and pending:
         return {"action": "leave", "reason": "spend approval pending"}
@@ -3445,10 +3445,6 @@ def boot_resume_decision(
         if not gaps:
             return {"action": "resume_fresh",
                     "reason": "orphaned final review, delivery clean"}
-        if reviews >= max_final_reviews:
-            return {"action": "park",
-                    "reason": "orphaned final review, gaps open, "
-                              "review budget exhausted"}
         return {"action": "replan",
                 "reason": "orphaned final review, gaps open: "
                           f"{'; '.join(gaps[:5])}"}
@@ -3475,23 +3471,18 @@ async def boot_resume_one(
     ``resume_fresh`` clears the park and the spent review budget: the
     deterministic check proved the old wedge gone, so this is a new
     episode, not the same loop. ``replan`` sends an orphaned review with
-    real gaps back to planning under the surviving budget. ``park``
-    escalates a hopeless orphan once; ``leave`` touches nothing.
+    real gaps back to planning under whatever budget survives; ``leave``
+    touches nothing.
     """
     objective = await env.objectives.get_objective(objective_id)
     if objective is None:
         return {"ok": False, "reason": "objective not found"}
     call = boot_resume_decision(
-        objective, await env.tasks.list_by_objective(objective_id),
-        int(env.objectives_cfg.get("max_final_reviews", 2)))
+        objective, await env.tasks.list_by_objective(objective_id))
     action = str(call.get("action") or "leave")
     if action == "leave":
         return {"ok": True, "action": "leave",
                 "reason": str(call.get("reason") or "")}
-    if action == "park":
-        return await _objective_park(
-            env, objective, "stalled",
-            f"{call.get('reason')} (§9.6)")
     patch: dict[str, Any] = {"status": "active", "waiting_reason": None}
     if action == "resume_fresh":
         patch["final_reviews"] = 0
@@ -3531,14 +3522,18 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
     clear a registered deterministic verifier per domain (missing
     verifiers park as capability_gap, failed evidence or no verified
     delivery as data_gaps).
+
+    A spent review budget (``max_final_reviews``, §9.6) never parks
+    (TASK-2026-00468): open work keeps the objective active until its
+    own closes re-plan, and a clean dev delivery closes on the
+    deterministic checks, its last fixes cleared by their ticket reviews.
     """
     objective = await env.objectives.get_objective(objective_id)
     if objective is None:
         return {"ok": False, "reason": "objective not found"}
     reviews = int(objective.get("final_reviews") or 0)
-    if reviews >= int(env.objectives_cfg.get("max_final_reviews", 2)):
-        return await _objective_park(
-            env, objective, "stalled", "max_final_reviews reached (§9.6)")
+    budget_spent = reviews >= int(
+        env.objectives_cfg.get("max_final_reviews", 2))
     try:
         await ensure_erp_group(env, objective)
     except ObjectiveErpError as exc:
@@ -3551,6 +3546,17 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
         return await _objective_park(
             env, objective, "data_gaps",
             f"delivery data gaps: {'; '.join(verdict['data_gaps'][:5])}")
+    if verdict["open_gaps"] and budget_spent:
+        # No planner bounce past the budget: every open child's close
+        # re-plans this still-active objective, so the wait is bounded.
+        gaps = "; ".join(verdict["open_gaps"][:5])
+        if env.notify is not None:
+            await env.notify(
+                _notify_ref(objective),
+                f"Objective {objective_id} waits for its open work "
+                f"(final review budget spent): {gaps}")
+        return {"ok": False, "reason": "awaiting_open_work",
+                "detail": gaps}
     if verdict["open_gaps"]:
         await env.objectives.patch_objective(objective_id, {
             "status": "active", "final_reviews": reviews + 1})
@@ -3594,6 +3600,13 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
                       f"{verdict['work_children']} work children are "
                       "history (cancelled/failed)")
         return await _objective_park(env, objective, "data_gaps", detail)
+    if budget_spent and verdict["dev_children"]:
+        return await _finish_objective(
+            env, objective, {"verified": evidence["verified"]},
+            closure=(f"final review budget spent ({reviews} reviews, "
+                     "§9.6); the last fixes closed through their own "
+                     "ticket reviews"),
+            review="budget_spent")
     await env.objectives.patch_objective(
         objective_id, {"status": "final_review",
                        "final_reviews": reviews + 1})
@@ -4116,6 +4129,9 @@ async def _finish_objective(
     env: ObjectiveEnv,
     objective: Mapping[str, Any],
     evidence: Mapping[str, Any] | None = None,
+    *,
+    closure: str = "final review clean",
+    review: str | None = None,
 ) -> dict[str, Any]:
     """Close the objective: delivery record, ERP note, vault note (§9.7).
 
@@ -4124,7 +4140,8 @@ async def _finish_objective(
     group — a 417 parks as ``pending_status`` and the startup reconcile
     retries it. No group push is done directly. ``evidence`` is the
     ``{"verified": ...}`` link the final review cleared (None when the
-    review ran elsewhere).
+    review ran elsewhere). ``closure`` states how the close was earned in
+    every notice; ``review`` overrides the delivery record's review kind.
     """
     from orchestration import knowledge as knowledge_mod
 
@@ -4135,7 +4152,7 @@ async def _finish_objective(
         "closed_at": _utcnow_iso(),
         "delivery": _delivery_record(
             objective, children, verified_by="final_review",
-            evidence=evidence),
+            review=review, evidence=evidence),
     })
     mission_id = str(objective.get("mission_id") or "").strip()
     if mission_id and getattr(env, "missions", None) is not None:
@@ -4149,7 +4166,7 @@ async def _finish_objective(
             logger.warning("mission ledger failed for %s (close stands)",
                            mission_id)
     if env.ceo_wake is not None:
-        reason = f"Objective {objective_id} closed: final review clean."
+        reason = f"Objective {objective_id} closed: {closure}."
         if mission_id:
             reason += (
                 f" It served mission {mission_id}: judge the mission "
@@ -4170,7 +4187,7 @@ async def _finish_objective(
                 "resume_at": None,
                 "completed_at": _utcnow_iso(),
                 "last_response_summary": (
-                    f"Objective {objective_id} closed: final review clean."),
+                    f"Objective {objective_id} closed: {closure}."),
             })
     ref = _notify_ref(objective)
     if env.notify is not None:
@@ -4184,7 +4201,7 @@ async def _finish_objective(
         await env.notify(
             ref,
             f"Objective {objective_id} closed: {len(tickets)} tickets "
-            f"({mix}), final review clean.")
+            f"({mix}), {closure}.")
         if not env.auto_merge:
             await env.notify(
                 ref,
