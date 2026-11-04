@@ -11,6 +11,7 @@ promotion (F5) — comes through :class:`ObjectiveService`.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -639,9 +640,14 @@ class ObjectiveService:
         return recovery_mod.recovery_seconds_to_next(rows or [])
 
     async def recovery_tick(self) -> dict[str, Any]:
-        """One scheduler pass: retry due parks, open tickets when spent."""
+        """One scheduler pass: retry due parks, open tickets when spent.
+
+        Returns the sleep until the nearest still-pending due time, so the
+        timer never re-reads every waiting objective just to find it.
+        """
         retried: list[str] = []
         ticketed: list[str] = []
+        next_due: Any = None
         candidates = await self.recovery_candidates()
         for candidate in candidates:
             objective = candidate["objective"]
@@ -661,7 +667,22 @@ class ObjectiveService:
                     candidate["objective_id"])
                 if result.get("ok"):
                     ticketed.append(candidate["objective_id"])
-        return {"ok": True, "retried": retried, "ticketed": ticketed}
+            elif str(decision.get("reason") or "") == "not due":
+                due = (objective.get("recovery") or {}).get("due_at") \
+                    if isinstance(objective.get("recovery"), Mapping) else None
+                parsed = recovery_mod.parse_due(due)
+                if parsed is not None and (next_due is None
+                                           or parsed < next_due):
+                    next_due = parsed
+        now = datetime.now(timezone.utc)
+        if next_due is None:
+            delay = recovery_mod.MAX_SLEEP_SECONDS
+        else:
+            delay = int((next_due - now).total_seconds())
+            delay = max(recovery_mod.MIN_SLEEP_SECONDS,
+                        min(recovery_mod.MAX_SLEEP_SECONDS, delay))
+        return {"ok": True, "retried": retried, "ticketed": ticketed,
+                "next_seconds": delay}
 
     async def recover_objective(self, objective_id: str) -> dict[str, Any]:
         """Claim one due park and replan it (single winner, never twice)."""

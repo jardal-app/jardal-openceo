@@ -23,6 +23,7 @@ __all__ = [
     "park_reason",
     "recovery_decision",
     "recovery_park_patch",
+    "parse_due",
     "recovery_config",
     "recovery_initial_patch",
     "recovery_seconds_to_next",
@@ -69,7 +70,7 @@ def _iso(instant: datetime) -> str:
     return instant.astimezone(timezone.utc).isoformat()
 
 
-def _parse(value: Any) -> datetime | None:
+def parse_due(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     text = str(value or "").strip()
@@ -160,7 +161,7 @@ def recovery_park_patch(
     if attempts >= int(cfg["max_attempts"]):
         return {"recovery": {**base, "exhausted": True, "due_at": None}}
     due = moment + timedelta(minutes=_backoff_minutes(cfg, attempts))
-    previous = _parse(existing.get("due_at"))
+    previous = parse_due(existing.get("due_at"))
     if previous is not None and moment < previous < due:
         due = previous
     return {"recovery": {**base, "exhausted": False, "due_at": _iso(due)}}
@@ -212,7 +213,7 @@ def recovery_decision(
         return {"action": "ticket", "reason": reason}
     if active_children > 0:
         return {"action": "none", "reason": "children still active"}
-    due = _parse(recovery.get("due_at"))
+    due = parse_due(recovery.get("due_at"))
     moment = _now(now)
     if due is not None and moment < due:
         return {"action": "none", "reason": "not due"}
@@ -231,7 +232,7 @@ def recovery_seconds_to_next(
             continue
         if park_reason(objective) not in RECOVERABLE_REASONS:
             continue
-        due = _parse((objective.get("recovery") or {}).get("due_at")) \
+        due = parse_due((objective.get("recovery") or {}).get("due_at")) \
             if isinstance(objective.get("recovery"), Mapping) else None
         if due is not None and (nearest is None or due < nearest):
             nearest = due

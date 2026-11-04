@@ -178,6 +178,23 @@ class TestServiceRecovery:
         assert result["retried"] == ["OBJ-TEST"]
         assert result["ticketed"] == ["OBJ-SPENT"]
 
+    def test_tick_reports_the_next_pending_due_only(self) -> None:
+        future = (datetime.now(timezone.utc)
+                  + timedelta(minutes=10)).isoformat()
+        repo = FakeRepo([_objective(recovery={
+            "attempts": 0, "due_at": future, "exhausted": False})])
+        service = _service(repo)
+        result = asyncio.run(service.recovery_tick())
+        assert 540 <= result["next_seconds"] <= 600
+
+        busy = FakeRepo([_objective()])
+        busy.task_rows.append({"task_id": "child-1",
+                               "objective_id": "OBJ-TEST",
+                               "status": "in_progress"})
+        service = _service(busy)
+        result = asyncio.run(service.recovery_tick())
+        assert result["next_seconds"] == 3600
+
     def test_recover_claims_once_and_plans(self) -> None:
         repo = FakeRepo([_objective()])
         service = _service(repo)

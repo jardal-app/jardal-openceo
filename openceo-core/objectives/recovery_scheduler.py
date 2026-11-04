@@ -68,15 +68,13 @@ class RecoveryScheduler:
     async def _run(self) -> None:
         while not self._stopped:
             try:
-                await self._service.recovery_tick()
+                tick = await self._service.recovery_tick()
+                delay = int(tick.get("next_seconds")
+                            or recovery_mod.MAX_SLEEP_SECONDS)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - one bad objective never stops it
                 logger.warning("recovery tick failed", exc_info=True)
-            try:
-                delay = await self._service.recovery_next_delay()
-            except Exception:  # noqa: BLE001
-                logger.warning("recovery delay read failed", exc_info=True)
                 delay = recovery_mod.MAX_SLEEP_SECONDS
             self._wake.clear()
             try:
