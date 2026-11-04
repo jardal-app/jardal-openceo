@@ -772,6 +772,7 @@ class ObjectiveService:
             "priority": "high",
             "tags": ["recovery", "objective-recovery", project],
             "coding_tool": str(rec_cfg.get("ticket_tier") or "tier_c"),
+            "agent_hint": "dev",
             "autorun": True,
             # Not an objective child on purpose: a failed recovery must not
             # replan the mission from the wrong project. The close hook

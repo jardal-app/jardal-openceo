@@ -230,6 +230,7 @@ class TestServiceRecovery:
         assert "objective_id" not in payload
         assert payload["params"]["recovery_for"] == "OBJ-TEST"
         assert payload["coding_tool"] == "tier_c"
+        assert payload["agent_hint"] == "dev"
         assert "OBJ-TEST" in payload["description"]
         assert "MANDATO DE RECUPERACIÓN" in payload["description"]
         patched = repo.docs["OBJ-TEST"]["recovery"]
