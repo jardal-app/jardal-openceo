@@ -2,6 +2,15 @@
 
 Resumen operativo corto del estado real del repo.
 
+## 2026-11-04 — Builder en host, reanudación sin rehacer y recuperación automática de objetivos (TASK-2026-00481)
+
+- Orden del Owner: dejar de fallar por el sandbox (pnpm/Docker) usando el host; revisar los pendientes de 00478; y que OpenCEO se recupere solo, con una sesión musej que analice y arregle la causa raíz si un objetivo se para. El servicio quedó en release c7c9274 dirty=false (13:25 UTC), /health ok, con 2694f34 desplegado.
+- Host: `dev.isolation: sandbox|host` por proyecto (defecto sandbox). En host, los builders A/B/C y el de Tier S corren con el usuario del host (toolchain, store pnpm, Docker, cachés); el env sigue pasando por `child_env` y reviewers/planner/roles de solo lectura conservan bwrap. Activado en jardal-erp y jardal-openceo. Trade-off documentado en ARCHITECTURE_REFERENCE.
+- Pendientes de 00478 corregidos: checkpoint `build_done` (al reanudar una espera ya construida se salta el builder), checkpoints en las esperas needs_owner (quórum, findings, HANDOFF, rutas), `kept_work` en el retorno a planner de Tier S, y `test_simple_review_251` hermético (27/27). No se añadió continuación a agentes genéricos: no hay árbol ni gates del orquestador.
+- Recuperación: `recovery` persistido en cada park; un solo timer event-driven (tope 1 h) reclama con CAS y replanifica con contexto RECOVERY. Dos intentos y luego ticket de recuperación en jardal-openceo (tier_c/musej); su cierre reanuda el objetivo; máximo 2 rondas. El fix mergeado se despliega reiniciando el servicio cuando no hay tickets en progreso (systemd-run fuera del cgroup). Compras/owner questions y `pending_plan` nunca se recuperan solos.
+- Bug de infraestructura encontrado en la verificación: el arranque por script no ponía `/home/develop/.bun/bin` en PATH, así que `bun run typecheck` fallaba y todo ticket nacía con baseline_red. Corregido en el script; baseline rojo transitorio reintenta 2 veces a 15 min antes de parkar needs_owner.
+- Estado de la misión MIS-4804F506: 718b9176 y 59a46530 completados; OBJ-7C611C54 activo; 06101db9 reencolado y en ejecución con el código nuevo. TASK-2026-00478 Completed. TASK-2026-00481 Working hasta confirmar la misión. Sin push en esta sesión.
+
 ## Continuar aquí (traspaso a la próxima sesión)
 
 **DOCS MÍNIMOS (2026-10-29, TASK-2026-00392).** Regla global aprobada por el Owner: arquitectura vigente y referencias esenciales en el repo; temporales de tickets con checklist de conservación al cierre; evidencia en tickets, conocimiento de ingeniería en el vault del proyecto y procesos empresariales en la futura wiki ERP (adjuntos del ticket mientras no exista). Global versionado y activo iguales, inodo preservado y 8 cargadores verificados; README de OpenCEO y knowledge alineados. Checks obligatorios y contrato de rutas: 81 tests + 7 subtests en verde, sin modelos. Limpieza de documentos reservada para trabajo posterior por orden del Owner.
