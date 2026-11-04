@@ -44,12 +44,16 @@ class RecoveryScheduler:
         if self._started:
             return
         self._started = True
+        seeded = 0
         try:
-            await self._service.seed_recovery_parks()
+            seed = await self._service.seed_recovery_parks()
+            seeded = int((seed or {}).get("seeded") or 0)
         except Exception:  # noqa: BLE001 - recovery never blocks boot
             logger.warning("recovery seed failed", exc_info=True)
         self._task = asyncio.create_task(
             self._run(), name="objective-recovery")
+        logger.info("Objective recovery scheduler started (seeded=%s)",
+                    seeded)
 
     async def stop(self) -> None:
         self._stopped = True
