@@ -628,6 +628,11 @@ class DevSessionManager:
             if isinstance(opened, DevExecutionOutput):
                 return opened
             branch = opened
+            if isinstance(task.get("params"), dict) \
+                    and "baseline_retries" in task["params"]:
+                task["params"] = {key: value for key, value
+                                  in task["params"].items()
+                                  if key != "baseline_retries"}
             if not isinstance((task.get("params") or {}).get(
                     "dev_checkpoint"), dict):
                 await self._note_exposure(task, "gates")
@@ -921,10 +926,26 @@ class DevSessionManager:
             names = ", ".join(item.name for item in blocked)
             self._simple_git(repo, "checkout", "-q", base)
             self._simple_git(repo, "branch", "-D", branch)
+            params = dict(task.get("params") or {})
+            retries = int(params.get("baseline_retries") or 0)
+            if retries < 2:
+                # A red baseline can be transient (another merge in flight,
+                # a gate environment that just changed): retry before
+                # parking for the owner (TASK-2026-00481).
+                params["baseline_retries"] = retries + 1
+                return DevExecutionOutput(
+                    status=TaskStatus.WAITING,
+                    waiting_reason=(
+                        f"baseline_red: {names} (automatic retry "
+                        f"{retries + 1}/2)"),
+                    resume_at=(datetime.now(timezone.utc)
+                               + timedelta(minutes=15)),
+                    params=params,
+                )
             return DevExecutionOutput(
                 status=TaskStatus.WAITING,
                 waiting_reason=f"needs_owner: baseline_red: {names}",
-                params=task.get("params") if isinstance(task.get("params"), dict) else None,
+                params=params or None,
             )
         # Oracle protection (§24) applies to any simple tier with a
         # declared qualifying oracle; freeze_oracle returns None when

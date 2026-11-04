@@ -618,6 +618,27 @@ async def test_a_resumed_build_checkpoint_skips_the_builder(repo):
     assert "dev_checkpoint" not in (out.params or {})
 
 
+def test_a_red_baseline_retries_before_parking_for_the_owner(repo):
+    from agents.dev.session import DevExecutionOutput
+    dev = manager()
+    config = dev_project(repo, gates=[{"name": "t", "cmd": "exit 1"}])
+    first = dev._open_simple_branch(
+        {"task_id": "t-1", "title": "x"}, config, CodingTool.TIER_B, repo)
+    assert isinstance(first, DevExecutionOutput)
+    assert first.status == TaskStatus.WAITING
+    assert first.resume_at is not None
+    assert first.params["baseline_retries"] == 1
+    assert first.waiting_reason.startswith("baseline_red:")
+    second = dev._open_simple_branch(
+        {"task_id": "t-1", "title": "x",
+         "params": {"baseline_retries": 2}},
+        config, CodingTool.TIER_B, repo)
+    assert isinstance(second, DevExecutionOutput)
+    assert second.status == TaskStatus.WAITING
+    assert second.waiting_reason.startswith("needs_owner: baseline_red:")
+    assert second.resume_at is None
+
+
 def test_a_wait_checkpoint_that_git_refuses_falls_back_to_the_old_drop(repo):
     from agents.dev.session import DevExecutionOutput
     dev = manager()

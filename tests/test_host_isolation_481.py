@@ -139,6 +139,12 @@ class TestTierExecutorIsolation:
         assert seen == [False]
 
 
+def test_service_path_includes_the_bun_gate_runner() -> None:
+    script = Path(__file__).resolve().parents[1] / "scripts" / "openceo-core-host.sh"
+    text = script.read_text(encoding="utf-8")
+    assert '$HOME/.bun/bin:$HOME/.local/bin' in text
+
+
 class TestHostProcess:
     def test_unsandboxed_run_skips_bwrap(self) -> None:
         manager = _manager()

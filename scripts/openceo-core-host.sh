@@ -51,7 +51,9 @@ PY
   if [[ -n "${MONGODB_URL:-}" ]] && [[ "${MONGODB_URL}" == *"jardal-mongo"* ]]; then
     export MONGODB_URL="${MONGODB_URL//jardal-mongo/127.0.0.1}"
   fi
-  export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.opencode/bin:$PATH"
+  # Bun is the jardal-erp gate runner (bun run typecheck / bun test) and
+  # lives outside the system PATH; without it every baseline gate is red.
+  export PATH="$HOME/.bun/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.opencode/bin:$PATH"
   export KIMI_CLI_PATH="${KIMI_CLI_PATH:-$HOME/.local/bin/kimi}"
   export PROJECTS_DIR="${PROJECTS_DIR:-$ROOT_DIR/projects}"
   export PYTHONUNBUFFERED=1
