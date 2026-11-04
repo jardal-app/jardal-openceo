@@ -272,6 +272,17 @@ def role_spec_for_engine(
     }
 
 
+#: How a fenced agent gets Python packages (TASK-2026-00485): installed ones
+#: import as usual; the rest comes per run, never onto the host.
+PYTHON_PACKAGES_PROMPT = (
+    "Python packages: what is installed imports as usual. For a missing one "
+    "use `uv run --with <package> python <script>` (or a venv inside this "
+    "folder); a skill script with a PEP 723 `# /// script` header runs with "
+    "`uv run <script>`. A plain `pip install` or `pip install --user` fails "
+    "here by design (PEP 668, read-only system): that is not a blocker."
+)
+
+
 def build_agent_prompt(
     profile: RoleProfile, task: Mapping[str, Any],
     skill: str | None = None,
@@ -316,8 +327,9 @@ def build_agent_prompt(
                 f"Required evidence: {', '.join(skill_evidence)} — "
                 "include it in your evidencia.")
         lines.extend(declared)
-    lines.extend(["", CRYSTALLIZATION_PROMPT, "", KNOWLEDGE_PROPOSAL_PROMPT,
-                    "", AGENT_RESULT_PROMPT])
+    lines.extend(["", PYTHON_PACKAGES_PROMPT,
+                  "", CRYSTALLIZATION_PROMPT, "", KNOWLEDGE_PROPOSAL_PROMPT,
+                  "", AGENT_RESULT_PROMPT])
     return "\n".join(lines)
 
 

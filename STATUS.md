@@ -2,6 +2,13 @@
 
 Resumen operativo corto del estado real del repo.
 
+## 2026-11-04 — Dependencias Python de las skills de los agentes genéricos (TASK-2026-00485)
+
+- Orden del Owner: «de los agentes genericos algunos se instalaran sus librerias python para sus skills eso no lanzara error al ponerse en sandbox?».
+- Evidencia en el sandbox real de un agente genérico: lo instalado importa (python3 del sistema y el venv del core en solo lectura); `pip install` y `pip install --user` fallan siempre (PEP 668, sistema de solo lectura), así que ningún agente ensucia el host ni el core; un venv en la carpeta del ticket o `uv run --with` funcionan. Huecos: la cristalización probaba los scripts con el Python del core y descartaba toda skill con librerías de terceros, y el prompt no explicaba cómo conseguirlas.
+- Arreglo: el script de una skill declara sus paquetes en la cabecera PEP 723 y se ejecuta con `uv run`; la cristalización prueba esos scripts con `uv run --with pytest --with <deps>` en el mismo cerco y descarta con motivo los metadatos inválidos; la regla va en el prompt del agente genérico y en el de cristalización (`skills/README.md`).
+- Verificación: en el cerco real, una skill con `tinydb` declarado pasa sus tests en 3,3 s y sin cabecera falla como antes; el host sigue sin el paquete. 12 tests nuevos y 5 mutaciones detectadas; 361 tests de suites vecinas y los checks obligatorios en verde.
+
 ## 2026-11-04 — Revisión de 00481: deploy de recuperación seguro, builder host confinado y core bajo systemd (TASK-2026-00483)
 
 - Orden del Owner: revisar el trabajo de 00481 hecho por otra sesión, corregirlo garantizando el funcionamiento y decidir la arquitectura de aislamiento (host, sandbox o Docker por proyecto), incluidos los agentes genéricos.

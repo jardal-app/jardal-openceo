@@ -63,6 +63,25 @@ history; each role still learns only inside its own scope, and no shared
 listing exists — reuse common steps via helpers under `references/` or
 `scripts/`, never by copying the recipe.
 
+## Python dependencies (TASK-2026-00485)
+
+Agents run fenced: the system and the service venv are read-only, so a
+plain `pip install` or `pip install --user` always fails (PEP 668) and
+nothing lands on the host. A script that needs packages outside the
+standard library declares them in its PEP 723 header and SKILL.md runs it
+with `uv run`, which builds a throwaway env for the run:
+
+```python
+# /// script
+# dependencies = ["openpyxl>=3.1"]
+# ///
+```
+
+The save step runs that skill's tests with the declared packages
+(`uv run --with pytest --with <deps>`) in the same fence; malformed
+metadata discards the draft with its reason. Scripts without the header
+keep running on the service interpreter (`.venv/bin/python`).
+
 ## Exact skills (no LLM)
 
 A skill dir may carry `workflow.yaml` (same format as `workflows/`): when a

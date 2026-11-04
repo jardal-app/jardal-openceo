@@ -37,6 +37,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
@@ -81,6 +82,7 @@ __all__ = [
     "muse_validate_skill",
     "rewrite_skills_list",
     "run_save_step",
+    "script_dependencies",
 ]
 
 #: Ticket-folder dir where agents leave skill drafts for the save step.
@@ -115,7 +117,9 @@ in this folder (your ticket folder): `SKILL.md` opens with `name` (== the dir, \
 lowercase letters/digits/`-`) and a one-line `description`, then the recipe; add \
 `scripts/` only where exactness or safe repetition is needed (every script ships \
 its `test_<stem>.py` next to it), `references/` for stable context, and \
-`workflow.yaml` for the exact part. If a skill already covers it, write the \
+`workflow.yaml` for the exact part. A script that needs packages outside the \
+standard library declares them in a PEP 723 `# /// script` header \
+(`dependencies = [...]`) and SKILL.md runs it with `uv run <script>`. If a skill already covers it, write the \
 improved skill dir with small evidenced changes under `{DRAFTS_DIRNAME}/<same-name>/` \
 instead (never a full rewrite); two drafts \
 of the same thing fuse into one. Never write outside `{DRAFTS_DIRNAME}/` for this: \
@@ -1023,6 +1027,53 @@ def muse_validate_skill(skill_dir: Path | str,
     return True, ""
 
 
+_PEP723_BLOCK = re.compile(
+    r"(?m)^# /// (?P<type>[a-zA-Z0-9-]+)$\s(?P<content>(^#(| .*)$\s)+)^# ///$")
+
+
+def script_dependencies(skill_dir: str | Path) -> list[str]:
+    """Third-party packages the skill's scripts declare (PEP 723).
+
+    Skill scripts run with ``uv run``, which builds their environment from
+    the inline ``# /// script`` block (TASK-2026-00485); test files are not
+    scanned. Raises ValueError on malformed metadata.
+    """
+    found: list[str] = []
+    scripts = Path(skill_dir) / "scripts"
+    if not scripts.is_dir():
+        return found
+    for path in sorted(scripts.rglob("*.py")):
+        if path.name.startswith("test_") or not path.is_file() \
+                or path.is_symlink():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        blocks = [match for match in _PEP723_BLOCK.finditer(text)
+                  if match.group("type") == "script"]
+        if len(blocks) > 1:
+            raise ValueError(f"{path.name}: more than one PEP 723 block")
+        if not blocks:
+            continue
+        content = "".join(
+            line[2:] if line.startswith("# ") else line[1:]
+            for line in blocks[0].group("content").splitlines(keepends=True))
+        try:
+            meta = tomllib.loads(content)
+        except tomllib.TOMLDecodeError as exc:
+            raise ValueError(f"{path.name}: invalid PEP 723 metadata: "
+                             f"{exc}") from exc
+        deps = meta.get("dependencies", [])
+        if not isinstance(deps, list):
+            raise ValueError(f"{path.name}: dependencies must be a list")
+        for dep in deps:
+            text_dep = str(dep).strip() if isinstance(dep, str) else ""
+            # A leading '-' would reach uv as an option, not a package.
+            if not text_dep or not text_dep[0].isalnum() or "\n" in text_dep:
+                raise ValueError(f"{path.name}: invalid dependency {dep!r}")
+            if text_dep not in found:
+                found.append(text_dep)
+    return found
+
+
 def fenced_skill_tests(*, skill_rel: str, worktree: str | Path,
                        timeout_s: int = _SKILL_TEST_TIMEOUT_S
                        ) -> tuple[bool, str]:
@@ -1030,7 +1081,9 @@ def fenced_skill_tests(*, skill_rel: str, worktree: str | Path,
 
     Agent-authored code is untrusted: the worktree is the workspace
     (rw, discarded with it), the service interpreter mounts read-only,
-    and bytecode/caches stay off. No tests means nothing to run.
+    and bytecode/caches stay off. No tests means nothing to run. Scripts
+    that declare PEP 723 dependencies get them through ``uv run`` inside
+    the same fence (an ephemeral env, nothing installed on the host).
     """
     root = Path(worktree)
     target = root / skill_rel
@@ -1039,10 +1092,23 @@ def fenced_skill_tests(*, skill_rel: str, worktree: str | Path,
     if not tests:
         return True, "no tests"
     try:
+        deps = script_dependencies(target)
+    except (ValueError, OSError) as exc:
+        return False, f"invalid script dependencies: {exc}"
+    pytest_args = [*(str(path.relative_to(root)) for path in tests),
+                   "-q", "-p", "no:cacheprovider"]
+    if deps:
+        uv = shutil.which("uv")
+        if uv is None:
+            return False, "skill scripts declare dependencies but uv is missing"
+        argv = [uv, "run", "--no-project", "--quiet", "--with", "pytest",
+                *[token for dep in deps for token in ("--with", dep)],
+                "python", "-B", "-m", "pytest", *pytest_args]
+    else:
+        argv = [sys.executable, "-B", "-m", "pytest", *pytest_args]
+    try:
         plan = plan_agent(
-            argv=[sys.executable, "-B", "-m", "pytest",
-                 *(str(path.relative_to(root)) for path in tests),
-                 "-q", "-p", "no:cacheprovider"],
+            argv=argv,
             workspace=root, base=os.environ,
             extra_read_roots=[sys.prefix])
     except (IsolationUnavailable, ValueError, OSError) as exc:
