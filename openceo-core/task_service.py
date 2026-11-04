@@ -27,6 +27,7 @@ from company_mandate import (
     project_requires_human_review,
     requires_owner,
 )
+from agents.dev.builder_contract import kept_work_note
 from db.mongo import MongoRepository
 from events import RealtimeHub
 import delegation as delegation_mod
@@ -231,6 +232,19 @@ _WEBHOOK_PARENT_UNSET: Any = object()
 
 def _transition_audit_text(value: Any, limit: int = _TRANSITION_AUDIT_MAX) -> str:
     return " ".join(str(value or "").split())[:limit]
+
+
+def _return_necesidad(verdict: Mapping[str, Any], fresh: Mapping[str, Any]) -> str:
+    """The return's ``necesidad`` plus where a kept candidate lives.
+
+    The planner replans from this entry: naming the branch lets a new
+    child reuse the builder's work instead of redoing it (TASK-2026-00478).
+    """
+    parts = [str(verdict.get("necesidad") or "")[:300]]
+    kept = fresh.get("kept_work")
+    if isinstance(kept, Mapping) and kept.get("branch"):
+        parts.append(kept_work_note(kept))
+    return " | ".join(part for part in parts if part)[:500]
 
 
 def wait_comment_text(task: dict[str, Any], reason: str) -> str:
@@ -7600,7 +7614,7 @@ class TaskService:
                     "agent": str(ticket.get("agent") or ""),
                     "resultado": resultado,
                     "motivo": str(verdict.get("motivo") or "")[:500],
-                    "necesidad": str(verdict.get("necesidad") or "")[:500],
+                    "necesidad": _return_necesidad(verdict, fresh),
                 }
                 actor = f"Agent {resultado}"
             elif has_verdict:
@@ -7683,7 +7697,7 @@ class TaskService:
             "agent": str(ticket.get("agent") or ""),
             "resultado": resultado,
             "motivo": motivo,
-            "necesidad": str(verdict.get("necesidad") or "")[:500],
+            "necesidad": _return_necesidad(verdict, fresh),
         }
         try:
             env = service.env_for(str(ticket.get("project") or ""))

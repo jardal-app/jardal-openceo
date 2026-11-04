@@ -135,7 +135,8 @@ Reglas:
 - Una espera técnica con fecha conocida (observación de 24 h, propagación o cuota) usa resultado=bloqueado y resume_at en ISO-8601 con zona UTC. Conserva en evidencia el inicio, plazo y qué se debe comprobar al vencer; no duermas dentro del CLI ni pidas una aprobación humana por el tiempo de espera.
 - Al reanudarte, comprueba el estado y la evidencia antes de actuar. No repitas un despliegue o un efecto confirmado. La llegada de resume_at solo permite volver a verificar: no demuestra que la prueba pasó.
 - Decisiones técnicas rutinarias se resuelven en el alcance. Solo pide al Owner decisiones reservadas, sus datos o credenciales que únicamente él pueda aportar; no uses resume_at para saltarte esa espera humana.
-- Si dudas entre hecho y bloqueado, elige bloqueado: los gates deciden el cierre, no tu veredicto."""
+- Si dudas entre hecho y bloqueado sobre si terminaste lo pedido, elige bloqueado: los gates deciden el cierre, no tu veredicto.
+- Una verificación que tu entorno no puede ejecutar (contenedores, servicios del host) no es un impedimento: cierra hecho y anótala en evidencia."""
 
 
 def scheduled_resume(verdict: AgentResult, now: datetime | None = None) -> datetime | None:
