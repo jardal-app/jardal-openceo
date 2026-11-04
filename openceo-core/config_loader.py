@@ -597,8 +597,8 @@ class ConfigLoader:
                     # prepaid credit size; never new money). The guard
                     # still refuses any cap above the threshold.
                     # relax_after_seconds (Owner order 2026-11-04,
-                    # TASK-2026-00469): an available relaxed quorum stands
-                    # after this grace, not at the 12 h recovery deadline.
+                    # TASK-2026-00469): this long after the first independent
+                    # report muse-review counts, not at the 12 h deadline.
                     "cascade": {
                         "enabled": True,
                         "relax_after_seconds": 300,

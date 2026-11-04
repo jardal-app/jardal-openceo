@@ -801,7 +801,7 @@ def cascade_enabled(cascade: Mapping[str, Any] | None) -> bool:
 
 
 def cascade_relax_after(cascade: Mapping[str, Any] | None) -> float | None:
-    """Grace before an available relaxed quorum stands (TASK-2026-00469).
+    """Grace before the relaxed quorum may stand (TASK-2026-00469).
 
     ``None`` keeps the classic wait for the recovery deadline: cascade
     off, or ``relax_after_seconds`` absent, negative or unreadable.
@@ -900,9 +900,10 @@ async def run_quorum_round(
     A cascade mapping (00310) guards metered attempts, orders recovery
     free → own → metered and, only as final degradation, lets extra
     and builder-family reports count toward quorum, audited. With
-    ``relax_after_seconds`` that degradation comes once those reports
-    meet quorum and the grace passes without the strict one, cutting
-    the reviewers still running (TASK-2026-00469).
+    ``relax_after_seconds`` it comes early: the grace starts at the
+    first counted report, an untried extra joins when it ends, and once
+    the relaxed quorum holds the reviewers still running are cut
+    (TASK-2026-00469).
     """
     enabled = cascade_enabled(cascade)
     pool = premium_slots(
@@ -1060,26 +1061,45 @@ async def _recover_quorum(
     attempts: dict[str, int] = {}
     latest: dict[str, dict[str, Any]] = {}
     tried_models: set[str] = set()
-    relaxed_since: float | None = None
+    armed_at: float | None = None
+    degraded = False
 
     def relax_left() -> float | None:
-        """Seconds until an available relaxed quorum stands, else None."""
-        nonlocal relaxed_since
+        """Grace left since the first counted report; None while unarmed."""
+        nonlocal armed_at
         if relax_after is None:
             return None
         valid = _valid_by_label(outcomes)
         if quorum_met(valid, reviewers, builder_family, quorum):
             return None
-        if not quorum_met(valid, [*reviewers, *plan.extras], builder_family,
-                          quorum, relaxed=True):
+        if not _counted_families(valid, reviewers, builder_family):
             return None
-        if relaxed_since is None:
-            relaxed_since = time.monotonic()
-        return relaxed_since + relax_after - time.monotonic()
+        if armed_at is None:
+            armed_at = time.monotonic()
+        return armed_at + relax_after - time.monotonic()
+
+    def relaxed_met() -> bool:
+        listed = {slot.label for slot in reviewers}
+        ran = [slot for slot in pool
+               if slot.label in latest and slot.label not in listed]
+        return quorum_met(_valid_by_label(outcomes), [*reviewers, *ran],
+                          builder_family, quorum, relaxed=True)
 
     def relax_due() -> bool:
         left = relax_left()
-        return left is not None and left <= 0
+        return left is not None and left <= 0 and relaxed_met()
+
+    async def degradation_slots() -> list[ReviewSlot]:
+        """Untried extra/builder-family slots, launched once the grace ends."""
+        found: list[ReviewSlot] = []
+        for slot in pool:
+            if (slot.label in attempts or slot.reserve_only
+                    or not (slot.extra or slot.family == builder_family)):
+                continue
+            ok, _reason = slot_available(slot, await store.get_slot(slot.label))
+            if ok:
+                found.append(slot)
+        return found
 
     def recoverable(outcome: Mapping[str, Any]) -> bool:
         if outcome.get("routing_exhausted"):
@@ -1163,17 +1183,25 @@ async def _recover_quorum(
 
     async def run_batch(slots: Sequence[ReviewSlot]) -> bool:
         """Run one batch; True when the relax grace cut it short."""
+        nonlocal degraded
         pending = {asyncio.ensure_future(run_slot(slot)) for slot in slots}
         try:
-            while pending:
+            while True:
                 left = relax_left()
                 if left is not None and left <= 0:
-                    return True
+                    if relaxed_met():
+                        return True
+                    if not degraded:
+                        degraded = True
+                        pending |= {asyncio.ensure_future(run_slot(slot))
+                                    for slot in await degradation_slots()}
+                    left = None
+                if not pending:
+                    return False
                 done, pending = await asyncio.wait(
                     pending, timeout=left, return_when=asyncio.FIRST_COMPLETED)
                 for task in done:
                     task.result()
-            return False
         finally:
             for task in pending:
                 task.cancel()
@@ -1217,7 +1245,7 @@ async def _recover_quorum(
             if len(counted | {slot.family for slot in waiting}) < quorum:
                 break
             left = relax_left()
-            wait = delay if left is None else max(0.0, min(delay, left))
+            wait = min(delay, left) if left is not None and left > 0 else delay
             logger.warning("Review quorum unavailable; keeping valid reports and waiting %.0fs", wait)
             if not await pause(wait):
                 break
