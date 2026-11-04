@@ -438,7 +438,7 @@ class Dispatcher:
         # Fail-closed even when the gate module itself is unreadable.
         try:
             from reliability import admission as _admission
-        except Exception:
+        except Exception:  # noqa: BLE001
             _admission = None  # type: ignore[assignment]
         if _admission is not None:
             hunter = _admission.is_hunter_task(ticket)

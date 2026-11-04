@@ -616,7 +616,7 @@ def live_free_families(
         if not target.exists():
             return frozenset()
         profile = catalog_fallback_profile(load_catalog_doc(target))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return frozenset()
     return frozenset(item.family_id for item in profile.order)
 

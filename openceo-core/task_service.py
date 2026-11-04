@@ -1096,7 +1096,7 @@ class TaskService:
         doc = make_task_document(payload)
         try:
             from reliability import admission as _hunter_admission
-        except Exception:
+        except Exception:  # noqa: BLE001
             _hunter_admission = None  # type: ignore[assignment]
         if _hunter_admission is not None:
             try:
@@ -2102,12 +2102,12 @@ class TaskService:
         """Hunter execution ticket, by source_id or params marker."""
         try:
             from reliability import admission as _admission
-        except Exception:
+        except Exception:  # noqa: BLE001
             _admission = None  # type: ignore[assignment]
         if _admission is not None:
             try:
                 return bool(_admission.is_hunter_task(task))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return False
         if not isinstance(task, dict):
             return False
@@ -2134,7 +2134,7 @@ class TaskService:
         """
         try:
             from reliability import admission as _admission
-        except Exception:
+        except Exception:  # noqa: BLE001
             _admission = None  # type: ignore[assignment]
         try:
             if _admission is None:
@@ -2310,7 +2310,7 @@ class TaskService:
                 mirror = business_mirror(mirrors) \
                     if isinstance(mirrors, dict) else {}
                 previous = str((mirror or {}).get("business_status") or "")
-            except Exception:
+            except Exception:  # noqa: BLE001
                 previous = ""
             if not previous and str(task.get("status") or "") == \
                     TaskStatus.COMPLETED.value:
@@ -2399,7 +2399,7 @@ class TaskService:
             "_erp_order": {"order_id": order_id, "business_reference": name}}
         try:
             from reliability import admission as _adopt_admission
-        except Exception:
+        except Exception:  # noqa: BLE001
             _adopt_admission = None  # type: ignore[assignment]
         if _adopt_admission is not None:
             try:
@@ -2921,7 +2921,7 @@ class TaskService:
                         hits = {}
                         self._adapter_invariant_hits = hits
                     hits[ticket] = str((payload or {}).get("target") or "")
-                except Exception:
+                except Exception:  # noqa: BLE001, S110
                     pass
         except Exception:
             logger.warning("Sumidero INV-002 del adaptador fallido",
@@ -3221,7 +3221,7 @@ class TaskService:
             _hits = getattr(self, "_adapter_invariant_hits", None)
             if isinstance(_hits, dict):
                 _hits.pop(name, None)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
         span_extended = False
         delay = 1.0
@@ -3302,7 +3302,7 @@ class TaskService:
             try:
                 _hits = getattr(self, "_adapter_invariant_hits", None)
                 _dup = isinstance(_hits, dict) and _hits.pop(name, None) == target
-            except Exception:
+            except Exception:  # noqa: BLE001
                 _dup = False
             if not _dup:
                 await self._record_reread_violation(
@@ -3347,11 +3347,11 @@ class TaskService:
                 if _db is not None and hasattr(_db, "__getitem__"):
                     try:
                         _problems = _db["reliability_problems"]
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         _problems = None
                     try:
                         _exposure_store = _db["reliability_exposures"]
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         _exposure_store = None
                 if _problems is not None:
                     await _verification.note_ticket_completed(

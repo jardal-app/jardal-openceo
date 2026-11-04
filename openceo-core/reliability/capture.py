@@ -324,14 +324,14 @@ def _resolve_collection(source: Any) -> Any | None:
         if db is not None:
             try:
                 return db[COLLECTION]
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return None
         if hasattr(source, "__getitem__"):
             try:
                 return source[COLLECTION]
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return None
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     return None
 
@@ -534,7 +534,7 @@ async def replay_spool(collection: Any,
                 await _insert_async(coll, doc)
                 replayed_ids.append(doc.get("_id"))
                 outcome["replayed"] += 1
-            except Exception:
+            except Exception:  # noqa: BLE001
                 outcome["failed"] += 1
                 break
         outcome["pending"] = _drop_replayed(replayed_ids, runtime_dir)
@@ -571,7 +571,7 @@ def replay_spool_sync(collection: Any,
                     _insert_sync(coll, doc)
                 replayed_ids.append(doc.get("_id"))
                 outcome["replayed"] += 1
-            except Exception:
+            except Exception:  # noqa: BLE001
                 outcome["failed"] += 1
                 break
         outcome["pending"] = _drop_replayed(replayed_ids, runtime_dir)
@@ -631,7 +631,7 @@ async def _record_async(
     try:
         recent = await _count_recent_async(
             coll, doc["fingerprint"], doc["created_at"] - timedelta(hours=1))
-    except Exception:
+    except Exception:  # noqa: BLE001
         _spool_append(doc, runtime_dir, int(cap_bytes))
         return str(doc["_id"])
     if recent >= int(limit):
@@ -641,7 +641,7 @@ async def _record_async(
         return None
     try:
         stored_id = await _insert_async(coll, doc)
-    except Exception:
+    except Exception:  # noqa: BLE001
         _spool_append(doc, runtime_dir, int(cap_bytes))
         return str(doc["_id"])
     _notify(doc, notify)
@@ -680,7 +680,7 @@ def record_incident_sync(
             recent = _count_recent_sync(
                 coll, doc["fingerprint"],
                 doc["created_at"] - timedelta(hours=1))
-        except Exception:
+        except Exception:  # noqa: BLE001
             _spool_append(doc, runtime_dir, int(cap_bytes))
             return str(doc["_id"])
         if recent >= int(limit):
@@ -696,7 +696,7 @@ def record_incident_sync(
                     stored_id = future.result(timeout=INSERT_TIMEOUT_SECONDS + 1)
             else:
                 stored_id = _insert_sync(coll, doc)
-        except Exception:
+        except Exception:  # noqa: BLE001
             _spool_append(doc, runtime_dir, int(cap_bytes))
             return str(doc["_id"])
         if notify is not None:
@@ -788,5 +788,5 @@ def transient_recovered(probe: str | BaseException | None) -> bool:
 
         text = probe if isinstance(probe, str) else str(probe or "")
         return bool(transient_provider_error(text))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False

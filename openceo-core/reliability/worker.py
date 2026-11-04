@@ -407,9 +407,9 @@ def _stores(source: Any) -> tuple[Any | None, Any | None]:
             try:
                 return (source[_capture.COLLECTION],
                         source[PROBLEMS_COLLECTION])
-            except Exception:
+            except Exception:  # noqa: BLE001
                 return None, None
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None, None
     return None, None
 
@@ -445,7 +445,7 @@ async def _supersede_stale_versions(
     except AttributeError:
         stored = await _maybe_await(
             problems.find({"scope": scope, "fingerprint": fingerprint}))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return 0
     stale = 0
     for item in stored:
@@ -838,7 +838,7 @@ class ReliabilityWorker:
                 await self._event.wait()
                 await self._drain()
                 supervisor.success()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 wait = await supervisor.failure(
                     exc if isinstance(exc, BaseException)
                     else RuntimeError(str(exc)),
@@ -959,7 +959,7 @@ async def _reconcile_unprocessed(
     except AttributeError:
         pending = await _maybe_await(
             incidents.find({"processed": False}))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return 0
     docs = [doc for doc in pending if isinstance(doc, dict)]
     for doc in docs[:max(1, int(limit))]:
@@ -973,7 +973,7 @@ async def _expire_claims(source: Any,
     moment = _utcnow() if now is None else _as_utc(now)
     try:
         budget = source[BUDGET_COLLECTION]
-    except Exception:
+    except Exception:  # noqa: BLE001
         return 0
     try:
         cursor = budget.find({})
@@ -981,9 +981,9 @@ async def _expire_claims(source: Any,
     except AttributeError:
         try:
             docs = await _maybe_await(budget.find({}))
-        except Exception:
+        except Exception:  # noqa: BLE001
             return 0
-    except Exception:
+    except Exception:  # noqa: BLE001
         return 0
     expired = 0
     _, problems = _stores(source)

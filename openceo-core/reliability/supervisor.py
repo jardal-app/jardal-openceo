@@ -33,7 +33,7 @@ def frames_from_exc(exc: BaseException) -> list[dict[str, str]]:
             "module": "?",
         } for entry in extracted]
         return frames[-MAX_FRAMES:]
-    except Exception:
+    except Exception:  # noqa: BLE001
         return []
 
 

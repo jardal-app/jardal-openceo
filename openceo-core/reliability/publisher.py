@@ -277,7 +277,7 @@ async def republish_changed_proposal(
     previous = ticket.get("proposal_hash")
     try:
         digest = proposal_hash(proposal)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
     if previous is not None and previous == digest:
         return None

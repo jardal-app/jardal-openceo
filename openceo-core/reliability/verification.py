@@ -560,7 +560,7 @@ def _exposure_filter(problem: dict[str, Any],
 def _day_of(moment: Any) -> str:
     try:
         return _as_utc(moment).strftime("%Y-%m-%d")
-    except Exception:
+    except Exception:  # noqa: BLE001
         return _utcnow().strftime("%Y-%m-%d")
 
 
@@ -595,7 +595,7 @@ async def _scan_regressions(
         return None
     try:
         since = _as_utc(fix.get("merged_at"))
-    except Exception:
+    except Exception:  # noqa: BLE001
         since = now
     docs = await _collect(
         incidents,

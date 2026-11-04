@@ -278,7 +278,7 @@ async def record_reopen_escape(
         try:
             if resolve_collection(source) is None:
                 return None
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
         doc_task_id: str | None = None
         if isinstance(task, dict):
@@ -321,7 +321,7 @@ async def record_revert_escape(
         try:
             if resolve_collection(source) is None:
                 return {"recorded": False, "reason": "no_store"}
-        except Exception:
+        except Exception:  # noqa: BLE001
             return {"recorded": False, "reason": "no_store"}
         verdict = classify_revert(
             revert_message, reverted_ref=reverted_ref,

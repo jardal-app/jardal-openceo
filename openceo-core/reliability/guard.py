@@ -211,7 +211,7 @@ def evaluate(state: Any, observation: dict[str, Any],
                "window": window[-WINDOW_MAX:]}
     try:
         rule = _match_rule(current["window"], phase, parsed_policy)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return current, _continue(mode == "shadow", True)
     if rule is None:
         return current, _continue(mode == "shadow", fail_open)
