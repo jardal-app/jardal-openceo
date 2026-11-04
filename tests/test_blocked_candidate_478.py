@@ -112,9 +112,12 @@ class ScriptedBuilder:
         self.repo = repo
         self.turns = list(turns)
         self.prefixes: list[str] = []
+        self.retries: list[bool] = []
 
-    async def __call__(self, task, config, tool, *, prompt_prefix: str = ""):
+    async def __call__(self, task, config, tool, *, prompt_prefix: str = "",
+                       retry: bool = True):
         self.prefixes.append(prompt_prefix)
+        self.retries.append(retry)
         turn = self.turns.pop(0)
         for rel, text in turn.get("writes", {}).items():
             path = self.repo / rel
@@ -246,6 +249,7 @@ async def test_hecho_after_the_turn_goes_to_gates_and_merge(repo):
         oracle_cmd="bun test {refs}")
     assert output.status == TaskStatus.COMPLETED, output.error
     assert builder.prefixes[0] == ""
+    assert builder.retries == [True, False]
     turn = builder.prefixes[1]
     assert turn.startswith("CONTINUACIÓN TRAS TU VEREDICTO bloqueado")
     assert MOTIVO in turn and "Docker para la suite global" in turn
@@ -627,3 +631,19 @@ def test_a_failing_pre_commit_hook_cannot_block_keeping_the_work(repo):
     kept = manager()._keep_candidate(_built_branch(repo), "blocked")
     assert kept is not None
     assert git(repo, "show", f"{kept['branch']}:tracked.txt") == "after"
+
+
+@run_async
+async def test_a_single_attempt_turn_never_sleeps_through_provider_retries():
+    dev = manager()
+    dev._resolve_tier_executor = AsyncMock(return_value=SimpleNamespace(argv=["x"]))
+    failing = CodingStepResult(
+        step={"step": "code", "status": "failed"}, prompt="p", summary="",
+        error="503 service unavailable", provider_retryable=True)
+    dev._step_code_once = AsyncMock(return_value=failing)
+    with patch("agents.dev.session.asyncio.sleep", new=AsyncMock()) as sleep:
+        result = await dev._step_code(
+            {"task_id": "t"}, {}, CodingTool.TIER_B, retry=False)
+    assert result.error == "503 service unavailable"
+    assert dev._step_code_once.await_count == 1
+    assert sleep.await_count == 0

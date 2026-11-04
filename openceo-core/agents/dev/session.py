@@ -750,7 +750,7 @@ class DevSessionManager:
             "bloqueado with work in the tree: one continuation turn "
             "(sandbox facts and gates) before the candidate is set aside"))
         follow = await self._step_code(
-            task, project_config, tool,
+            task, project_config, tool, retry=False,
             prompt_prefix=blocked_continuation_prompt(
                 code_result.agent_result or {}, gates, oracle_cmd))
         if (follow.error or follow.waiting_reason
@@ -3025,14 +3025,15 @@ class DevSessionManager:
 
     async def _step_code(
         self, task: dict[str, Any], config: dict[str, Any], tool: CodingTool,
-        *, prompt_prefix: str = "",
+        *, prompt_prefix: str = "", retry: bool = True,
     ) -> CodingStepResult:
         if self._settings.DEV_EXECUTION_MODE == "mock":
             return await self._step_code_once(task, config, tool)
         executor = await self._resolve_tier_executor(tool, config)
         elapsed = 0.0
         responded = tuple(executor.argv) in self._provider_responses
-        for attempt in range(len(PROVIDER_RETRY_DELAYS) + 1):
+        last_attempt = len(PROVIDER_RETRY_DELAYS) if retry else 0
+        for attempt in range(last_attempt + 1):
             result = await self._step_code_once(
                 task, config, tool, executor=executor,
                 prompt_prefix=prompt_prefix + (
@@ -3042,7 +3043,7 @@ class DevSessionManager:
                 elapsed += float(result.cost_run.get("duration_s") or 0)
                 result.cost_run["duration_s"] = elapsed
             responded = responded or result.provider_responded
-            if (not result.provider_retryable or attempt == len(PROVIDER_RETRY_DELAYS)
+            if (not result.provider_retryable or attempt == last_attempt
                     or await self._task_cancelled(str(task.get("task_id") or ""))):
                 if attempt:
                     result.step["provider_attempts"] = attempt + 1
