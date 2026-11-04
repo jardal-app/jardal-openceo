@@ -52,8 +52,8 @@ class RecoveryScheduler:
             logger.warning("recovery seed failed", exc_info=True)
         self._task = asyncio.create_task(
             self._run(), name="objective-recovery")
-        logger.info("Objective recovery scheduler started (seeded=%s)",
-                    seeded)
+        logger.warning("Objective recovery scheduler started (seeded=%s)",
+                       seeded)
 
     async def stop(self) -> None:
         self._stopped = True

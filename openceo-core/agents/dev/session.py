@@ -623,8 +623,9 @@ class DevSessionManager:
         repo_path = self._resolve_repo_path(project_config)
         branch: _SimpleBranch | None = None
         if repo_path is not None and self._settings.DEV_EXECUTION_MODE != "mock":
-            opened = self._open_simple_branch(
-                task, project_config, tool, Path(repo_path))
+            opened = await asyncio.to_thread(
+                self._open_simple_branch, task, project_config, tool,
+                Path(repo_path))
             if isinstance(opened, DevExecutionOutput):
                 return opened
             branch = opened
