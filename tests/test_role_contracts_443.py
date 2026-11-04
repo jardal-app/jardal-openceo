@@ -219,20 +219,21 @@ class CodexHomeTests(unittest.TestCase):
             account = home / ".codex-j"
             (account / "plugins").mkdir(parents=True)
             for name in ("config.toml", "auth.json", "installation_id",
-                         "state_5.sqlite", "memories_1.sqlite",
-                         "history.jsonl"):
+                         "models_cache.json", "state_5.sqlite",
+                         "memories_1.sqlite", "history.jsonl"):
                 (account / name).write_text("x", encoding="utf-8")
             (account / "AGENTS.md").symlink_to(home / "rules.md")
             ops = _codex_state_ops(home, ["codexj", "exec", "-"])
             self.assertEqual(ops[0], ["--tmpfs", str(account)])
             self.assertIn(["--ro-bind", str(account / "config.toml"),
                            str(account / "config.toml")], ops)
-            for writable in ("auth.json", "installation_id"):
+            for writable in ("auth.json", "installation_id",
+                             "models_cache.json"):
                 self.assertIn(["--bind", str(account / writable),
                                str(account / writable)], ops)
             mounted = {Path(op[-1]).name for op in ops[1:]}
             self.assertEqual(mounted, {"config.toml", "plugins", "auth.json",
-                                       "installation_id"})
+                                       "installation_id", "models_cache.json"})
             self.assertEqual(_codex_state_ops(home, ["agyj", "--print"]), [])
 
     def test_codexf_gets_the_same_per_run_home_over_dot_codex(self) -> None:
@@ -243,13 +244,14 @@ class CodexHomeTests(unittest.TestCase):
             account = home / ".codex"
             account.mkdir()
             for name in ("config.toml", "auth.json", "installation_id",
-                         "AGENTS.md"):
+                         "models_cache.json", "AGENTS.md"):
                 (account / name).write_text("x", encoding="utf-8")
             ops = _codex_state_ops(home, ["/x/.local/bin/codexf", "exec"])
             self.assertEqual(ops[0], ["--tmpfs", str(account)])
-            for writable in ("auth.json", "installation_id"):
+            for writable in ("auth.json", "installation_id",
+                             "models_cache.json"):
                 self.assertIn(["--bind", str(account / writable),
                                str(account / writable)], ops)
             mounted = {Path(op[-1]).name for op in ops[1:]}
             self.assertEqual(mounted, {"config.toml", "auth.json",
-                                       "installation_id"})
+                                       "installation_id", "models_cache.json"})

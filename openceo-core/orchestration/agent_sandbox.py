@@ -132,13 +132,14 @@ _GEMINI_BINARY_SUBDIRS = {"agyj": ".gemini-j", "agy2": ".gemini-2"}
 
 #: codex wrapper → its CODEX_HOME, plus the entries a run reads from it.
 #: Read-write: codex opens installation_id O_RDWR|O_CREAT at boot (EROFS kills
-#: its in-process app-server) and rewrites auth.json on token refresh.
+#: its in-process app-server), rewrites auth.json on token refresh, and
+#: refreshes models_cache.json when the model catalog changes: read-only
+#: left runs on fallback metadata (TASK-2026-00476).
 #: ``~/.codex`` is also bound read-only with the home; codexf's per-run
 #: tmpfs over it shadows that bind (TASK-2026-00475).
 _CODEX_BINARY_SUBDIRS = {"codexf": ".codex", "codexj": ".codex-j"}
-_CODEX_READ_ENTRIES = ("config.toml", "version.json", "models_cache.json",
-                       "plugins")
-_CODEX_WRITE_ENTRIES = ("installation_id", "auth.json")
+_CODEX_READ_ENTRIES = ("config.toml", "version.json", "plugins")
+_CODEX_WRITE_ENTRIES = ("installation_id", "auth.json", "models_cache.json")
 
 _WALK_PRUNE_DIRS = frozenset({
     ".git", ".venv", "node_modules", "__pycache__", ".pytest_cache",
@@ -448,7 +449,7 @@ def _codex_state_ops(home: Path, argv: Sequence[str]) -> list[list[str]]:
     The agent home never mounted ``~/.codex-j``, so codexj died at boot
     ("CODEX_HOME ... does not exist"). codex writes sqlite state, logs and
     sessions there: a tmpfs holds them for the run, the entries it only
-    reads are bound read-only and the two it opens for writing persist.
+    reads are bound read-only and the three it opens for writing persist.
     Memories and the user-level AGENTS.md stay out.
     """
     if not argv:
