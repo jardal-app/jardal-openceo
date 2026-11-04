@@ -11,6 +11,10 @@ dev:
   # Tier S design §3/§15: no dev.coding_tool (routing is per-task) and no
   # dev.tier_s (roles and pool are global in config_loader.py).
   default_provider: muse
+  # Builder on the host user (TASK-2026-00481, Owner order): OpenCEO's own
+  # toolchain (pnpm, Docker, caches) must be usable by dev tickets and the
+  # recovery agent. Reviewers and read-only roles keep the bwrap fence.
+  isolation: host
   branch_pattern: "{session_id}-{slug}"
   auto_push: false
   create_pr: true

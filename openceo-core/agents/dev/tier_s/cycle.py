@@ -623,6 +623,13 @@ class TierSCycle:
         )
         if resume is not None:
             self._restore_checkpoint(ctx, resume)
+        else:
+            # A fresh cycle must not inherit an older attempt's kept-work
+            # record; only a park of this run writes one (TASK-2026-00481).
+            fresh_params = dict(ctx.ticket.get("params") or {})
+            if "kept_work" in fresh_params:
+                fresh_params.pop("kept_work")
+                ctx.ticket["params"] = fresh_params
         ctx.cost_sessions_base = len(ctx.metrics.get("sessions") or [])
         await self._deadline_mark_start(ctx)
         await self._note_exposure(ctx, "tier_s")
@@ -1030,6 +1037,18 @@ class TierSCycle:
                 json.dumps(agent_result, ensure_ascii=False), encoding="utf-8")
         self._commit_if_changed(ctx, f"checkpoint {ctx.ref}: {reason}")
         ctx.head_sha = ctx.head_sha or ctx.base_sha
+        if reason == "agent_blocked" and agent_result is not None:
+            changed = self._changed_files(ctx)
+            if changed:
+                # The planner must learn where the blocked work lives
+                # (TASK-2026-00481): the branch survives with its checkpoint.
+                params = dict(ctx.ticket.get("params") or {})
+                params["kept_work"] = {
+                    "branch": ctx.branch, "kind": "blocked",
+                    "base_sha": ctx.base_sha, "head_sha": ctx.head_sha,
+                    "files": len(changed),
+                }
+                ctx.ticket["params"] = params
         checkpoint = self._review_checkpoint(ctx)
         checkpoint["phase"] = "build"
         await self._runs.patch_run(ctx.run_id, {"checkpoint": checkpoint})

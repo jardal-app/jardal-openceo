@@ -279,6 +279,16 @@ class ConfigLoader:
                 errors.append(
                     f"dev.tiers in {project}/project.yaml must be a mapping or absent."
                 )
+        # Optional builder fence override (TASK-2026-00481): a project whose
+        # toolchain the bwrap fence cannot provide (Docker, host caches,
+        # package installs) may run its builders on the host user. Absent
+        # keeps the sandbox; anything but the two values fails validation.
+        isolation = dev.get("isolation")
+        if isolation is not None and isolation not in ("sandbox", "host"):
+            errors.append(
+                f"{project}/project.yaml: 'dev.isolation' must be "
+                "'sandbox' or 'host'."
+            )
         # Optional vault mapping for Tier S knowledge notes (design §9.8, F7b).
         vault = dev.get("vault_project")
         if vault is not None:
@@ -689,6 +699,25 @@ class ConfigLoader:
                 "max_active_objectives_global": 3,
                 "max_active_objectives_per_project": 2,
                 "max_active_tickets_per_objective": 6,
+                # Bounded self-recovery for parked objectives
+                # (TASK-2026-00481): a persisted due time retries the
+                # planner; when the budget is spent a recovery ticket in
+                # OpenCEO's project asks a musej builder to diagnose and
+                # fix the root cause under the normal gates/merge.
+                "recovery": {
+                    "enabled": True,
+                    "max_attempts": 2,
+                    "backoff_minutes": [10, 60],
+                    "ticket_project": "jardal-openceo",
+                    "ticket_tier": "tier_c",
+                    "ticket_max_open": 1,
+                    "max_tickets": 2,
+                    # A merged recovery fix is deployed by restarting the
+                    # canonical service once no ticket is in progress.
+                    "deploy_on_close": True,
+                    "deploy_grace_seconds": 5,
+                    "deploy_retry_seconds": [60, 300],
+                },
             },
             # Autonomous company CEO (autonomy epic TASK-2026-00110,
             # F4 TASK-2026-00119). One headless Muse run per review

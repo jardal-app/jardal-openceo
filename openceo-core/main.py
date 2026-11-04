@@ -63,6 +63,7 @@ from objectives.missions import (
     MissionErpError,
     MissionRejected,
 )
+from objectives.recovery_scheduler import RecoveryScheduler
 from objectives.service import ObjectiveService
 from phase_workflows import merge_workflow_templates
 from project_service import ProjectService
@@ -252,6 +253,11 @@ ceo_loop = CEOLoop(
 )
 task_service.set_ceo_wake(ceo_loop.wake)
 objective_service.set_ceo_wake(ceo_loop.wake)
+# Objective recovery timer (TASK-2026-00481): one event-driven task that
+# retries a parked objective at its persisted due time and opens a musej
+# recovery ticket when the budget is spent. Never a poll loop.
+recovery_scheduler = RecoveryScheduler(objective_service)
+objective_service.set_recovery_wake(recovery_scheduler.wake)
 # Ticket research bridge (TASK-2026-00222): per-ticket consumers over the
 # in-process service, with lazy lookups for the service and dispatcher wake.
 _ticket_research_consumers = ConsumerRegistry()
@@ -506,6 +512,7 @@ async def lifespan(_: FastAPI):
         await task_service.drain_erp_outbox_startup()
         await dispatcher.start()
         await ceo_loop.start()
+        await recovery_scheduler.start()
         # Ojo: dentro de ``lifespan`` hay un ``settings = get_settings()`` mas
         # abajo (bloque de auth) que vuelve ``settings`` local a toda la funcion.
         # Leerlo aqui antes de esa asignacion lanzaria UnboundLocalError, asi que
@@ -606,6 +613,7 @@ async def lifespan(_: FastAPI):
         # Horizon se para antes que el resto para que ninguna escritura suya
         # caiga despues de cerrar el repositorio.
         await horizon_scheduler.stop()
+        await recovery_scheduler.stop()
         await ceo_loop.stop()
         await dispatcher.stop()
         await dispatcher.close_deadline_watch()

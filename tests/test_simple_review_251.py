@@ -86,7 +86,13 @@ def _config(repo: Path, pool: list[dict[str, Any]] | None = None,
                                "branch_base": "main"}]},
         "dev": dev}
     if pool is not None:
-        config["review"] = {"reviewers": pool, "review": {}}
+        # The live free-router replaces static slots from the local catalog;
+        # these tests script the slots, so pin the router off (same opt-out
+        # as the other routing suites).
+        config["review"] = {
+            "reviewers": pool,
+            "review": {"free_router": {"enabled": False}},
+        }
     if auto_merge is not None:
         dev["auto_merge"] = auto_merge
     if budgets is not None:
@@ -359,6 +365,9 @@ class QuorumTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(output.resume_at)
         self.assertEqual(
             output.params[REVIEW_ROUND_PARAMS_KEY]["no_quorum_waits"], 3)
+        checkpoint = output.params["dev_checkpoint"]
+        self.assertEqual(checkpoint["branch"], branch.branch)
+        self.assertTrue(checkpoint["build_done"])
         self.assertNotEqual(
             _git(repo, "branch", "--list", branch.branch), "")
 

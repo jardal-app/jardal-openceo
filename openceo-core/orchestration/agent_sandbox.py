@@ -40,6 +40,7 @@ __all__ = [
     "ensure_sandbox_scratch",
     "ensure_ticket_dir",
     "plan_agent",
+    "project_isolation",
     "remove_ticket_dir",
     "runtime_base_dir",
     "sandbox_available",
@@ -155,6 +156,19 @@ _TICKET_WORK_BASE = "agent-work"
 def sandbox_available() -> bool:
     """True when the bwrap backend can fence agent runs."""
     return BubblewrapBackend().available
+
+
+def project_isolation(dev_cfg: Mapping[str, Any] | None) -> str:
+    """Execution fence for a project's builders: ``sandbox`` or ``host``.
+
+    ``dev.isolation: host`` runs the builder on the host user (real home,
+    toolchain, Docker and package caches; env still goes through the
+    ``child_env`` allowlist). It is a deliberate per-project exception to
+    the bwrap fence, for repos whose build/test toolchain the fence cannot
+    provide. Absent or malformed values keep the safe default.
+    """
+    raw = str((dev_cfg or {}).get("isolation") or "sandbox").strip().lower()
+    return raw if raw in ("sandbox", "host") else "sandbox"
 
 
 def sandbox_env(base: Mapping[str, str],

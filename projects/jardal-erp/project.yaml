@@ -9,6 +9,11 @@ project:
 
 dev:
   default_provider: muse
+  # Builder on the host user (TASK-2026-00481, Owner order): the pnpm/bun
+  # toolchain, package store and Docker the repo tests need are not fully
+  # available inside the bwrap fence. Reviewers and read-only roles keep
+  # the fence; env still goes through the child allowlist.
+  isolation: host
   branch_pattern: "{session_id}-{slug}"
   auto_push: false
   auto_merge: true

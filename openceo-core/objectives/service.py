@@ -21,6 +21,7 @@ from catalog import (
 )
 from objectives import missions as missions_mod
 from objectives import playbooks as playbooks_mod
+from objectives import recovery_policy as recovery_mod
 from objectives.delivery_verification import generic_agent_verifiers
 from objectives.money_guide import project_money_routing
 from objectives.missions import (
@@ -201,6 +202,14 @@ class ObjectiveService:
         self._settings = settings
         self._rate_monitor = rate_monitor
         self._ceo_wake: Any | None = None
+        self._recovery_wake: Any | None = None
+
+    def set_recovery_wake(self, wake: Any | None) -> None:
+        """Inject the recovery scheduler wake (TASK-2026-00481)."""
+        self._recovery_wake = wake
+        # Dev-flow envs are built outside this service; the single timer
+        # registers process-wide so their parks also wake it.
+        engine_mod.RECOVERY_WAKE = wake
 
     def set_ceo_wake(self, wake: Any | None) -> None:
         """Inject the CEO loop wake (objective parked/closed events).
@@ -293,6 +302,7 @@ class ObjectiveService:
             vault=dict(dev_cfg.get("vault_project") or {})
             if dev_cfg.get("vault_project") else None,
             ceo_wake=self._ceo_wake,
+            recovery_wake=self._recovery_wake,
             project_routing=project_money_routing(project_config),
             # Generic delivery check per enabled AI agent
             # (TASK-2026-00216): declared skill outputs plus required
@@ -553,6 +563,302 @@ class ObjectiveService:
         summary["ok"] = True
         return summary
 
+    # -- automatic recovery (TASK-2026-00481) ---------------------------
+
+    def _objectives_cfg(self, project: str) -> dict[str, Any]:
+        try:
+            return dict(self._config.load_project(project).get(
+                "objectives") or {})
+        except Exception:  # noqa: BLE001 - missing config keeps defaults
+            return {}
+
+    async def seed_recovery_parks(self, limit: int = 100) -> dict[str, Any]:
+        """One bounded boot pass: give legacy parks their first due time."""
+        if self._repo is None:
+            return {"ok": False, "reason": "no-store"}
+        seeded = 0
+        rows = await self._repo.list_boot_resumable_objectives(limit)
+        for row in rows or []:
+            if str((row or {}).get("status") or "") != "waiting":
+                continue
+            objective_id = str((row or {}).get("objective_id") or "")
+            if not objective_id:
+                continue
+            project = str((row or {}).get("project") or "")
+            if not project or not self._config.has_project(project):
+                continue
+            patch = recovery_mod.recovery_initial_patch(
+                row, self._objectives_cfg(project))
+            if patch is None:
+                continue
+            try:
+                await self._repo.patch_objective(objective_id, patch)
+                seeded += 1
+            except Exception:  # noqa: BLE001 - one row never breaks the pass
+                logger.warning("recovery seed failed for %s",
+                               objective_id, exc_info=True)
+        if seeded and self._recovery_wake is not None:
+            self._recovery_wake()
+        return {"ok": True, "seeded": seeded}
+
+    async def recovery_candidates(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Waiting objectives with their live recovery decision inputs."""
+        if self._repo is None:
+            return []
+        out: list[dict[str, Any]] = []
+        rows = await self._repo.list_boot_resumable_objectives(limit)
+        for row in rows or []:
+            if str((row or {}).get("status") or "") != "waiting":
+                continue
+            objective_id = str((row or {}).get("objective_id") or "")
+            project = str((row or {}).get("project") or "")
+            if not objective_id or not project \
+                    or not self._config.has_project(project):
+                continue
+            try:
+                children = await self._repo.list_tasks_by_objective(
+                    objective_id)
+            except Exception:  # noqa: BLE001
+                children = []
+            active = engine_mod._brake_active_children(children)
+            out.append({
+                "objective": row,
+                "objective_id": objective_id,
+                "project": project,
+                "objectives_cfg": self._objectives_cfg(project),
+                "active_children": len(active),
+                "children": children,
+                "ticket_open": await self._recovery_ticket_open(objective_id),
+            })
+        return out
+
+    async def recovery_next_delay(self) -> int:
+        if self._repo is None:
+            return recovery_mod.MAX_SLEEP_SECONDS
+        rows = await self._repo.list_boot_resumable_objectives(100)
+        return recovery_mod.recovery_seconds_to_next(rows or [])
+
+    async def recovery_tick(self) -> dict[str, Any]:
+        """One scheduler pass: retry due parks, open tickets when spent."""
+        retried: list[str] = []
+        ticketed: list[str] = []
+        candidates = await self.recovery_candidates()
+        for candidate in candidates:
+            objective = candidate["objective"]
+            decision = recovery_mod.recovery_decision(
+                objective,
+                candidate["active_children"],
+                candidate["objectives_cfg"],
+                ticket_open=candidate["ticket_open"],
+            )
+            action = str(decision.get("action") or "none")
+            if action == "retry":
+                result = await self.recover_objective(candidate["objective_id"])
+                if result.get("ok"):
+                    retried.append(candidate["objective_id"])
+            elif action == "ticket":
+                result = await self.open_recovery_ticket(
+                    candidate["objective_id"])
+                if result.get("ok"):
+                    ticketed.append(candidate["objective_id"])
+        return {"ok": True, "retried": retried, "ticketed": ticketed}
+
+    async def recover_objective(self, objective_id: str) -> dict[str, Any]:
+        """Claim one due park and replan it (single winner, never twice)."""
+        if self._repo is None:
+            return {"ok": False, "reason": "no-store"}
+        objective = await self._repo.get_objective(objective_id)
+        if objective is None:
+            return {"ok": False, "reason": "not-found"}
+        project = str(objective.get("project") or "")
+        if not project or not self._config.has_project(project):
+            return {"ok": False, "reason": "unknown-project"}
+        cfg = self._objectives_cfg(project)
+        try:
+            children = await self._repo.list_tasks_by_objective(objective_id)
+        except Exception:  # noqa: BLE001
+            children = []
+        decision = recovery_mod.recovery_decision(
+            objective, len(engine_mod._brake_active_children(children)), cfg,
+            ticket_open=await self._recovery_ticket_open(objective_id))
+        if decision.get("action") != "retry":
+            return {"ok": False, "reason": str(decision.get("reason") or "")}
+        recovery = objective.get("recovery")
+        due_at = (recovery or {}).get("due_at") \
+            if isinstance(recovery, Mapping) else None
+        store = (MongoObjectiveStore(self._repo) if self._repo is not None
+                 else InMemoryObjectiveStore())
+        claimed = await store.claim_recovery(objective_id, due_at)
+        if claimed is None:
+            return {"ok": False, "reason": "claim-lost"}
+        env = self.env_for(project)
+        try:
+            plan = await engine_mod.plan_objective(env, objective_id)
+        except Exception as exc:  # noqa: BLE001 - park it again, bounded
+            logger.exception("automatic recovery planning failed")
+            await engine_mod._objective_park(
+                env, claimed, "planner_error",
+                f"automatic recovery planning failed: {exc}")
+            return {"ok": False, "reason": "plan-error",
+                    "detail": str(exc)[:300]}
+        logger.info("Objective %s recovered automatically (attempt %s)",
+                    objective_id, (claimed.get("recovery") or {}).get(
+                        "attempts"))
+        return {"ok": True, "action": "retried", "plan": plan}
+
+    async def open_recovery_ticket(self, objective_id: str) -> dict[str, Any]:
+        """Create the musej recovery ticket once the retry budget is spent."""
+        if self._repo is None or self._task_service is None:
+            return {"ok": False, "reason": "no-store"}
+        objective = await self._repo.get_objective(objective_id)
+        if objective is None:
+            return {"ok": False, "reason": "not-found"}
+        project = str(objective.get("project") or "")
+        if not project or not self._config.has_project(project):
+            return {"ok": False, "reason": "unknown-project"}
+        cfg = self._objectives_cfg(project)
+        decision = recovery_mod.recovery_decision(
+            objective, 0, cfg, ticket_open=False)
+        if decision.get("action") != "ticket":
+            return {"ok": False, "reason": str(decision.get("reason") or "")}
+        if await self._recovery_ticket_open(objective_id):
+            return {"ok": False, "reason": "ticket-open"}
+        recovery = objective.get("recovery")
+        recovery = dict(recovery) if isinstance(recovery, Mapping) else {}
+        rec_cfg = recovery_mod.recovery_config(cfg)
+        target = str(rec_cfg.get("ticket_project") or "jardal-openceo")
+        if not self._config.has_project(target):
+            logger.warning("recovery ticket project %s missing; using %s",
+                           target, project)
+            target = project
+        try:
+            children = await self._repo.list_tasks_by_objective(objective_id)
+        except Exception:  # noqa: BLE001
+            children = []
+        round_no = int(recovery.get("ticket_round") or 0) + 1
+        if round_no > int(rec_cfg.get("max_tickets") or 2):
+            logger.warning("Recovery ticket budget spent for objective %s",
+                           objective_id)
+            return {"ok": False, "reason": "ticket-budget"}
+        description = self._recovery_ticket_description(
+            objective, project, children, recovery)
+        payload = {
+            "source": "spillover",
+            "source_id": f"objective-recovery:{objective_id}:{round_no}",
+            "title": f"[recovery] Objetivo {objective_id}: causa raíz del park",
+            "description": description,
+            "project": target,
+            "priority": "high",
+            "tags": ["recovery", "objective-recovery", project],
+            "coding_tool": str(rec_cfg.get("ticket_tier") or "tier_c"),
+            "autorun": True,
+            # Not an objective child on purpose: a failed recovery must not
+            # replan the mission from the wrong project. The close hook
+            # resumes the objective through params.recovery_for.
+            "params": {
+                "recovery_for": objective_id,
+                "recovery_project": project,
+                "recovery_reason": str(
+                    objective.get("waiting_reason") or "")[:500],
+            },
+            "acceptance": [
+                "Diagnóstico de la causa raíz del park en el ticket",
+                "Corrección verificada con tests dirigidos",
+                "HANDOFF con evidencia y siguiente acción",
+            ],
+        }
+        created = await create_internal_ticket(self._task_service, payload)
+        if created is None:
+            return {"ok": False, "reason": "create-failed"}
+        recovery.update({
+            "ticket_id": str(created.get("task_id") or ""),
+            "ticket_round": round_no,
+            "ticket_at": engine_mod._utcnow_iso(),
+            "exhausted": True,
+            "due_at": None,
+        })
+        await self._repo.patch_objective(objective_id, {"recovery": recovery})
+        logger.warning("Recovery ticket opened for objective %s: %s",
+                       objective_id, created.get("task_id"))
+        return {"ok": True, "ticket_id": created.get("task_id"),
+                "project": target}
+
+    async def _recovery_ticket_open(self, objective_id: str) -> bool:
+        if self._repo is None:
+            return False
+        terminal = list(engine_mod.TERMINAL_TICKET_STATUS
+                        | {engine_mod.FAILED_HISTORY_STATUS})
+        try:
+            row = await self._repo.tasks.find_one({
+                "params.recovery_for": objective_id,
+                "status": {"$nin": terminal},
+            })
+            return row is not None
+        except Exception:  # noqa: BLE001 - a read failure never blocks recovery
+            return False
+
+    def _recovery_ticket_description(
+        self, objective: Mapping[str, Any], project: str,
+        children: list[Mapping[str, Any]], recovery: Mapping[str, Any],
+    ) -> str:
+        gaps = objective.get("capability_gap") or {}
+        gap_text = str(gaps.get("summary") or "")[:900]             if isinstance(gaps, Mapping) else ""
+        failed = [item for item in children
+                  if str(item.get("status")) in ("failed", "waiting")]
+        evidence: list[str] = []
+        for item in failed[-6:]:
+            kept = item.get("params") if isinstance(
+                item.get("params"), Mapping) else {}
+            kept = kept.get("kept_work") if isinstance(
+                kept.get("kept_work"), Mapping) else {}
+            line = (f"- {item.get('task_id')} [{item.get('status')}] "
+                    f"{(str(item.get('title') or ''))[:120]}")
+            if kept.get("branch"):
+                line += f" | work kept on {kept['branch']}"
+            evidence.append(line)
+        returns = objective.get("planner_returns") or []
+        last_return = returns[-1] if returns else {}
+        return_text = ""
+        if isinstance(last_return, Mapping) and last_return:
+            return_text = (f"Último retorno: {last_return.get('title')} "
+                           f"[{last_return.get('agent')}/"
+                           f"{last_return.get('resultado')}] "
+                           f"{str(last_return.get('necesidad') or '')[:300]}")
+        return f"""MANDATO DE RECUPERACIÓN (TASK-2026-00481, automático)
+
+OpenCEO detectó un objetivo parado tras agotar sus reintentos. Este ticket
+existe para encontrar la causa raíz y corregirla, no para repetir el trabajo
+de la misión.
+
+OBJETIVO: {objective.get('objective_id')} (proyecto {project})
+ESTADO: {objective.get('status')} — {str(objective.get('waiting_reason') or '')[:400]}
+INTENTOS AUTOMÁTICOS: {recovery.get('attempts')} (agotados)
+{('GAP DECLARADO: ' + gap_text) if gap_text else ''}
+{return_text}
+
+TICKETS FALLIDOS O EN ESPERA:
+{chr(10).join(evidence) if evidence else '- (sin hijos fallidos)'}
+
+QUÉ HACER
+1. Diagnostica la causa raíz del park (motor, configuración, credencial,
+   presupuesto, prompt o contrato), leyendo el repo de OpenCEO y los
+   artefactos de la misión. No asumas que el plan anterior era correcto.
+2. Si la causa es código/configuración de OpenCEO, corrígela en este repo
+   con el cambio mínimo y tests dirigidos. Si la causa está en el repo de
+   la misión ({project}), no lo edites desde aquí: deja la corrección
+   propuesta y el punto exacto en el HANDOFF.
+3. Verifica con tests dirigidos, sin modelos en vivo. Los gates del
+   orquestador se ejecutan después; no ejecutes la suite global si pide
+   contenedores.
+4. NO reinicies el servicio, NO hagas commit ni merge: el orquestador
+   integra este ticket con sus gates y merge normales.
+5. Deja .openceo/HANDOFF.md con: causa raíz, cambio, evidencia, cómo
+   verificar y qué debe hacer el siguiente ciclo de la misión.
+
+ACEPTACIÓN
+- Diagnóstico explícito y corrección (o propuesta exacta si el fix vive en
+  el repo de la misión).
+- Tests dirigidos en verde y HANDOFF completo."""
     async def plan_return(
         self,
         objective_id: str,

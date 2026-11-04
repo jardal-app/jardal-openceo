@@ -56,6 +56,7 @@ from orchestration.live import TIMEOUT_RETURNCODE, ProcessExecutor
 from objectives import planner_models as planner_mod
 from objectives import plan_spend as spend_mod
 from objectives import playbooks as playbooks_mod
+from objectives import recovery_policy as recovery_mod
 from objectives import ticket_cost as cost_mod
 from owner_channel import (
     build_owner_question,
@@ -119,6 +120,8 @@ class ObjectiveStore(Protocol):
         self, project: str | None = None) -> list[dict[str, Any]]: ...
     async def list_boot_resumable_objectives(
         self, limit: int = 100) -> list[dict[str, Any]]: ...
+    async def claim_recovery(
+        self, objective_id: str, due_at: Any) -> dict[str, Any] | None: ...
 
 
 class ObjectiveTaskLister(Protocol):
@@ -171,6 +174,10 @@ class ObjectiveEnv:
     # reason when an objective parks or closes. Sync, never fatal, None
     # in bare unit envs and dev flows that do not wire the CEO loop.
     ceo_wake: Callable[[str], None] | None = None
+    # Recovery scheduler wake (TASK-2026-00481): parks persist their due
+    # time and this event-driven hook wakes the single timer; None in bare
+    # unit envs (the park still records the due time).
+    recovery_wake: Callable[[], None] | None = None
     # Normalized per-project tier routing (TASK-2026-00161): the
     # ``dev.routing`` mapping for the objective's project (``{}`` when the
     # project carries no characteristic). Feeds the planner prompt guide.
@@ -236,6 +243,23 @@ class InMemoryObjectiveStore:
                 if doc.get("status") in (
                     "active", "final_review", "waiting")][:limit]
 
+    async def claim_recovery(
+        self, objective_id: str, due_at: Any,
+    ) -> dict[str, Any] | None:
+        """Test double of the Mongo compare-and-set claim."""
+        doc = self.docs.get(objective_id)
+        if doc is None or doc.get("status") != "waiting":
+            return None
+        recovery = doc.get("recovery")
+        if not isinstance(recovery, dict) or recovery.get("due_at") != due_at:
+            return None
+        recovery["attempts"] = int(recovery.get("attempts") or 0) + 1
+        recovery["last_attempt_at"] = _utcnow_iso()
+        recovery["due_at"] = None
+        doc["status"] = "active"
+        doc["waiting_reason"] = None
+        return dict(doc)
+
 
 class MongoObjectiveStore:
     def __init__(self, repo: Any) -> None:
@@ -261,6 +285,12 @@ class MongoObjectiveStore:
         self, limit: int = 100,
     ) -> list[dict[str, Any]]:
         return await self._repo.list_boot_resumable_objectives(limit)
+
+    async def claim_recovery(
+        self, objective_id: str, due_at: Any,
+    ) -> dict[str, Any] | None:
+        return await self._repo.claim_objective_recovery(
+            objective_id, due_at)
 
 
 class MongoObjectiveTaskLister:
@@ -310,6 +340,11 @@ TERMINAL_TICKET_STATUS = frozenset({"completed", "cancelled", "converted"})
 #: showing failures (``open_tickets``) and the stall brake keeps tripping on
 #: runs without a terminal close (``closed_before``).
 FAILED_HISTORY_STATUS = "failed"
+
+#: Process-wide recovery wake (TASK-2026-00481): dev-flow envs do not
+#: carry the scheduler on every construction, so the single timer registers
+#: here and every park wakes it without a DB sweep.
+RECOVERY_WAKE: Callable[[], None] | None = None
 
 #: Origin marker of the parent ticket minted for a top-down objective.
 SHELL_ORIGIN = "objective_shell"
@@ -1003,6 +1038,7 @@ def _planner_prompt(
     principles_guide: str = "",
     cost_guide: str = "",
     playbooks_md: str = "",
+    parked_md: str = "",
 ) -> str:
     """Planner prompt: bounded state + JSON contract (self-contained).
 
@@ -1105,6 +1141,16 @@ def _planner_prompt(
         lines.extend(["", agents_md])
     if playbooks_md.strip():
         lines.extend(["", playbooks_md.strip()])
+    if parked_md.strip():
+        lines.extend([
+            "",
+            "RECOVERY CONTEXT: the objective was parked and this planning",
+            "run is an automatic retry (bounded, no Owner action). Plan",
+            "differently from the attempt that parked it: split, change the",
+            "approach, or use another available agent/tier. Do not repeat",
+            "the same ticket unchanged.",
+            parked_md.strip(),
+        ])
     lines.extend([
         "",
         "ROUTING (summary; the normative policy below rules on conflicts):",
@@ -1704,6 +1750,14 @@ async def _plan_objective_inner(
     handoffs = [item for item in reversed(handoffs) if item]
     skills_md, skill_map = _planner_skills()
     playbooks_md, playbook_names = _planner_playbooks()
+    recovery = objective.get("recovery")
+    recovery = dict(recovery) if isinstance(recovery, Mapping) else {}
+    parked_md = ""
+    if str(recovery.get("last_reason") or "").strip():
+        parked_md = (
+            f"Previous park: {recovery['last_reason']}\n"
+            f"Recovery attempts: {int(recovery.get('attempts') or 0)}/"
+            f"{recovery_mod.recovery_config(getattr(env, 'objectives_cfg', None))['max_attempts']}")
     scratch = objective_scratch(env.repo, objective_id)
     scratch.mkdir(parents=True, exist_ok=True)
     (scratch / "OBJECTIVE_CAPSULE.md").write_text(
@@ -1738,7 +1792,8 @@ async def _plan_objective_inner(
         cost_guide=cost_mod.objective_cost_section(
             cost_mod.aggregate_objective_cost(
                 [item.get("cost") for item in tickets])),
-        playbooks_md=playbooks_md)
+        playbooks_md=playbooks_md,
+        parked_md=parked_md)
     timeout_s = int(planner_cfg.get("timeout_minutes", 15)) * 60
     errors: list[str] = []
     result: planner_mod.PlannerResult | None = None
@@ -2579,9 +2634,20 @@ async def _objective_park(
     reason: str,
     detail: str,
 ) -> dict[str, Any]:
+    patch: dict[str, Any] = {
+        "status": "waiting", "waiting_reason": f"{reason}: {detail}"}
+    recovery = recovery_mod.recovery_park_patch(
+        objective, reason, detail, getattr(env, "objectives_cfg", None))
+    if recovery is not None:
+        patch.update(recovery)
     await env.objectives.patch_objective(
-        str(objective.get("objective_id")),
-        {"status": "waiting", "waiting_reason": f"{reason}: {detail}"})
+        str(objective.get("objective_id")), patch)
+    wake = getattr(env, "recovery_wake", None) or RECOVERY_WAKE
+    if wake is not None:
+        try:
+            wake()
+        except Exception:  # noqa: BLE001 - a wake never breaks the park
+            logger.warning("recovery wake failed", exc_info=True)
     if env.notify is not None:
         await env.notify(
             _notify_ref(objective),
@@ -2994,8 +3060,10 @@ async def on_ticket_closed(
         objective = await env.objectives.get_objective(objective_id)
         if objective is None:
             return {"ok": True, "action": "objective-not-active"}
+        is_recovery_ticket = str(
+            (ticket.get("params") or {}).get("recovery_for") or "") == objective_id
         if objective.get("status") != "active":
-            if not _park_resumes_on_close(objective):
+            if not (_park_resumes_on_close(objective) or is_recovery_ticket):
                 return {"ok": True, "action": "objective-not-active"}
             await env.objectives.patch_objective(objective_id, {
                 "status": "active", "waiting_reason": None})
@@ -3003,7 +3071,20 @@ async def on_ticket_closed(
                 await env.notify(
                     _notify_ref(objective),
                     f"Objective {objective_id} resumed: child evidence "
-                    "arrived while parked (capability_gap).")
+                    "arrived while parked ("
+                    f"{'recovery ticket' if is_recovery_ticket else 'capability_gap'}).")
+            objective = await env.objectives.get_objective(objective_id) \
+                or objective
+        # A child close (including a recovery ticket) is progress: the next
+        # park starts a fresh recovery budget (TASK-2026-00481).
+        previous_recovery = objective.get("recovery")
+        if isinstance(previous_recovery, Mapping) and previous_recovery:
+            await env.objectives.patch_objective(objective_id, {
+                "recovery": {
+                    **dict(previous_recovery),
+                    "attempts": 0, "due_at": None, "exhausted": False,
+                    "last_reason": None,
+                }})
             objective = await env.objectives.get_objective(objective_id) \
                 or objective
         if close is not None:

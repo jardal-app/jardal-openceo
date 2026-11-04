@@ -1342,6 +1342,37 @@ class MongoRepository:
         ).limit(limit)
         return [self._clean(row) async for row in rows]
 
+    async def claim_objective_recovery(
+        self, objective_id: str, due_at: Any,
+    ) -> dict[str, Any] | None:
+        """Compare-and-set claim of one due recovery (TASK-2026-00481).
+
+        Only a waiting objective whose persisted due time still matches can
+        be claimed: the timer and a concurrent close can never plan twice.
+        The winner becomes active with the attempt already counted, so the
+        park that follows sees the next backoff.
+        """
+        now = datetime.now(timezone.utc)
+        row = await self.dev_objectives.find_one_and_update(
+            {
+                "objective_id": objective_id,
+                "status": "waiting",
+                "recovery.due_at": due_at,
+            },
+            {
+                "$set": {
+                    "status": "active",
+                    "waiting_reason": None,
+                    "recovery.last_attempt_at": now.isoformat(),
+                    "recovery.due_at": None,
+                    "updated_at": now,
+                },
+                "$inc": {"recovery.attempts": 1},
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._clean(row) if row is not None else None
+
     async def list_tasks_by_objective(
         self, objective_id: str, limit: int = 100,
     ) -> list[dict[str, Any]]:

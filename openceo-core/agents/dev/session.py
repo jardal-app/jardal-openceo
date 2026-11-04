@@ -43,6 +43,7 @@ from objectives.money_guide import project_money_routing
 from objectives.pedido import is_explicit_dev
 from objectives.ticket_cost import COST_RUNS_KEY
 from objectives import ticket_cost as cost_mod
+from orchestration.agent_sandbox import project_isolation
 from orchestration.inbox import InMemoryInboxStore, MongoInboxStore
 from orchestration.knowledge import detect_prompt_lang, with_preamble
 from orchestration.knowledge_proposals import (
@@ -209,6 +210,9 @@ class TierExecutor:
     env: dict[str, str]
     label: str
     role_profile: str | None = None
+    #: ``False`` when the project sets ``dev.isolation: host``: the builder
+    #: runs with the host toolchain instead of the bwrap fence.
+    sandbox: bool = True
 
 
 @dataclass
@@ -225,6 +229,9 @@ class _SimpleBranch:
     #: it was already red on the base branch, so it can neither accept nor
     #: reject this work (TASK-2026-00178). "" = it runs as a gate.
     oracle_baseline_red: str = ""
+    #: The checkpoint was taken after the builder finished (TASK-2026-00481):
+    #: a resume goes straight to gates/review instead of paying another build.
+    build_done: bool = False
 
 
 #: Provenance marker for the explicit-dev tier default (TASK-2026-00204).
@@ -627,6 +634,21 @@ class DevSessionManager:
 
         if tool == CodingTool.TIER_C:
             await self._record_tier_c_event(task, "started")
+        if branch is not None and branch.build_done:
+            # A wait that resumed (review quorum, review-pool/router or gates
+            # config) left a checkpoint taken after the build (TASK-2026-00481):
+            # the paid work is committed, so go straight to gates/review.
+            output.steps.append(self._step(
+                "code", "ok",
+                "resumed from checkpoint: builder work already committed; "
+                "skipping the build turn"))
+            resumed_params = dict(task.get("params") or {})
+            resumed_params.pop("dev_checkpoint", None)
+            output.params = resumed_params
+            return await self._reliability_finish(
+                task, tool, branch,
+                await self._finish_simple_tool(
+                    task, project_config, tool, output, branch))
         code_result = await self._step_code(task, project_config, tool)
         await self._absorb_code_result(task, output, code_result)
         code_result = await self._continue_blocked_candidate(
@@ -951,7 +973,7 @@ class DevSessionManager:
         params = dict(output.params if isinstance(output.params, dict)
                       else (task.get("params") or {}))
         try:
-            self._save_simple_checkpoint(branch, params)
+            self._save_simple_checkpoint(branch, params, build_done=True)
         except (ValueError, OSError, subprocess.SubprocessError):
             logger.warning("wait checkpoint failed for %s; dropping the branch",
                            branch.branch, exc_info=True)
@@ -961,6 +983,7 @@ class DevSessionManager:
 
     def _save_simple_checkpoint(
         self, branch: _SimpleBranch, params: dict[str, Any] | None,
+        *, build_done: bool = False,
     ) -> None:
         if params is None:
             raise ValueError("cannot preserve a branch without execution params")
@@ -984,6 +1007,7 @@ class DevSessionManager:
             "head_sha": self._simple_git(repo, "rev-parse", "HEAD").stdout.strip(),
             "oracle_frozen": branch.oracle_frozen,
             "oracle_baseline_red": branch.oracle_baseline_red,
+            "build_done": bool(build_done),
             "artifacts": artifacts,
         }
         if self._simple_git(repo, "checkout", "-q", branch.base).returncode != 0:
@@ -1010,7 +1034,8 @@ class DevSessionManager:
             repo=repo, branch=branch, base=str(checkpoint["base"]),
             base_sha=str(checkpoint["base_sha"]), ref=str(checkpoint["ref"]),
             oracle_frozen=checkpoint.get("oracle_frozen"),
-            oracle_baseline_red=str(checkpoint.get("oracle_baseline_red") or ""))
+            oracle_baseline_red=str(checkpoint.get("oracle_baseline_red") or ""),
+            build_done=bool(checkpoint.get("build_done")))
 
     def _simple_diff_sizes(
         self, branch: _SimpleBranch, exclude: list[str],
@@ -1857,6 +1882,7 @@ class DevSessionManager:
                 "reports": reports, "quorum": False,
                 "no_quorum_waits": waits})
             if waits >= SIMPLE_REVIEW_MAX_NO_QUORUM_WAITS:
+                self._park_branch_for_wait(task, output, branch)
                 output.status = TaskStatus.WAITING
                 output.waiting_reason = (
                     "needs_owner: review quorum unreachable after "
@@ -1985,6 +2011,7 @@ class DevSessionManager:
         if missing:
             names = ", ".join(f"F{index}" for index in missing)
             self._store_review_checkpoint(task, output, checkpoint)
+            self._park_branch_for_wait(task, output, branch)
             output.status = TaskStatus.WAITING
             output.waiting_reason = (
                 f"needs_owner: review findings without verdict: {names} "
@@ -2133,6 +2160,7 @@ class DevSessionManager:
             except OSError:
                 handoff = ""
             if not handoff:
+                self._park_branch_for_wait(task, output, branch)
                 output.status = TaskStatus.WAITING
                 output.waiting_reason = (
                     f"needs_owner: missing HANDOFF.md (branch kept: {branch.branch})")
@@ -2177,6 +2205,7 @@ class DevSessionManager:
         routes_block = await self._protected_routes_check(
             branch, files, sha, branch.ref)
         if routes_block is not None:
+            self._park_branch_for_wait(task, output, branch)
             output.status = TaskStatus.WAITING
             output.waiting_reason = (
                 f"needs_owner: {routes_block} "
@@ -2730,7 +2759,8 @@ class DevSessionManager:
             roles=_tier_s_roles_with_vault(cycle_cfg["roles"],
                                            project_config),
             pool=cycle_cfg["reviewers"],
-            badge_provider=badge_provider)
+            badge_provider=badge_provider,
+            host_mode=project_isolation(dev_cfg) == "host")
         quota: Any = self._objective_quota()
         notices: list[str] = []
 
@@ -3123,6 +3153,7 @@ class DevSessionManager:
             ok, output, err = await self._run_process(
                 command, stdin_payload=stdin_payload, timeout=1800,
                 cwd=executor.cwd, env=run_env,
+                sandbox=executor.sandbox,
                 config_argv=list(executor.argv),
                 home_file_overlays=overlays,
                 extra_read_roots=_dev_vault_roots(config),
@@ -3197,6 +3228,7 @@ class DevSessionManager:
         tiers_cfg = dev_cfg.get("tiers", {}) or {}
         providers = dev_cfg.get("providers", {}) or {}
         repo_cwd = self._resolve_repo_path(config)
+        builder_sandbox = project_isolation(dev_cfg) != "host"
 
         if tool == CodingTool.TIER_A:
             tier_cfg = tiers_cfg.get("tier_a") or {}
@@ -3220,6 +3252,7 @@ class DevSessionManager:
                     self._provider_env(provider_cfg)),
                 label="tier_a",
                 role_profile=(str(profile_name) if profile_name else None),
+                sandbox=builder_sandbox,
             )
         if tool == CodingTool.TIER_B:
             tier_cfg = tiers_cfg.get("tier_b") or {}
@@ -3246,6 +3279,7 @@ class DevSessionManager:
                 env=self._provider_env(provider_cfg),
                 label="tier_b",
                 role_profile=(str(profile_name) if profile_name else None),
+                sandbox=builder_sandbox,
             )
         if tool == CodingTool.TIER_C:
             tier_c = tiers_cfg.get("tier_c", {}) or {}
@@ -3275,6 +3309,7 @@ class DevSessionManager:
                     label="tier_c:muse",
                     role_profile=(str(profile_name)
                                   if profile_name else None),
+                    sandbox=builder_sandbox,
                 )
             argv = self._as_argv(link_cfg.get("command")) or [link]
             if link == "claudep":
@@ -3289,6 +3324,7 @@ class DevSessionManager:
                 env=(claude_no_auto_memory_env(link_env)
                      if link == "claudep" else link_env),
                 label=f"tier_c:{link}",
+                sandbox=builder_sandbox,
             )
         raise ValueError(f"no simple executor for tier {tool!r}")
 

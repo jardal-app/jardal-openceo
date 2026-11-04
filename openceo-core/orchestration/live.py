@@ -32,6 +32,7 @@ from model_routing.reviewer_isolation import (
 )
 from model_routing.reviewer_isolation import plan_reviewer
 from model_routing.secrets import SecretsError, load_router_secrets
+from agents.dev.tier_s_contract import child_env
 from orchestration.agent_sandbox import (
     cleanup_sandbox_scratch,
     plan_agent,
@@ -201,12 +202,17 @@ class ProcessExecutor:
         roles: Mapping[str, Any] | None = None,
         pool: Sequence[Mapping[str, Any]] | None = None,
         badge_provider: Any | None = None,
+        host_mode: bool = False,
     ) -> None:
         self._roles = dict(roles or {})
         self._pool = {str(slot.get("label")): dict(slot)
                       for slot in (pool or []) if slot.get("label")}
         self._badge_provider = badge_provider
         self._responded: set[tuple[str, str]] = set()
+        # Builder on the host user (``dev.isolation: host``): the toolchain,
+        # Docker and package caches are the project's, not the fence's.
+        self._host_mode = bool(host_mode)
+        self._host_noted = False
 
     # -- Executor protocol -------------------------------------------------
 
@@ -456,13 +462,24 @@ class ProcessExecutor:
         if is_read_only(role):
             file_overlays = {**user_instruction_masks(),
                              **(file_overlays or {})}
+        # Host mode is only for the builder: reviewers and read-only roles
+        # keep the bwrap fence even in a host-isolated project.
+        host_run = self._host_mode and role == "builder" and not hardened
+        if host_run and not self._host_noted:
+            self._host_noted = True
+            logger.warning(
+                "Builder runs on the host user (dev.isolation: host): "
+                "no bwrap fence for %s", workdir)
         trace_dir: Path | None = None
         trace_ops: list[list[str]] = []
-        if str(spec.get("provider") or "") == "claude" and not hardened:
+        if str(spec.get("provider") or "") == "claude" and not hardened \
+                and not host_run:
             trace_dir, trace_ops = session_trace.prepare(
                 workdir, Path(os.path.expanduser("~")))
         try:
-            if hardened:
+            if host_run:
+                plan = None
+            elif hardened:
                 plan = plan_reviewer(
                     argv=full_argv, workspace=workdir, base=os.environ,
                     report=None, project=workdir, overlay=overlay,
@@ -492,24 +509,32 @@ class ProcessExecutor:
             if badge is not None and self._badge_provider is not None:
                 await self._badge_provider.revoke(badge)
             raise
+        if plan is not None:
+            run_argv = plan.argv
+            run_cwd = plan.cwd
+            run_env = plan.env
+        else:
+            run_argv = list(full_argv)
+            run_cwd = str(workdir)
+            run_env = child_env(os.environ, overlay)
         started = time.monotonic()
         process = None
         try:
             try:
                 process = await asyncio.create_subprocess_exec(
-                    *plan.argv,
+                    *run_argv,
                     stdin=(asyncio.subprocess.PIPE
                            if stdin_payload is not None
                            else asyncio.subprocess.DEVNULL),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    cwd=plan.cwd,
-                    env=plan.env,
+                    cwd=run_cwd,
+                    env=run_env,
                 )
             except FileNotFoundError:
                 return ExecResult(
                     returncode=1, elapsed_s=0.0,
-                    output_tail=f"command not found: {plan.argv[0]}",
+                    output_tail=f"command not found: {run_argv[0]}",
                     model=model, slot=slot)
             except OSError as exc:
                 return ExecResult(

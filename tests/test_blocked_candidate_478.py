@@ -496,6 +496,9 @@ async def test_tier_s_bloqueado_twice_parks_with_the_work_checkpointed(repo):
     outcome = ctx.parked_outcome
     assert outcome.reason == "agent_blocked" and outcome.detail == "segundo"
     assert git(repo, "show", "tier-s/t-wip:tracked.txt") == "after"
+    kept = ctx.ticket["params"]["kept_work"]
+    assert kept["branch"] == ctx.branch and kept["kind"] == "blocked"
+    assert kept["files"] == 1 and kept["head_sha"] == ctx.head_sha
 
 
 @run_async
@@ -577,13 +580,42 @@ def test_a_wait_that_resumes_checkpoints_the_build_and_the_resume_restores_it(re
     dev._park_branch_for_wait({"params": {"keep": 1}}, output, branch)
     assert output.params["keep"] == 1
     assert output.params["dev_checkpoint"]["branch"] == branch.branch
+    assert output.params["dev_checkpoint"]["build_done"] is True
     assert git(repo, "branch", "--show-current") == "main"
     assert git(repo, "status", "--porcelain") == ""
     assert (repo / "tracked.txt").read_text() == "before\n"
     restored = dev._restore_simple_checkpoint(
         repo, output.params["dev_checkpoint"], {"params": output.params})
     assert isinstance(restored, _SimpleBranch)
+    assert restored.build_done is True
     assert (repo / "tracked.txt").read_text() == "after\n"
+
+
+@run_async
+async def test_a_resumed_build_checkpoint_skips_the_builder(repo):
+    from agents.dev.session import DevExecutionOutput
+    dev = manager()
+    branch = _built_branch(repo)
+    parked = DevExecutionOutput(status=TaskStatus.IN_PROGRESS)
+    dev._park_branch_for_wait({"params": {}}, parked, branch)
+    task = {"task_id": "t-478-resume", "title": "resume",
+            "params": dict(parked.params)}
+    config = dev_project(repo, gates=[{"name": "t", "cmd": "true"}])
+    builder = AsyncMock(side_effect=AssertionError("builder re-executed"))
+    dev._step_code = builder
+    async def finish(_task, _config, _tool, output, _branch):
+        output.status = TaskStatus.COMPLETED
+        return output
+
+    with patch.object(dev, "_finish_simple_tool",
+                      AsyncMock(side_effect=finish)):
+        out = await dev._run_simple_tool(
+            task, config, CodingTool.TIER_B, {})
+    builder.assert_not_awaited()
+    assert out.status == TaskStatus.COMPLETED
+    assert any("skipping the build turn" in step.get("detail", "")
+               for step in out.steps)
+    assert "dev_checkpoint" not in (out.params or {})
 
 
 def test_a_wait_checkpoint_that_git_refuses_falls_back_to_the_old_drop(repo):
