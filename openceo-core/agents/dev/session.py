@@ -779,7 +779,9 @@ class DevSessionManager:
         follow = await self._step_code(
             task, project_config, tool, retry=False,
             prompt_prefix=blocked_continuation_prompt(
-                code_result.agent_result or {}, gates, oracle_cmd))
+                code_result.agent_result or {}, gates, oracle_cmd,
+                sandboxed=project_isolation(
+                    project_config.get("dev", {}) or {}) != "host"))
         if (follow.error or follow.waiting_reason
                 or follow.agent_result is None):
             if follow.cost_run is not None:
@@ -3567,9 +3569,11 @@ class DevSessionManager:
             lines.extend(["", proposal_prompt_for(
                 str(task.get("task_id") or ""),
                 project_prefix=knowledge_prefix)])
-        gates, oracle_cmd = self._builder_gate_context(
-            config.get("dev", {}) or {})
-        lines.extend(["", builder_environment_prompt(gates, oracle_cmd),
+        dev_cfg = config.get("dev", {}) or {}
+        gates, oracle_cmd = self._builder_gate_context(dev_cfg)
+        lines.extend(["", builder_environment_prompt(
+            gates, oracle_cmd,
+            sandboxed=project_isolation(dev_cfg) != "host"),
                       "", AGENT_RESULT_PROMPT])
 
         vault_index = _dev_vault_index(config)

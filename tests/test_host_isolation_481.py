@@ -145,6 +145,26 @@ def test_service_path_includes_the_bun_gate_runner() -> None:
     assert '$HOME/.bun/bin:$HOME/.local/bin' in text
 
 
+class TestHostPrompt:
+    def test_environment_facts_follow_the_fence(self) -> None:
+        from agents.dev.builder_contract import builder_environment_prompt
+
+        fenced = builder_environment_prompt([], sandboxed=True)
+        hosted = builder_environment_prompt([], sandboxed=False)
+        assert "Este sandbox no tiene Docker" in fenced
+        assert "Corres en el host" not in fenced
+        assert "Corres en el host" in hosted
+        assert "Este sandbox no tiene Docker" not in hosted
+
+    def test_simple_builder_prompt_states_the_host_toolchain(self) -> None:
+        manager = _manager()
+        prompt = manager._build_coding_prompt(
+            {"task_id": "t", "title": "x", "description": "d"},
+            _config("host"))
+        assert "Corres en el host" in prompt
+        assert "Este sandbox no tiene Docker" not in prompt
+
+
 class TestHostProcess:
     def test_unsandboxed_run_skips_bwrap(self) -> None:
         manager = _manager()

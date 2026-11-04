@@ -1,9 +1,12 @@
 """Run-environment contract for dev builders (TASK-2026-00478).
 
-Builders run inside the agent sandbox, which has no Docker (daemon and
-socket are hidden by design), while the orchestrator -- not the builder --
-runs the project gates on the host. A builder that does not know this reads
-a check it cannot run as an external blocker and closes ``bloqueado``.
+Builders run inside the agent sandbox by default, which has no Docker
+(daemon and socket are hidden by design), while the orchestrator -- not the
+builder -- runs the project gates. A builder that does not know this reads a
+check it cannot run as an external blocker and closes ``bloqueado``. A
+project with ``dev.isolation: host`` (TASK-2026-00481) runs its builder with
+the host toolchain instead, so the text states that fact rather than the
+sandbox one.
 These texts state the facts, and a builder that still closes ``bloqueado``
 with work in the tree gets one more turn to confirm or retract.
 
@@ -27,6 +30,13 @@ _SANDBOX_FACTS = (
     "credenciales del host: las suites que levantan contenedores "
     "(Testcontainers, PostgreSQL) o necesitan esos secretos no pueden "
     "ejecutarse aquí."
+)
+
+_HOST_FACTS = (
+    "Corres en el host con el usuario del orquestador: tienes el toolchain "
+    "del proyecto, Docker y los stores/cachés del host. El orquestador "
+    "ejecuta los gates al final; no repitas la suite global si el ticket "
+    "no lo pide."
 )
 
 _MOTIVO_CHARS = 600
@@ -55,19 +65,28 @@ def _gates_intro(gates: Sequence[Any], oracle_cmd: str | None) -> list[str]:
 
 def builder_environment_prompt(
     gates: Sequence[Any], oracle_cmd: str | None = None,
+    *, sandboxed: bool = True,
 ) -> str:
-    """What the builder cannot run, what the orchestrator runs for it."""
-    return "\n".join([
+    """What the builder can run, what the orchestrator runs for it."""
+    facts = _SANDBOX_FACTS if sandboxed else _HOST_FACTS
+    limit = ("- Una verificación que este sandbox no puede ejecutar no es un "
+             "impedimento externo: cierra con resultado=hecho y anota en "
+             "evidencia qué ejecutaste, qué no pudiste ejecutar y por qué. "
+             "Reserva bloqueado para lo que te impide entregar lo pedido."
+             if sandboxed else
+             "- Una verificación que el host no pueda ejecutar no es un "
+             "impedimento: cierra con resultado=hecho y anota en evidencia "
+             "qué ejecutaste y qué quedó pendiente. Reserva bloqueado para "
+             "lo que te impide entregar lo pedido.")
+    lines = [
         "ENTORNO Y VERIFICACIÓN (el orquestador corre los gates, no tú)",
-        f"- {_SANDBOX_FACTS} No las intentes.",
+        f"- {facts}" + (" No las intentes." if sandboxed else ""),
         *_gates_intro(gates, oracle_cmd),
         "- No repliques la suite global: valida lo que cambiaste con las "
         "comprobaciones y los tests dirigidos que sí corren aquí.",
-        "- Una verificación que este sandbox no puede ejecutar no es un "
-        "impedimento externo: cierra con resultado=hecho y anota en "
-        "evidencia qué ejecutaste, qué no pudiste ejecutar y por qué. "
-        "Reserva bloqueado para lo que te impide entregar lo pedido.",
-    ])
+        limit,
+    ]
+    return "\n".join(lines)
 
 
 def blocked_continuation_due(
@@ -89,6 +108,7 @@ def blocked_continuation_prompt(
     verdict: Mapping[str, Any],
     gates: Sequence[Any],
     oracle_cmd: str | None = None,
+    *, sandboxed: bool = True,
 ) -> str:
     """Prefix for the one continuation turn after a bloqueado with work.
 
@@ -107,7 +127,8 @@ def blocked_continuation_prompt(
         "Tu trabajo sigue en el árbol de trabajo (git status y git diff) y "
         ".openceo/HANDOFF.md lo resume: no lo rehagas ni lo descartes.",
         "Hechos del entorno, confirmados por el orquestador:",
-        f"- {_SANDBOX_FACTS} Eso no es un impedimento.",
+        f"- {_SANDBOX_FACTS if sandboxed else _HOST_FACTS} "
+        "Eso no es un impedimento.",
         *_gates_intro(gates, oracle_cmd),
         "Decide con eso:",
         "- Si ese era tu único impedimento, cierra con resultado=hecho y en "

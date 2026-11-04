@@ -152,6 +152,7 @@ class _Ctx:
     budget_exclude: list[str]
     gate_specs: list[GateSpec]
     roles: dict[str, dict[str, Any]]
+    sandboxed: bool = True
     metrics: dict[str, Any] = field(default_factory=blank_ticket_metrics)
     base_sha: str = ""
     build_sha: str = ""
@@ -574,6 +575,7 @@ class TierSCycle:
             "deploy": dict(dev.get("deploy", {}) or {}),
             "base_branch": base_branch,
             "budget_exclude": list(dev.get("budget_exclude", []) or []),
+            "isolation": str(dev.get("isolation") or "sandbox"),
             "knowledge_prefix": knowledge_target_prefix(cfg),
         }
 
@@ -608,6 +610,7 @@ class TierSCycle:
             gate_specs=list(gate_specs) if gate_specs is not None
             else gate_mod.load_gates(dev_cfg),
             roles=dict(cycle_cfg.get("roles", {}) or {}),
+            sandboxed=str(cycle_cfg.get("isolation") or "sandbox") != "host",
             pool=list(review_mod.parse_pool(
                 cycle_cfg.get("reviewers", []) or [])),
             reviewers_raw=[dict(entry)
@@ -1404,7 +1407,8 @@ class TierSCycle:
                 break
             blocked = verdict
             prompt = blocked_continuation_prompt(
-                blocked.model_dump(mode="json"), ctx.gate_specs) + prompt
+                blocked.model_dump(mode="json"), ctx.gate_specs,
+                sandboxed=getattr(ctx, "sandboxed", True)) + prompt
         if verdict is not None and verdict.resultado.value in {"bloqueado", "no_aplica"}:
             try:
                 resume_at = scheduled_resume(verdict)
@@ -3135,7 +3139,9 @@ class TierSCycle:
             f"and emit {SIGNALS['build_done']} in .openceo/status.\n"
             f"{knowledge_prompt}"
             f"Previous checkpoint (recheck; never repeat confirmed effects):\n{TierSCycle._read_artifact(ctx, 'WAIT.md')}\n"
-            + builder_environment_prompt(ctx.gate_specs) + "\n\n"
+            + builder_environment_prompt(
+                getattr(ctx, "gate_specs", []) or [],
+                sandboxed=getattr(ctx, "sandboxed", True)) + "\n\n"
             + AGENT_RESULT_PROMPT
         )
         vault_index = getattr(ctx, "vault_index", "")
