@@ -7,7 +7,7 @@ Resumen operativo corto del estado real del repo.
 - Sí fue bug: el builder de #548 dejó `.openceo/HANDOFF.md` con intención de añadir forzada (`git add -N -f`) en el checkout vivo de jardal-erp, y cada intento posterior aparcó en `repo_busy` cada 15 min, en silencio («transient waits heal alone») y reteniendo el lock: parada ~19:19→20:48 hasta limpieza manual. main nunca se contaminó (el squash excluye `.openceo/`).
 - Fix en tres partes: (1) el prompt del builder prohíbe forzar rutas ignoradas (`git add -f/-N`); (2) el orquestador des-prepara su scratch `.openceo/` (solo índice, nunca el árbol) antes del chequeo de suciedad; (3) la suciedad que sobrevive 3 parques (~45 min) escala a `repo_busy_persistent` sin reintento: libera el lock y deja un comentario en el ERP con los ficheros sucios y la acción exacta.
 - Verificación: 5 tests nuevos (git real en tmp + comentario ERP con mocks); checks obligatorios y 7 suites vecinas en verde (261 + 33 subtests); ruff limpio. Un assert viejo de 00483 se actualizó al contrato nuevo (el parque ahora porta el contador, igual que `scheduled_wait`).
-- Pendiente de orden explícita: commit + push + reinicio del core (corre 7153326 sin el fix; #546 en curso, reiniciar lo reencolaría solo al ser tier_c). Cambios sin commitear a la espera de esa orden.
+- Despliegue (orden del Owner): commit be0d74f + push + reinicio 21:10 UTC, release be0d74f dirty=false, /health ok. #546 (tier_c) se reencoló solo a las 21:11 sin intervención; ningún Tier S en marcha, sin relanzamientos manuales.
 
 ## 2026-11-05 — Listón de calidad de ingeniería y review decidido por riesgo (TASK-2026-00492)
 
