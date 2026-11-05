@@ -1,9 +1,9 @@
 ---
 document_id: objective-planner-routing-policy-dev
 title: OpenCEO Objective Planner Routing Policy — dev detail
-version: 1.0
+version: 1.1
 status: NORMATIVE
-updated: 2026-10-12
+updated: 2026-11-05
 runtime_document: true
 planner_reads_this_document: on_demand
 language: en
@@ -253,17 +253,32 @@ The C/B boundary is about **provable complexity**, not perceived
 difficulty and not oracle availability: B needs its `why_not_c`, C
 needs nothing beyond specified work.
 
-The review switch is orthogonal to the tier: A/B/C review on by
-default and an explicit user instruction (`review: off`, e.g. "Tier C
-sin reviewers") keeps the tier, builder and gates and only skips
-reviewer invocations — a generic ask for speed never implies it.
-Tier S always reviews and rejects off. Preserve an explicit
-instruction on the decided ticket or child; omit the field otherwise.
+The review switch is orthogonal to the tier: `review: off` keeps the
+tier, builder and gates and only skips reviewer invocations. Tier S
+always reviews and rejects off.
+
+A/B/C review is on by default, and the planner decides it per ticket
+by risk (Owner order 2026-11-05, TASK-2026-00492): set `review: off`
+with a one-line `review_reason` when a review round cannot pay for
+itself — documentation or configuration only, a mechanical or fully
+specified change covered by a qualifying oracle, a trivial fix, or
+work whose verification is entirely deterministic. Keep it on (omit
+the field) for code with logic, data flow, events and handlers,
+state, navigation, auth, money, persistence, concurrency or public
+contracts: there a second reading plausibly catches what one session
+misses. Reviewers read the diff as text (no browser, no screenshots);
+visual verification is the builder's job (§44).
+
+An explicit user instruction wins either way: "C sin reviewers", "A
+sin reviewers" and "B sin reviewers" set off (`review_reason` quotes
+it), and an explicit request for reviewers keeps on. Preserve it on
+the decided ticket or child. A generic ask for speed ("rápido") never
+implies off by itself.
+
 A reviewed A/B/C ticket runs build → gates → one quorum round
 (three reviewers, two independent families) → builder fix verdicts →
 final gates → close; the round never recurses and never copies the S
-pipeline. Pedido examples: "C sin reviewers", "A sin reviewers" and
-"B sin reviewers" set off; "rápido" alone never does.
+pipeline.
 
 ## 28. Quota is separate from technical routing
 

@@ -1,7 +1,7 @@
 """Company mandate v2 (TASK-2026-00193): gain/spend principles, optional KPI.
 
-Acceptance with zero tokens: the shipped YAML carries the five Owner
-principles; both prompts (CEO strategy, planner core) render them; a
+Acceptance with zero tokens: the shipped YAML carries the Owner
+principles (quality added by TASK-2026-00492); both prompts (CEO strategy, planner core) render them; a
 pedido validates without axes when it carries a written justification.
 No network, no CLI, no LLM.
 """
@@ -93,7 +93,7 @@ def _pedido_decision(**spec: Any) -> Any:
 
 
 class ShippedMandateTests(unittest.TestCase):
-    def test_shipped_yaml_carries_the_five_principles(self) -> None:
+    def test_shipped_yaml_carries_the_canonical_principles(self) -> None:
         from company_mandate import load_mandate_file
 
         mandate = load_mandate_file(REPO / "projects" / "company_mandate.yaml")
@@ -101,8 +101,9 @@ class ShippedMandateTests(unittest.TestCase):
         self.assertEqual(list(mandate.principios), list(MANDATE_PRINCIPLES))
 
     def test_canonical_principles_cover_gain_spend_and_price(self) -> None:
-        keywords = ("ganancia", "gasto", "rinda", "reutilizar", "precio")
-        self.assertEqual(len(MANDATE_PRINCIPLES), 5)
+        keywords = ("ganancia", "gasto", "rinda", "reutilizar", "precio",
+                    "calidad")
+        self.assertEqual(len(MANDATE_PRINCIPLES), 6)
         for keyword, principle in zip(keywords, MANDATE_PRINCIPLES):
             with self.subTest(keyword=keyword):
                 self.assertIn(keyword, principle)
@@ -127,7 +128,7 @@ class ShippedMandateTests(unittest.TestCase):
 
 
 class PrincipiosSchemaTests(unittest.TestCase):
-    def test_absent_principios_default_to_the_five(self) -> None:
+    def test_absent_principios_default_to_the_canonical(self) -> None:
         mandate = parse_mandate(_mandate_dict())
         self.assertEqual(list(mandate.principios), list(MANDATE_PRINCIPLES))
 

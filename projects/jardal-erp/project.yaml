@@ -36,8 +36,13 @@ dev:
       command: ["/home/develop/.local/bin/claudej"]
       cwd: /home/develop/development/Jardal/jardal-erp
       env: {}
+  # lint, web tests and the web build join typecheck (TASK-2026-00492):
+  # all green on main@a6e96a9, so a ticket cannot merge a broken build.
   gates:
     - { name: typecheck, cmd: "bun run typecheck", timeout_minutes: 5, required: true }
+    - { name: lint, cmd: "bun run lint", timeout_minutes: 5, required: true }
+    - { name: web_test, cmd: "pnpm --filter @jardal/web test", timeout_minutes: 5, required: true }
+    - { name: web_build, cmd: "pnpm --filter @jardal/web build", timeout_minutes: 5, required: true }
   oracle_cmd: "bun test {refs}"
   oracle_timeout_minutes: 10
   qa:

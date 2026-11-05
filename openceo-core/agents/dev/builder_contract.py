@@ -10,6 +10,11 @@ sandbox one.
 These texts state the facts, and a builder that still closes ``bloqueado``
 with work in the tree gets one more turn to confirm or retract.
 
+The engineering standard (TASK-2026-00492) is the quality bar every builder
+receives, for any stack: standard maintained libraries instead of
+hand-written substitutes, conventional names, and the result verified the
+way its user meets it.
+
 Dependency-free (stdlib only): the simple tiers and the Tier S cycle both
 import it, and the Tier S package imports its own cycle on load.
 """
@@ -19,11 +24,52 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 __all__ = [
+    "ENGINEERING_STANDARD",
     "blocked_continuation_due",
     "blocked_continuation_prompt",
     "builder_environment_prompt",
+    "engineering_standard_prompt",
     "kept_work_note",
 ]
+
+ENGINEERING_STANDARD = (
+    "ESTÁNDAR DE INGENIERÍA (el listón de tu entrega, en cualquier stack)",
+    "- Entrega trabajo de producción, como un ingeniero senior del stack "
+    "del proyecto: correcto, mantenible, probado y terminado. No una "
+    "maqueta ni el mínimo que pase los gates.",
+    "- Para lo que el ecosistema ya resolvió (enrutado, estilos y sistema "
+    "de diseño, formularios, validación, i18n, fechas, estado, acceso a "
+    "datos y migraciones, clientes HTTP, gráficos, 3D...) usa la "
+    "biblioteca o el framework estándar y mantenido del stack, instalado "
+    "con el gestor de paquetes y la política de versiones del repo. No "
+    "escribas un sustituto casero. Si una regla del proyecto o del ticket "
+    "prohíbe una dependencia concreta, respétala y dilo en el HANDOFF.",
+    "- Las convenciones del repo deciden estilo y herramientas, pero no "
+    "obligan a perpetuar una base por debajo de este estándar. Si a la "
+    "parte que tocas le falta un cimiento que el objetivo necesita "
+    "(router, hoja de estilos, migraciones, manejo de errores...), "
+    "constrúyelo con la herramienta estándar dentro del alcance, o "
+    "anótalo en «Discovered work» si excede el ticket.",
+    "- Nombres convencionales de la industria para componentes, módulos, "
+    "tablas y APIs (Button, TextField, AppShell, invoice_lines...), sin "
+    "prefijos de marca o de proyecto salvo que el repo ya use ese "
+    "esquema. Una marca en el ticket describe el producto, no una "
+    "convención de nombres.",
+    "- Verifica el resultado tal como lo encontrará su usuario, no solo "
+    "con tests. Una interfaz se abre en un navegador real (si tienes uno, "
+    "p. ej. agent-browser) a anchos representativos y en cada tema: sin "
+    "maquetación rota, desbordes ni scroll innecesario, y con navegación, "
+    "Atrás y formularios funcionando. Una API o un CLI se ejecutan con una "
+    "petición real. Una migración se aplica y se revierte en una base "
+    "efímera. Anota en evidencia qué comprobaste y con qué.",
+    "- Los tests prueban comportamiento; no fijan detalles de "
+    "implementación como hex, textos literales o estructura interna.",
+)
+
+
+def engineering_standard_prompt() -> str:
+    """Quality bar shared by every dev builder prompt (TASK-2026-00492)."""
+    return "\n".join(ENGINEERING_STANDARD)
 
 _SANDBOX_FACTS = (
     "Este sandbox no tiene Docker (ni daemon ni socket, por diseño) ni las "

@@ -1,9 +1,9 @@
 ---
 document_id: objective-planner-routing-policy
 title: OpenCEO Objective Planner Routing Policy
-version: 1.5
+version: 1.6
 status: NORMATIVE
-updated: 2026-10-12
+updated: 2026-11-05
 runtime_document: true
 planner_reads_this_document: true
 language: en
@@ -784,14 +784,56 @@ You run as one fresh Muse Code / Muse Spark 1.3 Contributor headless planning cy
     the Owner, like any spend over the mandate threshold.
 
 19. Optimize for the company PRINCIPLES in the prompt (§43).
+
+20. Hold every ticket contract to the engineering quality bar (§44).
 ```
 
 ## 43. Company principles guide optimization
 
 Every planning prompt carries a PRINCIPLES section from the company
 mandate (`projects/company_mandate.yaml`, `principios`; TASK-2026-00193):
-gain up, spend down, no fruitless work, reuse what exists, and never
-tier or model by price. They are optimization guidance, not gates:
+gain up, spend down, no fruitless work, reuse what meets the bar,
+never tier or model by price, and production-grade quality (§44).
+They are optimization guidance, not gates:
 they never override an explicit request, a justification rule, or an
 escalation. When two plans both satisfy the contract, prefer the one
 the principles favor; say so in one line of `state_summary`.
+
+## 44. Engineering quality bar
+
+Owner order, 2026-11-05 (TASK-2026-00492): every ticket aims at
+production-grade work a senior engineer of the project's stack would
+sign, in any domain (web, mobile, API, data, infrastructure). Saving
+spend never lowers this bar; it removes waste around it.
+
+- Constraints never forbid the stack's standard maintained libraries
+  or frameworks (routing, styling and design systems, forms,
+  validation, i18n, ORM and migrations, HTTP clients, charts, 3D...)
+  unless an authoritative project rule or the Owner forbids that
+  dependency; cite the rule when you do.
+- "Reuse what exists" (§43) applies to work that meets this bar. When
+  the base lacks a foundation the Objective needs, plan the foundation
+  with the standard tool; never contract "restyle only", "no new
+  framework" or "minimal diff" over a base that cannot reach the goal.
+- Brand or business words in an Objective describe the product, not a
+  naming scheme: translate them into conventional engineering terms
+  ("<brand> components" means the project's design-system components,
+  following its design document, with conventional names).
+- Acceptance states how the result is verified as its user meets it:
+  an interface renders correctly in a real browser at representative
+  sizes and themes, an API answers real requests, a migration applies
+  and rolls back. Tests verify behavior; they never pin implementation
+  details (hex values, literal copy, internal structure).
+- Inputs exist on the base: a document or version the Objective names
+  (for example "the updated design document") must be committed on the
+  integration branch; check it with git, since builders never see
+  uncommitted files. If it is missing or stale there, return blocked
+  with the gap instead of building on the old version.
+- One ticket owns a coherent slice one session can finish (a whole
+  foundation, a whole flow). Do not split work into micro-tickets that
+  each pay a build and review cycle, and do not create tickets whose
+  only output is a proposal or a criteria text. An end-to-end test
+  ticket is legitimate when it exercises the real flow.
+- Review rounds follow risk, not habit (dev detail §27): A/B/C tickets
+  whose risk does not pay for a review round carry `review: off` with
+  `review_reason`; Tier S always reviews.

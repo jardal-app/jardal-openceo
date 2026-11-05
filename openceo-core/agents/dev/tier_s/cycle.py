@@ -32,6 +32,7 @@ from agents.dev.builder_contract import (
     blocked_continuation_due,
     blocked_continuation_prompt,
     builder_environment_prompt,
+    engineering_standard_prompt,
 )
 from agents.dev.production_deploy import normalize_deploy, run_production_step
 from agents.dev.routing import resolve_coding_tool
@@ -3081,6 +3082,10 @@ class TierSCycle:
             "FILES lines use exactly: - <path> (<create|modify|delete>) — "
             "<why>, e.g. - apps/web/src/auth/login.ts (create) — login "
             "screen per DESIGN.md.\n"
+            "Plan production-grade work: prefer the stack's standard "
+            "maintained libraries over hand-written substitutes, and never "
+            "decide 'no new dependencies' unless the ticket or a project "
+            "rule forbids that dependency (cite it).\n"
             "Decide open questions yourself and record them in DECISIONS; only "
             "use [OWNER] when the ticket explicitly marks a decision so."
         )
@@ -3139,6 +3144,7 @@ class TierSCycle:
             f"and emit {SIGNALS['build_done']} in .openceo/status.\n"
             f"{knowledge_prompt}"
             f"Previous checkpoint (recheck; never repeat confirmed effects):\n{TierSCycle._read_artifact(ctx, 'WAIT.md')}\n"
+            + engineering_standard_prompt() + "\n\n"
             + builder_environment_prompt(
                 getattr(ctx, "gate_specs", []) or [],
                 sandboxed=getattr(ctx, "sandboxed", True)) + "\n\n"

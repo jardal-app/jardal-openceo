@@ -49,16 +49,20 @@ __all__ = [
 
 MANDATE_VERSION = 1
 
-#: The five Owner-decided company principles (TASK-2026-00193): how the
-#: CEO and the planner optimize — gain up, spend down, no fruitless work,
-#: reuse, and never tier/model by price (routing policy §28). Guidance
-#: only, never a gate: an unreadable mandate still fails autonomy closed.
+#: The Owner-decided company principles (TASK-2026-00193): how the CEO
+#: and the planner optimize — gain up, spend down, no fruitless work,
+#: reuse what meets the bar, never tier/model by price (routing policy
+#: §28) and production-grade quality (TASK-2026-00492, policy §44).
+#: Guidance only, never a gate: an unreadable mandate still fails
+#: autonomy closed.
 MANDATE_PRINCIPLES: tuple[str, ...] = (
     "maximizar la ganancia",
     "reducir el gasto",
     "no hacer trabajo que no rinda",
-    "reutilizar lo que ya existe",
+    "reutilizar lo que ya existe cuando cumple el estándar profesional",
     "nunca elegir el tier ni el modelo por precio",
+    "entregar calidad profesional de producción: estándares, "
+    "convenciones y bibliotecas mantenidas de la industria",
 )
 
 #: Owner channels allowed to change the mandate. Voice, Horizon or a ticket
