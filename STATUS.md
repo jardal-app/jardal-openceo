@@ -26,6 +26,13 @@ Resumen operativo corto del estado real del repo.
   - **Despliegue de e00d242 pendiente:** está en main (4bc57f7) pero sin desplegar. El checkout vivo lo usa el builder de #486, así que el reinicio va por el despliegue en ocioso del mecánico (`mechanic_state`).
   - **#549/#550** (MIS-8C06FB6C, `needs_owner: invalid plan … missing ESTIMATE`): los toma el siguiente latido. Es un defecto de diseño, no un caso: el plan de Tier S es texto libre y el validador `plan.py:175` lo rechaza entero si falta la línea ESTIMATE (867362a, 00448).
   - **Fase 2 propuesta:** contratos por esquema (`--output-schema`), tolerancia en campos informativos y menos relevos.
+- **Defectos de diseño eliminados de raíz (50eb8c2, merge 19d9814)**, por orden del Owner de eliminar de raíz la clase «el sistema se contradice»:
+  - **Plan Tier S:** los campos informativos (TICKET, ESTIMATE) son avisos y nunca paran. La estimación se entiende en cualquier redacción y si falta acota el freno sobre el diff real.
+  - **Scratch:** `agents/dev/scratch.stage_work` es la única forma de preparar trabajo (6 sitios, Tier S incluido); `.openceo/` siempre sale del índice, y el builder recibe una sola regla de entregables frente a scratch.
+  - **Dependencias:** `state.BLOCKER_RELEASED_STATUSES` es la única definición. El ciclo Tier S daba `converted` por liberado, al contrario que el dispatcher y el motor.
+  - **Verificación:** tests de contrato con 7/7 mutaciones detectadas y 563 vecinos en verde.
+- Segundo run real (MEC-20261105T234427-0A22, #549/#550): diagnosticó la clase en la release en servicio, vio el fix ya en main sin desplegar y **no abrió un fix duplicado**. Los dejó en `mechanic_wait` 2 h y comentó en ambos.
+- **Traspaso actualizado:** despliegue de e00d242 + 50eb8c2 pendiente del reinicio en ocioso. `mechanic_state.deploy` tiene `resume` = #549/#550, así que el arranque los reencola con el validador nuevo. Riesgo de diseño anotado para la fase 2: el core corre desde el mismo checkout donde construyen los tickets de jardal-openceo, así que no se puede desplegar mientras uno construye.
 
 ## 2026-11-05 — Escalado repo_busy: la suciedad persistente ya no para la misión en silencio (TASK-2026-00506)
 
