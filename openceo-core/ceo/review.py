@@ -946,6 +946,10 @@ def _ceo_prompt(
             "planner decides ticket or objective, agent, skill and "
             "(dev) tier. Never name the outcome ticket or objective; "
             "describe the work.",
+            "- Describe outcomes at production grade, never shortcuts: "
+            "no 'reuse X', 'minimal changes' or 'no new libraries' "
+            "unless the Owner said so. Brand words describe the "
+            "product, not a naming scheme.",
             "- A mission advances only through your mission pedidos: "
             "when a mission needs its next objective, crear_pedido "
             "with mission_id (filed under the mission group; the "

@@ -224,9 +224,11 @@ class PlannedTicket(BaseModel):
     tier_reason: str | None = None
     oracle: Oracle | None = None
 
-    # Per-ticket review switch (00249): on/off, omit = on. Preserves an
-    # explicit user instruction ("sin reviewers" -> off) on dev tickets.
+    # Per-ticket review switch (00249): on/off, omit = on. The planner
+    # also decides off for A/B/C work a review round cannot pay for
+    # (TASK-2026-00492); every off carries review_reason.
     review: Literal["on", "off"] | None = None
+    review_reason: str | None = None
 
     # Suggested skill for any agent (TASK-2026-00198): a hint, the agent
     # decides. Checked against the real role skills by TASK-2026-00203.
@@ -270,7 +272,7 @@ class PlannedTicket(BaseModel):
 
     @field_validator("tier_reason", "why_consensus_is_needed",
                      "why_single_session_is_insufficient", "why_not_c",
-                     "completes_task_id", "skill", "review")
+                     "completes_task_id", "skill", "review", "review_reason")
     @classmethod
     def _optional_fields_nonblank(cls, value: str | None) -> str | None:
         if value is not None and not value.strip():
@@ -307,6 +309,9 @@ class PlannedTicket(BaseModel):
                 raise ValueError("why_not_c is only valid for DEV tickets")
             if self.review is not None:
                 raise ValueError("review is only valid for DEV tickets")
+            if self.review_reason is not None:
+                raise ValueError(
+                    "review_reason is only valid for DEV tickets")
             return self
 
         if self.coding_tool is None:
@@ -340,6 +345,11 @@ class PlannedTicket(BaseModel):
             raise ValueError(
                 "tier_c is the default and carries no why_not_c: choose "
                 "tier_a/tier_b for it or drop the statement")
+
+        if self.review == "off" and not self.review_reason:
+            raise ValueError(
+                "review=off requires review_reason: why this ticket needs "
+                "no review round, or the user's explicit instruction")
 
         return self
 

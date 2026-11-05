@@ -1021,6 +1021,39 @@ def _agents_section(
     return "\n".join(lines)
 
 
+#: Planner-side quality bar (routing policy §44, TASK-2026-00492).
+_QUALITY_GUIDE = (
+    "ENGINEERING QUALITY (policy §44; every agent and stack):",
+    "- Contracts aim at production-grade work. Constraints never forbid",
+    "  the stack's standard maintained libraries or frameworks unless a",
+    "  project rule or the Owner does (cite it). Reuse what meets the",
+    "  bar; a missing foundation gets a ticket that builds it with the",
+    "  standard tool, never 'restyle only' or 'minimal diff' over it.",
+    "- Brand or business words describe the product, not names: write",
+    "  conventional engineering terms into the contract.",
+    "- Acceptance says how the result is verified as its user meets it",
+    "  (UI rendered in a real browser, API answering real requests,",
+    "  migration applied and rolled back); tests check behavior.",
+    "- An input the goal names (e.g. an updated design doc) must exist",
+    "  on the base branch; if it is missing or stale there, block and",
+    "  ask instead of building on the old one.",
+    "- One ticket owns a coherent slice one session can finish; no",
+    "  micro-tickets that each pay a build and review cycle.",
+)
+
+#: The per-ticket review switch as both planner prompts describe it.
+_REVIEW_FIELD_LINES = (
+    '    "review?": "<dev only: on|off, omit = on. off for an A/B/C '
+    'ticket whose risk does not pay for a review round (docs/config, '
+    'mechanical or fully specified change with a qualifying oracle, '
+    'trivial fix); keep on for logic, data flow, events, state, auth, '
+    'money, persistence, concurrency or public contracts. Preserve an '
+    'explicit user instruction; tier_s always reviews (off rejected)>",',
+    '    "review_reason?": "<required when review is off: why no review '
+    'round is needed, or the user instruction>",',
+)
+
+
 def _planner_prompt(
     objective: Mapping[str, Any],
     capsule_text: str,
@@ -1210,6 +1243,8 @@ def _planner_prompt(
         "approval creates the dev ticket that builds it. Never propose "
         "for technical failures (broken tests, fallen reviewers, plan "
         "errors): replan those. Omit the key when nothing is missing.",
+        "",
+        *_QUALITY_GUIDE,
     ])
     if (routing_guide or "").strip():
         lines.extend(["", routing_guide.strip()])
@@ -1241,8 +1276,7 @@ def _planner_prompt(
         '    "expected_artifacts": ["<at least one>"],',
         '    "blocked_by": ["<local_ref or existing task_id, acyclic>"],',
         '    "coding_tool": "<dev only: tier_s|tier_a|tier_b|tier_c>",',
-        '    "review?": "<dev only: on|off, omit = on; preserve an '
-        'explicit user instruction, reject off for tier_s>",',
+        *_REVIEW_FIELD_LINES,
         '    "tier_reason": "<dev only: why this tier>",',
         '    "oracle": {"type": "<oracle type>", "refs": [{"ref": "...",',
         '      "description?": "..."}]},',
@@ -1987,8 +2021,7 @@ def _pedido_prompt(
         '    "blocked_by": [],',
         '    "coding_tool": "<REQUIRED for dev: tier_s|tier_a|tier_b|'
         'tier_c; FORBIDDEN otherwise>",',
-        '    "review?": "<dev only: on|off, omit = on; preserve an '
-        'explicit user instruction, reject off for tier_s>",',
+        *_REVIEW_FIELD_LINES,
         '    "tier_reason": "<REQUIRED for dev: why this tier>",',
         '    "oracle?": {"type": "<oracle type>", "refs": [{"ref": '
         '"..."}]},',
@@ -2254,8 +2287,17 @@ async def _plan_pedido_inner(
         # A re-decision away from dev clears the stale tier: the gate
         # forces DEV on any coding_tool. Fresh pedidos stay tier-free.
         updates["coding_tool"] = None
-    if planned.review is not None:
+    # A switch the user set (no planner review_reason on record) outranks
+    # the planner's own risk call (TASK-2026-00492).
+    user_review = (ticket.get("review") is not None
+                   and not (ticket.get("params") or {}).get("review_reason"))
+    if planned.review is not None and planned.coding_tool is not None \
+            and user_review:
+        params.pop("review_reason", None)
+    elif planned.review is not None:
         updates["review"] = planned.review
+        if not planned.review_reason:
+            params.pop("review_reason", None)
     elif planned.coding_tool is None and ticket.get("review"):
         # Same rule as the tier above: a re-decision away from dev
         # clears the stale switch; a dev decision that omits it
@@ -2265,7 +2307,7 @@ async def _plan_pedido_inner(
         for key in ("tier_reason", "tier_assigned_by", "tier_signals",
                     "oracle", "why_consensus_is_needed",
                     "why_single_session_is_insufficient", "why_not_c",
-                    "material_failure"):
+                    "material_failure", "review_reason"):
             params.pop(key, None)
     await env.patch_task(task_id, updates)
     spend = spend_mod.check_plan_spend(
@@ -2800,6 +2842,8 @@ def _planned_params(ticket: planner_mod.PlannedTicket) -> dict[str, Any]:
             ticket.why_single_session_is_insufficient)
     if ticket.why_not_c:
         params["why_not_c"] = ticket.why_not_c
+    if ticket.review_reason:
+        params["review_reason"] = ticket.review_reason
     return params
 
 
@@ -3776,7 +3820,11 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
         + "\nObjective files:\n"
         + "".join(f"- {name}\n" for name in files[:100])
         + "\nScope: anchor acceptance met? contracts between tickets fit? "
-          "regressions across the set? Same report format as ticket rounds."
+          "regressions across the set? production-grade delivery: standard "
+          "maintained libraries instead of hand-written substitutes, "
+          "conventional names, and handoff evidence that user-facing "
+          "results were verified the way users meet them? Same report "
+          "format as ticket rounds."
     )
     scratch = objective_scratch(env.repo, objective_id)
     try:

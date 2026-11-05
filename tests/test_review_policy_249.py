@@ -291,7 +291,8 @@ def _planned_ticket(**overrides: Any) -> dict[str, Any]:
 
 class PlannerContractTests(unittest.TestCase):
     def test_dev_review_parses(self) -> None:
-        ticket = planner_mod.PlannedTicket(**_planned_ticket(review="off"))
+        ticket = planner_mod.PlannedTicket(**_planned_ticket(
+            review="off", review_reason="docs-only change"))
         self.assertEqual(ticket.review, "off")
         ticket = planner_mod.PlannedTicket(**_planned_ticket())
         self.assertIsNone(ticket.review)
@@ -448,7 +449,8 @@ class PlannerWiringTests(unittest.IsolatedAsyncioTestCase):
         result = planner_mod.PlannerResult(
             objective_status="active", state_summary="first cycle",
             tickets=[planner_mod.PlannedTicket(
-                **_planned_ticket(review="off"))])
+                **_planned_ticket(review="off",
+                                  review_reason="docs-only change"))])
         await engine_mod._create_planned_tickets(
             env, {"objective_id": "OBJ-1", "project": "proj",
                   "erp_group_ref": ""}, result)
@@ -459,7 +461,8 @@ class PlannerWiringTests(unittest.IsolatedAsyncioTestCase):
     async def test_pedido_applies_planned_review(self) -> None:
         ticket = _pedido()
         env, patches, tmp = _pedido_env([_plan_result(_planned_ticket(
-            local_ref="pedido-1", review="off"))], ticket)
+            local_ref="pedido-1", review="off",
+            review_reason="user asked: sin reviewers"))], ticket)
         try:
             out = await engine_mod.plan_pedido(env, ticket)
         finally:
@@ -492,6 +495,61 @@ class PlannerWiringTests(unittest.IsolatedAsyncioTestCase):
             tmp.cleanup()
         self.assertEqual(out.get("action"), "decided")
         self.assertIsNone(patches["task-pedido-1"]["review"])
+
+    async def test_pedido_redecision_on_drops_a_stale_review_reason(self) -> None:
+        ticket = _pedido(review="off", params={"review_reason": "docs only"})
+        env, patches, tmp = _pedido_env([_plan_result(_planned_ticket(
+            local_ref="pedido-1", review="on"))], ticket)
+        try:
+            out = await engine_mod.plan_pedido(env, ticket)
+        finally:
+            tmp.cleanup()
+        self.assertEqual(out.get("action"), "decided")
+        self.assertEqual(patches["task-pedido-1"]["review"], "on")
+        self.assertNotIn("review_reason", patches["task-pedido-1"]["params"])
+
+    async def test_pedido_redecision_away_from_dev_drops_review_reason(
+            self) -> None:
+        ticket = _pedido(review="off", params={"review_reason": "docs only"})
+        planned = _planned_ticket(local_ref="pedido-1",
+                                  target_agent="secretary",
+                                  coding_tool=None, tier_reason=None,
+                                  why_not_c=None)
+        env, patches, tmp = _pedido_env([_plan_result(planned)], ticket)
+        try:
+            out = await engine_mod.plan_pedido(env, ticket)
+        finally:
+            tmp.cleanup()
+        self.assertEqual(out.get("action"), "decided")
+        self.assertNotIn("review_reason", patches["task-pedido-1"]["params"])
+
+    async def test_pedido_user_switch_outranks_the_planner_call(self) -> None:
+        ticket = _pedido(review="on")
+        env, patches, tmp = _pedido_env([_plan_result(_planned_ticket(
+            local_ref="pedido-1", review="off",
+            review_reason="looks mechanical"))], ticket)
+        try:
+            out = await engine_mod.plan_pedido(env, ticket)
+        finally:
+            tmp.cleanup()
+        self.assertEqual(out.get("action"), "decided")
+        self.assertNotIn("review", patches["task-pedido-1"])
+        self.assertNotIn("review_reason", patches["task-pedido-1"]["params"])
+
+    async def test_pedido_decided_off_carries_its_reason(self) -> None:
+        ticket = _pedido()
+        env, patches, tmp = _pedido_env([_plan_result(_planned_ticket(
+            local_ref="pedido-1", review="off",
+            review_reason="configuration only"))], ticket)
+        try:
+            out = await engine_mod.plan_pedido(env, ticket)
+        finally:
+            tmp.cleanup()
+        self.assertEqual(out.get("action"), "decided")
+        self.assertEqual(patches["task-pedido-1"]["review"], "off")
+        self.assertEqual(
+            patches["task-pedido-1"]["params"]["review_reason"],
+            "configuration only")
 
 
 class _FakeService:

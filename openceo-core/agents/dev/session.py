@@ -18,6 +18,7 @@ from .builder_contract import (
     blocked_continuation_due,
     blocked_continuation_prompt,
     builder_environment_prompt,
+    engineering_standard_prompt,
     kept_work_note,
 )
 from .review_links import ReviewLinksExtraction, apply_review_links_to_params, extract_review_links
@@ -3565,7 +3566,7 @@ class DevSessionManager:
                 "FORMATO FINAL OBLIGATORIO",
                 "Al final de tu respuesta incluye exactamente un bloque REVIEW_LINKS con los links directos para QA/cliente de las vistas afectadas.",
                 "Si hay varias vistas afectadas, escribe un link por línea dentro del bloque.",
-                "Si el ticket toca vistas, router, menú, componentes visuales o renderizado, cumple también el smoke test/browser exigido por AGENTS.md.",
+                "Si el ticket toca vistas, router, menú, componentes visuales o renderizado, verifícalas renderizadas según el ESTÁNDAR DE INGENIERÍA y cumple además el smoke test que exija el AGENTS.md del repo, si define uno.",
             ]
         )
         if review_base_url:
@@ -3598,7 +3599,8 @@ class DevSessionManager:
                 project_prefix=knowledge_prefix)])
         dev_cfg = config.get("dev", {}) or {}
         gates, oracle_cmd = self._builder_gate_context(dev_cfg)
-        lines.extend(["", builder_environment_prompt(
+        lines.extend(["", engineering_standard_prompt(),
+                      "", builder_environment_prompt(
             gates, oracle_cmd,
             sandboxed=project_isolation(dev_cfg) != "host"),
                       "", AGENT_RESULT_PROMPT])
