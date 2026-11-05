@@ -670,7 +670,7 @@ class ObjectiveService:
             objective_id = candidate["objective_id"]
             if idle is None and recovery_mod.park_reason(objective) \
                     == recovery_mod.DEPLOY_REASON:
-                idle = await self._deploy_idle()
+                idle = await self.deploy_idle()
             decision = recovery_mod.recovery_decision(
                 objective,
                 candidate["active_children"],
@@ -725,7 +725,7 @@ class ObjectiveService:
         return {"ok": True, "retried": retried, "ticketed": ticketed,
                 "deployed": deployed, "next_seconds": delay}
 
-    async def _deploy_idle(self) -> bool:
+    async def deploy_idle(self) -> bool:
         """True when a restart kills no run and deploys a clean ``main``."""
         if self._repo is None or engine_mod.planning_in_flight():
             return False

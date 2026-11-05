@@ -4,7 +4,9 @@ The core listens on ``.runtime/reliability.sock`` for ``POST /events`` with
 ``{type: incident|exposure}``. Bodies are schema-validated, capped at 32 KiB
 and rate-limited. Events are evidence, never authorization: builders without
 sandbox share the user and can reach the socket, so nothing here admits
-tickets, changes gates or runs commands.
+tickets, changes gates or runs commands. Exposure events are still accepted
+so runners need no change, but they are discarded: their only consumer, the
+hunter's verification, was retired (TASK-2026-00510).
 
 When the core is unreachable the runner appends raw events to
 ``.runtime/runner-events-spool.jsonl``; the core ingests them at boot with
@@ -14,7 +16,6 @@ When the core is unreachable the runner appends raw events to
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import logging
 import os
@@ -35,7 +36,6 @@ logger = logging.getLogger(__name__)
 
 SOCKET_FILENAME = "reliability.sock"
 RUNNER_SPOOL_FILENAME = "runner-events-spool.jsonl"
-EXPOSURES_COLLECTION = "reliability_exposures"
 HEADER_MAX_BYTES = 8192
 
 _DEFAULTS = RELIABILITY_DEFAULTS["endpoint"]
@@ -176,50 +176,27 @@ async def _read_event(reader: asyncio.StreamReader,
         return _reason(400, str(exc)[:200])
 
 
-def _exposure_day_id(event: dict[str, Any], now: datetime) -> tuple[str, str]:
-    from . import exposures as _exposures
-
-    project = _exposures.normalize_project(event.get("project_key"))
-    return _exposures.exposure_day_id(
-        event["component"], project, now), project
-
-
-async def _store_exposure(exposures: Any, event: dict[str, Any],
-                          now: datetime) -> None:
-    from . import exposures as _exposures
-
-    day_id, update = _exposures.build_exposure_update(
-        event["component"], event.get("project_key"), now)
-    result = exposures.update_one({"_id": day_id}, update, upsert=True)
-    if inspect.isawaitable(result):
-        await result
-
-
-async def _store_validated(incidents: Any, exposures: Any,
-                           event: dict[str, Any], now: datetime,
+async def _store_validated(incidents: Any, event: dict[str, Any],
                            runtime_dir: str | Path | None) -> bool:
-    """Persist one validated event; spool it when stores are down."""
-    try:
-        if event["type"] == "incident":
-            fields = {k: v for k, v in event.items()
-                      if k not in ("type", "event_id", "ts", "kind",
-                                   "component")}
-            stored = await _capture.record_incident(
-                incidents, kind=event["kind"], component=event["component"],
-                incident_id=event["event_id"], runtime_dir=runtime_dir,
-                **fields)
-            return stored is not None
-        if exposures is None:
-            raise RuntimeError("no exposures store")
-        await _store_exposure(exposures, event, now)
+    """Persist one validated incident; spool it when the store is down."""
+    if event["type"] != "incident":
         return True
+    try:
+        fields = {k: v for k, v in event.items()
+                  if k not in ("type", "event_id", "ts", "kind",
+                               "component")}
+        stored = await _capture.record_incident(
+            incidents, kind=event["kind"], component=event["component"],
+            incident_id=event["event_id"], runtime_dir=runtime_dir,
+            **fields)
+        return stored is not None
     except Exception:
         logger.warning("Endpoint store failed; spooling event", exc_info=True)
         spool_event(event, runtime_dir)
         return True
 
 
-def _handler(incidents: Any, exposures: Any,
+def _handler(incidents: Any,
              runtime_dir: str | Path | None,
              limiter: RateLimiter,
              max_bytes: int) -> Callable[..., Any]:
@@ -232,8 +209,7 @@ def _handler(incidents: Any, exposures: Any,
             elif not limiter.allow():
                 writer.write(_reason(429, "rate limit exceeded"))
             else:
-                await _store_validated(incidents, exposures, parsed,
-                                       _utcnow(), runtime_dir)
+                await _store_validated(incidents, parsed, runtime_dir)
                 writer.write(_reason(202, "accepted"))
             await writer.drain()
         except Exception:
@@ -245,7 +221,7 @@ def _handler(incidents: Any, exposures: Any,
     return _serve
 
 
-async def start_endpoint(incidents: Any, exposures: Any, *,
+async def start_endpoint(incidents: Any, *,
                          runtime_dir: str | Path | None = None,
                          limiter: RateLimiter | None = None,
                          max_bytes: int = MAX_EVENT_BYTES
@@ -259,8 +235,7 @@ async def start_endpoint(incidents: Any, exposures: Any, *,
     except OSError:
         pass
     server = await asyncio.start_unix_server(
-        _handler(incidents, exposures, root, limiter or RateLimiter(),
-                 max_bytes),
+        _handler(incidents, root, limiter or RateLimiter(), max_bytes),
         path=str(path))
     os.chmod(path, 0o660)
     return server
@@ -387,7 +362,7 @@ def _drop_replayed_events(replayed: list[str],
         return -1
 
 
-async def ingest_runner_spool(incidents: Any, exposures: Any, *,
+async def ingest_runner_spool(incidents: Any, *,
                               runtime_dir: str | Path | None = None,
                               now: datetime | None = None) -> dict[str, int]:
     """Replay spooled runner events with late=true; drops replayed lines."""
@@ -421,10 +396,6 @@ async def ingest_runner_spool(incidents: Any, exposures: Any, *,
                         component=event["component"],
                         incident_id=event["event_id"], late=True,
                         runtime_dir=runtime_dir, now=stamp, **fields)
-                else:
-                    if exposures is None:
-                        raise RuntimeError("no exposures store")
-                    await _store_exposure(exposures, event, stamp)
                 replayed.append(event["event_id"])
                 outcome["replayed"] += 1
             except Exception:

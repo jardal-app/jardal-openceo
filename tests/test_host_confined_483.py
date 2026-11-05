@@ -216,10 +216,9 @@ class TestLiveCheckoutGuard:
         assert out.waiting_reason.startswith("repo_busy: ")
         assert "uncommitted changes on main" in out.waiting_reason
         assert out.resume_at is not None
-        # TASK-2026-00506 redefines the contract: the park carries the
-        # dirty-streak counter so persistent dirt can escalate.
-        assert out.params["x"] == 1
-        assert out.params["repo_busy_dirt_declines"]["count"] == 1
+        # The park keeps the ticket params untouched; repeats stall through
+        # the generic rule (TASK-2026-00510).
+        assert out.params == {"x": 1}
         assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main"
         assert (repo / "a.txt").read_text(encoding="utf-8") == "owner wip\n"
 

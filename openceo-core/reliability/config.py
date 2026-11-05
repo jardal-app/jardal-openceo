@@ -1,11 +1,8 @@
-"""Reliability hunter global configuration (design v2 section 14).
+"""Reliability base global configuration (design v2 section 14).
 
-Global, not per-project: engine Problems cross projects. Values below are
-the initial thresholds; any change is an agent decision reopenable by the
-Owner. Code invariants (hunter tickets always autorun=false, admission and
-route gates, engine scope without business text, tool-less diagnosis, no
-self-diagnosis of the reliability component) are structural and no
-configuration key can change them.
+Global, not per-project. What remains after TASK-2026-00510: incident
+capture, the progress brake, deadlines and the runner endpoint. Diagnosis,
+tickets and recovery belong to the mechanic (``openceo-core/mechanic``).
 """
 
 from __future__ import annotations
@@ -15,8 +12,8 @@ from typing import Any
 RELIABILITY_DEFAULTS: dict[str, Any] = {
     "capture": True,
     "guard": {
-        "mode": {"runner": "enforce", "dev_session": "shadow",
-                 "tier_s": "shadow", "generic_agent": "shadow"},
+        "mode": {"runner": "enforce", "dev_session": "enforce",
+                 "tier_s": "enforce", "generic_agent": "enforce"},
         "same_work_attempts": 3,
         "alternating_attempts": 4,
         "long_phase_attempts": 8,
@@ -29,60 +26,19 @@ RELIABILITY_DEFAULTS: dict[str, Any] = {
         "resume_overdue_seconds": 600,
     },
     "triage": {
-        "engine_normal": {"occurrences": 3, "tickets": 2},
-        "project_or_unknown": {"occurrences": 3, "tickets": 2},
-        "task": {"tickets": 5, "window_days": 14},
-        "release_storm": {"new_problems": 3, "window_hours": 24},
         "max_incidents_per_fingerprint_hour": 20,
-    },
-    "diagnosis": {
-        "enabled": False,
-        "max_concurrent": 1,
-        "max_starts_per_hour": 3,
-        "max_starts_per_day": 20,
-        "max_per_problem": 3,
-        "processes_per_diagnosis": 2,
-        "timeout_seconds": 300,
-        "claim_seconds": 600,
-        "max_input_bytes": 65536,
-        "max_input_tokens_estimated": 12000,
-        "max_output_tokens": 2000,
-    },
-    "tickets": {
-        "enabled": False,
-        "max_pending_owner": 5,
     },
     "endpoint": {
         "max_event_bytes": 32768,
         "max_per_minute": 120,
     },
-    "verification": {
-        "min_exposures": 20,
-        "max_exposures": 500,
-        "default_baseline_rate": 0.05,
-    },
-    "routes_gate": {
-        "enabled": False,
-    },
-    "recovery": {
-        "reconcile_business_state": False,
-    },
     "spool_max_bytes": 10485760,
-    "retention_days": {"incidents": 90, "exposures": 180},
-    "invariants": {
-        "mode": {"INV-001": "record", "INV-002": "record",
-                 "INV-003": "record", "INV-004": "record",
-                 "INV-005": "record"},
-    },
+    "retention_days": {"incidents": 90},
 }
 
 GUARD_MODES = frozenset({"off", "shadow", "enforce"})
 
 GUARD_PRODUCERS = frozenset({"runner", "dev_session", "tier_s", "generic_agent"})
-
-HUNTER_TICKET_AUTORUN = False
-
-SELF_DIAGNOSIS_EXCLUDED = frozenset({"reliability"})
 
 
 def validate_reliability_config(block: Any) -> list[str]:
@@ -122,8 +78,6 @@ def _validate_value(value: Any, spec: Any, label: str) -> list[str]:
             return [f"{label}: must be a mapping"]
         if label == "reliability.guard.mode":
             return _validate_guard_mode(value)
-        if label == "reliability.invariants.mode":
-            return _validate_invariant_mode(value)
         errors: list[str] = []
         for key in value:
             if key not in spec:
@@ -145,22 +99,6 @@ def _validate_guard_mode(value: dict[str, Any]) -> list[str]:
             errors.append(
                 f"reliability.guard.mode.{producer}: must be one of "
                 f"{sorted(GUARD_MODES)}")
-    return errors
-
-
-def _validate_invariant_mode(value: dict[str, Any]) -> list[str]:
-    from .invariants import INVARIANTS, INVARIANT_MODES
-
-    errors: list[str] = []
-    for invariant_id, mode in value.items():
-        if invariant_id not in INVARIANTS:
-            errors.append(
-                f"reliability.invariants.mode.{invariant_id}: unknown "
-                "invariant (fail-closed)")
-        elif mode not in INVARIANT_MODES:
-            errors.append(
-                f"reliability.invariants.mode.{invariant_id}: must be one of "
-                f"{sorted(INVARIANT_MODES)}")
     return errors
 
 

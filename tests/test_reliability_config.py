@@ -14,9 +14,7 @@ if str(CORE) not in sys.path:
     sys.path.insert(0, str(CORE))
 
 from reliability.config import (  # noqa: E402
-    HUNTER_TICKET_AUTORUN,
     RELIABILITY_DEFAULTS,
-    SELF_DIAGNOSIS_EXCLUDED,
     get_reliability_config,
     validate_reliability_config,
 )
@@ -74,11 +72,14 @@ class ReliabilityConfigTests(unittest.TestCase):
         self.assertIs(effective["capture"], False)
         self.assertEqual(effective["guard"], RELIABILITY_DEFAULTS["guard"])
 
-    def test_code_invariants_are_not_configurable(self) -> None:
-        self.assertIs(HUNTER_TICKET_AUTORUN, False)
-        self.assertIn("reliability", SELF_DIAGNOSIS_EXCLUDED)
-        self.assertNotIn("autorun", RELIABILITY_DEFAULTS["tickets"])
-        self.assertNotIn("autorun", repr(RELIABILITY_DEFAULTS))
+    def test_pruned_hunter_keys_are_gone(self) -> None:
+        for key in ("diagnosis", "tickets", "verification", "routes_gate",
+                    "recovery", "invariants"):
+            self.assertNotIn(key, RELIABILITY_DEFAULTS)
+        self.assertTrue(validate_reliability_config(
+            {**RELIABILITY_DEFAULTS, "diagnosis": {"enabled": True}}))
+        self.assertEqual(set(RELIABILITY_DEFAULTS["guard"]["mode"].values()),
+                         {"enforce"})
 
     def test_project_yaml_reliability_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -65,7 +65,7 @@ __all__ = [
 ]
 
 READONLY_BOX = frozenset({"openceo_search_tickets", "openceo_get_ticket"})
-READONLY_PRINCIPALS = ("planner", "ceo")
+READONLY_PRINCIPALS = ("planner", "ceo", "mechanic")
 
 #: Calls with no token get this box (Owner order: keep working everywhere
 #: without a badge; the agent-specific tools need one). A present but

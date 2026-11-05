@@ -320,36 +320,6 @@ RUNNER_SCRATCH_DIRS = (".openceo-automatico", ".runtime", ".openceo")
 RUNNER_SPOOL_FILENAME = "runner-events-spool.jsonl"
 _GUARD: dict = {"module": None, "failed": False}
 _ENDPOINT: dict = {"module": None, "failed": False}
-_ROUTES: dict = {"module": None, "failed": False}
-
-ROUTES_APPROVAL_IO = """
-import asyncio, json, sys
-from settings import get_settings
-from business.approvals import JardalERPApproval
-
-async def main(op, arg):
-    data = json.loads(arg)
-    approval = JardalERPApproval(get_settings())
-    if not approval.is_enabled:
-        print(json.dumps({"ok": False, "status": "not_configured"}))
-        return
-    try:
-        if op == "request":
-            body = {"resource": data["resource"],
-                    "routes": data.get("routes", []),
-                    "list_version": data.get("list_version", 1)}
-            if data.get("business_reference"):
-                body["business_reference"] = data["business_reference"]
-            out = await approval.request_approval(body, key=data["key"])
-        else:
-            out = await approval.get_approval(data["approval_id"])
-        print(json.dumps({"ok": True, "approval": out}))
-    finally:
-        await approval.aclose()
-
-asyncio.run(main(sys.argv[1], sys.argv[2]))
-"""
-
 
 def _guard_module():
     cached = _GUARD
@@ -460,202 +430,6 @@ def runner_guard_mode(decisions: dict | None = None) -> str:
     if decisions is None:
         decisions = load_owner_decisions()
     return "enforce" if decisions.get(RUNNER_GUARD_DECISION) else "shadow"
-
-
-def _routes_module():
-    cached = _ROUTES
-    if cached["failed"]:
-        return None
-    if cached["module"] is None:
-        try:
-            if str(CORE) not in sys.path:
-                sys.path.insert(0, str(CORE))
-            from reliability import protected_routes as module
-            cached["module"] = module
-        except Exception:  # noqa: BLE001 - fail-open: sin gate el runner sigue
-            cached["failed"] = True
-            return None
-    return cached["module"]
-
-
-def _routes_gate_enabled() -> bool:
-    try:
-        module = _routes_module()
-        return bool(module and module.routes_gate_enabled())
-    except Exception:  # noqa: BLE001 - fail-open: gate apagado
-        return False
-
-
-def routes_gate_status(c: dict, t: dict) -> dict:
-    """Pure-local gate position at close entry. Never raises.
-
-    Returns ``applies`` plus touched routes, digest and file count when
-    the branch diff touches the protected list. Off (config), knowledge
-    tickets and missing branches never apply.
-    """
-    result: dict = {"applies": False, "reason": "gate_off",
-                    "touched": [], "digest": "", "files": 0}
-    try:
-        if not _routes_gate_enabled():
-            return result
-        module = _routes_module()
-        if module is None:
-            result["reason"] = "gate_unreadable"
-            return result
-        if not c.get("branch") or c.get("workspace") == KNOWLEDGE:
-            result["reason"] = "no_branch"
-            return result
-        code, base, _err = run(
-            ["git", "merge-base", "main", c["branch"]], 60)
-        if code != 0 or not base.strip():
-            result["reason"] = "no_merge_base"
-            return result
-        files, diff = module.collect_diff(
-            str(REPO), base.strip(), c["branch"])
-        touched = module.touched_protected(files)
-        if not touched:
-            result["reason"] = "no_protected_routes"
-            return result
-        result.update(applies=True, reason="protected",
-                      touched=touched,
-                      digest=module.diff_digest(files, diff),
-                      files=len(files))
-        return result
-    except Exception as exc:  # noqa: BLE001 - fail-open: el bucle sigue
-        log(f"{c.get('ticket', '?')}: gate de rutas no evaluable "
-            f"(fail-open): {exc}"[:200])
-        result["reason"] = "gate_error"
-        return result
-
-
-def routes_gate_approval_io(op: str, payload: dict) -> dict | None:
-    """ERP approval request/read for a protected diff. None on any failure."""
-    try:
-        code, out, _err = run(
-            [str(PYTHON), "-c", ROUTES_APPROVAL_IO, op,
-             json.dumps(payload)], 60, cwd=CORE)
-        if code != 0:
-            return None
-        data = json.loads(out.strip().splitlines()[-1])
-        if not data.get("ok"):
-            return None
-        approval = data.get("approval")
-        return approval if isinstance(approval, dict) else None
-    except Exception:  # noqa: BLE001 - fail-closed en el llamante
-        return None
-
-
-def routes_gate_close_entry(c: dict, t: dict) -> str:
-    """Request (idempotent) and verify the diff approval at close entry.
-
-    Stores ``routes_digest``/``routes_approval_id`` in the ticket state and
-    returns the gate instruction for the close prompt ("" when the gate
-    does not apply). Never raises: without approval the closer must not
-    merge and the ticket waits for the Owner.
-    """
-    status = routes_gate_status(c, t)
-    if not status["applies"]:
-        kept = t.get("routes_verdict") or {}
-        if not kept.get("digest"):
-            t.pop("routes_verdict", None)
-            return ""
-        return ("Gate de rutas protegidas (§9.4): la rama ya no existe "
-                "(merge ya integrado); NO reintentes el merge. Si la "
-                "verificación del runner lo devuelve, termina con "
-                f"TICKET_OWNER {kept.get('human_action', '')}.")
-    try:
-        module = _routes_module()
-        assert module is not None
-        digest = status["digest"]
-        approval_id = str(t.get("routes_approval_id") or "")
-        if t.get("routes_digest") != digest:
-            approval_id = ""
-        if not approval_id:
-            request, key = module.build_approval_request(
-                digest, status["touched"], business_ref=c["ticket"])
-            created = routes_gate_approval_io("request", {
-                "resource": request["resource"],
-                "routes": request["routes"],
-                "list_version": request["list_version"],
-                "business_reference": c["ticket"], "key": key})
-            if created and str(created.get("id") or ""):
-                approval_id = str(created.get("id"))
-                t["routes_digest"] = digest
-                t["routes_approval_id"] = approval_id
-            else:
-                t["routes_digest"] = digest
-                t.pop("routes_approval_id", None)
-                approval_id = ""
-        allowed = False
-        if approval_id:
-            live = routes_gate_approval_io(
-                "read", {"approval_id": approval_id})
-            allowed, _reason = module.verify_approval(
-                live, proposal_hash=digest) if live else (False, "")
-        human_action = module.human_action_for(digest, status["touched"])
-        verdict = {"digest": digest, "routes": status["touched"],
-                   "approval_id": approval_id or None,
-                   "human_action": human_action, "allowed": allowed}
-        t["routes_verdict"] = verdict
-        if allowed:
-            return ("Gate de rutas protegidas (§9.4): el diff toca "
-                    f"{', '.join(status['touched'])} (digest {digest[:12]}), "
-                    f"con aprobación {approval_id} verificada por el runner. "
-                    "Antes de mergear confirma que el digest coincide "
-                    "(helper de abajo); si difiere, NO merges y termina con "
-                    "TICKET_CONTINUE indicando deriva del diff.")
-        return ("Gate de rutas protegidas (§9.4): el diff toca "
-                f"{', '.join(status['touched'])} (digest {digest[:12]}). "
-                f"NO hagas merge ni push. Termina con TICKET_OWNER "
-                f"{human_action} y ticket en Pending Review con esa "
-                "human_action; la aprobación queda pedida "
-                f"({approval_id or 'pendiente de ERP'}).")
-    except Exception as exc:  # noqa: BLE001 - fail-open del prompt, no del gate
-        log(f"{c.get('ticket', '?')}: gate de rutas sin instrucción "
-            f"(fail-open): {exc}"[:200])
-        t.pop("routes_verdict", None)
-        return ""
-
-
-def routes_gate_verify(c: dict, t: dict) -> tuple[bool, str]:
-    """Backstop determinista tras el cierre: el diff integrado en main exige
-    aprobación verificada del Owner. (True, "") autoriza; (False, motivo)
-    devuelve el ticket a close con la human_action."""
-    try:
-        if not _routes_gate_enabled():
-            return True, ""
-        module = _routes_module()
-        assert module is not None
-        base = (t.get("base") or {}).get("openceo", "")
-        files, diff = module.collect_diff(str(REPO), base, "main") \
-            if base else ([], b"")
-        touched = module.touched_protected(files)
-        if not touched:
-            return True, ""
-        digest = module.diff_digest(files, diff)
-        verdict = t.get("routes_verdict") or {}
-        if not verdict.get("digest"):
-            human_action = module.human_action_for(digest, touched)
-            return False, ("diff en rutas protegidas sin aprobación "
-                           f"verificada: {human_action}")
-        if digest != verdict.get("digest"):
-            return False, (f"el diff integrado deriva del aprobado "
-                           f"({digest[:12]}): pide aprobación del nuevo diff")
-        approval_id = str(verdict.get("approval_id") or "")
-        live = routes_gate_approval_io(
-            "read", {"approval_id": approval_id}) if approval_id else None
-        ok, _reason = module.verify_approval(
-            live, proposal_hash=digest) if live else (False, "")
-        if ok:
-            return True, ""
-        human_action = str(verdict.get("human_action") or
-                           module.human_action_for(digest, touched))
-        return False, (f"diff en rutas protegidas sin aprobación verificada: "
-                       f"{human_action}")
-    except Exception as exc:  # noqa: BLE001 - fail-closed: no integra a ciegas
-        log(f"{c.get('ticket', '?')}: verificación del gate falló "
-            f"(fail-closed): {exc}"[:200])
-        return False, "gate de rutas no verificable (fail-closed)"
 
 
 def _git_bytes(repo: Path, *args: str) -> bytes | None:
@@ -933,35 +707,6 @@ def work_prompt(c: dict, t: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def routes_gate_prompt(c: dict, t: dict) -> list[str]:
-    """Gate step for the close prompt ([] when the gate never applied)."""
-    verdict = t.get("routes_verdict") or {}
-    digest = str(verdict.get("digest") or "")
-    if not digest or not c.get("branch"):
-        return []
-    routes = ", ".join(verdict.get("routes") or [])
-    helper = (
-        f"cd {CORE} && {PYTHON} -m reliability.protected_routes "
-        f"--repo {REPO} --base $(git -C {REPO} merge-base main "
-        f"{c['branch']}) --head {c['branch']}")
-    if verdict.get("allowed"):
-        return [f"Gate de rutas protegidas (§9.4, antes de mergear): el diff "
-                f"toca {routes} (digest {digest[:12]}), con aprobación "
-                f"{verdict.get('approval_id')} verificada por el runner. "
-                "Confirma que el digest coincide (solo lectura): "
-                f"{helper} "
-                "Si el digest difiere o la rama ya no existe, NO merges y "
-                "termina con TICKET_CONTINUE indicando deriva del diff."]
-    return [f"Gate de rutas protegidas (§9.4, antes de mergear): el diff "
-            f"toca {routes} (digest {digest[:12]}), SIN aprobación "
-            "verificada "
-            f"({verdict.get('approval_id') or 'pendiente de ERP'}). "
-            "NO hagas merge ni push. Compruébalo si quieres (solo "
-            f"lectura): {helper} "
-            f"Termina con TICKET_OWNER {verdict.get('human_action', '')} y "
-            "ticket en Pending Review con esa human_action."]
-
-
 def close_prompt(c: dict, t: dict) -> str:
     reports = [f"- {path}" for path in t["reviews"]] or ["- (ninguno)"]
     lines = [
@@ -971,7 +716,6 @@ def close_prompt(c: dict, t: dict) -> str:
         "verifica los válidos (en la rama o, en jardal-knowledge, con un "
         "commit de corrección) y deja en el ticket un comentario con los "
         "aceptados y los descartados con su motivo.",
-        *routes_gate_prompt(c, t),
         "2. Cierra el ciclo (CLAUDE.md §9): tests del ticket y gates de "
         "AGENTS.md en verde → si hay rama en jardal-openceo: merge --no-ff a "
         "main, push origin main y borrado de la rama local y remota → si "
@@ -1280,9 +1024,6 @@ def verify_code(c: dict, t: dict) -> tuple[bool, str]:
                     "-q"], 900)
     if code != 0:
         return False, "tests rojos:\n" + out[-2000:]
-    ok, why = routes_gate_verify(c, t)
-    if not ok:
-        return False, why
     ok, why = verify_ruff()
     if not ok:
         return False, why
@@ -1379,10 +1120,6 @@ def advance(c: dict, s: Settings, state: dict) -> str:
         sessions += 1
         t["sessions"] += 1
         if phase == "close":
-            routes_note = routes_gate_close_entry(c, t)
-            if routes_note:
-                t["note"] = ((t["note"] + "\n") if t["note"] else "") \
-                    + routes_note
             save_state(state)
         report_runner_event(ticket, "exposure", phase=phase,
                             attempt_id=f"{ticket}-s{t['sessions']}")

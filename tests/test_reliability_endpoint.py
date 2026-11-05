@@ -56,23 +56,6 @@ class FakeIncidents:
         return 0
 
 
-class FakeExposures:
-    """Minimal upsert fake for the per-day exposure counters."""
-
-    def __init__(self) -> None:
-        self.docs: dict[str, dict[str, Any]] = {}
-
-    async def update_one(self, filt: dict[str, Any], update: dict[str, Any],
-                         upsert: bool = False) -> SimpleNamespace:
-        key = filt["_id"]
-        doc = self.docs.setdefault(key, {"_id": key, "count": 0})
-        doc["count"] += int(update.get("$inc", {}).get("count", 0))
-        doc.update(update.get("$set", {}))
-        for field, value in update.get("$setOnInsert", {}).items():
-            doc.setdefault(field, value)
-        return SimpleNamespace(matched_count=1)
-
-
 def _raw_post(runtime: Path, body: bytes, path: str = "/events") -> int:
     import socket
 
@@ -128,7 +111,6 @@ class SocketTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.runtime = Path(self._tmp.name)
         self.incidents = FakeIncidents()
-        self.exposures = FakeExposures()
         self._loop: Any = None
         self._thread: Any = None
 
@@ -143,8 +125,7 @@ class SocketTests(unittest.TestCase):
 
         async def _start() -> None:
             endpoint._SERVER = await start_endpoint(
-                self.incidents, self.exposures,
-                runtime_dir=self.runtime, **kwargs)
+                self.incidents, runtime_dir=self.runtime, **kwargs)
 
         loop.run_until_complete(_start())
         thread = threading.Thread(target=loop.run_forever, daemon=True)
@@ -197,7 +178,7 @@ class SocketTests(unittest.TestCase):
             body = json.dumps({"type": "exposure", "component": "runner",
                                "authorize": True}).encode()
             self.assertEqual(_raw_post(self.runtime, body), 400)
-            self.assertEqual(len(self.exposures.docs), 0)
+            self.assertEqual(len(self.incidents.docs), 0)
         finally:
             self._close()
 
@@ -223,15 +204,15 @@ class SocketTests(unittest.TestCase):
         finally:
             self._close()
 
-    def test_valid_exposure_counted(self) -> None:
+    def test_valid_exposure_accepted_and_discarded(self) -> None:
         self._serve()
         try:
             self.assertTrue(post_event(
                 {"type": "exposure", "component": "runner"},
                 runtime_dir=self.runtime))
-            self.assertEqual(len(self.exposures.docs), 1)
-            doc = next(iter(self.exposures.docs.values()))
-            self.assertEqual(doc["count"], 1)
+            self.assertEqual(len(self.incidents.docs), 0)
+            self.assertFalse(
+                (self.runtime / endpoint.RUNNER_SPOOL_FILENAME).exists())
         finally:
             self._close()
 
@@ -256,7 +237,6 @@ class SpoolTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.runtime = Path(self._tmp.name)
         self.incidents = FakeIncidents()
-        self.exposures = FakeExposures()
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -272,7 +252,7 @@ class SpoolTests(unittest.TestCase):
 
         async def _ingest() -> dict[str, int]:
             return await ingest_runner_spool(
-                self.incidents, self.exposures, runtime_dir=self.runtime)
+                self.incidents, runtime_dir=self.runtime)
 
         outcome = asyncio.run(_ingest())
         self.assertEqual(outcome["replayed"], 1)
@@ -307,7 +287,7 @@ class SpoolTests(unittest.TestCase):
 
         async def _ingest() -> dict[str, int]:
             return await ingest_runner_spool(
-                self.incidents, self.exposures, runtime_dir=self.runtime)
+                self.incidents, runtime_dir=self.runtime)
 
         outcome = asyncio.run(_ingest())
         self.assertEqual(outcome["replayed"], 1)
@@ -324,7 +304,7 @@ class SpoolTests(unittest.TestCase):
 
         async def _ingest() -> dict[str, int]:
             return await ingest_runner_spool(
-                self.incidents, self.exposures, runtime_dir=self.runtime,
+                self.incidents, runtime_dir=self.runtime,
                 now=datetime(2026, 10, 29, tzinfo=timezone.utc))
 
         self.assertEqual(asyncio.run(_ingest())["replayed"], 1)
@@ -332,42 +312,6 @@ class SpoolTests(unittest.TestCase):
         self.assertEqual(doc["created_at"],
                          datetime(2026, 10, 20, 10, 0,
                                   tzinfo=timezone.utc))
-
-    def test_store_exposure_awaits_motor_future(self) -> None:
-        from reliability.endpoint import _store_exposure
-
-        class MotorLikeFuture:
-            """Motor returns Futures: awaitable, not coroutines."""
-
-            def __init__(self) -> None:
-                self.awaited = False
-
-            def __await__(self):  # type: ignore[no-untyped-def]
-                self.awaited = True
-                yield
-                return SimpleNamespace(matched_count=1)
-
-        class MotorLikeExposures:
-            def __init__(self) -> None:
-                self.sent: MotorLikeFuture | None = None
-
-            def update_one(self, filt: dict[str, Any],
-                           update: dict[str, Any],
-                           upsert: bool = False) -> MotorLikeFuture:
-                self.sent = MotorLikeFuture()
-                return self.sent
-
-        fake = MotorLikeExposures()
-
-        async def _run() -> None:
-            await _store_exposure(
-                fake, {"type": "exposure", "component": "runner"},
-                datetime.now(timezone.utc))
-
-        asyncio.run(_run())
-        self.assertIsNotNone(fake.sent)
-        assert fake.sent is not None
-        self.assertTrue(fake.sent.awaited)
 
 
 class RunnerClientTests(unittest.TestCase):

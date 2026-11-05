@@ -64,7 +64,11 @@ from objectives.missions import (
     MissionRejected,
 )
 from objectives.recovery_scheduler import RecoveryScheduler
-from objectives.service import ObjectiveService
+from mechanic.service import MechanicService, mechanic_config
+from objectives.recovery_deploy import spawn_service_restart
+from objectives.service import ObjectiveService, create_internal_ticket
+from orchestration.live import ProcessExecutor
+from orchestration.role_muse import ReadonlyBadgeProvider, issuer_for_repo
 from phase_workflows import merge_workflow_templates
 from project_service import ProjectService
 from qa_review_service import QAReviewService
@@ -258,6 +262,34 @@ objective_service.set_ceo_wake(ceo_loop.wake)
 # recovery ticket when the budget is spent. Never a poll loop.
 recovery_scheduler = RecoveryScheduler(objective_service)
 objective_service.set_recovery_wake(recovery_scheduler.wake)
+
+
+def _mechanic_executor() -> ProcessExecutor:
+    role = (mechanic_config(config_loader.load_project(None)).get("role")
+            or {})
+    issuer = issuer_for_repo(repo)
+    badge = (ReadonlyBadgeProvider(issuer, settings, "mechanic")
+             if issuer is not None else None)
+    return ProcessExecutor(roles={"mechanic": role}, pool=[],
+                           badge_provider=badge)
+
+
+# Engine mechanic (TASK-2026-00510): stalls, give-ups and missed deadlines
+# go to one musej run that returns repair actions; the heartbeat spends no
+# tokens unless it finds a wait nobody will move.
+mechanic_service = MechanicService(
+    repo=repo,
+    task_service=task_service,
+    config_fn=lambda: mechanic_config(config_loader.load_project(None)),
+    executor_fn=_mechanic_executor,
+    repo_for_project=_dispatcher_repo_for,
+    create_ticket=lambda payload: create_internal_ticket(task_service, payload),
+    wake_dispatcher=dispatcher.wake,
+    release_fn=lambda: read_release(Path(__file__).resolve().parents[1]),
+    deploy_ready=objective_service.deploy_idle,
+    spawn_restart=spawn_service_restart,
+)
+task_service.set_mechanic_wake(mechanic_service.wake)
 # Ticket research bridge (TASK-2026-00222): per-ticket consumers over the
 # in-process service, with lazy lookups for the service and dispatcher wake.
 _ticket_research_consumers = ConsumerRegistry()
@@ -458,34 +490,19 @@ async def lifespan(_: FastAPI):
                 replay_spool,
             )
             from reliability import endpoint as _reliability_endpoint
-            from reliability import exposures as _reliability_exposures
             _reliability_coll = repo.db["reliability_incidents"]
             _repo_root = Path(__file__).resolve().parents[1]
             await ensure_reliability_indexes(_reliability_coll)
-            await _reliability_exposures.ensure_exposure_indexes(
-                repo.db["reliability_exposures"])
             await replay_spool(
                 _reliability_coll, runtime_dir=_repo_root / ".runtime")
             await record_unclean_exit(
                 _reliability_coll, runtime_dir=_repo_root / ".runtime",
                 release=_release)
             await _reliability_endpoint.ingest_runner_spool(
-                _reliability_coll, repo.db["reliability_exposures"],
-                runtime_dir=_repo_root / ".runtime")
+                _reliability_coll, runtime_dir=_repo_root / ".runtime")
             _reliability_endpoint._SERVER = (
                 await _reliability_endpoint.start_endpoint(
-                    _reliability_coll, repo.db["reliability_exposures"],
-                    runtime_dir=_repo_root / ".runtime"))
-            await _reliability_exposures.record_exposure(
-                repo, "core_process")
-            from reliability import verification as _reliability_verification
-            await _reliability_verification.evaluate_release(
-                repo.db["reliability_problems"],
-                repo.db["reliability_exposures"],
-                str(_release.get("sha") or ""),
-                incidents=_reliability_coll,
-                repo_root=_repo_root,
-                scope="engine")
+                    _reliability_coll, runtime_dir=_repo_root / ".runtime"))
         except Exception:
             logger.warning("Reliability startup reconcile failed", exc_info=True)
         # DeadlineWatch (TASK-2026-00383, §7): indexes plus the single
@@ -498,7 +515,8 @@ async def lifespan(_: FastAPI):
             )
             await ensure_deadline_indexes(repo.tasks)
             dispatcher.set_deadline_watch(DeadlineWatch(
-                repo, incidents=repo.db["reliability_incidents"]))
+                repo, incidents=repo.db["reliability_incidents"],
+                on_missed=mechanic_service.wake))
         except Exception:
             logger.warning("DeadlineWatch startup wiring failed",
                            exc_info=True)
@@ -513,6 +531,7 @@ async def lifespan(_: FastAPI):
         await dispatcher.start()
         await ceo_loop.start()
         await recovery_scheduler.start()
+        await mechanic_service.start()
         # Ojo: dentro de ``lifespan`` hay un ``settings = get_settings()`` mas
         # abajo (bloque de auth) que vuelve ``settings`` local a toda la funcion.
         # Leerlo aqui antes de esa asignacion lanzaria UnboundLocalError, asi que
@@ -613,6 +632,7 @@ async def lifespan(_: FastAPI):
         # Horizon se para antes que el resto para que ninguna escritura suya
         # caiga despues de cerrar el repositorio.
         await horizon_scheduler.stop()
+        await mechanic_service.stop()
         await recovery_scheduler.stop()
         await ceo_loop.stop()
         await dispatcher.stop()

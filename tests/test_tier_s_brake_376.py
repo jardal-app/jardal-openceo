@@ -138,8 +138,10 @@ class ScriptedExecutor:
 
 
 @run_async
-async def test_same_head_different_tree_is_not_same_work(repo):
+async def test_same_head_different_tree_is_not_same_work(repo, monkeypatch):
     """HEAD igual con working tree distinto → no es el mismo trabajo."""
+    monkeypatch.setitem(RELIABILITY_DEFAULTS["guard"]["mode"], "tier_s",
+                        "shadow")
     fake = _FakeIncidents()
     runs, tasks = InMemoryRunStore(), InMemoryTaskStore()
     cycle = make_cycle(runs, tasks, ScriptedExecutor([]),

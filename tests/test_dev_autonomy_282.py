@@ -642,7 +642,11 @@ async def test_brake_credential_error_attributes_environment():
 
 
 @run_async
-async def test_brake_shadow_would_stop_keeps_loop_running(repo):
+async def test_brake_shadow_would_stop_keeps_loop_running(repo, monkeypatch):
+    from reliability.config import RELIABILITY_DEFAULTS
+
+    monkeypatch.setitem(RELIABILITY_DEFAULTS["guard"]["mode"], "dev_session",
+                        "shadow")
     fake = _FakeIncidents()
     dev = manager()
     dev._repo = _brake_store(fake)

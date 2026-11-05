@@ -473,65 +473,6 @@ class TierSCycle:
         # ``.db`` behind it); None skips capture but still evaluates the
         # brake and persists its state.
         self._incidents = incidents
-        # Routes gate (TASK-2026-00389, §9.4): ERP adapter for protected
-        # diff approvals (request + live read). None keeps the gate off
-        # the network: a protected diff then blocks with its human action
-        # until the activation child wires the production adapter.
-        self._routes_gate_adapter: Any | None = None
-
-    def set_routes_gate_adapter(self, adapter: Any | None) -> None:
-        """Inject the ERP adapter for protected-diff approvals.
-
-        ``None`` (default) keeps the gate off the network: an enabled
-        gate with no adapter blocks protected diffs with their human
-        action. The activation (TASK-2026-00391) wires the production
-        adapter here. Untouched diffs never need it.
-        """
-        self._routes_gate_adapter = adapter
-
-    async def _protected_routes_check(
-            self, ctx: _Ctx, files: list[str], head_sha: str) -> str | None:
-        """Protected-routes gate (§9.4): None allows, text parks with detail.
-
-        Off while the calibration child owns activation; untouched diffs
-        pass without any ERP read. A protected diff requests its approval
-        (idempotent on the diff hash) and verifies it live; anything
-        unverifiable blocks fail-closed with the exact human action.
-        """
-        try:
-            from reliability import protected_routes as routes_mod
-        except Exception:  # noqa: BLE001 - logged, gate skipped
-            routes_mod = None  # type: ignore[assignment]
-        if routes_mod is None:
-            logger.warning("routes gate module unreadable, gate skipped")
-            return None
-        try:
-            if not routes_mod.routes_gate_enabled():
-                return None
-            touched = routes_mod.touched_protected(files)
-            if not touched:
-                return None
-            _, diff = await asyncio.to_thread(
-                routes_mod.collect_diff,
-                str(ctx.repo), ctx.base_sha, head_sha)
-            digest = routes_mod.diff_digest(files, diff)
-            created = await routes_mod.request_diff_approval(
-                self._routes_gate_adapter, digest, touched,
-                business_ref=ctx.ref)
-            approval_id = str((created or {}).get("id") or "").strip()
-            verdict = await routes_mod.check_integration(
-                files, diff, approval_id=approval_id or None,
-                approvals=self._routes_gate_adapter)
-        except Exception:  # noqa: BLE001 - logged, merge withheld
-            logger.warning("routes gate check failed (fail-closed)",
-                           exc_info=True)
-            return "protected_routes: gate error, merge withheld"
-        if verdict.get("allowed"):
-            return None
-        detail = str(verdict.get("human_action") or "protected diff")
-        if approval_id:
-            detail += f" (approval {approval_id} pending)"
-        return f"protected_routes: {detail}"
 
     # -- configuration ---------------------------------------------------
 
@@ -636,7 +577,6 @@ class TierSCycle:
                 ctx.ticket["params"] = fresh_params
         ctx.cost_sessions_base = len(ctx.metrics.get("sessions") or [])
         await self._deadline_mark_start(ctx)
-        await self._note_exposure(ctx, "tier_s")
         try:
             outcome = await self._run_guarded(ctx)
             return replace(
@@ -783,7 +723,6 @@ class TierSCycle:
         baseline = await asyncio.to_thread(
             gate_mod.run_gates, ctx.repo, ctx.gate_specs)
         self._record_gates(ctx, "baseline", baseline)
-        await self._note_gates_exposure(ctx)
         blocked = gate_mod.baseline_blocked(baseline, ctx.gate_specs)
         if blocked:
             names = ", ".join(item.name for item in blocked)
@@ -1457,7 +1396,6 @@ class TierSCycle:
                 gate_mod.run_gates, ctx.repo, ctx.gate_specs)
             self._record_gates(ctx, "build" if attempt == 0 else f"fix{attempt}",
                                results)
-            await self._note_gates_exposure(ctx)
             failed = gate_mod.gates_failed(results)
             if not failed:
                 break
@@ -1742,7 +1680,6 @@ class TierSCycle:
         routing: wiring_mod.RoundRouting | None = None,
     ) -> dict[str, Any] | None:
         """Run one round; None when quorum is unreachable (§7.2)."""
-        await self._note_review_exposure(ctx)
         head = ctx.head_sha or ctx.build_sha
         request = review_mod.build_review_request(
             round_no, goal=str(ctx.ticket.get("title", "")),
@@ -2037,7 +1974,6 @@ class TierSCycle:
                 gate_mod.run_gates, ctx.repo, ctx.gate_specs)
             self._record_gates(ctx, f"fix{round_no}" if attempt == 0
                                else f"fix{round_no}b", results)
-            await self._note_gates_exposure(ctx)
             failed = gate_mod.gates_failed(results)
             if not failed:
                 break
@@ -2130,7 +2066,6 @@ class TierSCycle:
             results = await asyncio.to_thread(
                 gate_mod.run_gates, ctx.repo, ctx.gate_specs)
             self._record_gates(ctx, "arbitrated", results)
-            await self._note_gates_exposure(ctx)
             self._commit_if_changed(ctx, f"wip({ctx.ref}) arbitrated")
 
     @staticmethod
@@ -2406,7 +2341,6 @@ class TierSCycle:
         final = await asyncio.to_thread(
             gate_mod.run_gates, ctx.repo, ctx.gate_specs)
         self._record_gates(ctx, "final", final)
-        await self._note_gates_exposure(ctx)
         if gate_mod.gates_failed(final):
             names = ", ".join(item.name for item in gate_mod.gates_failed(final))
             return await self._park(
@@ -2435,14 +2369,6 @@ class TierSCycle:
         (_tier_dir(ctx.repo) / "HANDOFF.md").write_text(
             completed, encoding="utf-8")
         task_id = str(ctx.ticket.get("task_id", ""))
-        # Routes gate (§9.4, TASK-2026-00389): a protected diff parks with
-        # the exact human action instead of merging. The branch is kept.
-        routes_block = await self._protected_routes_check(
-            ctx, files, ctx.final_sha)
-        if routes_block is not None:
-            return await self._park(
-                ctx, "needs_owner", routes_block,
-                patch_run=True)
         production = None
         if ctx.auto_merge:
             merged, conflict = self._merge(ctx)
@@ -2998,27 +2924,6 @@ class TierSCycle:
             model=result.model or str(role_cfg.get("model", "")),
             duration_s=result.elapsed_s, exit_code=result.returncode,
             usage=dict(result.usage or {})))
-
-    async def _note_exposure(self, ctx: _Ctx, component: str) -> None:
-        """Count one pass through ``component``; never raises (fail-open)."""
-        try:
-            from reliability import exposures as _exposures
-
-            await _exposures.record_exposure(
-                self._incidents, component,
-                project_key=str(ctx.ticket.get("project") or ""),
-                task_id=str(ctx.ticket.get("task_id") or "") or None)
-        except Exception:
-            logger.warning("tier-s %s exposure failed (fail-open)",
-                           component, exc_info=True)
-
-    async def _note_review_exposure(self, ctx: _Ctx) -> None:
-        """Count one review round; never raises (fail-open)."""
-        await self._note_exposure(ctx, "review")
-
-    async def _note_gates_exposure(self, ctx: _Ctx) -> None:
-        """Count one gates execution; never raises (fail-open)."""
-        await self._note_exposure(ctx, "gates")
 
     def _record_gates(
         self, ctx: _Ctx, phase: str, results: Sequence[GateResult]) -> None:
