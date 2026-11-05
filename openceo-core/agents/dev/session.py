@@ -123,6 +123,7 @@ from .tmux_runtime import TmuxRuntime
 from config_loader import ConfigLoader
 from rate_monitor import RateMonitor
 from settings import Settings
+from agents.dev.scratch import stage_work, unstage_scratch
 from state import CodingTool, TaskStatus
 
 logger = logging.getLogger(__name__)
@@ -748,7 +749,7 @@ class DevSessionManager:
         trip the foreign-changes guard on the next ticket (TASK-2026-00506).
         """
         try:
-            cls._simple_git(repo, "reset", "-q", "--", ".openceo")
+            unstage_scratch(cls._simple_git, repo)
         except (OSError, subprocess.SubprocessError):
             pass
 
@@ -783,7 +784,7 @@ class DevSessionManager:
         try:
             if git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() \
                     == branch.branch:
-                git(repo, "add", "-A", "--", ".", ":!.openceo")
+                stage_work(git, repo)
                 if git(repo, "diff", "--cached", "--quiet").returncode != 0:
                     if (repo / ".openceo" / "HANDOFF.md").is_file():
                         git(repo, "add", "-f", "--", ".openceo/HANDOFF.md")
@@ -989,7 +990,7 @@ class DevSessionManager:
         repo = branch.repo
         if self._simple_git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() != branch.branch:
             raise ValueError("cannot checkpoint a different branch")
-        self._simple_git(repo, "add", "-A", "--", ".", ":!.openceo")
+        stage_work(self._simple_git, repo)
         if self._simple_git(repo, "diff", "--cached", "--quiet").returncode != 0:
             commit = self._simple_git(
                 repo, "-c", "user.name=OpenCEO", "-c", "user.email=openceo@jardal.app",
@@ -1669,7 +1670,7 @@ class DevSessionManager:
             output.status = TaskStatus.WAITING
             output.waiting_reason = f"config: review pool: {exc}"
             return output
-        self._simple_git(repo, "add", "-A", "--", ".", ":!.openceo")
+        stage_work(self._simple_git, repo)
         tree_sha = self._simple_git(repo, "write-tree").stdout.strip()
         full = dict(output.params if isinstance(output.params, dict)
                     else (task.get("params") or {}))
@@ -2140,7 +2141,7 @@ class DevSessionManager:
         # Undo the review checkpoint commit when the round ran (no-op
         # when HEAD is still the base): the squash below stays single.
         self._simple_git(repo, "reset", "--soft", branch.base_sha)
-        self._simple_git(repo, "add", "-A", "--", ".", ":!.openceo")
+        stage_work(self._simple_git, repo)
         identity: list[str] = []
         name = self._simple_git(repo, "config", "user.name").stdout.strip()
         email = self._simple_git(repo, "config", "user.email").stdout.strip()

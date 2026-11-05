@@ -184,10 +184,13 @@ def test_simple_tiers_share_the_test_rule(repo):
     assert DevSessionManager._simple_diff_sizes(manager, branch, []) == (1, 10)
 
 
-def test_plan_without_estimate_is_invalid(repo):
-    errors = validate_plan(parse_plan(plan_md(None)), repo, 8,
-                           budget_lines=400).errors
-    assert "missing ESTIMATE files=<n> lines=<n>" in errors
+def test_plan_without_estimate_builds_with_a_warning(repo):
+    # TASK-2026-00510: the build-time brake bounds the size; a missing
+    # estimate never stops the cycle (live case #549/#550).
+    validation = validate_plan(parse_plan(plan_md(None)), repo, 8,
+                               budget_lines=400)
+    assert validation.valid and validation.errors == ()
+    assert any("ESTIMATE" in warning for warning in validation.warnings)
 
 
 def test_plan_over_line_budget_is_flagged(repo):

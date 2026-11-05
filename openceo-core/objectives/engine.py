@@ -64,6 +64,7 @@ from owner_channel import (
     question_answered,
     tool_proposal_source_id,
 )
+from state import BLOCKER_RELEASED_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -3268,7 +3269,7 @@ async def on_ticket_closed(
 #: Blocker states that release a dependent, the same set the dispatcher
 #: uses (``TaskService.blockers_open``). ``converted`` is not one: its work
 #: moved to replacements (TASK-2026-00492).
-BLOCKER_DONE_STATUS = frozenset({"completed", "cancelled"})
+BLOCKER_DONE_STATUS = BLOCKER_RELEASED_STATUSES
 
 
 async def _blocked(env: ObjectiveEnv, ticket: Mapping[str, Any]) -> bool:
