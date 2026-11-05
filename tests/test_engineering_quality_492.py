@@ -17,7 +17,10 @@ Contract under test:
   carries the quality principle;
 - the Owner's mission goal and every acceptance criterion reach the CEO,
   the mission pedido and the objective planner (the CEO used to see 300
-  goal and 400 criteria characters).
+  goal and 400 criteria characters);
+- a ticket that decomposes inside its objective hands its dependents to
+  the replacements the next plan creates, and ``converted`` never
+  releases a dependent (MIS-8C06FB6C #541 waited on converted #540).
 
 No network, no CLI, no LLM.
 """
@@ -63,6 +66,7 @@ from objectives import planner_models as planner_mod  # noqa: E402
 from orchestration import review as review_mod  # noqa: E402
 from test_company_objectives import (  # noqa: E402
     _child,
+    _dev_ticket,
     _env_for,
     _mirrored,
     _plan_result,
@@ -395,6 +399,67 @@ class MissionBriefTests(unittest.IsolatedAsyncioTestCase):
                       section)
         self.assertIn("12. Criterion 12:", section)
         self.assertIn("y" * 900, section)
+
+
+class DecompositionRewireTests(unittest.IsolatedAsyncioTestCase):
+    async def _world(self, payloads):
+        tasks = {
+            "task-big": _mirrored("task-big", "TASK-2026-00107",
+                                  objective_id="OBJ-1"),
+            "task-dep": {**_mirrored("task-dep", "TASK-2026-00108",
+                                     objective_id="OBJ-1", status="queued"),
+                         "blocked_by": ["task-big"]},
+        }
+        env, _planner, created, patches, _notices = _env_for(
+            self, _scratch_repo(self), payloads, tasks=tasks)
+        await env.objectives.create_objective({
+            "objective_id": "OBJ-1", "project": "proj", "status": "active",
+            "anchor": {"goal": "g", "acceptance": []},
+            "conversion_source_task_id": "task-parent",
+        })
+        return env, tasks, created, patches
+
+    async def test_dependents_wait_for_the_replacements(self) -> None:
+        env, tasks, created, patches = await self._world([_plan_result(
+            _dev_ticket("part-a", "Part A"), _dev_ticket("part-b", "Part B"))])
+        await engine_mod.convert_ticket(
+            env, tasks["task-big"], "TOO_BIG", "split in two")
+        self.assertEqual(patches["task-big"]["status"], "converted")
+        self.assertEqual(len(created), 2)
+        self.assertEqual(patches["task-dep"]["blocked_by"],
+                         ["task-new-1", "task-new-2"])
+        stored = await env.objectives.get_objective("OBJ-1")
+        self.assertEqual(stored.get("pending_rewires"), [])
+
+    async def test_a_plan_without_tickets_keeps_the_rewire_pending(self) -> None:
+        env, tasks, created, patches = await self._world(
+            [_plan_result(status="blocked")])
+        await engine_mod.convert_ticket(
+            env, tasks["task-big"], "TOO_BIG", "")
+        self.assertEqual(created, [])
+        self.assertNotIn("blocked_by", patches.get("task-dep", {}))
+        stored = await env.objectives.get_objective("OBJ-1")
+        self.assertEqual(stored.get("pending_rewires"),
+                         [{"from": "task-big", "dependents": ["task-dep"]}])
+
+    async def test_an_empty_run_never_strips_the_blocker(self) -> None:
+        env, tasks, _created, patches = await self._world([_plan_result()])
+        pending = [{"from": "task-big", "dependents": ["task-dep"]}]
+        await env.objectives.patch_objective(
+            "OBJ-1", {"pending_rewires": pending})
+        await engine_mod._apply_pending_rewires(env, "OBJ-1", [])
+        self.assertNotIn("task-dep", patches)
+        stored = await env.objectives.get_objective("OBJ-1")
+        self.assertEqual(stored.get("pending_rewires"), pending)
+
+    async def test_converted_blocker_never_releases_a_dependent(self) -> None:
+        lister = engine_mod.InMemoryTaskLister(
+            {"x": {"task_id": "x", "status": "converted"}})
+        env = SimpleNamespace(tasks=lister)
+        ticket = {"status": "queued", "blocked_by": ["x"]}
+        self.assertTrue(await engine_mod._blocked(env, ticket))
+        lister.tasks["x"]["status"] = "completed"
+        self.assertFalse(await engine_mod._blocked(env, ticket))
 
 
 if __name__ == "__main__":

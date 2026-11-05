@@ -702,7 +702,9 @@ async def convert_ticket(
     parent goes Completed in ERP only at objective close (§9.7). The parent
     ticket becomes the ERP group (no new record); planned children link
     under it. A ticket that already belongs to an active objective
-    decomposes inside it instead of minting a second objective. When the
+    decomposes inside it instead of minting a second objective; its open
+    dependents then wait for the replacements the next plan creates
+    (``pending_rewires``, TASK-2026-00492). When the
     group conversion fails the objective parks as ``erp_error`` — orphans
     are never planned. The next trigger retries the conversion. Returns the
     objective document.
@@ -720,9 +722,17 @@ async def convert_ticket(
                     f"Decomposing inside objective {own_id} ({cause}). "
                     "The objective planner owns the follow-up tickets."),
             })
+            patch: dict[str, Any] = {}
             if sizing_text.strip():
-                await env.objectives.patch_objective(
-                    own_id, {"sizing_hint": sizing_text[:4000]})
+                patch["sizing_hint"] = sizing_text[:4000]
+            dependents = await _open_dependents(env, own_id, task_id)
+            if dependents:
+                patch["pending_rewires"] = [
+                    *(entry for entry in own.get("pending_rewires") or []
+                      if isinstance(entry, Mapping)),
+                    {"from": task_id, "dependents": dependents}]
+            if patch:
+                await env.objectives.patch_objective(own_id, patch)
             if env.notify is not None:
                 await env.notify(
                     str(ticket.get("ref") or task_id[:8]),
@@ -2433,6 +2443,8 @@ async def _record_and_apply_plan(
     completed = await _apply_contract_completions(env, objective_id, result)
     created = await _create_planned_tickets(
         env, objective, result, return_from, run_tag=run_tag)
+    await _apply_pending_rewires(
+        env, objective_id, [item["task_id"] for item in created])
     await create_tool_proposal_questions(
         env, objective_id, str(objective.get("project") or ""), result)
     await create_playbook_update_questions(
@@ -3077,9 +3089,13 @@ async def _create_planned_tickets(
     key_to_task: dict[str, str] = {}
     run_tag = run_tag or uuid.uuid4().hex[:8]
     group = str(objective.get("erp_group_ref") or "").strip()
+    # The objective's own shell completes only after its children: a child
+    # waiting on it would never run (TASK-2026-00492).
+    shell = str(objective.get("conversion_source_task_id") or "")
     for key in order:
         item = by_key[key]
-        blocked = [key_to_task.get(dep, dep) for dep in item.blocked_by]
+        blocked = [key_to_task.get(dep, dep) for dep in item.blocked_by
+                   if key_to_task.get(dep, dep) != shell]
         params = _planned_params(item)
         if return_from:
             # Single-return limit: this ticket IS the return's resolution
@@ -3244,14 +3260,62 @@ async def on_ticket_closed(
         return {"ok": False, "reason": str(exc)[:300]}
 
 
+#: Blocker states that release a dependent, the same set the dispatcher
+#: uses (``TaskService.blockers_open``). ``converted`` is not one: its work
+#: moved to replacements (TASK-2026-00492).
+BLOCKER_DONE_STATUS = frozenset({"completed", "cancelled"})
+
+
 async def _blocked(env: ObjectiveEnv, ticket: Mapping[str, Any]) -> bool:
     if str(ticket.get("status") or "") == "waiting":
         return True
     for dep in ticket.get("blocked_by") or []:
         row = await env.tasks.get_task(str(dep))
-        if str((row or {}).get("status") or "") not in TERMINAL_TICKET_STATUS:
+        if str((row or {}).get("status") or "") not in BLOCKER_DONE_STATUS:
             return True
     return False
+
+
+async def _open_dependents(
+    env: ObjectiveEnv, objective_id: str, task_id: str,
+) -> list[str]:
+    """Open tickets of the objective that wait on ``task_id``."""
+    rows = await env.tasks.list_by_objective(objective_id)
+    return [str(row.get("task_id")) for row in rows
+            if task_id in (row.get("blocked_by") or [])
+            and str(row.get("task_id") or "") != task_id
+            and str(row.get("status") or "") not in TERMINAL_TICKET_STATUS]
+
+
+async def _apply_pending_rewires(
+    env: ObjectiveEnv, objective_id: str, new_ids: Sequence[str],
+) -> None:
+    """Point the dependents of a decomposed ticket at its replacements.
+
+    An in-objective decomposition leaves its ticket ``converted`` for good,
+    which never releases a dependent; the first plan that creates tickets
+    after it creates the replacements (TASK-2026-00492).
+    """
+    if not new_ids:
+        return
+    current = await env.objectives.get_objective(objective_id) or {}
+    pending = [entry for entry in current.get("pending_rewires") or []
+               if isinstance(entry, Mapping)]
+    if not pending:
+        return
+    for entry in pending:
+        old = str(entry.get("from") or "")
+        for dep_id in entry.get("dependents") or []:
+            row = await env.tasks.get_task(str(dep_id))
+            if row is None or str(row.get("status") or "") \
+                    in TERMINAL_TICKET_STATUS:
+                continue
+            blockers = [str(item) for item in row.get("blocked_by") or []
+                        if str(item) != old]
+            blockers += [item for item in new_ids
+                         if item not in blockers and item != str(dep_id)]
+            await env.patch_task(str(dep_id), {"blocked_by": blockers})
+    await env.objectives.patch_objective(objective_id, {"pending_rewires": []})
 
 
 def _touches_objective(
