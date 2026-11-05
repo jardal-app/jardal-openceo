@@ -133,6 +133,18 @@ CONFIG_INVALID_REASON = "config"
 #: Typed wait reason when another execution holds the repo lock (§11.1).
 REPO_BUSY_REASON = "repo_busy"
 
+#: Typed wait reason when the live checkout stays dirty past its budget.
+REPO_BUSY_PERSISTENT_REASON = "repo_busy_persistent"
+
+#: Params key counting consecutive dirty-tree parks (mirrors scheduled_wait).
+REPO_BUSY_DIRT_COUNT_KEY = "repo_busy_dirt_declines"
+
+#: Consecutive dirty parks before the wait names a human (15 min apart).
+REPO_BUSY_DIRT_MAX_DECLINES = 3
+
+#: Streaks older than this restart at 1 (a healed tree earns fresh grace).
+REPO_BUSY_DIRT_WINDOW = timedelta(hours=3)
+
 
 def _resolve_execution_repo(project_config: dict[str, Any]) -> str | None:
     """Repo path this execution would work on, for the common lock."""
@@ -806,6 +818,52 @@ class DevSessionManager:
             stderr=subprocess.PIPE, text=True, errors="replace",
             timeout=timeout)
 
+    @staticmethod
+    def _next_repo_busy_dirt_streak(
+            params: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
+        """Bump the consecutive dirty-park streak; stale streaks restart."""
+        count = 0
+        raw = (params or {}).get(REPO_BUSY_DIRT_COUNT_KEY)
+        if isinstance(raw, dict):
+            try:
+                seen = datetime.fromisoformat(str(raw.get("since") or ""))
+            except ValueError:
+                seen = None
+            if seen is not None:
+                if seen.tzinfo is None:
+                    seen = seen.replace(tzinfo=timezone.utc)
+                if now - seen < REPO_BUSY_DIRT_WINDOW:
+                    try:
+                        count = max(0, int(raw.get("count") or 0))
+                    except (TypeError, ValueError):
+                        count = 0
+        return {"count": count + 1, "since": now.isoformat()}
+
+    @classmethod
+    def _reset_orchestrator_scratch(cls, repo: Path) -> None:
+        """Unstage orchestrator scratch (``.openceo/``): index only, best effort.
+
+        Builders stage it to look busy in ``git status``; the entry would
+        trip the foreign-changes guard on the next ticket (TASK-2026-00506).
+        """
+        try:
+            cls._simple_git(repo, "reset", "-q", "--", ".openceo")
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    @classmethod
+    def _foreign_changes_files(cls, repo: Path) -> list[str]:
+        """Short ``git status`` lines for the dirty tree, bounded for reasons."""
+        try:
+            status = cls._simple_git(repo, "--no-optional-locks", "status",
+                                     "--porcelain", "--untracked-files=no")
+        except (OSError, subprocess.SubprocessError):
+            return []
+        if status.returncode != 0:
+            return []
+        return [line for line in status.stdout.splitlines()
+                if line.strip()][:10]
+
     @classmethod
     def _foreign_changes_branch(cls, repo: Path) -> str:
         """Branch holding uncommitted tracked changes not made by a ticket.
@@ -893,16 +951,34 @@ class DevSessionManager:
     ) -> "_SimpleBranch | DevExecutionOutput":
         """Open the ticket work branch (+ baseline gates, §10/§12)."""
         dev_cfg = project_config.get("dev", {}) or {}
+        self._reset_orchestrator_scratch(repo)
         foreign = self._foreign_changes_branch(repo)
         if foreign:
             # Simple tiers branch in place: someone else's uncommitted work
             # would ride into this ticket's branch (TASK-2026-00483).
+            # Dirt that outlasts its retry budget names a human instead of
+            # stalling silently (TASK-2026-00506).
+            params = dict(task.get("params") or {})
+            streak = self._next_repo_busy_dirt_streak(
+                params, datetime.now(timezone.utc))
+            params[REPO_BUSY_DIRT_COUNT_KEY] = streak
+            if streak["count"] >= REPO_BUSY_DIRT_MAX_DECLINES:
+                files = ", ".join(self._foreign_changes_files(repo))
+                return DevExecutionOutput(
+                    status=TaskStatus.WAITING,
+                    waiting_reason=(
+                        f"{REPO_BUSY_PERSISTENT_REASON}: {repo} has "
+                        f"uncommitted changes on {foreign} after "
+                        f"{streak['count']} attempts (no re-park): "
+                        f"{files or 'unknown files'}"),
+                    params=params,
+                )
             return DevExecutionOutput(
                 status=TaskStatus.WAITING,
                 waiting_reason=(f"{REPO_BUSY_REASON}: {repo} has uncommitted "
                                 f"changes on {foreign}"),
                 resume_at=datetime.now(timezone.utc) + timedelta(minutes=15),
-                params=task.get("params") if isinstance(task.get("params"), dict) else None,
+                params=params,
             )
         checkpoint = (task.get("params") or {}).get("dev_checkpoint")
         if isinstance(checkpoint, dict):

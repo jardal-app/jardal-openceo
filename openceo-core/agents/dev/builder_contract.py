@@ -136,6 +136,9 @@ def builder_environment_prompt(
         "por el repo (p. ej. docs/work/ donde está en .gitignore) no cuenta "
         "como cambio y el orquestador no puede integrarla. Deja los informes "
         "en una ruta versionada y el resumen en .openceo/HANDOFF.md.",
+        "- Nunca fuerces (git add -f, git add -N) una ruta ignorada "
+        "para que aparezca en git status: .openceo/HANDOFF.md es scratch "
+        "del orquestador y debe seguir ignorado.",
         limit,
     ]
     return "\n".join(lines)

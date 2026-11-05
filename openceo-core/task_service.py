@@ -4790,7 +4790,8 @@ class TaskService:
                     reason = str(updated.get("waiting_reason") or "")
                     if reason.startswith(("routing_missing", "config",
                                           "workflow_blocked_tool",
-                                          "review_conflict", "review_invalid")):
+                                          "review_conflict", "review_invalid",
+                                          "repo_busy_persistent")):
                         asyncio.create_task(self._comment_wait_on_erp(updated, reason))
                 result_comment = graph_out.get("result_comment")
                 if result_comment and str(result_comment).strip():
@@ -4856,11 +4857,11 @@ class TaskService:
     async def _comment_wait_on_erp(self, task: dict[str, Any], reason: str) -> None:
         """Post a one-shot ERP comment for waits that need the owner.
 
-        Only routing, config, blocked-tool and review-switch waits
-        qualify: all mean a human (or the tier authority) must fix
-        something before the ticket can run. Transient waits (quota,
-        repo_busy, rate limits) heal alone and stay silent. Never
-        breaks execution.
+        Only routing, config, blocked-tool, review-switch and
+        persistent-dirt waits qualify: all mean a human (or the tier
+        authority) must fix something before the ticket can run.
+        Transient waits (quota, repo_busy within its retry budget,
+        rate limits) heal alone and stay silent. Never breaks execution.
         """
         try:
             adapter = getattr(self, "_business", None)
@@ -4888,6 +4889,13 @@ class TaskService:
                 text = ("OpenCEO no puede ejecutar este ticket: su "
                         "workflow necesita una tool inexistente "
                         f"({detail}). Revisa la skill.")
+            elif key == "repo_busy_persistent":
+                detail = reason.split(":", 1)[1].strip() \
+                    if ":" in reason else reason
+                text = ("OpenCEO no puede ejecutar este ticket: el checkout "
+                        "vivo tiene cambios sin commitear que no se curan "
+                        f"solos ({detail}). Haz commit, stash o limpia esos "
+                        "ficheros en el checkout vivo y relanza el ticket.")
             else:
                 text = f"OpenCEO no puede ejecutar este ticket: configuración inválida ({reason})."
             await adapter.add_comment(name, text)
