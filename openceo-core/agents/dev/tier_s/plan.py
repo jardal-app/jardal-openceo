@@ -39,12 +39,16 @@ class Plan:
 
 @dataclass(frozen=True)
 class PlanValidation:
+    """Errors make a plan unbuildable or unsafe; warnings never stop it."""
+
     valid: bool
     errors: tuple[str, ...] = ()
     files_counted: int = 0  # non-test, non-excluded files (budget §13)
+    warnings: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {"valid": self.valid, "errors": list(self.errors),
+                "warnings": list(self.warnings),
                 "files_counted": self.files_counted}
 
 
@@ -53,6 +57,12 @@ _BULLET_RE = re.compile(r"^-\s+(.*)$")
 _STEP_RE = re.compile(r"^\d+\.\s+(.*)$")
 _FILE_RE = re.compile(r"^(\S+)\s+\((create|modify|delete)\)\s*[—–-]\s*(.+)$")
 _ESTIMATE_RE = re.compile(r"files\s*=\s*(\d+)\s+lines\s*=\s*(\d+)")
+_EST_FILES_RE = re.compile(
+    r"(?:files?|ficheros?|archivos?)\s*[=:]?\s*~?(\d+)"
+    r"|(\d+)\s*(?:files?|ficheros?|archivos?)\b", re.IGNORECASE)
+_EST_LINES_RE = re.compile(
+    r"(?:lines?|l[ií]neas?)\s*[=:]?\s*~?(\d+)"
+    r"|(\d+)\s*(?:lines?|l[ií]neas?)\b", re.IGNORECASE)
 
 _TEST_DIRS = frozenset({"tests", "test", "__tests__"})
 _TEST_NAME_RE = re.compile(r"^test_|_test\.|\.(test|spec)\.")
@@ -110,17 +120,8 @@ def parse_plan(text: str) -> Plan:
         match = _STEP_RE.match(line)
         steps.append(match.group(1).strip() if match else line)
 
-    est_files: int | None = None
-    est_lines: int | None = None
-    for line in sections.get("ESTIMATE", []):
-        match = _ESTIMATE_RE.search(line)
-        if match:
-            est_files, est_lines = int(match.group(1)), int(match.group(2))
-    inline_est = inline.get("ESTIMATE", "")
-    if est_files is None and inline_est:
-        match = _ESTIMATE_RE.search(inline_est)
-        if match:
-            est_files, est_lines = int(match.group(1)), int(match.group(2))
+    est_files, est_lines = _parse_estimate(
+        [inline.get("ESTIMATE", ""), *sections.get("ESTIMATE", [])])
 
     return Plan(
         ticket=inline.get("TICKET", ""),
@@ -135,6 +136,21 @@ def parse_plan(text: str) -> Plan:
         estimate_lines=est_lines,
         out_of_scope=bullets("OUT_OF_SCOPE"),
     )
+
+
+def _parse_estimate(lines: Sequence[str]) -> tuple[int | None, int | None]:
+    """Canonical ``files=<n> lines=<n>`` first, then any wording of it."""
+    files: int | None = None
+    count: int | None = None
+    for line in lines:
+        match = _ESTIMATE_RE.search(line or "")
+        if match:
+            return int(match.group(1)), int(match.group(2))
+        if files is None and (found := _EST_FILES_RE.search(line or "")):
+            files = int(next(group for group in found.groups() if group))
+        if count is None and (found := _EST_LINES_RE.search(line or "")):
+            count = int(next(group for group in found.groups() if group))
+    return files, count
 
 
 def _inside_repo(repo: Path, raw_path: str) -> Path | None:
@@ -161,8 +177,9 @@ def validate_plan(
 ) -> PlanValidation:
     """Structural validation (design §6.3): format, routes, size budget."""
     errors: list[str] = []
+    warnings: list[str] = []
     if not plan.ticket:
-        errors.append("missing TICKET")
+        warnings.append("TICKET line missing (informational)")
     if not plan.goal:
         errors.append("missing GOAL")
     if not plan.acceptance:
@@ -172,7 +189,9 @@ def validate_plan(
     if not plan.steps:
         errors.append("missing STEPS")
     if plan.estimate_lines is None:
-        errors.append("missing ESTIMATE files=<n> lines=<n>")
+        # The size brake on the real diff still bounds the build (§6.6).
+        warnings.append("ESTIMATE lines missing: plan-time line check "
+                        "skipped, the build-time size brake still applies")
 
     counted = 0
     for item in plan.files:
@@ -202,7 +221,7 @@ def validate_plan(
             f"line budget exceeded: {plan.estimate_lines} lines > "
             f"{budget_lines} (→ objective conversion, §6.3)")
     return PlanValidation(valid=not errors, errors=tuple(errors),
-                          files_counted=counted)
+                          files_counted=counted, warnings=tuple(warnings))
 
 
 def plan_declares_objective_needed(status_text: str) -> bool:

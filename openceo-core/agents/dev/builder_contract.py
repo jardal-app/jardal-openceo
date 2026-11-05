@@ -15,13 +15,15 @@ receives, for any stack: standard maintained libraries instead of
 hand-written substitutes, conventional names, and the result verified the
 way its user meets it.
 
-Dependency-free (stdlib only): the simple tiers and the Tier S cycle both
-import it, and the Tier S package imports its own cycle on load.
+Stdlib plus the scratch constant only: the simple tiers and the Tier S
+cycle both import it, and the Tier S package imports its own cycle on load.
 """
 
 from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
+
+from agents.dev.scratch import SCRATCH_DIR
 
 __all__ = [
     "ENGINEERING_STANDARD",
@@ -132,13 +134,13 @@ def builder_environment_prompt(
         *_gates_intro(gates, oracle_cmd),
         "- No repliques la suite global: valida lo que cambiaste con las "
         "comprobaciones y los tests dirigidos que sí corren aquí.",
-        "- Tus entregables deben aparecer en git status: una ruta ignorada "
-        "por el repo (p. ej. docs/work/ donde está en .gitignore) no cuenta "
-        "como cambio y el orquestador no puede integrarla. Deja los informes "
-        "en una ruta versionada y el resumen en .openceo/HANDOFF.md.",
-        "- Nunca fuerces (git add -f, git add -N) una ruta ignorada "
-        "para que aparezca en git status: .openceo/HANDOFF.md es scratch "
-        "del orquestador y debe seguir ignorado.",
+        "- Dos tipos de fichero, sin mezclarlos. Entregables: rutas "
+        "versionadas que aparecen en git status (una ruta ignorada, p. ej. "
+        "docs/work/, no cuenta y el orquestador no puede integrarla). "
+        f"Scratch del orquestador: {SCRATCH_DIR}/ (tu resumen va en "
+        f"{SCRATCH_DIR}/HANDOFF.md); el orquestador lo lee del disco, "
+        "nunca entra en el commit y no debe aparecer en git status. Nunca "
+        "prepares rutas ignoradas (ni git add -f ni git add -N).",
         limit,
     ]
     return "\n".join(lines)

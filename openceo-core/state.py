@@ -76,6 +76,13 @@ WAIT_BLOCKED_BY = "blocked_by"
 #: build-time enforcement) so filters keep working.
 WAIT_REPO_BUSY = "repo_busy"
 
+#: Blocker statuses that release their dependents, for every consumer
+#: (dispatcher, objective engine, Tier S cycle). A converted ticket never
+#: releases: its dependents are rewired to the substitutes (TASK-2026-00492,
+#: TASK-2026-00510).
+BLOCKER_RELEASED_STATUSES = frozenset({TaskStatus.COMPLETED.value,
+                                       TaskStatus.CANCELLED.value})
+
 
 class WorkflowRunStatus(str, Enum):
     PENDING = "pending"

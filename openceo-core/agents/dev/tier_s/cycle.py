@@ -101,13 +101,14 @@ from agents.dev.tier_s.telemetry import (
     record_session,
     record_sizes,
 )
-from state import CodingTool, TaskStatus
+from agents.dev.scratch import stage_work
+from state import BLOCKER_RELEASED_STATUSES, CodingTool, TaskStatus
 
 logger = logging.getLogger(__name__)
 
 #: Dependency statuses that unblock a ticket (design §9.5: the enqueuer never
 #: dispatches while a blocker is open; failed counts as open — no work done).
-TERMINAL_BLOCKER_STATUS = frozenset({"completed", "converted", "cancelled"})
+TERMINAL_BLOCKER_STATUS = BLOCKER_RELEASED_STATUSES
 
 #: The Tier S engine reads roles from the same global block F0/F0.1 built.
 _ROLE_KEYS = ("planner", "plan_reviewer", "plan-reviewer", "builder")
@@ -1134,7 +1135,7 @@ class TierSCycle:
         Returns (branch, diffstat), ("", "") when the commit fails.
         """
         kept = f"oversize/{ctx.branch}"
-        _git(ctx.repo, "add", "-A", "--", ".", ":!.openceo")
+        stage_work(_git, ctx.repo)
         if (_tier_dir(ctx.repo) / "PLAN.md").is_file():
             _git(ctx.repo, "add", "-f", "--", ".openceo/PLAN.md")
         commit = _git(ctx.repo, *_git_identity(ctx.repo), "commit", "-qm",
@@ -1157,7 +1158,7 @@ class TierSCycle:
 
     def _commit(self, ctx: _Ctx, message: str) -> str:
         identity = _git_identity(ctx.repo)
-        _git(ctx.repo, "add", "-A", "--", ".", ":!.openceo")
+        stage_work(_git, ctx.repo)
         proc = _git(ctx.repo, *identity, "commit", "-qm", message)
         if proc.returncode != 0:
             raise RuntimeError(f"commit failed: {proc.stderr.strip()[:300]}")
@@ -1227,7 +1228,8 @@ class TierSCycle:
                     "phase": "plan_review",
                     "plan": {"files_declared": len(plan.files),
                              "lines_estimated": plan.estimate_lines,
-                             "files_counted": validation.files_counted},
+                             "files_counted": validation.files_counted,
+                             "warnings": list(validation.warnings)},
                     "updated_at": _utcnow_iso(),
                 })
                 self._note_tier_s_milestone(
@@ -2981,9 +2983,9 @@ class TierSCycle:
             "Otherwise write .openceo/PLAN.md (§16.1: TICKET/OBJECTIVE/GOAL/"
             "ACCEPTANCE/FILES with create|modify|delete + why/CONTRACTS/DECISIONS/"
             "STEPS/ESTIMATE files=<n> lines=<n>/OUT_OF_SCOPE) and emit "
-            f"{SIGNALS['plan_ready']} in .openceo/status. ESTIMATE is "
-            "required and counts non-test lines; a plan over the budget "
-            "converts before any build.\n"
+            f"{SIGNALS['plan_ready']} in .openceo/status. Put the size on "
+            "its own line, e.g. ESTIMATE: files=3 lines=180 (non-test "
+            "lines); a plan over the budget converts before any build.\n"
             "FILES lines use exactly: - <path> (<create|modify|delete>) — "
             "<why>, e.g. - apps/web/src/auth/login.ts (create) — login "
             "screen per DESIGN.md.\n"

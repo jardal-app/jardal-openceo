@@ -105,6 +105,7 @@ from qa_review_service import QAReviewService
 from rate_monitor import RateMonitor
 from settings import Settings
 from state import (
+    BLOCKER_RELEASED_STATUSES,
     AgentName,
     ApprovalState,
     TaskCreateRequest,
@@ -6656,7 +6657,7 @@ class TaskService:
         for blocker in blockers:
             row = await self._repo.get_task(str(blocker))
             status = str((row or {}).get("status") or "")
-            if status not in {"completed", "cancelled"}:
+            if status not in BLOCKER_RELEASED_STATUSES:
                 return True
         return False
 
@@ -7488,7 +7489,7 @@ class TaskService:
             self._wake_mechanic(str(ticket.get("task_id") or ""), "fix_done")
         # Dependency wakeup (§9.5): tickets blocked by this one requeue when
         # it lands terminal-good. Event-driven, no sweeps.
-        if str(ticket.get("status") or "") in {"completed", "cancelled"}:
+        if str(ticket.get("status") or "") in BLOCKER_RELEASED_STATUSES:
             try:
                 await self._requeue_dependents(str(ticket.get("task_id") or ""))
             except Exception:
