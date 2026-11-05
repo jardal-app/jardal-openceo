@@ -552,7 +552,11 @@ class ConvertedShellNeverReadyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(created), 1)
         self.assertEqual(created[0]["objective_id"], "OBJ-1")
 
-    async def test_converted_dependency_does_not_block(self) -> None:
+    async def test_converted_dependency_blocks_like_the_dispatcher(self) -> None:
+        # TASK-2026-00492: the dispatcher never releases a converted blocker,
+        # so the engine must not call such a ticket ready (#541 waited on a
+        # converted #540 the planner believed released). Decompositions hand
+        # their dependents to the replacements instead.
         repo = _scratch_repo(self)
         tasks = {
             "shell-1": {**_child("shell-1", "converted", dev=True)},
@@ -561,7 +565,22 @@ class ConvertedShellNeverReadyTests(unittest.IsolatedAsyncioTestCase):
         }
         env, _planner, _created, _patches, _notices = _env_for(
             self, repo, [_plan_result(_dev_ticket())], tasks=tasks)
-        self.assertFalse(await engine_mod._blocked(env, tasks["kid-1"]))
+        self.assertTrue(await engine_mod._blocked(env, tasks["kid-1"]))
+
+    async def test_a_child_never_waits_on_its_own_shell(self) -> None:
+        repo = _scratch_repo(self)
+        tasks = {"shell-1": {**_child("shell-1", "converted", dev=True)}}
+        env, _planner, created, _patches, _notices = _env_for(
+            self, repo, [_plan_result(_dev_ticket(blocked_by=["shell-1"]))],
+            tasks=tasks)
+        await env.objectives.create_objective({
+            "objective_id": "OBJ-1", "project": "proj", "status": "active",
+            "anchor": {"goal": "g", "acceptance": []},
+            "conversion_source_task_id": "shell-1",
+        })
+        await engine_mod.plan_objective(env, "OBJ-1")
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["blocked_by"], [])
 
 
 class FailedChildrenAreHistoryTests(unittest.IsolatedAsyncioTestCase):
