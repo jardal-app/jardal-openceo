@@ -39,6 +39,7 @@ __all__ = [
     "deadline_confirmation_patch",
     "find_mission_duplicate",
     "mission_acceptance_deadline",
+    "mission_brief_lines",
     "mission_question_expired",
     "new_mission_id",
     "normalize_mission_goal",
@@ -58,6 +59,52 @@ MISSION_TAG = "mision"
 #: The Owner answers the proposed criteria within this long, or the
 #: proposal stands. Reabrible: no Owner value was given (00218).
 MISSION_ACCEPTANCE_DEADLINE_HOURS = 48
+
+#: Prompt budget for a mission brief (TASK-2026-00492): the CEO saw 300
+#: goal and 400 criteria characters, so the Owner's acceptance never
+#: reached the objectives intact.
+MISSION_BRIEF_GOAL_CHARS = 2000
+MISSION_BRIEF_CRITERIA_CHARS = 6000
+
+
+def mission_brief_lines(
+    mission: Mapping[str, Any],
+    *,
+    goal_chars: int = MISSION_BRIEF_GOAL_CHARS,
+    criteria_chars: int = MISSION_BRIEF_CRITERIA_CHARS,
+) -> list[str]:
+    """Goal plus numbered acceptance criteria, bounded, for prompts.
+
+    One definition for the CEO review, the mission pedido and the
+    objective planner. A cut criterion ends with ``…``; criteria past
+    the budget are counted, never silently dropped.
+    """
+    goal = str(mission.get("goal") or "").strip()
+    if len(goal) > goal_chars:
+        goal = goal[:goal_chars - 1].rstrip() + "…"
+    lines = [f"Goal: {goal or '(none)'}"]
+    criteria = [str(item).strip() for item in mission.get("acceptance") or []
+                if str(item).strip()]
+    if not criteria:
+        lines.append("Acceptance: (none yet)")
+        return lines
+    lines.append("Acceptance:")
+    budget = criteria_chars
+    for index, criterion in enumerate(criteria, 1):
+        line = f"{index}. {criterion}"
+        if len(line) <= budget:
+            lines.append(line)
+            budget -= len(line)
+            continue
+        shown = index - 1
+        if budget > 40:
+            lines.append(line[:budget - 1].rstrip() + "…")
+            shown = index
+        left = len(criteria) - shown
+        if left:
+            lines.append(f"(+{left} more criteria past the prompt budget)")
+        break
+    return lines
 
 #: Objective statuses that end the ledger entry (read live, not trusted).
 MISSION_TERMINAL_OBJECTIVE = frozenset({"closed", "cancelled"})
