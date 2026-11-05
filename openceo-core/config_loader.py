@@ -170,6 +170,12 @@ class ConfigLoader:
                     f"ceo in {project}/project.yaml must be "
                     "a mapping or absent."
                 )
+        mechanic = data.get("mechanic")
+        if mechanic is not None and mechanic != {}:
+            errors.append(
+                "mechanic must not be set in project.yaml: the engine "
+                f"mechanic is global. Remove it from {project}/project.yaml."
+            )
         # Reliability hunter config (epic TASK-2026-00365, TASK-2026-00368):
         # global, not per-project, because engine Problems cross projects.
         reliability = data.get("reliability")
@@ -741,6 +747,22 @@ class ConfigLoader:
                                 "muse-spark-1.3-contributor"],
                     "prompt_via": "argv",
                     "role_profile": "ceo",
+                },
+            },
+            # Engine mechanic (TASK-2026-00510): default handler for every
+            # stall the deterministic engine did not foresee. Thresholds
+            # live in mechanic.service.DEFAULTS; global only.
+            "mechanic": {
+                "enabled": True,
+                "role": {
+                    "provider": "muse", "account": "muse",
+                    "label": "mechanic",
+                    "model": "muse-spark-1.3-contributor",
+                    "effort": "max", "active": True,
+                    "command": ["musej", "exec", "--model",
+                                "muse-spark-1.3-contributor"],
+                    "prompt_via": "argv",
+                    "role_profile": "mechanic",
                 },
             },
             # Reliability hunter (epic TASK-2026-00365, TASK-2026-00368):

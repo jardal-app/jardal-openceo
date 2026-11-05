@@ -270,12 +270,14 @@ class DeadlineWatch:
         clock: Callable[[], datetime] | None = None,
         config: dict[str, Any] | None = None,
         record: Callable[..., Any] | None = None,
+        on_missed: Callable[[str, str, str], None] | None = None,
     ) -> None:
         self._repo = repo
         self._incidents = incidents
         self._clock = clock or _utcnow
         self._config = deadlines_config(config)
         self._record = record
+        self._on_missed = on_missed
         self._timer: asyncio.Task[Any] | None = None
         self._armed: list[dict[str, Any]] = []
 
@@ -415,9 +417,8 @@ class DeadlineWatch:
         message = (
             f"attempt {attempt_id} of task {task_id} missed its deadline "
             f"{deadline.isoformat()}; the attempt may be hung. "
-            "DeadlineWatch only warns: inspect or cancel it manually, "
-            "it never kills processes. Recommended: check the run, "
-            "then retry or park the ticket.")
+            "DeadlineWatch never kills processes; the mechanic is woken "
+            "to inspect it.")
         await self._store(
             task_id=task_id, attempt_id=attempt_id,
             deadline_type=DEADLINE_TYPE_ATTEMPT, severity="critical",
@@ -452,6 +453,11 @@ class DeadlineWatch:
     async def _store(self, *, task_id: str, attempt_id: str | None,
                      deadline_type: str, severity: str | None,
                      message: str, incident_id: str, now: datetime) -> None:
+        if self._on_missed is not None:
+            try:
+                self._on_missed(task_id, "deadline_missed", message)
+            except Exception:
+                logger.warning("deadline mechanic wake failed", exc_info=True)
         try:
             if self._record is not None:
                 await _maybe_await(self._record(

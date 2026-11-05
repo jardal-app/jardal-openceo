@@ -28,6 +28,7 @@ Hub: nota del proyecto en el vault; detalle bajo demanda, nunca el vault entero.
 ## 2. Arquitectura y Stack
 
 - **Orquestador**: LangGraph (Python) en `openceo-core/`; API FastAPI `/v1/chat/completions` (host `18765`, docker `8000`)
+- **Mecánico** (TASK-2026-00510): `openceo-core/mechanic/`. Lo imprevisto (espera repetida, `needs_owner`, plazo vencido, bucle frenado) despierta un run musej de solo lectura que devuelve acciones de un vocabulario cerrado; determinista solo para invariantes (ARCHITECTURE_REFERENCE §Engine mechanic)
 - **Primera capa**: `openceo-core/first_layer.py` (DeepSeek Flash): comprende contexto, responde con personalidad de colega en primera persona plural, cuenta tickets abiertos, guía a perdidos y corre presets (`projects/<proyecto>/project.yaml` o Mongo `project_presets`, opcionalmente en tmux)
 - **Datos**: MongoDB (`tasks`, `dev_sessions`, `user_context`, `project_presets`, `task_reviews`, `workflow_runs`); negocio en Jardal ERP (§6)
 - **Voz y móvil**: LiveKit + Silero VAD + Groq Whisper + OpenAI TTS (`openceo-voice/`); Android Compose + LiveKit (`openceo-voice-android/`, build con `./gradlew assembleDebug`)
@@ -58,11 +59,12 @@ log de arranque (TASK-2026-00367).
 
 ## 4. Reglas de sesión
 
-1. **Sin barridos ni polling**: prohibido el polling contra Mongo o APIs en loops; todo cambio es reactivo por eventos CRUD.
+1. **Sin barridos ni polling**: prohibido el polling contra Mongo o APIs en loops; todo cambio es reactivo por eventos CRUD. Única excepción: el latido del mecánico (una consulta indexada cada `heartbeat_minutes`, 0 tokens salvo hallazgo).
 2. **Respuesta inmediata en dev**: turnos de código en background, HTTP/SSE instantáneo; 1 call de API por operación.
 3. **`musej` es el `muse` de dev por defecto** (`--yolo --disable-sandbox --disable-approval --approval-mode never --trust-workspace`, van los últimos y no se pueden reescribir encima); **`muse` pelado es sesión aislada** (sandbox ON, para revisores/auditorías).
 4. **Memoria de motores**: no se usa; la automática de Claude Code está apagada en este repo (`.claude/settings.json`) y en las ejecuciones que lanza OpenCEO. Lo personal va a `CLAUDE.local.md` (sin versionar), nunca al vault.
 5. **Credenciales y paths**: host usa `~/.codex`, `~/.claude`, `/home/develop/.local/bin/agyd`; `gemini` corre con `agyd`.
+6. **Sin parches por caso**: un atasco o fallo de ejecución nuevo no recibe su `if`; lo atiende el mecánico. Solo se toca código para una clase de problema que el mecánico no puede resolver (TASK-2026-00510, tras la orden del Owner del 2026-11-05: «reestructura rapidamente para que sea proactivo»).
 
 Reglas por zona del código: `.claude/rules/` (frontmatter `paths`); procedimientos repetibles: skills en git; decisiones de arquitectura: `docs/ARCHITECTURE_REFERENCE_2026.md`.
 

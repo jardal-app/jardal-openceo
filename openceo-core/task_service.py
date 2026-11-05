@@ -353,18 +353,6 @@ class TaskService:
         self._workflow_service = workflow_service
         # `erpnext` es alias depreciado (TASK-2026-00318, una version).
         self._business = business if business is not None else erpnext
-        try:
-            adapter = self._business
-            if adapter is not None \
-                    and getattr(adapter, "on_violation", None) is None:
-                adapter.on_violation = self._business_violation_sink
-            if adapter is not None and getattr(
-                    adapter, "on_business_transition", None) is None:
-                adapter.on_business_transition = \
-                    self._business_transition_sink
-        except Exception:
-            logger.warning("No se pudo cablear el sumidero INV-002",
-                           exc_info=True)
         # Optional project.yaml reader (autonomy F4 TASK-2026-00118): the
         # default phase template skips human QA unless the project policy
         # demands it. Tests build TaskService without it; every use
@@ -386,6 +374,7 @@ class TaskService:
         # __new__ and without __init__, so the attribute may not exist.
         self._dispatcher_wake: Any | None = None
         self._ceo_wake: Any | None = None
+        self._mechanic_wake: Any | None = None
         self._token_issuer: Any | None = None
 
     def set_token_issuer(self, issuer: Any | None) -> None:
@@ -432,6 +421,53 @@ class TaskService:
         the incident events are silent (tests, standalone use).
         """
         self._ceo_wake = wake
+
+    def set_mechanic_wake(self, wake: Any | None) -> None:
+        """Inject the mechanic wake-up: ``wake(task_id, trigger, detail)``."""
+        self._mechanic_wake = wake
+
+    def _wake_mechanic(self, task_id: str, trigger: str, detail: str = "") -> None:
+        if self._mechanic_wake is None:
+            return
+        try:
+            self._mechanic_wake(task_id, trigger, detail)
+        except Exception:  # noqa: BLE001 - a wake never breaks a ticket write
+            logger.warning("mechanic wake failed for %s", task_id, exc_info=True)
+
+    def _apply_wait_streak(self, updates: dict[str, Any],
+                           current: dict[str, Any] | None,
+                           final_status: str) -> str | None:
+        """Generic stall rule on the single run outcome write (TASK-2026-00510)."""
+        from mechanic.service import DEFAULTS, mechanic_config
+        from mechanic.stall import STREAK_KEY, streak_outcome
+
+        try:
+            cfg = mechanic_config(self._config_loader.load_project(None))
+        except Exception:  # noqa: BLE001 - the defaults keep the rule on
+            cfg = dict(DEFAULTS)
+        if not cfg.get("enabled", True):
+            return None
+        params = updates.get("params") if isinstance(
+            updates.get("params"), dict) else (current or {}).get("params")
+        fields, trigger = streak_outcome(
+            status=final_status,
+            reason=updates.get("waiting_reason"),
+            resume_at=updates.get("resume_at"),
+            params=params if isinstance(params, dict) else {},
+            now=datetime.now(timezone.utc),
+            max_reparks=int(cfg.get("max_reparks", 3)),
+            gap=timedelta(hours=float(cfg.get("streak_gap_hours", 12))),
+            phase=(current or {}).get("phase"),
+            qa_state=(current or {}).get("qa_review_state"),
+        )
+        if STREAK_KEY in fields:
+            streak = fields.pop(STREAK_KEY)
+            if isinstance(updates.get("params"), dict):
+                updates["params"] = {**updates["params"], STREAK_KEY: streak}
+            else:
+                updates[f"params.{STREAK_KEY}"] = streak
+        updates.update(fields)
+        return trigger
 
     def _wake_ceo_incident(self, task: dict[str, Any] | None) -> None:
         """Signal the CEO loop on a company incident. Never breaks.
@@ -1089,28 +1125,6 @@ class TaskService:
             parse_costs(declared_spend)
 
         doc = make_task_document(payload)
-        try:
-            from reliability import admission as _hunter_admission
-        except Exception:  # noqa: BLE001
-            _hunter_admission = None  # type: ignore[assignment]
-        if _hunter_admission is not None:
-            try:
-                if str(getattr(doc, "source_id", "") or "").startswith(
-                        _hunter_admission.HUNTER_SOURCE_ID_PREFIX):
-                    doc_params = dict(getattr(doc, "params", None) or {})
-                    if not _hunter_admission.hunter_claim(
-                            {"params": doc_params}):
-                        fields = _hunter_admission.claim_fields(doc_params)
-                        if fields is not None:
-                            claimed = _hunter_admission.attach_approval(
-                                {"params": doc_params},
-                                approval_id=fields["approval_id"],
-                                problem_key=fields["problem_key"],
-                                proposal_hash=fields["proposal_hash"])
-                            doc.params = claimed["params"]
-            except Exception:
-                logger.warning("Hunter claim normalization failed",
-                               exc_info=True)
         await self._apply_default_phase_workflow_to_document(doc)
         if doc.ticket_number is None:
             doc.ticket_number = await self._repo.get_next_ticket_number()
@@ -2092,60 +2106,6 @@ class TaskService:
             dict(decisions) if isinstance(decisions, dict) else {},
         )
 
-    @staticmethod
-    def _is_hunter_task(task: dict[str, Any]) -> bool:
-        """Hunter execution ticket, by source_id or params marker."""
-        try:
-            from reliability import admission as _admission
-        except Exception:  # noqa: BLE001
-            _admission = None  # type: ignore[assignment]
-        if _admission is not None:
-            try:
-                return bool(_admission.is_hunter_task(task))
-            except Exception:  # noqa: BLE001
-                return False
-        if not isinstance(task, dict):
-            return False
-        if str(task.get("source_id") or "").startswith("reliability:"):
-            return True
-        hunter = (task.get("params") or {}).get("_hunter")
-        return isinstance(hunter, dict) and bool(hunter)
-
-    def set_hunter_approval_reader(self, reader: Any | None) -> None:
-        """Inject the live ERP approval reader for the hunter gate.
-
-        ``None`` (default) keeps hunter tickets blocked fail-closed; the
-        activation (TASK-2026-00391) wires the production reader here and
-        on the dispatcher. Non-hunter tickets never touch the reader.
-        """
-        self._hunter_reader = reader
-
-    async def check_hunter_admission(
-            self, task: dict[str, Any]) -> dict[str, Any]:
-        """Hunter admission verdict for one execution ticket (TASK-2026-00387).
-
-        Never raises: any internal failure denies fail-closed, like the
-        gate itself.
-        """
-        try:
-            from reliability import admission as _admission
-        except Exception:  # noqa: BLE001
-            _admission = None  # type: ignore[assignment]
-        try:
-            if _admission is None:
-                hunter = str(task.get("source_id") or "").startswith(
-                    "reliability:")
-                if not hunter:
-                    return {"allowed": True, "reason": "not_hunter"}
-                return {"allowed": False,
-                        "reason": "approval_unverifiable"}
-            return await _admission.check_admission(
-                task, approvals=getattr(self, "_hunter_reader", None))
-        except Exception:
-            logger.warning("Hunter admission check failed (fail-closed)",
-                           exc_info=True)
-            return {"allowed": False, "reason": "approval_unverifiable"}
-
     async def register_erp_approval(self, task_id: str, approval: dict[str, Any]) -> None:
         """Record an approval Core requested, so only its decision applies."""
         repo = getattr(self, "_repo", None)
@@ -2218,20 +2178,6 @@ class TaskService:
                 comment=comment,
             )
             if not result.get("applied"):
-                if result.get("reason") == "not_answerable" and self._is_hunter_task(fresh):
-                    params = self._task_params(fresh)
-                    books = dict(params.get("_erp_decisions") or {})
-                    if decision_id not in books:
-                        actor = event.get("actor") or {}
-                        books[decision_id] = {
-                            "verdict": verdict, "approval_id": approval_id,
-                            "applied_at": datetime.now(timezone.utc).isoformat(),
-                            "actor_kind": str(actor.get("kind") or "").strip(),
-                            "actor_id": str(actor.get("id") or "").strip(),
-                            "version": decision_version,
-                        }
-                        params["_erp_decisions"] = books
-                        await self.patch_task(key, {"params": params})
                 return {"ok": False, "status": "not_answerable", "task_id": key,
                         "reason": result.get("reason"), "pending": True}
             params = self._task_params(fresh)
@@ -2285,49 +2231,6 @@ class TaskService:
                 return "dependency_open"
         return None
 
-    async def _record_erp_reopen_escape(
-        self, task: dict[str, Any], event: dict[str, Any],
-        business_status: str,
-    ) -> None:
-        """Escape incident for an ERP-side reopen. Never raises or flows."""
-        try:
-            from reliability import escapes as _escapes
-        except Exception:
-            logger.warning(
-                "Escape de reapertura no disponible para %s",
-                self._webhook_name(task), exc_info=True,
-            )
-            return
-        try:
-            previous = ""
-            try:
-                mirrors = self._task_params(task).get("_mirrors")
-                mirror = business_mirror(mirrors) \
-                    if isinstance(mirrors, dict) else {}
-                previous = str((mirror or {}).get("business_status") or "")
-            except Exception:  # noqa: BLE001
-                previous = ""
-            if not previous and str(task.get("status") or "") == \
-                    TaskStatus.COMPLETED.value:
-                previous = "Completed"
-            if not _escapes.is_reopen_escape(previous, business_status):
-                return
-            actor = event.get("actor") or {}
-            await _escapes.record_reopen_escape(
-                getattr(self, "_repo", None),
-                previous_status=previous, new_status=business_status,
-                task=task,
-                business_ref=self._webhook_name(task) or None,
-                project_key=str(task.get("project") or "") or None,
-                actor="erp:%s" % str(actor.get("id") or "unknown"),
-                event_id=str(event.get("event_id") or "") or None,
-                runtime_dir=getattr(
-                    self, "_reliability_runtime_dir", None),
-            )
-        except Exception:
-            logger.warning("Registro de escape de reapertura fallido",
-                           exc_info=True)
-
     async def _apply_erp_status(self, event: dict[str, Any]) -> dict[str, Any]:
         payload = event.get("payload") or {}
         task = await self._resolve_erp_task(payload)
@@ -2338,7 +2241,6 @@ class TaskService:
             return {"ok": False, "status": "not_found"}
         assert_link_provider(task, "jardal_erp")
         business_status = str(payload.get("business_status") or payload.get("status") or "").strip()
-        await self._record_erp_reopen_escape(task, event, business_status)
         deleted = payload.get("deleted") is True
         if business_status == "Completed" and not deleted:
             gate = await self._execution_close_gated(task)
@@ -2392,22 +2294,6 @@ class TaskService:
             return {"ok": False, "status": "invalid_order"}
         adopted_params: dict[str, Any] = {
             "_erp_order": {"order_id": order_id, "business_reference": name}}
-        try:
-            from reliability import admission as _adopt_admission
-        except Exception:  # noqa: BLE001
-            _adopt_admission = None  # type: ignore[assignment]
-        if _adopt_admission is not None:
-            try:
-                fields = _adopt_admission.claim_fields(payload)
-                if fields is not None:
-                    claimed = _adopt_admission.attach_approval(
-                        {"params": adopted_params},
-                        approval_id=fields["approval_id"],
-                        problem_key=fields["problem_key"],
-                        proposal_hash=fields["proposal_hash"])
-                    adopted_params = claimed["params"]
-            except Exception:
-                logger.warning("Hunter claim adoption failed", exc_info=True)
         request = TaskCreateRequest(
             source=TaskSource.API,
             source_id=source_id,
@@ -2812,134 +2698,6 @@ class TaskService:
         name = str(business.get("name") or "").strip()
         return name or None
 
-    async def _live_runs_for_task(
-        self, task_id: str
-    ) -> list[dict[str, Any]] | None:
-        """Live Tier S runs of a task for INV-003; None when unobservable."""
-        # Seam: the interrupted-runs listing (db/mongo.py) only carries
-        # active/running/resuming runs; waiting runs stay invisible here.
-        try:
-            repo = getattr(self, "_repo", None)
-            listing = getattr(repo, "interrupted_tier_s_runs", None)
-            if not str(task_id or "").strip() or not callable(listing):
-                return None
-            rows = await listing(limit=200)
-            if not isinstance(rows, list):
-                return None
-            return [
-                row for row in rows
-                if isinstance(row, dict)
-                and str(row.get("task_id") or "") == str(task_id)
-            ]
-        except Exception:
-            logger.warning(
-                "No se pudieron leer los runs de %s para INV-003",
-                task_id, exc_info=True,
-            )
-            return None
-
-    async def _record_invariant_violations(
-        self,
-        violations: list[dict[str, Any]],
-        *,
-        ticket: str,
-        task: dict[str, Any] | None,
-    ) -> None:
-        """Persist invariant violations; never raises, never changes flows."""
-        if not violations:
-            return
-        try:
-            from reliability.capture import record_incident
-        except Exception:
-            logger.warning(
-                "Registro de invariantes no disponible para %s",
-                ticket, exc_info=True,
-            )
-            return
-        task_id = str((task or {}).get("task_id") or "") or None
-        runtime_dir = getattr(self, "_reliability_runtime_dir", None)
-        for violation in violations:
-            try:
-                await record_incident(
-                    getattr(self, "_repo", None),
-                    kind="invariant_violation", component="business_sync",
-                    invariant_id=str(
-                        violation.get("invariant_id") or "INV-?"),
-                    task_id=task_id or ticket,
-                    business_ref=ticket,
-                    message=str(violation.get("detail") or ""),
-                    runtime_dir=runtime_dir,
-                )
-            except Exception:
-                logger.warning(
-                    "Se perdio el incidente de invariante de %s",
-                    ticket, exc_info=True,
-                )
-
-    async def _business_transition_sink(
-        self, payload: dict[str, Any]
-    ) -> None:
-        """Count one applied business transition; never raises, never changes flows."""
-        try:
-            from reliability import exposures as _exposures
-
-            name = str((payload or {}).get("ticket") or "")
-            project = ""
-            try:
-                found = await self.find_task_for_business_ref(task_id=None, ref=name or None)
-                if isinstance(found, dict):
-                    project = str(found.get("project") or "")
-            except Exception:
-                logger.debug("Proyecto no resuelto para %s; cuenta en unknown",
-                             name, exc_info=True)
-                project = ""
-            await _exposures.record_exposure(
-                getattr(self, "_repo", None), "business_sync",
-                project_key=project, task_id=None)
-        except Exception:
-            logger.warning("Sumidero de transicion empresarial fallido",
-                           exc_info=True)
-
-    async def _business_violation_sink(
-        self, payload: dict[str, Any]
-    ) -> None:
-        """Persist adapter-side INV-002 detections; never raises."""
-        try:
-            violation = (payload or {}).get("violation")
-            ticket = str((payload or {}).get("ticket") or "")
-            if isinstance(violation, dict) and ticket:
-                await self._record_invariant_violations(
-                    [violation], ticket=ticket, task=None)
-                try:
-                    hits = getattr(self, "_adapter_invariant_hits", None)
-                    if not isinstance(hits, dict):
-                        hits = {}
-                        self._adapter_invariant_hits = hits
-                    hits[ticket] = str((payload or {}).get("target") or "")
-                except Exception:  # noqa: BLE001, S110
-                    pass
-        except Exception:
-            logger.warning("Sumidero INV-002 del adaptador fallido",
-                           exc_info=True)
-
-    async def _record_reread_violation(
-        self, *, ticket: str, target: str, actual: str,
-        task: dict[str, Any] | None,
-    ) -> None:
-        """INV-002 after a business transition whose reread missed the target."""
-        try:
-            from reliability import invariants as inv_mod
-        except Exception:
-            logger.warning(
-                "Chequeo INV-002 no disponible para %s", ticket, exc_info=True
-            )
-            return
-        violation = inv_mod.check_reread(
-            target=target, actual=actual, ticket=ticket)
-        if violation is not None:
-            await self._record_invariant_violations(
-                [violation], ticket=ticket, task=task)
-
     async def transition_ticket(
         self,
         ticket: str,
@@ -2962,8 +2720,7 @@ class TaskService:
         (sin ella se crea el escalado y no se cancela nada).
         `secret_block` (TASK-2026-00142) solo aparca en Working: escribe el
         marcador de secreto ausente que el cockpit lee como bloqueo.
-        `actor` nombra quien mueve el ticket (`engine` por defecto);
-        INV-001 nunca rechaza transiciones del Owner o manuales.
+        `actor` nombra quien mueve el ticket (`engine` por defecto).
 
         Devuelve `outcome` (`applied` | `already_applied` | `escalated`) con el
         estado de negocio RELEIDO, o `ok: False` con `status` clasificado. El
@@ -3156,46 +2913,6 @@ class TaskService:
                 )
 
         try:
-            from reliability import invariants as _invariants
-        except Exception:
-            logger.warning(
-                "Invariantes v1 no disponibles para %s; sigue sin chequear",
-                name, exc_info=True,
-            )
-            _invariants = None  # type: ignore[assignment]
-        if _invariants is not None:
-            invariant_actor = str(actor or "").strip().lower() or "engine"
-            if clean_instruction:
-                invariant_actor = "owner"
-            context: dict[str, Any] = {
-                "target": target,
-                "ticket": name,
-                "task": task,
-                "evidence": evidence,
-            }
-            if task is not None:
-                context["active_runs"] = await self._live_runs_for_task(
-                    str(task.get("task_id") or ""))
-            violations = _invariants.evaluate_transition(context)
-            await self._record_invariant_violations(
-                violations, ticket=name, task=task)
-            for violation in violations:
-                if _invariants.should_reject(
-                        str(violation.get("invariant_id") or ""),
-                        actor=invariant_actor):
-                    return {
-                        "ok": False,
-                        "status": "invariant",
-                        "ticket": name,
-                        "business_status": current,
-                        "to_status": target,
-                        "invariant": violation.get("invariant_id"),
-                        "message": f"{name} no pasa a {target}: invariante "
-                        f"{violation.get('invariant_id')} violado "
-                        f"({violation.get('detail')}).",
-                    }
-
-        try:
             transition_dates = visibility.work_dates_for_transition(
                 target=target,
                 zone=self._site_zone_name(),
@@ -3211,13 +2928,6 @@ class TaskService:
         transition_context = {}
         if getattr(adapter, "provider", "erpnext") == "jardal_erp":
             transition_context = {"reason": clean_reason, "evidence": evidence, "human_action": human_action}
-        # Fresh adapter INV-002 mark: the sink sets it during the POST below.
-        try:
-            _hits = getattr(self, "_adapter_invariant_hits", None)
-            if isinstance(_hits, dict):
-                _hits.pop(name, None)
-        except Exception:  # noqa: BLE001, S110
-            pass
         span_extended = False
         delay = 1.0
         for attempt in range(3):
@@ -3292,16 +3002,6 @@ class TaskService:
             }
         actual = str(reread.get("status") or "").strip()
         if actual != target:
-            # The adapter POST check already recorded this same miss via
-            # the sink; skip the second doc, keep reread-only misses.
-            try:
-                _hits = getattr(self, "_adapter_invariant_hits", None)
-                _dup = isinstance(_hits, dict) and _hits.pop(name, None) == target
-            except Exception:  # noqa: BLE001
-                _dup = False
-            if not _dup:
-                await self._record_reread_violation(
-                    ticket=name, target=target, actual=actual, task=task)
             return {
                 "ok": False,
                 "status": "mismatch",
@@ -3333,44 +3033,6 @@ class TaskService:
             else:
                 task_status = str(task.get("status") or "") or None
                 mirror_state = "execution_gone"
-        if actual == "Completed":
-            try:
-                from reliability import verification as _verification
-                _db = getattr(getattr(self, "_repo", None), "db", None)
-                _problems = None
-                _exposure_store = None
-                if _db is not None and hasattr(_db, "__getitem__"):
-                    try:
-                        _problems = _db["reliability_problems"]
-                    except Exception:  # noqa: BLE001
-                        _problems = None
-                    try:
-                        _exposure_store = _db["reliability_exposures"]
-                    except Exception:  # noqa: BLE001
-                        _exposure_store = None
-                if _problems is not None:
-                    await _verification.note_ticket_completed(
-                        task or {}, name, _problems,
-                        exposure_store=_exposure_store)
-            except Exception:
-                logger.warning(
-                    "Hunter fix registration failed", exc_info=True)
-        if current == "Completed" and target in {"Open", "Working"}:
-            try:
-                from reliability import escapes as _escapes
-                await _escapes.record_reopen_escape(
-                    getattr(self, "_repo", None),
-                    previous_status=current, new_status=target,
-                    task=task, business_ref=name,
-                    project_key=str((task or {}).get("project") or "")
-                    or None,
-                    actor=str(actor or "") or None,
-                    runtime_dir=getattr(
-                        self, "_reliability_runtime_dir", None),
-                )
-            except Exception:
-                logger.warning(
-                    "Hunter escape registration failed", exc_info=True)
         self._enqueue_visibility(
             str((task or {}).get("task_id") or "") or None, name, f"transition:{target}"
         )
@@ -4482,26 +4144,6 @@ class TaskService:
                     )
                     self._wake_dispatcher()
                     return task
-                # Hunter admission gate (TASK-2026-00387, §9.3): manual
-                # launches verify the Owner approval; denials park with a
-                # typed reason instead of executing. Fail-closed.
-                hunter_verdict = await self.check_hunter_admission(task)
-                if not hunter_verdict.get("allowed"):
-                    reason = (f"hunter_approval:"
-                              f"{hunter_verdict.get('reason')}")
-                    logger.warning("run_task: hunter gate denied %s (%s)",
-                                   task_id, reason)
-                    await self.patch_task(task_id, {
-                        "status": TaskStatus.QUEUED.value,
-                        "waiting_reason": reason,
-                        "resume_at": None,
-                    })
-                    await self.comment_on_ticket(
-                        task_id,
-                        f"Hunter admission gate denied launch: {reason}. "
-                        f"A verified Owner approval is required "
-                        f"(TASK-2026-00387).")
-                    return await self._repo.get_task(task_id)
                 try:
                     task, stop = await self._plan_pedido_pre_stage(
                         task, force=force)
@@ -4768,7 +4410,12 @@ class TaskService:
             }:
                 updates["completed_at"] = datetime.now(timezone.utc)
 
+            mechanic_trigger = self._apply_wait_streak(
+                updates, current, str(final_status))
             updated = await self._repo.patch_task(task_id, updates)
+            if updated is not None and mechanic_trigger:
+                self._wake_mechanic(task_id, mechanic_trigger,
+                                    str(updated.get("waiting_reason") or ""))
             if updated is not None:
                 await self._hub.broadcast("task_updated", updated)
                 asyncio.create_task(self._fire_notion_sync_back(updated, final_status))
@@ -4790,8 +4437,7 @@ class TaskService:
                     reason = str(updated.get("waiting_reason") or "")
                     if reason.startswith(("routing_missing", "config",
                                           "workflow_blocked_tool",
-                                          "review_conflict", "review_invalid",
-                                          "repo_busy_persistent")):
+                                          "review_conflict", "review_invalid")):
                         asyncio.create_task(self._comment_wait_on_erp(updated, reason))
                 result_comment = graph_out.get("result_comment")
                 if result_comment and str(result_comment).strip():
@@ -4857,11 +4503,11 @@ class TaskService:
     async def _comment_wait_on_erp(self, task: dict[str, Any], reason: str) -> None:
         """Post a one-shot ERP comment for waits that need the owner.
 
-        Only routing, config, blocked-tool, review-switch and
-        persistent-dirt waits qualify: all mean a human (or the tier
-        authority) must fix something before the ticket can run.
-        Transient waits (quota, repo_busy within its retry budget,
-        rate limits) heal alone and stay silent. Never breaks execution.
+        Only routing, config, blocked-tool and review-switch waits
+        qualify: all mean a human (or the tier authority) must fix
+        something before the ticket can run. Transient waits (quota,
+        repo_busy, rate limits) heal alone or stall to the mechanic.
+        Never breaks execution.
         """
         try:
             adapter = getattr(self, "_business", None)
@@ -4889,13 +4535,6 @@ class TaskService:
                 text = ("OpenCEO no puede ejecutar este ticket: su "
                         "workflow necesita una tool inexistente "
                         f"({detail}). Revisa la skill.")
-            elif key == "repo_busy_persistent":
-                detail = reason.split(":", 1)[1].strip() \
-                    if ":" in reason else reason
-                text = ("OpenCEO no puede ejecutar este ticket: el checkout "
-                        "vivo tiene cambios sin commitear que no se curan "
-                        f"solos ({detail}). Haz commit, stash o limpia esos "
-                        "ficheros en el checkout vivo y relanza el ticket.")
             else:
                 text = f"OpenCEO no puede ejecutar este ticket: configuración inválida ({reason})."
             await adapter.add_comment(name, text)
@@ -7844,6 +7483,9 @@ class TaskService:
 
     async def _on_ticket_done(self, ticket: dict[str, Any]) -> None:
         """Post-completion: QA gate, then refresh rate limits and wake the dispatcher."""
+        params = ticket.get("params")
+        if isinstance(params, dict) and params.get("mechanic_fix_for"):
+            self._wake_mechanic(str(ticket.get("task_id") or ""), "fix_done")
         # Dependency wakeup (§9.5): tickets blocked by this one requeue when
         # it lands terminal-good. Event-driven, no sweeps.
         if str(ticket.get("status") or "") in {"completed", "cancelled"}:

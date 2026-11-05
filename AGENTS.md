@@ -15,6 +15,7 @@ Sesiones del Owner: lee CLAUDE.md.
 - `openceo-core/objectives/` — company objective engine (execution state, planner models)
 - `openceo-core/company_mandate.py` — company mandate + owner escalation policy
 - `openceo-core/ops/` — deterministic project-creation library behind the operations skill
+- `openceo-core/mechanic/` — default handler for stalls the engine did not foresee: generic stall rule, musej verdict, closed action vocabulary
 - `openceo-react/` — dashboard (React 19 + Vite + Tailwind v4)
 - `openceo-voice/`, `openceo-voice-android/` — realtime voice + Android app
 - `workflows/` — deterministic Tier-0 YAML workflows
@@ -77,7 +78,13 @@ the boot log (TASK-2026-00367).
 
 ### Standing rules
 
-- No polling or Mongo/API sweeps: react to CRUD events only.
+- No polling or Mongo/API sweeps: react to CRUD events only. Single
+  exception: the mechanic heartbeat (TASK-2026-00510).
+- Fix the class of problem, never one live case: a stalled or failed
+  execution gets no ticket-specific branch. Waits, retries and give-ups
+  go through the generic stall rule and the mechanic
+  (`openceo-core/mechanic/`); add code only when the mechanic cannot
+  handle the class, and prefer a new mechanic tool over a new situation.
 - Jardal ERP owns business state (`Task`/`Project`); Mongo owns execution.
   Never create Mongo-only tickets: internal creation goes through the
   ticket API (Jardal ERP first). Bounded exception: Horizon personal tasks

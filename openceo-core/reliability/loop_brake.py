@@ -84,7 +84,7 @@ def resolve_incidents(source: Any) -> Any | None:
 
 
 def guard_mode(producer: str) -> str:
-    """Shadow by default; the calibration child owns the enforce switch."""
+    """Enforce by default: a stopped loop wakes the mechanic (TASK-2026-00510)."""
     try:
         from .config import RELIABILITY_DEFAULTS
 

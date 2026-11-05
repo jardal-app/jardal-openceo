@@ -13,7 +13,7 @@ from __future__ import annotations
 #: also run without the Owner's user-level instruction files (live.py).
 READ_ONLY_ROLES = frozenset({
     "planner", "objective_planner", "plan_reviewer", "review", "arbiter",
-    "closer", "ceo_reviewer",
+    "closer", "ceo_reviewer", "mechanic",
 })
 
 _BOUNDARIES = (
@@ -75,6 +75,13 @@ _ROLE_LINES = {
         "ROLE CONTRACT: CEO reviewer (one-shot, read-only).\n"
         "You only decide from the state in this prompt and write the "
         "decision file it names. Never implement, test or open tickets "
+        "yourself."
+    ),
+    "mechanic": (
+        "ROLE CONTRACT: engine mechanic (one-shot, read-only).\n"
+        "You only investigate and write the verdict file this prompt names; "
+        "the orchestrator applies the actions you list. `git status` is "
+        "allowed for reading. Never change files, git state or tickets "
         "yourself."
     ),
 }
