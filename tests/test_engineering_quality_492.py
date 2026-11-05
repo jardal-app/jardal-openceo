@@ -176,6 +176,7 @@ class PlannerQualityTests(unittest.TestCase):
         self.assertIn("ENGINEERING QUALITY (policy §44", prompt)
         self.assertIn("never 'restyle only' or 'minimal diff'", prompt)
         self.assertIn("must exist", prompt)
+        self.assertIn("default 8 files and 400 non-test lines", prompt)
         self.assertIn('"review_reason?"', prompt)
         self.assertLess(prompt.index("ENGINEERING QUALITY"),
                         prompt.index("OUTPUT: write"))
@@ -193,6 +194,7 @@ class PlannerQualityTests(unittest.TestCase):
         self.assertIn("20. Hold every ticket contract to the engineering "
                       "quality bar (§44).", cut)
         self.assertIn("reuse what meets the bar", cut)
+        self.assertIn("400 non-test lines, with a hard brake", cut)
         self.assertNotIn("reuse what exists, and never", cut)
 
     def test_dev_policy_lets_the_planner_decide_review(self) -> None:
@@ -451,6 +453,67 @@ class DecompositionRewireTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("task-dep", patches)
         stored = await env.objectives.get_objective("OBJ-1")
         self.assertEqual(stored.get("pending_rewires"), pending)
+
+    async def _pending(self, env) -> None:
+        env.tasks.tasks["task-new-1"] = _mirrored(
+            "task-new-1", "TASK-2026-00201", objective_id="OBJ-1",
+            status="queued")
+        await env.objectives.patch_objective("OBJ-1", {"pending_rewires": [
+            {"from": "task-big", "dependents": ["task-dep"]}]})
+
+    async def test_the_rewire_reaches_erp_dependencies(self) -> None:
+        env, _tasks, _created, patches = await self._world([_plan_result()])
+        calls: list[tuple[str, list[str]]] = []
+
+        class _Erp:
+            async def set_dependencies(self, identifier, depends_on):
+                calls.append((identifier, list(depends_on)))
+                return {"ok": True}
+
+        env.erp = _Erp()
+        await self._pending(env)
+        await engine_mod._apply_pending_rewires(env, "OBJ-1", ["task-new-1"])
+        self.assertEqual(patches["task-dep"]["blocked_by"], ["task-new-1"])
+        self.assertEqual(calls, [("TASK-2026-00108", ["TASK-2026-00201"])])
+
+    async def test_an_erp_failure_keeps_the_execution_rewire(self) -> None:
+        env, _tasks, _created, patches = await self._world([_plan_result()])
+
+        class _Erp:
+            async def set_dependencies(self, identifier, depends_on):
+                raise RuntimeError("erp down")
+
+        env.erp = _Erp()
+        await self._pending(env)
+        with self.assertLogs(engine_mod.logger, level="WARNING"):
+            await engine_mod._apply_pending_rewires(
+                env, "OBJ-1", ["task-new-1"])
+        self.assertEqual(patches["task-dep"]["blocked_by"], ["task-new-1"])
+        stored = await env.objectives.get_objective("OBJ-1")
+        self.assertEqual(stored.get("pending_rewires"), [])
+
+    async def test_decomposed_children_close_before_the_group(self) -> None:
+        tasks = {
+            "task-parent": _mirrored("task-parent", "TASK-1",
+                                     status="converted", objective_id="OBJ-1"),
+            "big": _child("big", "converted", dev=True),
+            "kid": _child("kid", "completed", dev=True),
+        }
+        env, _planner, _created, patches, _notices = _env_for(
+            self, _scratch_repo(self), [_plan_result()], tasks=tasks,
+            objectives_cfg={"max_final_reviews": 2})
+        await env.objectives.create_objective({
+            "objective_id": "OBJ-1", "project": "proj", "status": "active",
+            "anchor": {"goal": "g", "acceptance": ["ship"]},
+            "conversion_source_task_id": "task-parent", "final_reviews": 2,
+        })
+        result = await engine_mod.run_final_review(env, "OBJ-1")
+        self.assertEqual(result.get("action"), "closed")
+        self.assertEqual(patches["big"]["status"], "completed")
+        self.assertEqual(patches["task-parent"]["status"], "completed")
+        self.assertLess(list(patches).index("big"),
+                        list(patches).index("task-parent"))
+        self.assertNotIn("kid", patches)
 
     async def test_converted_blocker_never_releases_a_dependent(self) -> None:
         lister = engine_mod.InMemoryTaskLister(
