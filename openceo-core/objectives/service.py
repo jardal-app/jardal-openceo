@@ -72,6 +72,10 @@ class ObjectiveErpAdapter:
     async def convert_to_group(self, identifier: str) -> dict[str, Any]:
         return await self._adapter.convert_to_group(identifier)
 
+    async def set_dependencies(
+        self, identifier: str, depends_on: list[str]) -> dict[str, Any]:
+        return await self._adapter.set_dependencies(identifier, depends_on)
+
 
 def erp_for_task_service(task_service: Any) -> ObjectiveErpAdapter | None:
     """ObjectiveErp view of a TaskService, or None when ERP is unavailable."""

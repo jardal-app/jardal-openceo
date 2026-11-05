@@ -90,6 +90,9 @@ class ObjectiveErp(Protocol):
 
     async def convert_to_group(self, identifier: str) -> dict[str, Any]: ...
 
+    async def set_dependencies(
+        self, identifier: str, depends_on: list[str]) -> dict[str, Any]: ...
+
 
 class ObjectiveRejected(ValueError):
     """The objective was refused deterministically (bad input, no capacity)."""
@@ -1047,8 +1050,10 @@ _QUALITY_GUIDE = (
     "- An input the goal names (e.g. an updated design doc) must exist",
     "  on the base branch; if it is missing or stale there, block and",
     "  ask instead of building on the old one.",
-    "- One ticket owns a coherent slice one session can finish; no",
-    "  micro-tickets that each pay a build and review cycle.",
+    "- One ticket owns a coherent slice inside the size budget (by",
+    "  default 8 files and 400 non-test lines; past 800 the diff fails):",
+    "  split bigger work along its seams, never into micro-tickets that",
+    "  each pay a build and review cycle.",
 )
 
 #: The per-ticket review switch as both planner prompts describe it.
@@ -3315,7 +3320,30 @@ async def _apply_pending_rewires(
             blockers += [item for item in new_ids
                          if item not in blockers and item != str(dep_id)]
             await env.patch_task(str(dep_id), {"blocked_by": blockers})
+            await _mirror_dependencies(env, row, blockers)
     await env.objectives.patch_objective(objective_id, {"pending_rewires": []})
+
+
+async def _mirror_dependencies(
+    env: ObjectiveEnv, row: Mapping[str, Any], blockers: Sequence[str],
+) -> None:
+    """Carry a rewire to Jardal ERP ``depends_on`` (only set at creation).
+
+    Without it the ERP keeps the converted ticket as a dependency and
+    refuses the dependent's close with 417. Fail-soft: execution order is
+    already correct in Mongo.
+    """
+    setter = getattr(getattr(env, "erp", None), "set_dependencies", None)
+    name = erp_group_name(row)
+    if setter is None or not name:
+        return
+    names = [erp_group_name(await env.tasks.get_task(item))
+             for item in blockers]
+    try:
+        await setter(name, [item for item in names if item])
+    except Exception:  # noqa: BLE001
+        logger.warning("ERP dependencies of %s not updated", name,
+                       exc_info=True)
 
 
 def _touches_objective(
@@ -4453,6 +4481,21 @@ async def _finish_objective(
         except Exception:  # noqa: BLE001, S110
             pass
     parent_id = str(objective.get("conversion_source_task_id") or "")
+    # Tickets that decomposed inside the objective close with it, children
+    # before the group, or their ERP record stays open (TASK-2026-00492).
+    for child in children:
+        child_id = str(child.get("task_id") or "")
+        if child_id and child_id != parent_id \
+                and str(child.get("status") or "") == "converted":
+            await env.patch_task(child_id, {
+                "status": "completed",
+                "waiting_reason": None,
+                "resume_at": None,
+                "completed_at": _utcnow_iso(),
+                "last_response_summary": (
+                    f"Decomposed inside objective {objective_id}; its "
+                    f"replacements delivered it ({closure})."),
+            })
     if parent_id:
         parent = await env.tasks.get_task(parent_id)
         if parent is not None and str(parent.get("status") or "") == "converted":

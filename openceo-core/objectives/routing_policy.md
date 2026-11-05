@@ -829,9 +829,13 @@ spend never lowers this bar; it removes waste around it.
   integration branch; check it with git, since builders never see
   uncommitted files. If it is missing or stale there, return blocked
   with the gap instead of building on the old version.
-- One ticket owns a coherent slice one session can finish (a whole
-  foundation, a whole flow). Do not split work into micro-tickets that
-  each pay a build and review cycle, and do not create tickets whose
+- One ticket owns a coherent slice one session can finish inside the
+  size budget the orchestrator enforces on every tier: by default 8
+  changed files and 400 non-test lines, with a hard brake that fails a
+  diff past 800 lines as a material failure. Split bigger work, such as a
+  whole foundation, along its seams into sequential tickets that each
+  leave the tree working. Do not split below that into micro-tickets
+  that each pay a build and review cycle, and do not create tickets whose
   only output is a proposal or a criteria text. An end-to-end test
   ticket is legitimate when it exercises the real flow.
 - Review rounds follow risk, not habit (dev detail §27): A/B/C tickets
