@@ -1075,6 +1075,7 @@ def _planner_prompt(
     cost_guide: str = "",
     playbooks_md: str = "",
     parked_md: str = "",
+    mission_md: str = "",
 ) -> str:
     """Planner prompt: bounded state + JSON contract (self-contained).
 
@@ -1130,6 +1131,7 @@ def _planner_prompt(
         f"GOAL: {(objective.get('anchor') or {}).get('goal', '')}",
         "ACCEPTANCE:",
         *criteria,
+        *(["", mission_md.strip()] if mission_md.strip() else []),
         "",
         "CAPSULE (compiled state):",
         capsule_text or "(empty: first planning)",
@@ -1800,6 +1802,7 @@ async def _plan_objective_inner(
             f"Previous park: {recovery['last_reason']}\n"
             f"Recovery attempts: {int(recovery.get('attempts') or 0)}/"
             f"{recovery_mod.recovery_config(getattr(env, 'objectives_cfg', None))['max_attempts']}")
+    mission_md = await _objective_mission_section(env, objective)
     scratch = objective_scratch(env.repo, objective_id)
     scratch.mkdir(parents=True, exist_ok=True)
     (scratch / "OBJECTIVE_CAPSULE.md").write_text(
@@ -1835,7 +1838,8 @@ async def _plan_objective_inner(
             cost_mod.aggregate_objective_cost(
                 [item.get("cost") for item in tickets])),
         playbooks_md=playbooks_md,
-        parked_md=parked_md)
+        parked_md=parked_md,
+        mission_md=mission_md)
     timeout_s = int(planner_cfg.get("timeout_minutes", 15)) * 60
     errors: list[str] = []
     result: planner_mod.PlannerResult | None = None
@@ -2109,6 +2113,30 @@ async def plan_pedido(
             del _PLAN_FLIGHTS[flight_key]
 
 
+async def _objective_mission_section(
+    env: ObjectiveEnv, objective: Mapping[str, Any],
+) -> str:
+    """The Owner's mission brief for a mission-linked objective, or ""."""
+    mission_id = str(objective.get("mission_id") or "").strip()
+    store = getattr(env, "missions", None)
+    if not mission_id or store is None:
+        return ""
+    try:
+        mission = await store.get_mission(mission_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("planner: mission %s unreadable", mission_id,
+                       exc_info=True)
+        return ""
+    if mission is None:
+        return ""
+    from objectives import missions as missions_mod
+    return "\n".join([
+        f"MISSION {mission_id} (the Owner's outcome this objective serves; "
+        "every ticket stays consistent with its goal and acceptance):",
+        *missions_mod.mission_brief_lines(mission),
+    ])
+
+
 async def _mission_guide_section(
     env: ObjectiveEnv, ticket: Mapping[str, Any],
 ) -> str:
@@ -2128,18 +2156,15 @@ async def _mission_guide_section(
         return ""
     if mission is None:
         return ""
-    criteria = [str(item).strip()
-                for item in mission.get("acceptance") or []
-                if str(item).strip()]
+    from objectives import missions as missions_mod
     ledger = [item for item in mission.get("objectives") or []
               if isinstance(item, Mapping)]
     states = ", ".join(
         f"{item.get('objective_id')}={item.get('status')}"
         for item in ledger) or "(first objective)"
     lines = [
-        f"MISSION {mission_id}: {str(mission.get('goal') or '')[:300]}",
-        "Acceptance: "
-        + ("; ".join(criteria)[:600] if criteria else "(CEO proposes it)"),
+        f"MISSION {mission_id}",
+        *missions_mod.mission_brief_lines(mission),
         f"Objectives so far: {states}",
         "This pedido continues the mission as its next objective: it "
         "outgrows one ticket by definition, so return capability_gap "

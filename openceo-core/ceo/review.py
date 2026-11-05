@@ -534,7 +534,7 @@ async def _mission_digest(
     return {
         "mission_id": mission_id,
         "project": mission.get("project"),
-        "goal": _short(mission.get("goal"), 300),
+        "goal": str(mission.get("goal") or ""),
         "status": mission.get("status"),
         "shell_status": shell_status,
         "acceptance": [str(item) for item in mission.get("acceptance") or []],
@@ -782,20 +782,20 @@ def _missions_section(signals: CEOSignals) -> str:
         return "MISSIONS\nUNKNOWN (missions unreadable this review)"
     if not signals.missions:
         return "MISSIONS\n(none active)"
+    from objectives import missions as missions_mod
     lines = ["MISSIONS"]
     for item in signals.missions:
         lines.append(
-            f"- {item['mission_id']} [{item['project']}] "
-            f"({item['status']}): {item['goal']}"
-        )
-        criteria = item["acceptance"] or ["(no criteria yet: propose them "
-                                          "in your next mission pedido)"]
-        lines.append(
-            f"  acceptance ({item['acceptance_source']}/"
+            f"- {item['mission_id']} [{item['project']}] ({item['status']}); "
+            f"acceptance {item['acceptance_source']}/"
             f"{item['acceptance_status']}"
-            f"{', DISPUTED' if item['acceptance_disputed'] else ''}): "
-            f"{'; '.join(str(criterion) for criterion in criteria)[:400]}"
+            f"{', DISPUTED' if item['acceptance_disputed'] else ''}"
         )
+        brief = missions_mod.mission_brief_lines(item)
+        if not item["acceptance"]:
+            brief[-1] = ("Acceptance: (no criteria yet: propose them in "
+                         "your next mission pedido)")
+        lines.extend(f"  {line}" for line in brief)
         if item["question_state"]:
             lines.append(f"  owner question: {item['question_state']}")
         children = item["objectives"] or []

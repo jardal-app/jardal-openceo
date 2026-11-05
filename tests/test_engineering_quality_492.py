@@ -14,7 +14,10 @@ Contract under test:
   Tier S still rejects off;
 - reviewers focus on user-visible breakage, the final review asks for
   production grade, the CEO never prescribes shortcuts, and the mandate
-  carries the quality principle.
+  carries the quality principle;
+- the Owner's mission goal and every acceptance criterion reach the CEO,
+  the mission pedido and the objective planner (the CEO used to see 300
+  goal and 400 criteria characters).
 
 No network, no CLI, no LLM.
 """
@@ -47,9 +50,15 @@ from agents.dev.tier_s.stores import (  # noqa: E402
     InMemoryRunStore,
     InMemoryTaskStore,
 )
-from ceo.review import CEOSignals, _ceo_prompt  # noqa: E402
+from ceo.review import (  # noqa: E402
+    CEOSignals,
+    _ceo_prompt,
+    _mission_digest,
+    _missions_section,
+)
 from company_mandate import MANDATE_PRINCIPLES, load_mandate_file  # noqa: E402
 from objectives import engine as engine_mod  # noqa: E402
+from objectives import missions as missions_mod  # noqa: E402
 from objectives import planner_models as planner_mod  # noqa: E402
 from orchestration import review as review_mod  # noqa: E402
 from test_company_objectives import (  # noqa: E402
@@ -301,6 +310,91 @@ class CeoAndMandateTests(unittest.TestCase):
         self.assertTrue(any(item.startswith("entregar calidad profesional")
                             for item in principles))
         self.assertNotIn("reutilizar lo que ya existe", principles)
+
+
+def _long_mission() -> dict:
+    criteria = [f"Criterion {index}: " + "x" * 260 for index in range(1, 13)]
+    return {"mission_id": "MIS-T", "project": "erp", "status": "active",
+            "goal": "Rebuild the web UI " + "y" * 900,
+            "acceptance": criteria, "objectives": []}
+
+
+class MissionBriefTests(unittest.IsolatedAsyncioTestCase):
+    def test_brief_keeps_every_criterion_of_a_large_mission(self) -> None:
+        lines = missions_mod.mission_brief_lines(_long_mission())
+        text = "\n".join(lines)
+        self.assertTrue(lines[0].startswith("Goal: Rebuild the web UI"))
+        self.assertIn("y" * 900, text)
+        for index in range(1, 13):
+            self.assertIn(f"{index}. Criterion {index}:", text)
+        self.assertNotIn("more criteria", text)
+
+    def test_brief_counts_what_the_budget_cuts(self) -> None:
+        lines = missions_mod.mission_brief_lines(
+            _long_mission(), goal_chars=50, criteria_chars=700)
+        self.assertTrue(lines[0].endswith("…"))
+        self.assertLessEqual(len(lines[0]), len("Goal: ") + 50)
+        self.assertIn("1. Criterion 1:", lines[2])
+        self.assertTrue(any(line.endswith("…") for line in lines[3:]))
+        self.assertEqual(lines[-1], "(+9 more criteria past the prompt budget)")
+
+    def test_brief_without_criteria(self) -> None:
+        self.assertEqual(
+            missions_mod.mission_brief_lines({"goal": "g"}),
+            ["Goal: g", "Acceptance: (none yet)"])
+
+    async def test_objective_planner_sees_the_whole_mission(self) -> None:
+        store = missions_mod.InMemoryMissionStore()
+        await store.create_mission(_long_mission())
+        env = SimpleNamespace(missions=store)
+        section = await engine_mod._objective_mission_section(
+            env, {"objective_id": "OBJ-1", "mission_id": "MIS-T"})
+        self.assertIn("MISSION MIS-T", section)
+        self.assertIn("12. Criterion 12:", section)
+        prompt = engine_mod._planner_prompt(
+            {"objective_id": "OBJ-1",
+             "anchor": {"goal": "g", "acceptance": ["a"]}},
+            "", [], "", [], mission_md=section)
+        self.assertLess(prompt.index("ACCEPTANCE:"),
+                        prompt.index("MISSION MIS-T"))
+        self.assertLess(prompt.index("MISSION MIS-T"),
+                        prompt.index("CAPSULE (compiled state):"))
+        self.assertEqual(await engine_mod._objective_mission_section(
+            env, {"objective_id": "OBJ-2"}), "")
+
+    async def test_plan_objective_sends_the_mission_to_the_planner(self) -> None:
+        env, planner, _created, _patches, _notices = _env_for(
+            self, _scratch_repo(self), [_plan_result()])
+        env.missions = missions_mod.InMemoryMissionStore()
+        await env.missions.create_mission(_long_mission())
+        await env.objectives.create_objective({
+            "objective_id": "OBJ-1", "project": "proj", "status": "active",
+            "anchor": {"goal": "g", "acceptance": ["ship"]},
+            "mission_id": "MIS-T",
+        })
+        await engine_mod.plan_objective(env, "OBJ-1")
+        self.assertTrue(planner.prompts)
+        self.assertIn("MISSION MIS-T", planner.prompts[0])
+        self.assertIn("12. Criterion 12:", planner.prompts[0])
+
+    async def test_mission_pedido_sees_the_whole_mission(self) -> None:
+        store = missions_mod.InMemoryMissionStore()
+        await store.create_mission(_long_mission())
+        section = await engine_mod._mission_guide_section(
+            SimpleNamespace(missions=store),
+            {"task_id": "t", "params": {"mission_id": "MIS-T"}})
+        self.assertIn("12. Criterion 12:", section)
+        self.assertIn("y" * 900, section)
+
+    async def test_ceo_sees_the_whole_mission(self) -> None:
+        mission = {**_long_mission(), "acceptance_source": "owner",
+                   "acceptance_status": "confirmed"}
+        signal = await _mission_digest(SimpleNamespace(), mission)
+        section = _missions_section(CEOSignals(missions=[signal]))
+        self.assertIn("MIS-T [erp] (active); acceptance owner/confirmed",
+                      section)
+        self.assertIn("12. Criterion 12:", section)
+        self.assertIn("y" * 900, section)
 
 
 if __name__ == "__main__":
