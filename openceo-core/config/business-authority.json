@@ -3,7 +3,7 @@
   "provider": "jardal_erp",
   "state": "ready",
   "workspace_id": "00000000-0000-0000-0000-000000000001",
-  "origin": "https://erp.jardal.app",
+  "origin": "https://api.erp.jardal.app",
   "execution_database": "openceo",
   "evidence": {
     "reconciled_at": "2026-10-15T16:16:03.642Z",
