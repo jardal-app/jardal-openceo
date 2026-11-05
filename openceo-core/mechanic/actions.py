@@ -7,6 +7,7 @@ is stale.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import subprocess
@@ -142,7 +143,8 @@ class ActionRunner:
         return f"ticket {created.get('task_id')}"
 
     async def _do_git_unstage(self, action: MechanicAction, **_: Any) -> str:
-        done = self._git(str(action.repo), "reset", "-q", "--", *action.paths)
+        done = await asyncio.to_thread(
+            self._git, str(action.repo), "reset", "-q", "--", *action.paths)
         if done.returncode != 0:
             raise RuntimeError(done.stdout[:300])
         return f"unstaged {len(action.paths)} path(s)"
@@ -152,8 +154,9 @@ class ActionRunner:
         repo = str(action.repo)
         if await self._repo_busy(repo):
             raise RuntimeError("a ticket is running on this checkout")
-        done = self._git(repo, "stash", "push", "-m",
-                         f"openceo-mechanic {run_id}: {action.text[:80]}")
+        done = await asyncio.to_thread(
+            self._git, repo, "stash", "push", "-m",
+            f"openceo-mechanic {run_id}: {action.text[:80]}")
         if done.returncode != 0:
             raise RuntimeError(done.stdout[:300])
         return done.stdout.strip()[:300] or "stashed"

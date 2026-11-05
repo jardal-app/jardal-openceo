@@ -6,6 +6,7 @@ journal) and hands it over as data. Nothing here writes.
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -139,11 +140,12 @@ async def compile_situation(
             if task.get("project") else None
         digest["repo"] = repo
         if repo and repo not in repos:
-            repos[repo] = git(repo)
+            repos[repo] = await asyncio.to_thread(git, repo)
         number = task.get("ticket_number")
-        digest["log"] = logs([str(task.get("task_id") or ""),
-                              f"#{number}" if number else "",
-                              str(digest.get("business_ref") or "")])
+        digest["log"] = await asyncio.to_thread(
+            logs, [str(task.get("task_id") or ""),
+                   f"#{number}" if number else "",
+                   str(digest.get("business_ref") or "")])
         if tier_s_run is not None and task.get("coding_tool") == "tier_s":
             run = await tier_s_run(finding.task_id)
             if run:

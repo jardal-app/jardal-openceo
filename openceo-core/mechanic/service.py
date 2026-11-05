@@ -82,6 +82,27 @@ def _new_run_id(now: datetime) -> str:
     return f"MEC-{now:%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:4].upper()}"
 
 
+def last_activity(task: Mapping[str, Any]) -> datetime | None:
+    """Last time the engine acted on the ticket.
+
+    Mirror and sync writes refresh ``updated_at`` without any progress, so
+    the last step and the wait streak win over it.
+    """
+    moments: list[datetime] = []
+    steps = task.get("steps")
+    if isinstance(steps, list) and steps and isinstance(steps[-1], Mapping):
+        moment = as_utc(steps[-1].get("timestamp"))
+        if moment is not None:
+            moments.append(moment)
+    params = task.get("params")
+    streak = params.get(STREAK_KEY) if isinstance(params, Mapping) else None
+    if isinstance(streak, Mapping):
+        moment = as_utc(streak.get("last_at"))
+        if moment is not None:
+            moments.append(moment)
+    return max(moments) if moments else as_utc(task.get("updated_at"))
+
+
 def _history(task: Mapping[str, Any]) -> list[datetime]:
     params = task.get("params")
     state = params.get("mechanic") if isinstance(params, Mapping) else None
@@ -306,7 +327,7 @@ class MechanicService:
         for task in rows or []:
             if task.get("autorun") is not True:
                 continue
-            updated = as_utc(task.get("updated_at"))
+            updated = last_activity(task)
             if updated is None or updated < horizon:
                 continue
             reason = task.get("waiting_reason")

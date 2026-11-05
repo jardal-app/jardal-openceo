@@ -32,7 +32,12 @@ from mechanic.models import (  # noqa: E402
     parse_verdict,
     validate_verdict,
 )
-from mechanic.service import MechanicService, build_prompt, mechanic_config  # noqa: E402
+from mechanic.service import (  # noqa: E402
+    MechanicService,
+    build_prompt,
+    last_activity,
+    mechanic_config,
+)
 from mechanic.situation import Finding, compile_situation  # noqa: E402
 from mechanic.stall import STREAK_KEY, streak_outcome  # noqa: E402
 from orchestration.role_contracts import is_read_only  # noqa: E402
@@ -462,6 +467,19 @@ def test_heartbeat_finds_engine_give_ups_but_not_human_or_legacy_waits(tmp_path:
         ("give_up", "stale_wait"), ("overdue", "resume_overdue"),
         ("stalled", "stale_wait"), ("dep_stuck", "long_wait"),
         ("quota_long", "long_wait")}
+
+
+def test_heartbeat_clock_ignores_mirror_writes(tmp_path: Path) -> None:
+    synced = _task("synced", updated_at=NOW - timedelta(minutes=1),
+                   steps=[{"step": "cycle", "status": "waiting",
+                           "timestamp": NOW - timedelta(hours=2)}])
+    active = _task("active", updated_at=NOW - timedelta(hours=2),
+                   steps=[{"step": "cycle", "timestamp": NOW - timedelta(minutes=5)}])
+    service, _ = _service(tmp_path, _Repo([synced, active]), [])
+    found = asyncio.run(service.heartbeat_scan(NOW, service.config()))
+    assert [(f.task_id, f.trigger) for f in found] == [("synced", "stale_wait")]
+    assert last_activity({"steps": [{"timestamp": "2026-11-05 21:37:36.112000"}]}) \
+        == datetime(2026, 11, 5, 21, 37, 36, 112000, tzinfo=timezone.utc)
 
 
 def test_run_applies_verdict_comments_and_records(tmp_path: Path) -> None:
