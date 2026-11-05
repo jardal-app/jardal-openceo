@@ -2,6 +2,31 @@
 
 Resumen operativo corto del estado real del repo.
 
+## 2026-11-05 — Mecánico: lo imprevisto ya no se parchea caso a caso (TASK-2026-00510)
+
+- Orden del Owner, tras preguntar si los bugs diarios venían de la lógica determinista del núcleo: «corrigelo elimnia 50k lineas de codigo si es necesario comentarios y todo lo que quieras pero reestructura rapidamente para que sea proactivo no importa si gasta mas tokens», y analizar un cron con musej.
+- Diagnóstico: sí venían de ahí. Entre llamadas LLM todo era una máquina de estados determinista: `openceo-core` pasó de 21k a 130k líneas en 8 semanas, con 809 líneas que citan 202 tickets. Cada estado imprevisto acababa en parada silenciosa y cada fix añadía otra regla: 258426d (00481) metió la contradicción del prompt que causó el bucle de 00506. El cazador estaba en shadow o apagado y no veía las esperas previas al intento.
+- Rumbo: código determinista solo para invariantes; lo imprevisto lo atiende el mecánico (`openceo-core/mechanic/`, ARCHITECTURE_REFERENCE §Engine mechanic). Detalles:
+  - **Regla de atasco genérica** en `run_task`: la misma espera re-aparcada 3 veces pasa a `stalled`. Una espera sin resume que no es humana ni autocurable cuenta como abandono, `needs_owner` incluido.
+  - **Run musej** de solo lectura, con 9 acciones cerradas que aplica el core.
+  - **Latido** cada 30 min, sin tokens salvo hallazgo. El cron con musej sin condición se descartó porque quemaría las ventanas de 5 h y semanal de los builders.
+  - **Presupuesto** por hora, día y ticket.
+  - **Ciclo de fix**: fix → deploy en ocioso → reanudar.
+  - **Freno de progreso** en enforce. Sustituye el contador de 00506.
+- Poda: el cazador apagado (11 módulos, sus tests, la sección FIABILIDAD del CEO y el diseño de 1.258 líneas en docs/, guardado como adjunto privado en el ERP). Balance: +2.131 / −13.550 líneas. Sin cambios en gates, merges ni transiciones.
+- Verificación:
+  - Tests: 42 propios con fakes y git real; 9/9 mutaciones más la del reloj detectadas; checks obligatorios y vecinos en verde.
+  - Suite completa: 50 fallos = 19 preexistentes en main limpio + 31 que dependen del `.env` vivo (idénticos en main con ese `.env`: 31/97).
+  - Ruff del gate limpio.
+- Despliegue de fce0ecb (23:14 UTC, dirty=false, /health ok). La recuperación reencoló #553. Primer run real, MEC-20261105T231427-26C9:
+  - **#154**: huérfano del motor Tier S antiguo → fallado, con comentario de que puede cancelarse.
+  - **#486** (TASK-2026-00441): 28 h parado por un baseline ruff que ya estaba verde (7e47db7) → reanudado, con el diff verificado.
+- Primer bug propio cazado en vivo: la reconciliación del ERP refresca `updated_at`, así que el latido dejó fuera #549/#550 y metió #154. Fix e00d242: el reloj de inactividad es el último paso del motor; además, git y journal salen del event loop.
+- **Traspaso:**
+  - **Despliegue de e00d242 pendiente:** está en main (4bc57f7) pero sin desplegar. El checkout vivo lo usa el builder de #486, así que el reinicio va por el despliegue en ocioso del mecánico (`mechanic_state`).
+  - **#549/#550** (MIS-8C06FB6C, `needs_owner: invalid plan … missing ESTIMATE`): los toma el siguiente latido. Es un defecto de diseño, no un caso: el plan de Tier S es texto libre y el validador `plan.py:175` lo rechaza entero si falta la línea ESTIMATE (867362a, 00448).
+  - **Fase 2 propuesta:** contratos por esquema (`--output-schema`), tolerancia en campos informativos y menos relevos.
+
 ## 2026-11-05 — Escalado repo_busy: la suciedad persistente ya no para la misión en silencio (TASK-2026-00506)
 
 - Sí fue bug: el builder de #548 dejó `.openceo/HANDOFF.md` con intención de añadir forzada (`git add -N -f`) en el checkout vivo de jardal-erp, y cada intento posterior aparcó en `repo_busy` cada 15 min, en silencio («transient waits heal alone») y reteniendo el lock: parada ~19:19→20:48 hasta limpieza manual. main nunca se contaminó (el squash excluye `.openceo/`).
