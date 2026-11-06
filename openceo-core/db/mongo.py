@@ -9,6 +9,7 @@ from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.errors import BulkWriteError, DuplicateKeyError
 
 from horizon.privacy import mirror_exclusion_filter
+from objectives import recovery_policy as recovery_mod
 from research.contracts import (
     TERMINAL_STATUSES,
     ResearchIdempotencyConflict,
@@ -288,6 +289,12 @@ class MongoRepository:
         await self.dev_missions.create_index([("project", ASCENDING), ("status", ASCENDING)])
         await self.dev_objectives.create_index([("objective_id", ASCENDING)], unique=True)
         await self.dev_objectives.create_index([("project", ASCENDING), ("status", ASCENDING)])
+        # Objective recovery on the global schedule kernel (ticket #570):
+        # the agenda's only wait query is the nearest waiting due.
+        await self.dev_objectives.create_index(
+            [("status", ASCENDING), ("recovery.due_at", ASCENDING)],
+            name="idx_dev_objectives_recovery_due",
+        )
         await self.ceo_reviews.create_index([("review_id", ASCENDING)], unique=True)
         await self.ceo_reviews.create_index([("at", DESCENDING)])
         await self.agent_status.create_index(
@@ -1383,6 +1390,135 @@ class MongoRepository:
             return_document=ReturnDocument.AFTER,
         )
         return self._clean(row) if row is not None else None
+
+    async def next_objective_recovery_due_at(self) -> datetime | None:
+        """Nearest recovery due of a waiting, unsealed objective (ticket #570).
+
+        The only wait query of the objectives agenda: ``waiting`` + no
+        ``claimed_boot_id`` seal + a persisted due, oldest first. The due
+        is an ISO string (``recovery_policy`` writes it); an unparsable
+        value is not a due the kernel can wait on.
+        """
+        rows = (
+            self.dev_objectives.find(
+                {
+                    "status": "waiting",
+                    "claimed_boot_id": None,
+                    "recovery.due_at": {"$ne": None},
+                },
+                sort=[("recovery.due_at", ASCENDING)],
+            ).limit(1)
+        )
+        async for row in rows:
+            recovery = row.get("recovery") or {}
+            return recovery_mod.parse_due(recovery.get("due_at"))
+        return None
+
+    async def list_due_objective_recoveries(
+        self, now: datetime, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Waiting objectives the agenda may seal now: past dues + spent parks.
+
+        Past dues compare as ISO strings (the policy always writes the
+        same ``+00:00`` shape, so lexicographic order is chronological).
+        Spent parks carry no due (``None``) but still need their ticket
+        round: they ride along so the decision — not the query — resolves
+        them, as the old tick did when it scanned every waiting objective.
+        """
+        now_iso = now.astimezone(timezone.utc).isoformat()
+        rows = (
+            self.dev_objectives.find(
+                {
+                    "status": "waiting",
+                    "claimed_boot_id": None,
+                    "$or": [
+                        {"recovery.due_at": {"$ne": None, "$lte": now_iso}},
+                        {"recovery.exhausted": True},
+                    ],
+                },
+                sort=[("recovery.due_at", ASCENDING)],
+            ).limit(max(1, int(limit)))
+        )
+        return [self._clean(row) async for row in rows]
+
+    async def seal_objective_recovery(
+        self, objective_id: str, due_at: Any, boot_id: str
+    ) -> dict[str, Any] | None:
+        """Atomic boot-stamped seal of one due recovery (ticket #570).
+
+        Only a waiting, unsealed objective whose persisted due still
+        matches can be sealed: the seal reserves the item for this boot's
+        agenda lane while the existing ``claim_objective_recovery`` keeps
+        spending the attempt when the run replans. ``claimed_boot_id`` is
+        the only new field: additive, optional, no data migration.
+        """
+        now = datetime.now(timezone.utc)
+        row = await self.dev_objectives.find_one_and_update(
+            {
+                "objective_id": objective_id,
+                "status": "waiting",
+                "claimed_boot_id": None,
+                "recovery.due_at": due_at,
+            },
+            {"$set": {"claimed_boot_id": boot_id, "updated_at": now}},
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._clean(row)
+
+    async def release_objective_recovery_claim(
+        self, objective_id: str, boot_id: str
+    ) -> dict[str, Any] | None:
+        """Release one seal, only when this boot still owns it.
+
+        The fence is the seal alone: a settled objective may be ``active``
+        (replanned) or ``waiting`` (re-parked with its next due). A stale
+        settle (``None``) is ignored.
+        """
+        row = await self.dev_objectives.find_one_and_update(
+            {"objective_id": objective_id, "claimed_boot_id": boot_id},
+            {"$set": {"claimed_boot_id": None,
+                      "updated_at": datetime.now(timezone.utc)}},
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._clean(row)
+
+    async def release_objective_recovery_claims_for_boot(
+        self, boot_id: str
+    ) -> int:
+        """Release every seal of another boot, with no age threshold (#570).
+
+        The objectives agenda calls it once from ``recover_at_boot``: with
+        a single instance per host, any seal of an older boot is orphaned
+        at once (D3 of TASK-2026-00441). Unlike the trigger/schedule
+        sisters, ``$ne`` alone would also match the field-less rest state,
+        so sealed rows are selected explicitly; any status qualifies.
+        """
+        result = await self.dev_objectives.update_many(
+            {"claimed_boot_id": {"$exists": True, "$nin": [None, boot_id]}},
+            {"$set": {"claimed_boot_id": None,
+                      "updated_at": datetime.now(timezone.utc)}},
+        )
+        return int(result.modified_count or 0)
+
+    async def mark_objective_deploys_due_for_boot(self, now: datetime) -> int:
+        """Due now every deploy park requested before this boot (ticket #570).
+
+        The boot a deploy park waited for already happened: the fix is
+        live, so the park is resumable at once instead of at its retry due
+        — the same immediacy the old tick had when it scanned every
+        waiting objective on its first pass. The decision still says
+        ``resume``; this only moves the due the agenda waits on.
+        """
+        moment = now.astimezone(timezone.utc)
+        result = await self.dev_objectives.update_many(
+            {
+                "status": "waiting",
+                "recovery.deploy.requested_at": {"$lt": moment.isoformat()},
+            },
+            {"$set": {"recovery.due_at": moment.isoformat(),
+                      "updated_at": moment}},
+        )
+        return int(result.modified_count or 0)
 
     async def list_tasks_by_objective(
         self, objective_id: str, limit: int = 100,

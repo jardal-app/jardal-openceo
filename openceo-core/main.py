@@ -66,6 +66,7 @@ from objectives.missions import (
     MissionRejected,
 )
 from objectives.recovery_scheduler import RecoveryScheduler
+from objectives.schedule_agenda import ObjectivesRecoveryAgenda
 from mechanic.service import MechanicService, mechanic_config
 from objectives.recovery_deploy import live_checkout_ready, spawn_service_restart
 from objectives.service import ObjectiveService, create_internal_ticket
@@ -260,11 +261,22 @@ ceo_loop = CEOLoop(
 )
 task_service.set_ceo_wake(ceo_loop.wake)
 objective_service.set_ceo_wake(ceo_loop.wake)
-# Objective recovery timer (TASK-2026-00481): one event-driven task that
-# retries a parked objective at its persisted due time and opens a musej
-# recovery ticket when the budget is spent. Never a poll loop.
+# La recuperacion de objetivos (TASK-2026-00481) corre en el kernel de
+# schedule global (ticket #570): la agenda vive en el lifespan. El scheduler
+# aislado se conserva sin arrancar (oraculo y delegacion de ``wake``); los
+# parks y cierres siguen avisando por ``recovery_wake``, re-enlazado abajo.
 recovery_scheduler = RecoveryScheduler(objective_service)
 objective_service.set_recovery_wake(recovery_scheduler.wake)
+
+
+async def _run_objective_recovery(claimed: dict[str, Any]) -> dict[str, Any]:
+    """Agenda handler: decide and act for one sealed recovery (ticket #570).
+
+    The seal carries the objective id; the service re-reads it fresh, so a
+    park that moved between the list and the seal still decides correctly.
+    """
+    return await objective_service.recover_waiting_objective(
+        str(claimed.get("objective_id") or ""))
 
 
 def _mechanic_executor() -> ProcessExecutor:
@@ -536,7 +548,8 @@ async def lifespan(_: FastAPI):
         await task_service.drain_erp_outbox_startup()
         await dispatcher.start()
         await ceo_loop.start()
-        await recovery_scheduler.start()
+        # El bucle aislado de recuperacion ya no arranca (ticket #570): su
+        # agenda corre en el kernel compartido, registrado mas abajo.
         await mechanic_service.start()
         # Ojo: dentro de ``lifespan`` hay un ``settings = get_settings()`` mas
         # abajo (bloque de auth) que vuelve ``settings`` local a toda la funcion.
@@ -582,11 +595,11 @@ async def lifespan(_: FastAPI):
         from auth.service import create_default_user_if_needed
         create_default_user_if_needed(_auth_db)
 
-        # Kernel de schedule global (TASK-2026-00441): research (Fase 2, ticket #564)
-        # y Horizon (Fase 3, ticket #567) comparten la espera unica; las
-        # siguientes fases registran las suyas en este mismo kernel. Los
-        # incidentes del kernel van a la coleccion de reliability, como los de
-        # DeadlineWatch.
+        # Kernel de schedule global (TASK-2026-00441): research (Fase 2, ticket #564),
+        # Horizon (Fase 3, ticket #567) y recuperacion de objetivos (Fase 5,
+        # ticket #570) comparten la espera unica; las siguientes fases
+        # registran las suyas en este mismo kernel. Los incidentes del kernel
+        # van a la coleccion de reliability, como los de DeadlineWatch.
         schedule_kernel = ScheduleKernel(
             incidents=repo.db["reliability_incidents"],
             runtime_dir=Path(__file__).resolve().parents[1] / ".runtime",
@@ -627,6 +640,23 @@ async def lifespan(_: FastAPI):
             horizon_agenda.store.bind_waker(lambda: schedule_kernel.wake(horizon_agenda.name))
             horizon_service.bind_waker(lambda: schedule_kernel.wake(horizon_agenda.name))
             horizon_scheduler.delegate_wake_to(lambda: schedule_kernel.wake(horizon_agenda.name))
+        # Recuperacion (ticket #570): siempre activa, sobre el mismo kernel
+        # compartido y registrada antes del arranque para que el recover la
+        # cubra. Cada park sigue despertando por ``recovery_wake``, ahora
+        # enlazado al kernel.
+        recovery_agenda = ObjectivesRecoveryAgenda(
+            repo=repo, handler=_run_objective_recovery)
+        schedule_kernel.register(recovery_agenda)
+        objective_service.set_recovery_wake(
+            lambda: schedule_kernel.wake(recovery_agenda.name))
+        recovery_scheduler.delegate_wake_to(
+            lambda: schedule_kernel.wake(recovery_agenda.name))
+        # Las parks heredadas reciben su primer vencimiento aqui (acotado,
+        # nunca falla el arranque), donde antes sembraba el scheduler aislado.
+        try:
+            await objective_service.seed_recovery_parks()
+        except Exception:
+            logger.warning("recovery seed failed", exc_info=True)
         if _research_consumers is not None:
             # Revocar un consumidor pausa lo que programo en su nombre, de inmediato.
             _loop = asyncio.get_running_loop()
@@ -648,10 +678,14 @@ async def lifespan(_: FastAPI):
         stack.push_async_callback(research_coordinator.stop)
         research_schedules_started = await research_coordinator.start()
         logger.info("Research scheduler %s", "habilitado" if research_schedules_started else "deshabilitado")
-        if settings.HORIZON_ENABLED:
-            # No-op si research ya arranco el kernel compartido; imprescindible
-            # con research apagado (su defecto), porque Horizon viene activo.
-            await schedule_kernel.start()
+        # La recuperacion siempre esta activa, asi que el kernel compartido
+        # siempre arranca (no-op si research ya lo arranco; imprescindible
+        # con research apagado, su defecto, aunque Horizon tambien lo este).
+        await schedule_kernel.start()
+        # Un park agotado previo (su ronda de ticket fallo antes del reinicio)
+        # no tiene vencimiento: este aviso de arranque lo mueve ahora por la
+        # pasada caliente de la agenda, sin esperar al siguiente park.
+        schedule_kernel.wake(recovery_agenda.name)
 
         if internal_mcp is not None:
             logger.info(
@@ -665,9 +699,10 @@ async def lifespan(_: FastAPI):
         yield
 
         await research_coordinator.stop()
-        # El kernel compartido (research + Horizon) ya paro primero al detener
-        # el coordinador: cancela los carriles antes de cerrar el repositorio.
-        # El bucle aislado de Horizon nunca arranco; pararlo solo limpia flags.
+        # El kernel compartido (research + Horizon + recuperacion) ya paro
+        # primero al detener el coordinador: cancela los carriles antes de
+        # cerrar el repositorio. Los bucles aislados de Horizon y
+        # recuperacion nunca arrancaron; pararlos solo limpia flags.
         await horizon_scheduler.stop()
         await mechanic_service.stop()
         await recovery_scheduler.stop()

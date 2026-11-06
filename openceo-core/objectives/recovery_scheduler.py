@@ -21,7 +21,14 @@ __all__ = ["RecoveryScheduler"]
 
 
 class RecoveryScheduler:
-    """Owns the single recovery task; the service owns every decision."""
+    """Owns the single recovery task; the service owns every decision.
+
+    Legacy since ticket #570: in production the global schedule kernel
+    runs ``ObjectivesRecoveryAgenda`` and this loop no longer starts. The
+    class stays behaviorally unchanged as the harness for the frozen
+    oracle (``tests/test_objective_recovery_481.py``,
+    ``tests/test_recovery_deploy_483.py``).
+    """
 
     def __init__(
         self,
@@ -32,12 +39,20 @@ class RecoveryScheduler:
         self._service = service
         self._clock = clock
         self._wake = asyncio.Event()
+        self._wake_delegate: Callable[[], None] | None = None
         self._task: asyncio.Task | None = None
         self._stopped = False
         self._started = False
 
+    def delegate_wake_to(self, waker: Callable[[], None] | None) -> None:
+        """Redirect ``wake`` to the kernel (ticket #570). Unbound, as before."""
+        self._wake_delegate = waker
+
     def wake(self) -> None:
         """Event-driven nudge (parks and closes call this)."""
+        if self._wake_delegate is not None:
+            self._wake_delegate()
+            return
         self._wake.set()
 
     async def start(self) -> None:

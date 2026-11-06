@@ -213,6 +213,9 @@ class ObjectiveService:
         # This process's code is what a deploy park waits for: a park
         # requested before this instant is live now (TASK-2026-00483).
         self._booted_at = datetime.now(timezone.utc)
+        # One deploy restart per process life (ticket #570): a spawned
+        # restart kills this process in seconds, so the flag dies with it.
+        self._deploy_spawned = False
 
     def set_recovery_wake(self, wake: Any | None) -> None:
         """Inject the recovery scheduler wake (TASK-2026-00481)."""
@@ -653,6 +656,89 @@ class ObjectiveService:
         rows = await self._repo.list_boot_resumable_objectives(100)
         return recovery_mod.recovery_seconds_to_next(rows or [])
 
+    async def recover_waiting_objective(
+        self, objective_id: str, *, now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Decide and act for one waiting objective (ticket #570).
+
+        One body shared by the legacy ``recovery_tick`` and the kernel
+        agenda ``run``: fresh decision inputs, the policy decision, then
+        the branch the tick always ran (replan a retry/resume, open the
+        ticket when the budget is spent, restart-or-defer a deploy park).
+        ``due_after`` feeds the tick's sleep; the agenda ignores it and
+        re-reads its index instead.
+        """
+        outcome: dict[str, Any] = {"ok": True, "action": "none",
+                                   "reason": "", "result": {},
+                                   "due_after": None, "deployed": False}
+        if self._repo is None:
+            return {**outcome, "ok": False, "reason": "no-store"}
+        objective = await self._repo.get_objective(objective_id)
+        if objective is None:
+            return {**outcome, "ok": False, "reason": "not-found"}
+        project = str(objective.get("project") or "")
+        if not project or not self._config.has_project(project):
+            return {**outcome, "ok": False, "reason": "unknown-project"}
+        cfg = self._objectives_cfg(project)
+        try:
+            children = await self._repo.list_tasks_by_objective(objective_id)
+        except Exception:  # noqa: BLE001
+            children = []
+        idle = False
+        if recovery_mod.park_reason(objective) \
+                == recovery_mod.DEPLOY_REASON:
+            idle = await self.deploy_idle()
+        decision = recovery_mod.recovery_decision(
+            objective,
+            len(engine_mod._brake_active_children(children)),
+            cfg,
+            ticket_open=await self._recovery_ticket_open(objective_id),
+            now=now,
+            booted_at=self._booted_at,
+            idle=idle,
+        )
+        action = str(decision.get("action") or "none")
+        reason = str(decision.get("reason") or "")
+        if action == "deploy" and self._deploy_spawned:
+            # One restart per process life: a spawned restart kills this
+            # process in seconds, so a second deploy would only race it;
+            # the park keeps checking (and resumes on the running code past
+            # its deadline).
+            action = "deploy-deferred"
+        if action in ("retry", "resume"):
+            result = await self.recover_objective(objective_id)
+            return {**outcome, "ok": bool(result.get("ok")),
+                    "action": action, "reason": reason, "result": result}
+        if action == "ticket":
+            result = await self.open_recovery_ticket(objective_id)
+            return {**outcome, "ok": bool(result.get("ok")),
+                    "action": action, "reason": reason, "result": result}
+        if action in ("deploy", "deploy-deferred", "defer"):
+            spawned = action == "deploy" and await asyncio.to_thread(
+                deploy_mod.spawn_service_restart)
+            if spawned:
+                self._deploy_spawned = True
+            # A restart that never came, or a busy service, checks
+            # again later; the boot after a real restart resumes it.
+            due_after = recovery_mod.deploy_retry_due(cfg)
+            await self._repo.patch_objective(objective_id, {"recovery": {
+                **dict(objective.get("recovery") or {}),
+                "due_at": due_after}})
+            if spawned:
+                logger.warning(
+                    "Recovery deploy: restarting the idle service so "
+                    "objective %s resumes on its merged fix",
+                    objective_id)
+            return {**outcome, "action": "deploy" if spawned else "defer",
+                    "reason": reason, "result": {"spawned": bool(spawned)},
+                    "due_after": due_after, "deployed": bool(spawned)}
+        due_after = None
+        if reason == "not due":
+            due_after = (objective.get("recovery") or {}).get("due_at") \
+                if isinstance(objective.get("recovery"), Mapping) else None
+        return {**outcome, "action": action, "reason": reason,
+                "due_after": due_after}
+
     async def recovery_tick(self) -> dict[str, Any]:
         """One scheduler pass: retry due parks, open tickets when spent.
 
@@ -663,52 +749,18 @@ class ObjectiveService:
         ticketed: list[str] = []
         deployed: list[str] = []
         next_due: Any = None
-        idle: bool | None = None
         candidates = await self.recovery_candidates()
         for candidate in candidates:
-            objective = candidate["objective"]
             objective_id = candidate["objective_id"]
-            if idle is None and recovery_mod.park_reason(objective) \
-                    == recovery_mod.DEPLOY_REASON:
-                idle = await self.deploy_idle()
-            decision = recovery_mod.recovery_decision(
-                objective,
-                candidate["active_children"],
-                candidate["objectives_cfg"],
-                ticket_open=candidate["ticket_open"],
-                booted_at=self._booted_at,
-                idle=bool(idle),
-            )
-            action = str(decision.get("action") or "none")
-            due_after: Any = None
-            if action in ("retry", "resume"):
-                result = await self.recover_objective(objective_id)
-                if result.get("ok"):
-                    retried.append(objective_id)
-            elif action == "ticket":
-                result = await self.open_recovery_ticket(objective_id)
-                if result.get("ok"):
-                    ticketed.append(objective_id)
-            elif action in ("deploy", "defer"):
-                spawned = action == "deploy" and await asyncio.to_thread(
-                    deploy_mod.spawn_service_restart)
-                # A restart that never came, or a busy service, checks
-                # again later; the boot after a real restart resumes it.
-                due_after = recovery_mod.deploy_retry_due(
-                    candidate["objectives_cfg"])
-                await self._repo.patch_objective(objective_id, {"recovery": {
-                    **dict(objective.get("recovery") or {}),
-                    "due_at": due_after}})
-                if spawned:
-                    deployed.append(objective_id)
-                    logger.warning(
-                        "Recovery deploy: restarting the idle service so "
-                        "objective %s resumes on its merged fix",
-                        objective_id)
-            elif str(decision.get("reason") or "") == "not due":
-                due_after = (objective.get("recovery") or {}).get("due_at") \
-                    if isinstance(objective.get("recovery"), Mapping) else None
-            parsed = recovery_mod.parse_due(due_after)
+            acted = await self.recover_waiting_objective(objective_id)
+            action = str(acted.get("action") or "none")
+            if action in ("retry", "resume") and acted.get("ok"):
+                retried.append(objective_id)
+            elif action == "ticket" and acted.get("ok"):
+                ticketed.append(objective_id)
+            if acted.get("deployed"):
+                deployed.append(objective_id)
+            parsed = recovery_mod.parse_due(acted.get("due_after"))
             if parsed is not None and (next_due is None or parsed < next_due):
                 next_due = parsed
             if deployed:
