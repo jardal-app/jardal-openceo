@@ -353,8 +353,10 @@ def _plan_retry_prompt(errors: str, signal: str, repo: Path) -> str:
         hint = ("FILES lines use exactly: - <path> "
                 "(<create|modify|delete>) — <why>.\n")
     return knowledge_mod.with_preamble(
-        f"Your PLAN.md is invalid: {errors}\n{hint}Fix it in place "
-        f"and emit {signal} again.", repo, "en")
+        f"Your PLAN.md is invalid: {errors}\n{hint}Edit only those lines "
+        "in the existing .openceo/PLAN.md; keep the rest as it is and do "
+        f"not re-investigate the repository. Then emit {signal} again.",
+        repo, "en")
 
 
 def _plan_response_retry_prompt(
@@ -1195,6 +1197,8 @@ class TierSCycle:
                 plan, ctx.repo, int(ctx.budgets.get("files_per_ticket", 8)),
                 ctx.budget_exclude,
                 budget_lines=int(ctx.budgets.get("lines_per_ticket", 400)),
+                fallback_goal=str(ctx.ticket.get("title") or ""),
+                fallback_acceptance=self._acceptance(ctx),
             ) if plan else None
             if plan is not None and validation is not None and validation.valid:
                 await self._runs.patch_run(ctx.run_id, {
