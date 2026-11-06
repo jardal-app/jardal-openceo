@@ -253,9 +253,6 @@ def classify_park(reason: str, detail: str,
         return {"executed": False,
                 "marker": f"waiting:{reason}:{text[:60]}".strip(),
                 "capture": None}
-    if reason == "needs_owner" and "scheduled_wait declined" in text:
-        return {"executed": True, "marker": "brake_exhausted:scheduled_wait",
-                "capture": {"kind": "brake_exhausted", "brake": "scheduled_wait"}}
     if reason == "needs_owner" and "short of quorum" in text:
         return {"executed": True, "marker": "brake_exhausted:quorum",
                 "capture": {"kind": "brake_exhausted", "brake": "quorum"}}

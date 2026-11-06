@@ -221,7 +221,8 @@ def test_preflight_checks_given_epic(monkeypatch):
 
 
 def test_restart_checks_release_before_stop():
+    # The healthy instance is only restarted once the clean-tree gate passed.
     text = (_REPO / "scripts" / "openceo-core-host.sh").read_text()
     branch = text.split("restart)")[1].split(";;")[0]
     assert "write-release.sh" in branch
-    assert branch.index("write-release.sh") < branch.index("stop")
+    assert branch.index("write-release.sh") < branch.index("systemctl --user")

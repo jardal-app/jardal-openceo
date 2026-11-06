@@ -1,9 +1,9 @@
-"""Tier S scheduled_wait cap (TASK-2026-00366, diseño v2 §4.7).
+"""Tier S scheduled waits (TASK-2026-00366, generalized by TASK-2026-00510).
 
-Tier S comparte el contrato de TASK-2026-00350 con A/B/C y el agente
-genérico: como máximo 3 declinaciones scheduled_wait consecutivas y
-después needs_owner. El contador vive en los params del ticket y
-sobrevive a la reanudación; la ruta hecho lo limpia.
+Every scheduled_wait parks with its timer and checkpoint; the engine keeps
+no counter of its own. Repeats are bounded by the generic stall rule on
+the run outcome write (tests/test_mechanic_510.py), which sees the
+resume_at this outcome carries.
 """
 from __future__ import annotations
 
@@ -31,8 +31,6 @@ from agents.dev.tier_s.stores import (
     InMemoryTaskStore,
 )
 from objectives.agent_result import (
-    SCHEDULED_WAIT_COUNT_KEY,
-    SCHEDULED_WAIT_MAX_DECLINES,
     AgentResult,
 )
 from orchestration.live import ExecResult
@@ -117,36 +115,28 @@ def make_ctx(repo, tasks_ticket_params: dict, run_id: str = "run",
 
 
 @run_async
-async def test_scheduled_wait_cap_escalates_after_three_declines(repo):
-    assert SCHEDULED_WAIT_MAX_DECLINES == 3
+async def test_repeated_waits_always_park_with_a_timer(repo):
     runs, tasks = InMemoryRunStore(), InMemoryTaskStore()
     base = git(repo, "rev-parse", "HEAD")
-    persisted: dict = {}
-    for expected in range(1, SCHEDULED_WAIT_MAX_DECLINES + 1):
-        branch = f"tier-s/t-wip-{expected}"
+    for attempt in range(1, 5):
+        branch = f"tier-s/t-wip-{attempt}"
         git(repo, "checkout", "-qb", branch)
-        run_id = f"run-{expected}"
+        run_id = f"run-{attempt}"
         await runs.create_run({"run_id": run_id, "task_id": "t",
                                "status": "running"})
         cycle = make_cycle(runs, tasks, ScriptedExecutor([wait_verdict()]))
-        ctx = make_ctx(repo, persisted, run_id=run_id, branch=branch)
+        ctx = make_ctx(repo, {}, run_id=run_id, branch=branch)
         ctx.base_sha = base
         assert await cycle._build(ctx, demo_plan()) is False
         outcome = ctx.parked_outcome
         assert outcome is not None
-        persisted = dict(tasks.patches["t"]["params"])
-        assert persisted[SCHEDULED_WAIT_COUNT_KEY] == expected
-        if expected < SCHEDULED_WAIT_MAX_DECLINES:
-            assert outcome.reason == "scheduled_wait"
-            assert outcome.resume_at is not None
-        else:
-            assert outcome.reason == "needs_owner"
-            assert outcome.resume_at is None
-            assert outcome.detail.startswith("scheduled_wait declined 3 times")
+        assert outcome.reason == "scheduled_wait"
+        assert outcome.resume_at is not None
+        assert "scheduled_wait_count" not in (tasks.patches.get("t") or {}).get("params", {})
 
 
 @run_async
-async def test_legit_wait_before_cap_keeps_timer_and_checkpoint(repo):
+async def test_legit_wait_keeps_timer_and_checkpoint(repo):
     runs, tasks = InMemoryRunStore(), InMemoryTaskStore()
     await runs.create_run({"run_id": "run", "task_id": "t",
                            "status": "running"})
@@ -165,24 +155,6 @@ async def test_legit_wait_before_cap_keeps_timer_and_checkpoint(repo):
     assert outcome.agent_result["evidencia"] == verdict.evidencia
     saved = await runs.resumable_run("t")
     assert saved is not None and saved["checkpoint"]["phase"] == "build"
-    assert tasks.patches["t"]["params"][SCHEDULED_WAIT_COUNT_KEY] == 1
-
-
-@run_async
-async def test_scheduled_wait_count_clears_on_hecho(repo):
-    runs, tasks = InMemoryRunStore(), InMemoryTaskStore()
-    await runs.create_run({"run_id": "run", "task_id": "t",
-                           "status": "running"})
-    git(repo, "checkout", "-qb", "tier-s/t-wip")
-    base = git(repo, "rev-parse", "main")
-    (repo / "tracked.txt").write_text("after\n")
-    (repo / ".openceo").mkdir(exist_ok=True)
-    (repo / ".openceo" / "HANDOFF.md").write_text("cambio mínimo verificado")
-    cycle = make_cycle(runs, tasks, ScriptedExecutor([done_verdict()]))
-    ctx = make_ctx(repo, {SCHEDULED_WAIT_COUNT_KEY: 2})
-    ctx.base_sha = base
-    assert await cycle._build(ctx, demo_plan()) is True
-    assert SCHEDULED_WAIT_COUNT_KEY not in tasks.patches["t"]["params"]
 
 
 _RUN_PLAN_MD = """TICKET: TASK-2026-99999
@@ -278,14 +250,11 @@ def run_cfg(roles: dict) -> dict:
 
 
 @run_async
-async def test_scheduled_wait_count_travels_in_outcome_across_resumes(repo):
-    """H1 regression: the count must travel in the CycleOutcome.
+async def test_every_resume_parks_with_a_timer_for_the_generic_rule(repo):
+    """Each outcome carries reason and resume_at to the run outcome write.
 
-    _run_tier_s rebuilds DevExecutionOutput.params from the run-start
-    snapshot and run_task persists it over the cycle's store patch, so a
-    count kept only in the task store never reaches the third decline.
-    Each resume below is fed exclusively from the previous outcome.params,
-    like production re-reading the ticket from Mongo.
+    That write is where the generic stall rule counts repeats; the cycle
+    itself keeps no counter, so nothing escalates inside the engine.
     """
     runs = InMemoryRunStore()
     locks = InMemoryLockStore()
@@ -300,18 +269,12 @@ async def test_scheduled_wait_count_travels_in_outcome_across_resumes(repo):
                     "command": ["true"]},
     }
     carried: dict = {}
-    for expected in range(1, SCHEDULED_WAIT_MAX_DECLINES + 1):
+    for _attempt in range(4):
         cycle = TierSCycle(runs, locks, tasks,
                            RunBoundaryExecutor([wait_verdict()]))
         outcome = await cycle.run(run_ticket("t", carried), repo,
                                   run_cfg(roles), gate_specs=[])
-        assert outcome.params is not None
-        carried = dict(outcome.params)
-        assert carried[SCHEDULED_WAIT_COUNT_KEY] == expected
-        if expected < SCHEDULED_WAIT_MAX_DECLINES:
-            assert outcome.reason == "scheduled_wait"
-            assert outcome.resume_at is not None
-        else:
-            assert outcome.reason == "needs_owner"
-            assert outcome.resume_at is None
-            assert outcome.detail.startswith("scheduled_wait declined 3 times")
+        assert outcome.reason == "scheduled_wait"
+        assert outcome.resume_at is not None
+        carried = dict(outcome.params or {})
+        assert "scheduled_wait_count" not in carried

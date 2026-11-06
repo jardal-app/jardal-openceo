@@ -29,7 +29,6 @@ BRAKE_PROVIDER = "provider"
 BRAKE_QUORUM = "quorum"
 BRAKE_GATES = "gates"
 BRAKE_CORRECTION = "correction"
-BRAKE_SCHEDULED_WAIT = "scheduled_wait"
 
 MILESTONE_GATE_FIXED = "gate-fixed"
 MILESTONE_REVIEW_REPORT = "review-report"

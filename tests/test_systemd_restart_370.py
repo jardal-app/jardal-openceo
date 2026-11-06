@@ -86,9 +86,16 @@ def test_scripts_compile():
 def test_host_script_has_foreground_mode():
     text = HOST_SH.read_text(encoding="utf-8")
     assert "foreground)" in text
-    assert "unit_managed" in text
-    assert "systemctl --user stop openceo-core-host.service" in text
+    assert "require_unit" in text
+    assert 'systemctl --user stop "$UNIT"' in text
     assert "journalctl --user" in text
+
+
+def test_host_script_has_no_unsupervised_start_path():
+    # TASK-2026-00510: the unit is the only way to run the core.
+    text = HOST_SH.read_text(encoding="utf-8")
+    for legacy in ("setsid", "PID_FILE", "unit_managed", "nohup"):
+        assert legacy not in text, legacy
 
 
 def test_host_unit_orders_after_docker():
@@ -152,33 +159,43 @@ def test_restart_delegates_to_systemd_when_managed(
 def test_stop_delegates_to_systemd_when_managed(
     systemctl_shim: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    monkeypatch.setenv("SHIM_CAT_RC", "1")  # vía script: refresca el pidfile
-    _run(["bash", str(HOST_SH), "status"])
     monkeypatch.setenv("SHIM_CAT_RC", "0")
     monkeypatch.setenv("SHIM_ENABLED_RC", "0")
     proc = _run(["bash", str(HOST_SH), "stop"])
     assert proc.returncode == 0, proc.stderr
     assert "--user stop openceo-core-host.service" in systemctl_shim.read_text()
-    pidfile = _REPO / ".runtime" / "openceo-core-host.pid"
-    if pidfile.exists() and pidfile.read_text().strip().isdigit():
-        os.kill(int(pidfile.read_text().strip()), 0)  # sigue vivo si no lanza
 
 
-def test_stop_without_instance_exits_clean(
-    tmp_path: Path, systemctl_shim: Path, monkeypatch: pytest.MonkeyPatch
+def test_start_delegates_to_systemd(
+    systemctl_shim: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Nothing running: stop must not die under pipefail (TASK-2026-00448).
+    release = _REPO / ".runtime" / "RELEASE"
+    backup = release.read_text() if release.exists() else None
+    monkeypatch.setenv("SHIM_CAT_RC", "0")
+    try:
+        proc = _run(["bash", str(HOST_SH), "start"])
+    finally:
+        if backup is not None:
+            release.write_text(backup)
+    assert proc.returncode == 0, proc.stderr
+    assert "--user start openceo-core-host.service" in systemctl_shim.read_text()
 
-    restart runs stop then start; a failing stop left the core down.
-    """
+
+@pytest.mark.parametrize("command", ["start", "stop", "restart", "status", "logs"])
+def test_without_the_unit_every_command_refuses(
+    tmp_path: Path, systemctl_shim: Path, monkeypatch: pytest.MonkeyPatch,
+    command: str,
+):
+    """No unit, no core: nothing falls back to an unsupervised start."""
     root = tmp_path / "root"
     (root / "scripts").mkdir(parents=True)
     script = root / "scripts" / HOST_SH.name
     script.write_text(HOST_SH.read_text(encoding="utf-8"), encoding="utf-8")
-    monkeypatch.setenv("SHIM_CAT_RC", "1")  # no unit: script path
-    proc = _run(["bash", str(script), "stop"])
-    assert proc.returncode == 0, proc.stderr
-    assert "not running" in proc.stdout
+    monkeypatch.setenv("SHIM_CAT_RC", "1")
+    proc = _run(["bash", str(script), command])
+    assert proc.returncode == 1
+    assert "openceo-systemd-migrate.sh install" in proc.stdout
+    assert "--user start" not in systemctl_shim.read_text()
 
 
 def test_status_reports_unit_active(
@@ -203,7 +220,7 @@ def test_status_reports_unit_stopped(
     assert "unit inactive" in proc.stdout
 
 
-def test_unit_managed_sets_bus_env_without_session(
+def test_require_unit_sets_bus_env_without_session(
     systemctl_shim: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setenv("SHIM_CAT_RC", "0")

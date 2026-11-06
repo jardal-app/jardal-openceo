@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Migra el core entre arranque por script y unidad systemd de usuario
-# (TASK-2026-00370, §16.4). Nunca hay dos instancias: install para el
-# arranque por script antes de habilitar la unidad; uninstall la retira
-# sin arrancar nada (el operador decide cuándo volver al script).
+# Instala o retira la unidad systemd de usuario del core (TASK-2026-00370,
+# §16.4). Es la única forma de correr el core (TASK-2026-00510): install
+# para cualquier proceso suelto antes de habilitar la unidad; uninstall la
+# retira y el core queda parado hasta reinstalarla.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -56,11 +56,24 @@ cmd_status() {
   bash "$ROOT_DIR/scripts/openceo-core-host.sh" status || true
 }
 
+stop_strays() {
+  # A core started outside the unit would hold the lock (exit 3 for the
+  # unit); SIGTERM lets its lifespan shut down cleanly first.
+  local py="$ROOT_DIR/.venv/bin/python" pids
+  pids="$(ps -C python -o pid=,args= | awk -v py="$py" '$2 == py && $3 == "main.py" {print $1}')"
+  [[ -z "${pids// }" ]] && return 0
+  kill $pids 2>/dev/null || true
+  for _ in $(seq 1 30); do
+    kill -0 $pids 2>/dev/null || return 0
+    sleep 1
+  done
+  kill -9 $pids 2>/dev/null || true
+}
+
 cmd_install() {
   need_systemd
   check_linger
-  # Sin dos instancias: primero se para el arranque por script.
-  bash "$ROOT_DIR/scripts/openceo-core-host.sh" stop
+  stop_strays
   link_units
   systemctl --user enable --now openceo-core-host.service
   sleep 2
@@ -71,8 +84,8 @@ cmd_uninstall() {
   need_systemd
   systemctl --user disable --now openceo-core-host.service || true
   unlink_units
-  echo "Unidad retirada. Para volver al script:"
-  echo "  scripts/openceo-core-host.sh restart && scripts/openceo-core-host.sh status"
+  echo "Unidad retirada: el core no corre hasta reinstalarla (no hay arranque por script)."
+  echo "  scripts/openceo-systemd-migrate.sh install"
 }
 
 case "${1:-}" in

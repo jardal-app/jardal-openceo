@@ -20,19 +20,19 @@ y mantiene las credenciales de `~/.codex` y `~/.claude`.
 ## Migrar (sin dos instancias)
 
 ```bash
-scripts/openceo-systemd-migrate.sh install   # para el script, enlaza, enable --now, verifica
-scripts/openceo-systemd-migrate.sh status    # estado de unidad y de script
-scripts/openceo-systemd-migrate.sh uninstall # disable --now y retira los enlaces
+scripts/openceo-systemd-migrate.sh install   # para procesos sueltos, enlaza, enable --now, verifica
+scripts/openceo-systemd-migrate.sh status    # estado de la unidad
+scripts/openceo-systemd-migrate.sh uninstall # disable --now y retira los enlaces (el core queda parado)
 ```
 
 `install` enlaza (symlink) los ficheros del repo en
 `~/.config/systemd/user/` para que el repo sea la fuente de verdad.
 Antes verifica `Linger` y falla con el comando exacto si falta.
-Tras `uninstall`, volver al script con
-`scripts/openceo-core-host.sh restart`. `restart`/`status` delegan en
-`systemctl --user` solo cuando la unidad está habilitada o activa; si
-no, siguen por la vía del script. Nunca habilitar ambas a la vez
-(CLAUDE.md §3).
+La unidad es la única forma de correr el core (TASK-2026-00510): no hay
+arranque por script. `scripts/openceo-core-host.sh start|stop|restart|status|logs`
+delega siempre en `systemctl --user`/`journalctl` y falla con el comando de
+instalación si la unidad no está instalada; `foreground` es el `ExecStart`
+de la unidad. Tras `uninstall` el core queda parado hasta reinstalarla.
 
 ## Webhook de alerta
 

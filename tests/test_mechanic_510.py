@@ -572,6 +572,28 @@ def test_fix_done_deploys_when_idle_and_resumes_after_boot(tmp_path: Path) -> No
     assert "deploy" not in repo["mechanic_state"].state
 
 
+def test_long_pending_deploy_forces_once_the_checkout_is_free(tmp_path: Path) -> None:
+    repo = _Repo([])
+    spawn = MagicMock(return_value=True)
+    service, _ = _service(tmp_path, repo, [])
+    service._deploy_ready = AsyncMock(return_value=False)
+    service._checkout_ready = MagicMock(return_value=True)
+    service._spawn_restart = spawn
+    state = repo["mechanic_state"].state
+    state["deploy"] = {"_id": "deploy", "pending": True,
+                       "since": NOW - timedelta(minutes=10)}
+    asyncio.run(service._deploy_if_ready())
+    spawn.assert_not_called()
+    state["deploy"]["since"] = NOW - timedelta(minutes=45)
+    service._checkout_ready.return_value = False
+    asyncio.run(service._deploy_if_ready())
+    spawn.assert_not_called()
+    service._checkout_ready.return_value = True
+    asyncio.run(service._deploy_if_ready())
+    spawn.assert_called_once()
+    assert state["deploy"]["spawned_at"] == NOW
+
+
 def test_failed_fix_wakes_a_new_diagnosis(tmp_path: Path) -> None:
     repo = _Repo([_task("t1", updated_at=NOW - timedelta(minutes=1)),
                   _task("fix-1", status="failed", error="gates red",

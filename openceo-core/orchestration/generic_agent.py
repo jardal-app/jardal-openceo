@@ -51,13 +51,10 @@ from catalog import (
 )
 from objectives.agent_result import (
     AGENT_RESULT_PROMPT,
-    SCHEDULED_WAIT_COUNT_KEY,
-    SCHEDULED_WAIT_MAX_DECLINES,
     AgentOutcome,
     AgentResult,
     parse_agent_result,
     scheduled_resume,
-    scheduled_wait_declines,
 )
 from objectives import ticket_cost as cost_mod
 from orchestration.agent_sandbox import ensure_ticket_dir
@@ -759,7 +756,6 @@ async def _run_llm(
     if verdict is None:
         summary = (result.output_tail or "").strip() or "ok"
         legacy_params = dict(run_params)
-        legacy_params.pop(SCHEDULED_WAIT_COUNT_KEY, None)
         return await _reliability_finish_agent(
             agent_name, task, {
                 "selected_agent": agent_name,
@@ -780,22 +776,8 @@ async def _run_llm(
                 agent_name, run_params, "LLM run",
                 error=str(exc), verdict=verdict, cost_runs=runs), wiring)
     if resume_at is not None:
-        declines = max(scheduled_wait_declines(task.get("params")),
-                       scheduled_wait_declines(run_params)) + 1
         waited_params = {**run_params,
-                         "agent_result": verdict.model_dump(mode="json"),
-                         SCHEDULED_WAIT_COUNT_KEY: declines}
-        if declines >= SCHEDULED_WAIT_MAX_DECLINES:
-            reason = (
-                "needs_owner: scheduled_wait declined "
-                f"{declines} times in a row: {verdict.motivo} "
-                f"(last resume_at={resume_at.isoformat()}; no re-park)")
-            out = _waiting(agent_name, reason, waited_params)
-            out.update(last_response_summary=verdict.motivo,
-                       result_comment=f"{agent_name}: {reason}")
-            out[cost_mod.COST_RUNS_KEY] = runs
-            return await _reliability_finish_agent(
-                agent_name, task, out, wiring)
+                         "agent_result": verdict.model_dump(mode="json")}
         reason = f"scheduled_wait: {verdict.motivo}"
         out = _waiting(agent_name, reason, waited_params)
         out.update(resume_at=resume_at, last_response_summary=verdict.motivo,
@@ -806,7 +788,6 @@ async def _run_llm(
     if verdict.resultado is AgentOutcome.HECHO:
         out_params = {**run_params,
                       "agent_result": verdict.model_dump(mode="json")}
-        out_params.pop(SCHEDULED_WAIT_COUNT_KEY, None)
         return await _reliability_finish_agent(
             agent_name, task, {
                 "selected_agent": agent_name,
@@ -924,9 +905,6 @@ async def _reliability_finish_agent(
                 and out.get("resume_at") is not None:
             executed = False
             marker = "waiting:scheduled"
-        elif "needs_owner: scheduled_wait" in reason:
-            marker = "brake_exhausted:scheduled_wait"
-            capture = {"kind": "brake_exhausted", "brake": "scheduled_wait"}
         else:
             executed = False
             marker = f"waiting:{reason[:60]}".strip()
@@ -1006,7 +984,6 @@ def _failed(agent_name: str, params: dict[str, Any], where: str, *,
             cost_runs: list[dict[str, Any]] | None = None,
             ) -> dict[str, Any]:
     out_params = dict(params)
-    out_params.pop(SCHEDULED_WAIT_COUNT_KEY, None)
     if verdict is not None:
         out_params["agent_result"] = verdict.model_dump(mode="json")
     comment = (f"{agent_name}: {verdict.resultado.value}: {verdict.motivo}"
