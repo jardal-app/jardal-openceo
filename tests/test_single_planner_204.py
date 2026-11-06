@@ -554,6 +554,17 @@ def _completed_out(**overrides: Any) -> dict[str, Any]:
 
 
 class ExplicitSkipsPlannerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_targetless_delegation_returns_to_the_single_planner(self) -> None:
+        from mechanic.handoff import HANDOFF_KEY
+
+        handoff = {"run_id": "MEC-1", "instruction": "Choose an existing agent", "diagnosis": "recipe unavailable"}
+        task = _pedido(params={"workflow": "missing.recipe", HANDOFF_KEY: handoff})
+        self.assertTrue(is_pedido(task))
+        prompt = engine_mod._pedido_prompt(task)
+        self.assertIn("Choose an existing agent", prompt)
+        self.assertFalse(is_pedido({**task, "agent_hint": "finance"}))
+        self.assertFalse(is_pedido({**task, "workflow_phases": [{"type": "human"}]}))
+
     async def test_explicit_ticket_never_touches_planner(self) -> None:
         objectives = MagicMock()
         service, _repo, graph = _run_service(
@@ -621,7 +632,7 @@ class ExplicitSkipsPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("OBJ-9", note)
         self.assertIn("Declared spend", note)
 
-    async def test_pre_stage_crash_fails_terminally(self) -> None:
+    async def test_pre_stage_crash_yields_to_mechanic(self) -> None:
         from task_service import TaskService  # noqa: E402
         objectives = MagicMock()
         service, repo, graph = _run_service(
@@ -633,7 +644,7 @@ class ExplicitSkipsPlannerTests(unittest.IsolatedAsyncioTestCase):
             out = await service.run_task("task-pedido-1", force=True)
         self.assertEqual(graph.seen, [])
         assert out is not None
-        self.assertEqual(out["status"], TaskStatus.FAILED.value)
+        self.assertEqual(out["status"], TaskStatus.WAITING.value)
         self.assertIn("boom", out["error"])
         service.comment_on_ticket.assert_awaited_once()
 
@@ -695,12 +706,14 @@ class ExplicitSkipsPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(repo.task["coding_tool"], "tier_a")
         self.assertEqual(repo.task["params"]["decided_by"], "planner")
 
-    async def test_planner_error_backs_off(self) -> None:
+    async def test_planner_error_yields_to_mechanic_without_timed_retry(self) -> None:
         objectives = MagicMock()
         objectives.env_for.return_value = MagicMock()
         service, repo, graph = _run_service(
             _pedido(status=TaskStatus.QUEUED.value), _completed_out())
         service.set_objective_service(objectives)
+        mechanic = MagicMock()
+        service.set_mechanic_wake(mechanic)
         service.comment_on_ticket = AsyncMock()  # type: ignore[method-assign]
         with patch.object(engine_mod, "plan_pedido",
                           new=AsyncMock(return_value={
@@ -709,10 +722,11 @@ class ExplicitSkipsPlannerTests(unittest.IsolatedAsyncioTestCase):
             await service.run_task("task-pedido-1", force=True)
         self.assertEqual(graph.seen, [])
         self.assertEqual(repo.task["status"], TaskStatus.WAITING.value)
-        self.assertIn("planner_error", repo.task["waiting_reason"])
-        self.assertIsNotNone(repo.task["resume_at"])
+        self.assertEqual("execution_exception", repo.task["waiting_reason"])
+        self.assertIsNone(repo.task["resume_at"])
+        mechanic.assert_called_once()
 
-    async def test_planner_error_third_strike_fails(self) -> None:
+    async def test_planner_attempt_count_does_not_replace_agent_diagnosis(self) -> None:
         objectives = MagicMock()
         objectives.env_for.return_value = MagicMock()
         service, repo, graph = _run_service(
@@ -729,17 +743,18 @@ class ExplicitSkipsPlannerTests(unittest.IsolatedAsyncioTestCase):
             out = await service.run_task("task-pedido-1")
         self.assertEqual(graph.seen, [])
         assert out is not None
-        self.assertEqual(out["status"], TaskStatus.FAILED.value)
-        self.assertIn("planner failed 3x", out["error"])
+        self.assertEqual(out["status"], TaskStatus.WAITING.value)
+        self.assertEqual("bad json", out["error"])
+        self.assertIsNone(out["resume_at"])
 
-    async def test_no_objective_service_fails_fast(self) -> None:
+    async def test_no_objective_service_yields_to_mechanic(self) -> None:
         service, _repo, graph = _run_service(
             _pedido(status=TaskStatus.QUEUED.value), _completed_out())
         service.comment_on_ticket = AsyncMock()  # type: ignore[method-assign]
         out = await service.run_task("task-pedido-1", force=True)
         self.assertEqual(graph.seen, [])
         assert out is not None
-        self.assertEqual(out["status"], TaskStatus.FAILED.value)
+        self.assertEqual(out["status"], TaskStatus.WAITING.value)
         self.assertIn("no objective service", out["error"])
 
     async def test_ceo_agent_does_not_shadow_target(self) -> None:
@@ -756,7 +771,7 @@ class ExplicitSkipsPlannerTests(unittest.IsolatedAsyncioTestCase):
         planned.assert_not_called()
         self.assertEqual(graph.hints, [None])
 
-    async def test_unknown_workflow_without_agent_fails_loudly(self) -> None:
+    async def test_unknown_workflow_without_agent_yields_to_mechanic(self) -> None:
         objectives = MagicMock()
         objectives.env_for.return_value = MagicMock()
         service, _repo, graph = _run_service(
@@ -774,7 +789,7 @@ class ExplicitSkipsPlannerTests(unittest.IsolatedAsyncioTestCase):
         planned.assert_not_called()
         self.assertEqual(graph.seen, [])
         assert out is not None
-        self.assertEqual(out["status"], TaskStatus.FAILED.value)
+        self.assertEqual(out["status"], TaskStatus.WAITING.value)
         self.assertIn("no.such.template", out["error"])
         service.comment_on_ticket.assert_awaited_once()
 

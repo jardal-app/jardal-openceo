@@ -16,8 +16,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
-from mechanic.models import ActionKind, MechanicAction
-from mechanic.stall import MECHANIC_WAIT_PREFIX, OWNER_ACTION_PREFIX, STREAK_KEY
+from mechanic.handoff import HANDOFF_KEY
+from mechanic.models import STATE_ACTIONS, ActionKind, MechanicAction
+from mechanic.stall import MECHANIC_WAIT_PREFIX, OWNER_ACTION_PREFIX, PENDING_KEY, STREAK_KEY, human_wait
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,12 @@ class ActionRunner:
                     finding_ids: list[str], diagnosis: str) -> dict[str, Any]:
         handler = getattr(self, f"_do_{action.kind.value}")
         try:
+            if action.kind in STATE_ACTIONS:
+                task = await self._tasks.get_task(str(action.task_id))
+                if (task is None or str(task.get("status")) != "waiting"
+                        or human_wait(task.get("waiting_reason"), task.get("params"),
+                                      phase=task.get("phase"), qa_state=task.get("qa_review_state"))):
+                    raise RuntimeError("ticket is no longer an unattended wait")
             detail = await handler(action, run_id=run_id,
                                    finding_ids=finding_ids, diagnosis=diagnosis)
         except Exception as exc:  # noqa: BLE001 - one action never stops the rest
@@ -69,6 +76,7 @@ class ActionRunner:
                 "task_id": action.task_id, "repo": action.repo}
 
     async def _patch(self, task_id: str, updates: dict[str, Any]) -> None:
+        updates["params"] = {**updates.get("params", {}), PENDING_KEY: None}
         if await self._tasks.patch_task(task_id, updates) is None:
             raise RuntimeError(f"ticket {task_id} not found")
 
@@ -86,6 +94,16 @@ class ActionRunner:
             "waiting_reason": f"{MECHANIC_WAIT_PREFIX}: {action.text}"[:300],
             "resume_at": resume, "params": {STREAK_KEY: None}})
         return f"resume at {resume.isoformat()}"
+
+    async def _do_delegate(self, action: MechanicAction, *, run_id: str,
+                           diagnosis: str, **_: Any) -> str:
+        await self._patch(str(action.task_id), {
+            "status": "queued", "waiting_reason": None, "resume_at": None,
+            "params": {STREAK_KEY: None, HANDOFF_KEY: {
+                "run_id": run_id, "diagnosis": diagnosis,
+                "instruction": action.text}}})
+        self._wake_dispatcher()
+        return "delegated to the ticket agent"
 
     async def _do_fail(self, action: MechanicAction, *, run_id: str,
                        **_: Any) -> str:

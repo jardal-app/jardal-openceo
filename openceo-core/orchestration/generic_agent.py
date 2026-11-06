@@ -38,6 +38,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from mechanic.handoff import agent_handoff, handoff_prompt
+
 from catalog import (
     AgentType,
     Catalog,
@@ -324,7 +326,7 @@ def build_agent_prompt(
                 f"Required evidence: {', '.join(skill_evidence)} — "
                 "include it in your evidencia.")
         lines.extend(declared)
-    lines.extend(["", PYTHON_PACKAGES_PROMPT,
+    lines.extend([handoff_prompt(task), "", PYTHON_PACKAGES_PROMPT,
                   "", CRYSTALLIZATION_PROMPT, "", KNOWLEDGE_PROPOSAL_PROMPT,
                   "", AGENT_RESULT_PROMPT])
     return "\n".join(lines)
@@ -427,7 +429,7 @@ async def run_generic_agent(
     upstream = await _resolve_upstream(task, wiring)
     deadline_armed = await _deadline_mark_start(wiring, task, agent_name)
     try:
-        if exact is not None:
+        if exact is not None and agent_handoff(task) is None:
             return await _run_exact_skill(
                 agent_name, task, params, profile, skill_name or "", exact,
                 wiring, upstream=upstream)

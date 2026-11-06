@@ -27,7 +27,7 @@ La [referencia completa](docs/ARCHITECTURE_REFERENCE_2026.md) conserva las 2.064
 
 - `openceo-core/main.py` expone HTTP, WebSocket, el endpoint compatible con OpenAI y los mounts MCP.
 - `openceo-core/first_layer.py` interpreta el contexto conversacional de chat y voz; `router.py` y `graph.py` conectan los agentes ejecutables de forma explicita.
-- `openceo-core/task_service.py` gestiona tareas de ejecucion; `workflow_service.py` propone, aprueba y ejecuta recetas YAML deterministas de `workflows/`.
+- `openceo-core/task_service.py` gestiona tareas de ejecucion; `workflow_service.py` ejecuta recetas YAML de `workflows/` sin tokens mientras cumplen su contrato; ante situaciones imprevistas, el mecánico deriva al agente del ticket con el avance conservado. Véase [Engine mechanic](docs/ARCHITECTURE_REFERENCE_2026.md#engine-mechanic-task-2026-00510).
 - `openceo-core/dev_session_service.py` y `agents/dev/` gobiernan sesiones tmux, providers y revision Tier S. Los planes, briefs y feedback de esas sesiones son artefactos de ejecucion.
 - `openceo-core/horizon/` implementa el contexto personal del CEO, clasificacion, planificacion y delegacion; `scheduler.py` y `rate_monitor.py` coordinan trabajo programado y cuotas.
 - `openceo-core/mcp_server.py` publica herramientas seleccionadas; `openceo-core/tools/` contiene funciones compartidas y `agents/` los paquetes propios de cada agente.

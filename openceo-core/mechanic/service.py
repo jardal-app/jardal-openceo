@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
+from horizon.privacy import is_personal_scope
 from mechanic.actions import ActionRunner
 from mechanic.models import (
     STATE_ACTIONS,
@@ -29,6 +30,7 @@ from mechanic.models import (
 from mechanic.situation import Finding, compile_situation
 from mechanic.stall import (
     OWNER_ACTION_PREFIX,
+    PENDING_KEY,
     STREAK_KEY,
     as_utc,
     human_wait,
@@ -142,6 +144,11 @@ WHAT YOU CAN DO
 You change nothing yourself: the core applies the actions you return.
 - resume {{task_id, text}}: requeue a waiting ticket now. Only when the
   cause is gone (otherwise it stalls again).
+- delegate {{task_id, text}}: hand the same ticket to its existing agent
+  with your diagnosis and concrete guidance. Use this when the recipe
+  cannot handle the situation and judgment is needed. The agent keeps
+  its role, skills, permissions, gates and previous work; it does not
+  replay the exact recipe. Prefer this over opening an engine fix.
 - wait {{task_id, minutes 5-1440, text}}: the wait is legitimate (quota
   window, dependency, external system); come back later.
 - fail {{task_id, text}}: the ticket cannot succeed as written; its
@@ -149,8 +156,11 @@ You change nothing yourself: the core applies the actions you return.
 - escalate {{task_id, text}}: only a human can unblock it; text is the
   exact action the Owner must take.
 - comment {{task_id, text}}: leave findings on the business ticket.
-- fix_ticket {{title, text}}: the cause is in the engine (code, prompt,
-  config, contract). Opens a builder ticket in jardal-openceo that runs
+- fix_ticket {{title, text}}: last resort, only a missing general tool or
+  a broken invariant prevents resolution with existing capabilities.
+  Never add a deterministic branch for the situation, a wait reason or
+  an agent decision. Explain why delegate and existing tools cannot
+  resolve it. Opens a builder ticket in jardal-openceo that runs
   through the normal gates and merge; when it lands the service restarts
   and the tickets here resume. text: diagnosis, evidence (files, lines,
   commits), the generic fix (never a special case for this ticket) and
@@ -159,7 +169,7 @@ You change nothing yourself: the core applies the actions you return.
 - git_stash {{repo, text}}: stash tracked changes (recoverable).
 - remove_index_lock {{repo, text}}: delete a stale .git/index.lock.
 `repo` must be a key of SITUATION.repos; ticket actions take task_ids
-from WHY YOU WERE WOKEN. One state action (resume/wait/fail/escalate) per
+from WHY YOU WERE WOKEN. One state action (resume/delegate/wait/fail/escalate) per
 ticket, at most 10 actions. Pair fix_ticket with wait on the affected
 tickets when they must wait for the fix. If SITUATION.open_fix_tickets
 already covers the cause, do not open another: wait for that one.
@@ -316,6 +326,8 @@ class MechanicService:
             if not await self._budget_left(now, cfg):
                 logger.warning("mechanic budget spent; %s finding(s) wait",
                                len(admitted) - start)
+                for finding in admitted[start:]:
+                    self._queue.setdefault(finding.task_id, finding)
                 break
             await self.run_batch(admitted[start:start + size])
             ran += 1
@@ -332,10 +344,7 @@ class MechanicService:
         healing_max = timedelta(hours=float(cfg.get("self_heal_max_hours", 24)))
         findings: list[Finding] = []
         for task in rows or []:
-            if task.get("autorun") is not True:
-                continue
-            updated = last_activity(task)
-            if updated is None or updated < horizon:
+            if task.get("autorun") is not True or is_personal_scope(task):
                 continue
             reason = task.get("waiting_reason")
             params = task.get("params") if isinstance(task.get("params"), Mapping) else {}
@@ -344,6 +353,12 @@ class MechanicService:
                 continue
             task_id = str(task.get("task_id") or "")
             detail = str(reason or "")
+            if params.get(PENDING_KEY):
+                findings.append(Finding(task_id, str(params[PENDING_KEY]), detail))
+                continue
+            updated = last_activity(task)
+            if updated is None or updated < horizon:
+                continue
             resume_at = as_utc(task.get("resume_at"))
             if resume_at is not None and now - resume_at >= overdue:
                 findings.append(Finding(task_id, "resume_overdue", detail))
@@ -368,11 +383,15 @@ class MechanicService:
             task = await self._repo.get_task(finding.task_id)
             status = str((task or {}).get("status") or "")
             hung = finding.trigger == "deadline_missed" and status == "in_progress"
-            if task is None or (status != "waiting" and not hung):
+            if task is None or is_personal_scope(task) or (status != "waiting" and not hung):
+                continue
+            if human_wait(task.get("waiting_reason"), task.get("params"),
+                          phase=task.get("phase"), qa_state=task.get("qa_review_state")):
                 continue
             recent = [moment for moment in _history(task)
                       if now - moment <= timedelta(hours=24)]
             if recent and now - max(recent) < cooldown:
+                self._queue.setdefault(finding.task_id, finding)
                 continue
             if len(recent) >= cap:
                 await self._escalate_exhausted(task, len(recent))

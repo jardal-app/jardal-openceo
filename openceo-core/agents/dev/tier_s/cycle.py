@@ -3020,6 +3020,8 @@ class TierSCycle:
     # -- prompts --------------------------------------------------------------------
 
     def _planner_prompt(self, ctx: _Ctx) -> str:
+        from mechanic.handoff import handoff_prompt
+
         ticket = ctx.ticket
         acceptance = ticket.get("acceptance") or []
         if isinstance(acceptance, str):
@@ -3047,6 +3049,7 @@ class TierSCycle:
         body = (
             f"You plan ticket {ctx.ref}: {ticket.get('title', '')}\n"
             f"{ticket.get('description', '')}\n"
+            f"{handoff_prompt(ticket)}"
             f"Acceptance:\n{criteria or '- (derive verifiable criteria in PLAN.md)'}\n"
             f"{owner_note}"
             f"{empty_note}"
@@ -3107,6 +3110,8 @@ class TierSCycle:
         return knowledge_mod.with_preamble(body, ctx.repo, "en")
 
     def _builder_prompt(self, ctx: _Ctx, plan: Plan) -> str:
+        from mechanic.handoff import handoff_prompt
+
         files = "\n".join(f"- {item.path} ({item.operation}): {item.reason}"
                           for item in plan.files)
         steps = "\n".join(f"{num}. {step}"
@@ -3120,6 +3125,7 @@ class TierSCycle:
             f"Implement ticket {ctx.ref} from .openceo/PLAN.md + "
             ".openceo/PLAN_RESPONSE.md.\n"
             f"Goal: {plan.goal}\nFiles:\n{files}\nSteps:\n{steps}\n"
+            f"{handoff_prompt(ctx.ticket)}"
             "Do NOT commit, push, rebase, stash, or change branches: leave your "
             "work uncommitted; the orchestrator integrates it.\n"
             "Write .openceo/HANDOFF.md (§16.6, executor sections ≤300 words) "

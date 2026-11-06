@@ -183,7 +183,7 @@ _TERMINAL_TASK_STATUSES = frozenset(
 
 
 class _UnknownWorkflowTarget(Exception):
-    """Explicit workflow target no template resolves (loud failure)."""
+    """An explicit workflow target without a matching recipe or agent."""
 
 
 def _target_of(task: dict[str, Any]) -> str:
@@ -438,35 +438,41 @@ class TaskService:
     def _apply_wait_streak(self, updates: dict[str, Any],
                            current: dict[str, Any] | None,
                            final_status: str) -> str | None:
-        """Generic stall rule on the single run outcome write (TASK-2026-00510)."""
+        """Apply the shared stall rule to an execution or service write."""
         from mechanic.service import DEFAULTS, mechanic_config
-        from mechanic.stall import STREAK_KEY, streak_outcome
+        from mechanic.stall import PENDING_KEY, STREAK_KEY, streak_outcome
 
+        if is_personal_scope(current):
+            return None
         try:
             cfg = mechanic_config(self._config_loader.load_project(None))
         except Exception:  # noqa: BLE001 - the defaults keep the rule on
             cfg = dict(DEFAULTS)
         if not cfg.get("enabled", True):
             return None
-        params = updates.get("params") if isinstance(
-            updates.get("params"), dict) else (current or {}).get("params")
+        params = dict((current or {}).get("params") or {})
+        if isinstance(updates.get("params"), dict):
+            params.update(updates["params"])
         fields, trigger = streak_outcome(
             status=final_status,
-            reason=updates.get("waiting_reason"),
-            resume_at=updates.get("resume_at"),
+            reason=updates.get("waiting_reason", (current or {}).get("waiting_reason")),
+            resume_at=updates.get("resume_at", (current or {}).get("resume_at")),
             params=params if isinstance(params, dict) else {},
             now=datetime.now(timezone.utc),
             max_reparks=int(cfg.get("max_reparks", 3)),
             gap=timedelta(hours=float(cfg.get("streak_gap_hours", 12))),
-            phase=(current or {}).get("phase"),
-            qa_state=(current or {}).get("qa_review_state"),
+            phase=updates.get("phase", (current or {}).get("phase")),
+            qa_state=updates.get("qa_review_state", (current or {}).get("qa_review_state")),
         )
-        if STREAK_KEY in fields:
-            streak = fields.pop(STREAK_KEY)
-            if isinstance(updates.get("params"), dict):
-                updates["params"] = {**updates["params"], STREAK_KEY: streak}
-            else:
-                updates[f"params.{STREAK_KEY}"] = streak
+        if trigger or params.get(PENDING_KEY):
+            fields[PENDING_KEY] = trigger
+        for key in (STREAK_KEY, PENDING_KEY):
+            if key in fields:
+                value = fields.pop(key)
+                if isinstance(updates.get("params"), dict):
+                    updates["params"] = {**updates["params"], key: value}
+                else:
+                    updates[f"params.{key}"] = value
         updates.update(fields)
         return trigger
 
@@ -3913,15 +3919,15 @@ class TaskService:
         proceed untouched; a decided pedido refreshes from the patched
         decision, holds on declared spend, and re-queues for decided
         A/B/S tiers so the dispatcher re-admits with the exact tier.
-        Unplannable pedidos (unwired service, broken env) fail fast:
-        proceeding undecided would strand in a wake-less wait.
+        Unplannable pedidos yield to the mechanic; they never proceed
+        undecided or retry the same broken path on a timer.
         """
         task_id = str(task.get("task_id") or "")
         if not is_pedido(task):
             return task, None
         service = getattr(self, "_objective_service", None)
         if service is None:
-            return task, await self._stop_pedido_failed(
+            return task, await self._park_execution_error(
                 task_id, "planner unavailable: no objective service wired")
         if force:
             params = dict(task.get("params") or {})
@@ -3932,7 +3938,7 @@ class TaskService:
             env = service.env_for(str(task.get("project") or ""))
         except Exception as exc:
             logger.warning("pedido env failed for %s", task_id, exc_info=True)
-            return task, await self._stop_pedido_failed(
+            return task, await self._park_execution_error(
                 task_id, f"planner unavailable: {exc}")
         try:
             out = await engine_mod.plan_pedido(env, task)
@@ -3946,9 +3952,10 @@ class TaskService:
         if out.get("ok") and out.get("action") == "convert":
             return task, await self._plan_pedido_convert(task, env, out)
         if out.get("reason") == "config":
-            return task, await self._stop_pedido_failed(
+            return task, await self._park_execution_error(
                 task_id, f"planner unavailable: {out.get('detail')}")
-        return task, await self._plan_pedido_backoff(task, out)
+        return task, await self._park_execution_error(
+            task_id, str(out.get("detail") or out.get("reason") or "planner_error"))
 
     async def _hold_decided_spend(
         self, task: dict[str, Any], costs: Any, spend: dict[str, Any],
@@ -4012,7 +4019,7 @@ class TaskService:
         except Exception as exc:
             logger.warning("pedido convert failed for %s", task_id,
                            exc_info=True)
-            return await self._stop_pedido_failed(
+            return await self._park_execution_error(
                 task_id, f"pedido conversion failed: {exc}")
         try:
             note = (f"Planner converts to objective {objective_id}: "
@@ -4035,69 +4042,35 @@ class TaskService:
         refreshed = await self._repo.get_task(task_id)
         return refreshed or task
 
-    async def _plan_pedido_backoff(
-        self, task: dict[str, Any], out: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Back off a failed pedido plan; fail terminally past 3 tries."""
-        task_id = str(task.get("task_id") or "")
-        refreshed = await self._repo.get_task(task_id) or task
-        params = refreshed.get("params") \
-            if isinstance(refreshed.get("params"), dict) else {}
-        attempts = int(params.get("planner_attempts") or 0)
-        if out.get("reason") == "planner_error" and out.get("detail") == \
-                "planner run crashed":
-            attempts += 1
-            await self._repo.patch_task(
-                task_id, {"params": {**params, "planner_attempts": attempts}})
-        detail = str(out.get("detail") or "planner_error")
-        if attempts >= 3:
-            return await self._stop_pedido_failed(
-                task_id, f"planner failed {attempts}x: {detail[:300]}")
-        backoff = (5, 15, 30)[min(max(attempts, 1), 3) - 1]
-        parked = await self._repo.patch_task(task_id, {
-            "status": TaskStatus.WAITING.value,
-            "waiting_reason": f"planner_error: {detail[:200]}",
-            "resume_at": datetime.now(timezone.utc)
-            + timedelta(minutes=backoff),
-        })
-        try:
-            await self.comment_on_ticket(
-                task_id,
-                f"Planner failed (attempt {max(attempts, 1)}/3, retry in "
-                f"{backoff}m): {detail[:300]}")
-        except Exception:
-            logger.warning("pedido backoff comment failed for %s", task_id,
-                           exc_info=True)
-        return parked or refreshed
-
-    async def _stop_pedido_failed(
+    async def _park_execution_error(
         self, task_id: str, detail: str,
     ) -> dict[str, Any]:
-        """Fail a pedido whose planning cannot proceed. Mirrors a run crash."""
-        previous = await self._repo.get_task(task_id)
-        previous_status = str((previous or {}).get("status") or "")
-        failed = await self._repo.patch_task(task_id, {
-            "status": TaskStatus.FAILED.value,
-            "error": detail[:500],
-            "waiting_reason": None,
-            "resume_at": None,
-            "completed_at": datetime.now(timezone.utc),
-        })
-        if failed is not None:
-            await self._hub.broadcast("task_updated", failed)
-            asyncio.create_task(self._fire_notion_sync_back(failed, "failed"))
-            asyncio.create_task(self._revoke_ticket_badges(failed))
-            # Solo en la transicion a terminal (funnel update_task):
-            # un reintento sobre un pedido ya fallado no reavisa al CEO.
-            if previous_status not in _TERMINAL_TASK_STATUSES:
-                self._wake_ceo_incident(failed)
-        try:
-            await self.comment_on_ticket(task_id, detail[:500])
-        except Exception:
-            logger.warning("pedido failure comment failed for %s", task_id,
-                           exc_info=True)
+        """Yield an unexpected execution failure to the mechanic, keeping human holds."""
+        from mechanic.stall import human_wait
+
         current = await self._repo.get_task(task_id)
-        return current or failed or {"task_id": task_id}
+        if current is None or str(current.get("status")) == TaskStatus.CANCELLED.value:
+            return current or {"task_id": task_id}
+        held = human_wait(
+            current.get("waiting_reason"), current.get("params"),
+            phase=current.get("phase"), qa_state=current.get("qa_review_state"))
+        reason = current.get("waiting_reason") if held else "execution_exception"
+        personal = is_personal_scope(current)
+        status = TaskStatus.FAILED.value if personal else TaskStatus.WAITING.value
+        parked = await self.patch_task(task_id, {
+            "status": status,
+            "waiting_reason": None if personal else reason, "resume_at": None,
+            "error": detail[:800],
+            "completed_at": datetime.now(timezone.utc) if personal else None})
+        if parked is not None:
+            asyncio.create_task(self._fire_notion_sync_back(parked, status))
+        try:
+            await self.comment_on_ticket(task_id, detail[:800])
+        except Exception:
+            logger.warning("execution failure comment failed for %s", task_id,
+                           exc_info=True)
+        self._wake_dispatcher()
+        return parked or current
 
     async def run_task(self, task_id: str, force: bool = False) -> dict[str, Any] | None:
         lock = self._locks.setdefault(task_id, asyncio.Lock())
@@ -4149,13 +4122,10 @@ class TaskService:
                     task, stop = await self._plan_pedido_pre_stage(
                         task, force=force)
                 except Exception as exc:
-                    # Outside the run try: fail terminally (commented, CEO
-                    # sees it) instead of crashing the launch or stranding
-                    # the ticket in an undecided wait.
                     logger.warning("pedido pre-stage failed for %s",
                                    task_id, exc_info=True)
                     self._wake_dispatcher()
-                    return await self._stop_pedido_failed(
+                    return await self._park_execution_error(
                         task_id, f"pedido planning failed: {exc}")
                 if stop is not None:
                     # Planned holds and parks patch waiting/queued
@@ -4212,16 +4182,11 @@ class TaskService:
                         if workflow_out is not None:
                             graph_out = self._workflow_outcome_to_graph_out(workflow_out)
                         elif explicit_yaml_target and not hint and not _target_of(task):
-                            # Unknown workflow target with no agent to
-                            # fall back to: fail loudly instead of
-                            # stranding in a wake-less routing wait.
                             target = _workflow_target_of(task)
-                            await self.comment_on_ticket(
-                                task_id,
+                            raise _UnknownWorkflowTarget(
                                 f"Unknown workflow target {target!r} and "
-                                "no agent to fall back to: failing. Fix "
-                                "the target or set an explicit agent.")
-                            raise _UnknownWorkflowTarget(target)
+                                "no agent to fall back to; handing the "
+                                "situation to the mechanic.")
                         else:
                             graph_out = await self._graph.execute(task, agent_hint=hint)
                     else:
@@ -4239,21 +4204,7 @@ class TaskService:
                         )
                         self._wake_dispatcher()
                         return current
-                    failed = await self._repo.patch_task(
-                        task_id,
-                        {
-                            "status": TaskStatus.FAILED.value,
-                            "error": str(exc),
-                            "completed_at": datetime.now(timezone.utc),
-                        },
-                    )
-                    if failed is not None:
-                        await self._hub.broadcast("task_updated", failed)
-                        asyncio.create_task(self._fire_notion_sync_back(failed, "failed"))
-                        asyncio.create_task(self._revoke_ticket_badges(failed))
-                    # A freed slot is a dispatch event even on crash.
-                    self._wake_dispatcher()
-                    return failed
+                    return await self._park_execution_error(task_id, str(exc))
 
             # Fencing before incorporating the result: a business
             # cancellation that landed mid-run wins over whatever the
@@ -6704,6 +6655,11 @@ class TaskService:
         if task is None:
             return None
 
+        mechanic_trigger = None
+        if (str(updates.get("status", task.get("status"))) == TaskStatus.WAITING.value
+                and any(key in updates for key in ("status", "waiting_reason", "resume_at"))):
+            mechanic_trigger = self._apply_wait_streak(updates, task, TaskStatus.WAITING.value)
+
         # Merge params instead of overwriting (preserves pm_ticket, evidence, etc.)
         if "params" in updates and isinstance(updates["params"], dict):
             existing = dict(task.get("params") or {})
@@ -6732,6 +6688,9 @@ class TaskService:
 
         updated = await self._repo.patch_task(task_id, updates)
         if updated is not None:
+            if mechanic_trigger:
+                self._wake_mechanic(task_id, mechanic_trigger,
+                                    str(updated.get("waiting_reason") or ""))
             await self._hub.broadcast("task_updated", updated)
             if (
                 task.get("autorun") is False

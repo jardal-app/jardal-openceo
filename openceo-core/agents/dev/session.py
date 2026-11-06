@@ -3497,6 +3497,8 @@ class DevSessionManager:
         return {str(k): str(v) for k, v in dict(provider_cfg.get("env") or {}).items()}
 
     def _build_coding_prompt(self, task: dict[str, Any], config: dict[str, Any]) -> str:
+        from mechanic.handoff import handoff_prompt
+
         pm = (task.get("params") or {}).get("pm_ticket") or {}
         ticket_num = task.get("ticket_number")
         review_base_url = self._review_base_url(config)
@@ -3507,6 +3509,7 @@ class DevSessionManager:
             lines.append(f"Ticket: #{ticket_num}")
         lines.append(f"Título: {task.get('title')}")
         lines.append(f"Descripción: {task.get('description')}")
+        lines.append(handoff_prompt(task))
         previous = (task.get("params") or {}).get("agent_result")
         if isinstance(previous, dict) and previous.get("resume_at"):
             lines.extend(["", "REANUDACIÓN DE ESPERA PROGRAMADA",

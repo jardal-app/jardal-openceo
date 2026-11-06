@@ -37,6 +37,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from mechanic.handoff import agent_handoff
+
 #: Params keys whose presence marks a validated-plan target: planning
 #: must not override them.
 _EXPLICIT_WORKFLOW_PARAMS = (
@@ -78,13 +80,14 @@ def is_pedido(ticket: Mapping[str, Any] | None) -> bool:
         return False
     if _nonblank(params.get("target_agent")):
         return False
-    for key in _EXPLICIT_WORKFLOW_PARAMS:
-        value = params.get(key)
-        if isinstance(value, bool):
-            if value:
+    if agent_handoff(ticket) is None:
+        for key in _EXPLICIT_WORKFLOW_PARAMS:
+            value = params.get(key)
+            if isinstance(value, bool):
+                if value:
+                    return False
+            elif _nonblank(value):
                 return False
-        elif _nonblank(value):
-            return False
     phases = ticket.get("workflow_phases")
     if isinstance(phases, list) and phases:
         return False
