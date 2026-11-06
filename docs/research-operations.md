@@ -15,6 +15,38 @@ saltos de línea se resuelven como en Settings, sin ejecutar texto del archivo
 XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus systemctl --user restart openceo-core-host.service
 ```
 
+## Tramo vivo en jardal-openceo
+
+`projects/jardal-openceo/project.yaml` trae el bloque `research` (ticket #594):
+`enabled: true`, solo `quick`, techo `public`, `brave` on y
+`serper`/`firecrawl`/`grounding` off, `paid_budget_usd: "0.00"`, límites quick
+(3 búsquedas, 5 páginas, 8 pasos, 120 s) y `allowed_account_refs: []`. La
+política efectiva solo recorta: deep denegado, gasto pagado cero, adaptadores
+recortados por proyecto y entorno.
+
+El servicio sigue apagado en el host (`openceo-core/.env:142`
+`RESEARCH_ENABLED=false`; `RESEARCH_SCHEDULER_ENABLED` ausente, defecto `false`
+en `settings.py`). Encender `RESEARCH_ENABLED` abre `/api/research/*` a quien
+tenga `run_research`; sin él, el servicio responde deshabilitado y no admite
+jobs. El scheduler recurrente exige ambas flags (`workflows.py:112-113`) y solo
+se activa con autorización explícita del Owner; en este tramo queda apagado.
+
+Smoke #594 verificado sin tocar `.env` (8/8 con el flag en memoria): config
+real del yaml vía `ConfigLoader`, servicio disponible, `submit`→`queued`
+(gasto 0), `get`→mismo job, `cancel`→`cancelled`, deep rechazado, scheduler
+off. Mongo real + lector falso declarado, sin red ni LLM vivo.
+
+Activación en producción (Owner, tras el merge): (1)
+`RESEARCH_ENABLED=false`→`true` en `openceo-core/.env`, dejar
+`RESEARCH_SCHEDULER_ENABLED` ausente; (2) `scripts/openceo-core-host.sh restart`
++ `status`; (3) smoke prod (submit/get/cancel + scheduler apagado); (4) el Owner
+decide si las flags quedan encendidas.
+
+Cuándo este research merece su propia línea en vez de tickets sueltos, ver
+`Línea dedicada de investigación` (criterio del ticket #592; aquí no se
+duplica). Fuera de alcance en este tramo: Serper, Firecrawl, deep con
+presupuesto, enrutado del planner, intake externo y perfil free-research.
+
 ## Línea dedicada de investigación
 
 Cuándo el research merece su propio objetivo (línea) en vez de vivir como
@@ -189,16 +221,18 @@ impide devolver el job terminado ni arrancar el servicio.
 ## Cierre humano único
 
 Se decide al terminar todo el proyecto y nada de esto se activa antes. Hoy
-`projects/jardal-openceo/project.yaml` no tiene bloque `research` y
-`RESEARCH_ENABLED=false`; el scheduler no se activa salvo
-`RESEARCH_SCHEDULER_ENABLED=true`. Con `RESEARCH_PAID_SPEND_USD=0.00` y sin
-`paid_budget_usd` en el proyecto no hay gasto de pago. Encender `RESEARCH_ENABLED` abre
-`/api/research/*` a quien tenga `run_research`; no inicia nada recurrente por sí solo.
+`projects/jardal-openceo/project.yaml` ya trae el bloque `research` (ver
+`Tramo vivo en jardal-openceo`) y `RESEARCH_ENABLED=false` pendiente del Owner;
+el scheduler no se activa salvo autorización explícita del Owner con
+`RESEARCH_SCHEDULER_ENABLED=true`. Con `paid_budget_usd: "0.00"` en el proyecto
+no hay gasto de pago (la política efectiva es el mínimo entre servidor y
+proyecto). Encender `RESEARCH_ENABLED` abre `/api/research/*` a quien tenga
+`run_research`; no inicia nada recurrente por sí solo.
 
 **Demostración B (recurrencia desplegada).** La persona elige una URL pública de feed
 que controle (comprobable con la sonda de arriba) y autoriza poner
-`RESEARCH_ENABLED=true` y `RESEARCH_SCHEDULER_ENABLED=true` en `openceo-core/.env` y este
-bloque en el proyecto:
+`RESEARCH_ENABLED=true` y `RESEARCH_SCHEDULER_ENABLED=true` en `openceo-core/.env`
+(el bloque `research` ya existe desde #594; este es su mínimo):
 
 ```yaml
 research:
@@ -207,9 +241,11 @@ research:
   classification_ceiling: public
 ```
 
-El agente reinicia la unidad, crea una suscripción acotada, la reinicia de nuevo para
-comprobar que identidad, vencimiento y cursor sobreviven, observa un tick, la cancela y
-comprueba que deja de adquirir. La persona decide si las flags quedan encendidas.
+El bloque vivo trae además adaptadores, presupuesto y límites (ver
+`Tramo vivo en jardal-openceo`). El agente reinicia la unidad, crea una
+suscripción acotada, la reinicia de nuevo para comprobar que identidad,
+vencimiento y cursor sobreviven, observa un tick, la cancela y comprueba que
+deja de adquirir. La persona decide si las flags quedan encendidas.
 
 **Piloto X (hasta cinco posts).** La persona ejecuta `create` y `cookies` con su propia
 sesión (login/2FA incluido), acuerda una cuenta o consulta pública y añade
