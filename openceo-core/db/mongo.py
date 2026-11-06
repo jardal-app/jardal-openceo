@@ -1651,6 +1651,10 @@ class MongoRepository:
         Spent parks carry no due (``None``) but still need their ticket
         round: they ride along so the decision — not the query — resolves
         them, as the old tick did when it scanned every waiting objective.
+        A paced spent park (future due after a #586 pacing) keeps waiting
+        on its due: the exhausted branch takes only no-due or past-due
+        parks, so any other wake never retries its ticket round early
+        (#588).
         """
         now_iso = now.astimezone(timezone.utc).isoformat()
         rows = (
@@ -1660,7 +1664,13 @@ class MongoRepository:
                     "claimed_boot_id": None,
                     "$or": [
                         {"recovery.due_at": {"$ne": None, "$lte": now_iso}},
-                        {"recovery.exhausted": True},
+                        {
+                            "recovery.exhausted": True,
+                            "$or": [
+                                {"recovery.due_at": None},
+                                {"recovery.due_at": {"$lte": now_iso}},
+                            ],
+                        },
                     ],
                 },
                 sort=[("recovery.due_at", ASCENDING)],

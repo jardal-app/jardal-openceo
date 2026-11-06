@@ -317,6 +317,12 @@ def recovery_decision(
         return {"action": "none", "reason": f"park {reason or '<empty>'}"}
     attempts = int(recovery.get("attempts") or 0)
     if recovery.get("exhausted") or attempts >= int(cfg["max_attempts"]):
+        # #588: a paced spent park (future due after a failed ticket
+        # round, #586) keeps waiting on its due; without this check any
+        # claim retries the ticket round immediately and defeats the pace.
+        due = parse_due(recovery.get("due_at"))
+        if due is not None and _now(now) < due:
+            return {"action": "none", "reason": "not due"}
         if ticket_open:
             return {"action": "none", "reason": "recovery ticket open"}
         if int(recovery.get("ticket_round") or 0) >= int(cfg["max_tickets"]):

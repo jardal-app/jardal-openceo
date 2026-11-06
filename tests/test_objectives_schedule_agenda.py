@@ -203,7 +203,10 @@ class _FakeRepo:
             due = recovery.get("due_at")
             if due is not None and due <= now_iso:
                 out.append(doc)
-            elif recovery.get("exhausted") is True:
+            elif recovery.get("exhausted") is True and due is None:
+                # #588: the exhausted branch takes only no-due parks
+                # here; a past-due exhausted park already matched above,
+                # and a paced one (future due, #586) keeps waiting.
                 out.append(doc)
         out.sort(key=lambda d: ((d.get("recovery") or {}).get("due_at") is not None,
                                 (d.get("recovery") or {}).get("due_at") or ""))
@@ -407,6 +410,30 @@ class AgendaContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.repo.docs["OBJ-S"]["claimed_boot_id"], "boot-1")
 
+    async def test_claim_due_skips_paced_spent_parks(self) -> None:
+        """#588: a future-due spent park keeps waiting when others fire."""
+        future = NOW + timedelta(minutes=10)
+        self._seed(_objective("OBJ-P", recovery={
+            "attempts": 2, "due_at": _iso(future), "exhausted": True,
+            "ticket_round": 1}))
+        self._seed(_objective("OBJ-A", recovery={
+            "attempts": 0, "due_at": _iso(NOW - timedelta(seconds=10)),
+            "exhausted": False}))
+        agenda = await self._recovered_agenda()
+        claims = await agenda.claim_due(NOW, 5)
+        self.assertEqual([c.item_id for c in claims], ["OBJ-A"])
+        self.assertNotIn("claimed_boot_id", self.repo.docs["OBJ-P"])
+
+    async def test_claim_due_lists_past_due_spent_parks(self) -> None:
+        """#588: the exhausted branch still takes past-due parks."""
+        self._seed(_objective("OBJ-S", recovery={
+            "attempts": 2,
+            "due_at": _iso(NOW - timedelta(seconds=10)),
+            "exhausted": True, "ticket_round": 1}))
+        agenda = await self._recovered_agenda()
+        claims = await agenda.claim_due(NOW, 5)
+        self.assertEqual([c.item_id for c in claims], ["OBJ-S"])
+
     async def test_run_ok_wraps_the_handler_result(self) -> None:
         agenda = await self._recovered_agenda()
         outcome = await agenda.run(SimpleNamespace(
@@ -539,6 +566,35 @@ class RecoverWaitingObjectiveTests(unittest.IsolatedAsyncioTestCase):
         result = await service.recover_waiting_objective("OBJ-TEST", now=NOW)
         self.assertEqual(result["action"], "ticket")
         self.assertTrue(result["ok"])
+        service.open_recovery_ticket.assert_awaited_once_with("OBJ-TEST")
+        service.recover_objective.assert_not_awaited()
+
+    async def test_paced_spent_park_waits_for_its_due(self) -> None:
+        """#588: a future-due spent park opens no ticket round early."""
+        due = _iso(NOW + timedelta(minutes=10))
+        repo = self._repo_with(_objective(recovery={
+            "attempts": 2, "due_at": due, "exhausted": True,
+            "ticket_round": 1}))
+        service = _service(repo)
+        service.recover_objective = AsyncMock()
+        service.open_recovery_ticket = AsyncMock()
+        result = await service.recover_waiting_objective("OBJ-TEST", now=NOW)
+        self.assertEqual(result["action"], "none")
+        self.assertEqual(result["reason"], "not due")
+        self.assertEqual(result["due_after"], due)
+        service.open_recovery_ticket.assert_not_awaited()
+        service.recover_objective.assert_not_awaited()
+
+    async def test_past_due_spent_park_opens_its_ticket_round(self) -> None:
+        """#588: the due check gates only future pacing dues."""
+        repo = self._repo_with(_objective(recovery={
+            "attempts": 2, "due_at": _iso(NOW - timedelta(seconds=10)),
+            "exhausted": True, "ticket_round": 1}))
+        service = _service(repo)
+        service.recover_objective = AsyncMock()
+        service.open_recovery_ticket = AsyncMock(return_value={"ok": True})
+        result = await service.recover_waiting_objective("OBJ-TEST", now=NOW)
+        self.assertEqual(result["action"], "ticket")
         service.open_recovery_ticket.assert_awaited_once_with("OBJ-TEST")
         service.recover_objective.assert_not_awaited()
 
@@ -820,6 +876,52 @@ class AgendaKernelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertGreater(paced, self.clock())
                 await asyncio.sleep(0.2)
                 self.assertEqual(len(handled), 1)
+        finally:
+            await kernel.stop()
+
+    async def test_paced_spent_park_survives_another_parks_wake(self) -> None:
+        """#588: a foreign wake never retries a paced ticket round early."""
+        self.repo.docs["OBJ-S"] = _objective("OBJ-S", recovery={
+            "attempts": 2, "due_at": None, "exhausted": True,
+            "ticket_round": 0})
+        service = _service(self.repo)
+        service._booted_at = self.clock() - timedelta(hours=1)
+        handled: list[str] = []
+
+        async def failing_handler(claimed: dict) -> dict:
+            handled.append(str(claimed.get("objective_id")))
+            return await service.recover_waiting_objective(
+                str(claimed.get("objective_id")), now=self.clock())
+
+        waiter = _VirtualWaiter(self.clock)
+        kernel = ScheduleKernel(now_fn=self.clock, waiter=waiter)
+        agenda = ObjectivesRecoveryAgenda(
+            repo=self.repo, handler=failing_handler, now_fn=self.clock)
+        kernel.register(agenda)
+        try:
+            with patch("objectives.service.create_internal_ticket",
+                       AsyncMock(return_value=None)):
+                await kernel.start()
+                await asyncio.sleep(0.3)
+                self.assertEqual(handled, ["OBJ-S"])
+                paced = policy.parse_due(
+                    self.repo.docs["OBJ-S"]["recovery"]["due_at"])
+                self.assertIsNotNone(paced)
+                assert paced is not None
+                self.assertGreater(paced, self.clock())
+                # A bare wake (any other park's) claims nothing paced.
+                kernel.wake(agenda.name)
+                await asyncio.sleep(0.2)
+                self.assertEqual(handled, ["OBJ-S"])
+                # A newly spent park still drains on the next wake (#586).
+                self.repo.docs["OBJ-T"] = _objective("OBJ-T", recovery={
+                    "attempts": 2, "due_at": None, "exhausted": True,
+                    "ticket_round": 0})
+                kernel.wake(agenda.name)
+                await asyncio.sleep(0.3)
+                self.assertEqual(sorted(handled), ["OBJ-S", "OBJ-T"])
+                await asyncio.sleep(0.2)
+                self.assertEqual(sorted(handled), ["OBJ-S", "OBJ-T"])
         finally:
             await kernel.stop()
 
