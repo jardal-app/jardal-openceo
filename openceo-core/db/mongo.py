@@ -8,6 +8,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.errors import BulkWriteError, DuplicateKeyError
 
+from ceo.loop import MAX_PENDING_REASONS
 from horizon.privacy import mirror_exclusion_filter
 from objectives import recovery_policy as recovery_mod
 from research.contracts import (
@@ -872,6 +873,159 @@ class MongoRepository:
             {"$set": payload},
             upsert=True,
         )
+
+    async def ensure_ceo_trigger(
+        self, doc: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Rebuild a missing/corrupt trigger preserving live pendings (#575R1F1).
+
+        One atomic upsert: schedule fields are set, the seal is dropped
+        (a rebuild counts as a release, like the recovery), and the live
+        ``pending_reasons`` are kept — a flush pushed between the agenda
+        read and this write survives. On insert (no document yet) the
+        snapshot seeds the list; on update with a missing list the
+        snapshot fills it.
+        """
+        payload = dict(doc)
+        payload.pop("_id", None)
+        snapshot = payload.pop("pending_reasons", [])
+        snapshot = list(snapshot) if isinstance(snapshot, list) else []
+        payload["claimed_boot_id"] = None
+        payload["updated_at"] = datetime.now(timezone.utc)
+        row = await self.ceo_review_trigger.find_one_and_update(
+            {"_id": self.CEO_TRIGGER_DOC_ID},
+            [{"$set": {
+                **payload,
+                "pending_reasons": {
+                    "$ifNull": ["$pending_reasons", snapshot]},
+            }}],
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._clean(row)
+
+    async def claim_ceo_trigger(self, boot_id: str) -> dict[str, Any] | None:
+        """Atomically seal the single CEO trigger for this boot (ticket #575).
+
+        The kernel agenda calls it after deciding a review is due: only an
+        unsealed trigger — or one sealed by this same boot — can be sealed.
+        Re-sealing the own boot is self-healing: a settle that failed to
+        land (store hiccup between the review and its patch) must not wedge
+        the agenda until the next restart. A foreign seal is never adopted;
+        ``recover_ceo_trigger_for_boot`` owns it. ``claimed_boot_id`` is the
+        only new field: additive, optional, no data migration.
+        """
+        row = await self.ceo_review_trigger.find_one_and_update(
+            {
+                "_id": self.CEO_TRIGGER_DOC_ID,
+                "claimed_boot_id": {"$in": [None, boot_id]},
+            },
+            {"$set": {"claimed_boot_id": boot_id,
+                      "updated_at": datetime.now(timezone.utc)}},
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._clean(row)
+
+    async def push_ceo_pending_reasons(
+        self, reasons: list[str]
+    ) -> dict[str, Any] | None:
+        """Atomically append staged wake reasons (ticket #575).
+
+        One update, no read: the push never touches the seal, so a wake
+        landing mid-review cannot clobber the running claim, and concurrent
+        flushes cannot lose each other's reasons. Capped at
+        ``MAX_PENDING_REASONS`` like the loop merge (newest win); dedupe
+        happens at review time in the merge. Upserts a skeleton when the
+        trigger does not exist yet: the agenda ensure fills the schedule in
+        without dropping these reasons.
+        """
+        texts = [str(reason or "").strip() for reason in reasons or []]
+        texts = [text for text in texts if text]
+        if not texts:
+            return await self.get_ceo_trigger()
+        row = await self.ceo_review_trigger.find_one_and_update(
+            {"_id": self.CEO_TRIGGER_DOC_ID},
+            {
+                "$push": {"pending_reasons": {
+                    "$each": texts, "$slice": -MAX_PENDING_REASONS}},
+                "$set": {"updated_at": datetime.now(timezone.utc)},
+            },
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._clean(row)
+
+    async def settle_ceo_trigger(
+        self, boot_id: str, updates: dict[str, Any], *,
+        reviewed: int = 0,
+        reviewed_reasons: list[Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """One fenced patch: record the review and release the seal (#575).
+
+        Only lands when this boot still owns the seal; a stale settle
+        (``None``) is ignored. With ``reviewed_reasons`` (the claim-time
+        snapshot) the patch subtracts it by multiset — one surviving
+        copy per reviewed entry, order kept — so arrivals from during
+        the run survive even when the capped push evicted already
+        reviewed oldest entries (#575R1F2). Without it (failure path,
+        ``reviewed=0``) it drops the ``reviewed`` prefix; a plain
+        value-based pull would drop every copy of a re-arrival, the
+        multiset keeps one.
+        """
+        payload = dict(updates)
+        payload.pop("_id", None)
+        payload.pop("pending_reasons", None)
+        payload["claimed_boot_id"] = None
+        payload["updated_at"] = datetime.now(timezone.utc)
+        if reviewed_reasons is None:
+            drop = max(0, int(reviewed))
+            pending_expr: dict[str, Any] = {"$slice": [
+                {"$ifNull": ["$pending_reasons", []]}, drop, 1000]}
+        else:
+            snapshot = list(reviewed_reasons)
+            pending_expr = {"$let": {"vars": {"kept": {"$reduce": {
+                "input": {"$ifNull": ["$pending_reasons", []]},
+                "initialValue": {
+                    "remaining": snapshot, "kept": []},
+                "in": {"$let": {
+                    "vars": {"idx": {"$indexOfArray": [
+                        "$$value.remaining", "$$this"]}},
+                    "in": {"$cond": [
+                        {"$eq": ["$$idx", -1]},
+                        {"remaining": "$$value.remaining", "kept": {
+                            "$concatArrays": ["$$value.kept", ["$$this"]]}},
+                        {"remaining": {"$concatArrays": [
+                            {"$slice": ["$$value.remaining", "$$idx"]},
+                            {"$slice": ["$$value.remaining",
+                                        {"$add": ["$$idx", 1]},
+                                        {"$size": "$$value.remaining"}]},
+                        ]}, "kept": "$$value.kept"},
+                    ]},
+                }},
+            }}}, "in": "$$kept.kept"}}
+        row = await self.ceo_review_trigger.find_one_and_update(
+            {"_id": self.CEO_TRIGGER_DOC_ID, "claimed_boot_id": boot_id},
+            [{"$set": {**payload, "pending_reasons": pending_expr}}],
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._clean(row)
+
+    async def recover_ceo_trigger_for_boot(self, boot_id: str) -> int:
+        """Release the CEO seal of another boot, no age threshold (#575).
+
+        The CEO agenda calls it once from ``recover_at_boot``: with a single
+        instance per host, a seal of an older boot is orphaned at once (D3
+        of TASK-2026-00441). Only a sealed foreign row matches, like the
+        objectives sister.
+        """
+        result = await self.ceo_review_trigger.update_one(
+            {"_id": self.CEO_TRIGGER_DOC_ID,
+             "claimed_boot_id": {"$exists": True,
+                                 "$nin": [None, boot_id]}},
+            {"$set": {"claimed_boot_id": None,
+                      "updated_at": datetime.now(timezone.utc)}},
+        )
+        return int(result.modified_count or 0)
 
     async def save_ceo_review(self, record: dict[str, Any]) -> None:
         """Append one review record (Horizon reads the latest)."""

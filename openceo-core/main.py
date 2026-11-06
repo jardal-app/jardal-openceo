@@ -23,6 +23,7 @@ from langchain_openai import ChatOpenAI
 
 from agents.dev.session import DevSessionManager
 from ceo.loop import CEOLoop
+from ceo.schedule_agenda import CeoScheduleAgenda
 from ceo.review import run_review as run_ceo_review
 from ceo.service import CEOService
 from agents.secretary.session import SecretarySessionManager
@@ -244,6 +245,10 @@ task_service.set_dispatcher_wake(dispatcher.wake)
 # reactive reviews on company events (objective parked/closed, failed
 # or escalated executions). The mandate is the switch: without a valid
 # one the reviews escalate deterministically and spend zero tokens.
+# Since ticket #575 the reviews run on the shared schedule kernel (the
+# agenda is registered in the lifespan); the isolated loop never starts
+# and ``ceo_loop.wake`` stages, persists and delegates to the kernel, so
+# every producer below (TaskService, ObjectiveService, missions) is untouched.
 ceo_service = CEOService(
     repo=repo,
     task_service=task_service,
@@ -563,7 +568,10 @@ async def lifespan(_: FastAPI):
         await task_service.drain_erp_outbox_startup()
         # El bucle aislado del dispatcher ya no arranca (ticket #572): su
         # agenda corre en el kernel compartido, registrado mas abajo.
-        await ceo_loop.start()
+        # El bucle aislado del CEO ya no arranca (ticket #575): su agenda
+        # corre en el kernel compartido, registrado mas abajo. El recover
+        # asegura el trigger donde lo hacia ``start`` y la primera pasada
+        # del kernel reclama lo vencido donde corria ``_run_overdue_once``.
         # El bucle aislado de recuperacion ya no arranca (ticket #570): su
         # agenda corre en el kernel compartido, registrado mas abajo.
         # The isolated mechanic loop never starts either (ticket #573): its
@@ -615,11 +623,11 @@ async def lifespan(_: FastAPI):
         create_default_user_if_needed(_auth_db)
 
         # Kernel de schedule global (TASK-2026-00441): research (Fase 2, ticket #564),
-        # Horizon (Fase 3, ticket #567), recuperacion de objetivos (Fase 5,
-        # ticket #570), dispatcher + DeadlineWatch (Fase 6, ticket #572) y
-        # latido del mecanico (fase final, ticket #573) comparten la espera
-        # unica. Los incidentes del kernel van a la coleccion de reliability,
-        # como los de DeadlineWatch.
+        # Horizon (Fase 3, ticket #567), CEO (Fase 4, ticket #575),
+        # recuperacion de objetivos (Fase 5, ticket #570), dispatcher +
+        # DeadlineWatch (Fase 6, ticket #572) y latido del mecanico (fase
+        # final, ticket #573) comparten la espera unica. Los incidentes del
+        # kernel van a la coleccion de reliability, como los de DeadlineWatch.
         schedule_kernel = ScheduleKernel(
             incidents=repo.db["reliability_incidents"],
             runtime_dir=Path(__file__).resolve().parents[1] / ".runtime",
@@ -660,6 +668,22 @@ async def lifespan(_: FastAPI):
             horizon_agenda.store.bind_waker(lambda: schedule_kernel.wake(horizon_agenda.name))
             horizon_service.bind_waker(lambda: schedule_kernel.wake(horizon_agenda.name))
             horizon_scheduler.delegate_wake_to(lambda: schedule_kernel.wake(horizon_agenda.name))
+        # CEO (ticket #575): siempre activo, sobre el mismo kernel compartido
+        # y registrado antes del arranque para que el recover lo cubra. Sin
+        # aviso de arranque: cada backlog (programado o en debounce) tiene
+        # su vencimiento y la primera pasada lo reclama; nada caliente solo
+        # existe al arrancar. Cada productor sigue llamando a
+        # ``ceo_loop.wake(reason)``, ahora delegada al kernel.
+        ceo_agenda = CeoScheduleAgenda(
+            repo=repo,
+            review_runner=_run_ceo_review,
+            mandate_fn=ceo_service.current_mandate,
+            settings=settings,
+            router_state_dir=free_router_state_dir(),
+        )
+        schedule_kernel.register(ceo_agenda)
+        ceo_loop.delegate_wake_to(
+            lambda: schedule_kernel.wake(ceo_agenda.name))
         # Recuperacion (ticket #570): siempre activa, sobre el mismo kernel
         # compartido y registrada antes del arranque para que el recover la
         # cubra. Cada park sigue despertando por ``recovery_wake``, ahora
@@ -745,12 +769,12 @@ async def lifespan(_: FastAPI):
         yield
 
         await research_coordinator.stop()
-        # El kernel compartido (research + Horizon + recuperacion +
+        # El kernel compartido (research + Horizon + CEO + recuperacion +
         # dispatcher + latido) ya paro primero al detener el coordinador:
         # cancela los carriles antes de cerrar el repositorio. Los bucles
-        # aislados de Horizon, recuperacion, dispatcher y mecanico nunca
-        # arrancaron; pararlos solo limpia flags y desarma el watch (sin
-        # timer en el kernel).
+        # aislados de Horizon, CEO, recuperacion, dispatcher y mecanico
+        # nunca arrancaron; pararlos solo limpia flags y desarma el watch
+        # (sin timer en el kernel).
         await horizon_scheduler.stop()
         await mechanic_service.stop()
         await recovery_scheduler.stop()

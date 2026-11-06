@@ -89,6 +89,83 @@ def _merge_reasons(
     return merged[-limit:]
 
 
+def _reactive_min_interval_for(settings: Any) -> int:
+    """Reactive debounce, shared by the loop and the kernel agenda (#575).
+
+    One normalization, one fail-open rule: a missing or unreadable value
+    keeps the 3600 s default, a negative one means no debounce.
+    """
+    try:
+        value = int(
+            getattr(
+                settings,
+                "CEO_REACTIVE_MIN_INTERVAL_SECONDS", 3600,
+            )
+        )
+    except (TypeError, ValueError):
+        return 3600
+    return max(0, value)
+
+
+def _cadence_for(mandate_fn: Callable[[], Any]) -> str:
+    """Mandate cadence, shared by the loop and the kernel agenda (#575).
+
+    Missing, unreadable or unknown cadences fall back to weekly: without
+    a valid mandate there is no autonomy, but the schedule still exists.
+    """
+    try:
+        mandate = mandate_fn()
+    except Exception:
+        logger.warning("CEO: mandate unreadable", exc_info=True)
+        return DEFAULT_CADENCE
+    if mandate is None:
+        return DEFAULT_CADENCE
+    revision = getattr(mandate, "revision_ceo", None)
+    cadence = str(getattr(revision, "cadencia", "") or "").strip()
+    if cadence not in CADENCE_INTERVALS:
+        return DEFAULT_CADENCE
+    return cadence
+
+
+def _router_reasons_for(
+    router_state_dir: Any, now: datetime
+) -> list[str]:
+    """Fresh free-router alerts, shared by the loop and the agenda (#575).
+
+    Never raises (fail-open): one file read piggybacked on an existing
+    review, never a new poll.
+    """
+    if router_state_dir is None:
+        return []
+    try:
+        from model_routing.alerts import list_alerts
+    except Exception:
+        logger.warning("CEO: router alerts unreadable", exc_info=True)
+        return []
+    try:
+        alerts = list_alerts(Path(router_state_dir))
+    except Exception:
+        logger.warning("CEO: router alerts unreadable", exc_info=True)
+        return []
+    cutoff = now - timedelta(hours=ROUTER_ALERT_MAX_AGE_HOURS)
+    latest: dict[str, str] = {}
+    for alert in alerts:
+        if alert.kind not in ROUTER_ALERT_KINDS:
+            continue
+        try:
+            moment = datetime.fromisoformat(alert.ts)
+        except ValueError:
+            continue
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        if moment < cutoff or moment > now:
+            continue
+        latest[alert.kind] = (
+            f"free-router {alert.kind} at {alert.ts}: {alert.detail}"
+        )
+    return [latest[kind] for kind in ROUTER_ALERT_KINDS if kind in latest]
+
+
 class CEOLoop:
     """Scheduled + reactive CEO reviews over one persisted trigger.
 
@@ -98,6 +175,12 @@ class CEOLoop:
     ``repo`` persists the trigger (``get_ceo_trigger`` /
     ``save_ceo_trigger``); ``settings`` carries
     ``CEO_REACTIVE_MIN_INTERVAL_SECONDS``.
+
+    Legacy since ticket #575: in production the global schedule kernel
+    runs ``CeoScheduleAgenda`` and this loop no longer starts. The
+    class stays behaviorally unchanged as the harness for the frozen
+    oracle (``tests/test_ceo_loop.py``); ``delegate_wake_to`` redirects
+    ``wake`` to the kernel without touching the producers.
     """
 
     def __init__(
@@ -122,11 +205,20 @@ class CEOLoop:
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
         self._queued: list[str] = []
+        self._wake_delegate: Callable[[], None] | None = None
+        self._flush_lock = asyncio.Lock()
 
     # ------------------------- lifecycle -------------------------
 
+    def delegate_wake_to(self, waker: Callable[[], None] | None) -> None:
+        """Redirect ``wake`` to the kernel (ticket #575). Unbound, as before."""
+        self._wake_delegate = waker
+
     def wake(self, reason: str) -> None:
         """A company event asks for a reactive review. Coalesced."""
+        if self._wake_delegate is not None:
+            self._wake_via_kernel(reason)
+            return
         try:
             text = str(reason or "").strip()
             if text:
@@ -135,6 +227,64 @@ class CEOLoop:
             self._wake.set()
         except Exception:
             logger.warning("CEO loop wake failed", exc_info=True)
+
+    def _wake_via_kernel(self, reason: str) -> None:
+        """Stage the reason, persist it, then poke the kernel (#575).
+
+        The producers (TaskService, ObjectiveService, missions) keep
+        calling this synchronously and unchanged; the persistence runs as
+        a task on the running loop. The immediate poke drives the kernel
+        at once, and the flush re-pokes after its push lands, so a claim
+        that raced ahead of the push never loses the reason: the second
+        poke drives the claim that sees it. Never raises.
+        """
+        try:
+            text = str(reason or "").strip()
+            if text:
+                self._queued.append(text)
+                del self._queued[:-MAX_QUEUED_REASONS]
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop is not None:
+                    loop.create_task(self._flush_queued_reasons())
+            self._wake_delegate()
+        except Exception:
+            logger.warning("CEO loop wake failed", exc_info=True)
+
+    async def _flush_queued_reasons(self) -> None:
+        """Push staged reasons, then re-poke the kernel (ticket #575).
+
+        Serialized so concurrent wakes land in order; the push itself is
+        atomic and seal-safe (it never touches the claim). A failed push
+        re-stages its reasons for the next flush instead of dropping
+        company events. Never raises: this runs fire-and-forget.
+        """
+        try:
+            async with self._flush_lock:
+                reasons, self._queued = self._queued, []
+                reasons = [
+                    text for text in reasons if str(text or "").strip()]
+                if not reasons:
+                    return
+                try:
+                    await self._repo.push_ceo_pending_reasons(reasons)
+                except Exception:
+                    logger.warning(
+                        "CEO: wake reasons persist failed; restaged",
+                        exc_info=True)
+                    self._queued = _merge_reasons(
+                        reasons, self._queued, MAX_QUEUED_REASONS)
+                    return
+                try:
+                    delegate = self._wake_delegate
+                    if delegate is not None:
+                        delegate()
+                except Exception:
+                    logger.warning("CEO loop wake failed", exc_info=True)
+        except Exception:
+            logger.warning("CEO loop wake flush failed", exc_info=True)
 
     async def start(self) -> None:
         """Ensure the trigger, run an overdue scheduled review, loop."""
@@ -161,30 +311,10 @@ class CEOLoop:
             self._job = None
 
     def _min_reactive_interval(self) -> int:
-        try:
-            value = int(
-                getattr(
-                    self._settings,
-                    "CEO_REACTIVE_MIN_INTERVAL_SECONDS", 3600,
-                )
-            )
-        except (TypeError, ValueError):
-            return 3600
-        return max(0, value)
+        return _reactive_min_interval_for(self._settings)
 
     def _cadence(self) -> str:
-        try:
-            mandate = self._mandate_fn()
-        except Exception:
-            logger.warning("CEO: mandate unreadable", exc_info=True)
-            return DEFAULT_CADENCE
-        if mandate is None:
-            return DEFAULT_CADENCE
-        revision = getattr(mandate, "revision_ceo", None)
-        cadence = str(getattr(revision, "cadencia", "") or "").strip()
-        if cadence not in CADENCE_INTERVALS:
-            return DEFAULT_CADENCE
-        return cadence
+        return _cadence_for(self._mandate_fn)
 
     # ------------------------- trigger -------------------------
 
@@ -333,36 +463,7 @@ class CEOLoop:
         reads it (TASK-2026-00427 went unnoticed for two days). One
         file read piggybacked on an existing review, never a new poll.
         """
-        if self._router_state_dir is None:
-            return []
-        try:
-            from model_routing.alerts import list_alerts
-        except Exception:
-            logger.warning("CEO: router alerts unreadable", exc_info=True)
-            return []
-        try:
-            alerts = list_alerts(Path(self._router_state_dir))
-        except Exception:
-            logger.warning("CEO: router alerts unreadable", exc_info=True)
-            return []
-        now = self._now()
-        cutoff = now - timedelta(hours=ROUTER_ALERT_MAX_AGE_HOURS)
-        latest: dict[str, str] = {}
-        for alert in alerts:
-            if alert.kind not in ROUTER_ALERT_KINDS:
-                continue
-            try:
-                moment = datetime.fromisoformat(alert.ts)
-            except ValueError:
-                continue
-            if moment.tzinfo is None:
-                moment = moment.replace(tzinfo=timezone.utc)
-            if moment < cutoff or moment > now:
-                continue
-            latest[alert.kind] = (
-                f"free-router {alert.kind} at {alert.ts}: {alert.detail}"
-            )
-        return [latest[kind] for kind in ROUTER_ALERT_KINDS if kind in latest]
+        return _router_reasons_for(self._router_state_dir, self._now())
 
     async def _run_scheduled(
         self, trigger: dict[str, Any], *, reasons: list[str]
