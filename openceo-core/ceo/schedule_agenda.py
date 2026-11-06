@@ -112,6 +112,7 @@ class CeoScheduleAgenda:
         settings: Any = None,
         router_state_dir: Any = None,
         now_fn: Callable[[], datetime] | None = None,
+        pending_flush: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._repo = repo
         self._review_runner = review_runner
@@ -120,9 +121,37 @@ class CeoScheduleAgenda:
         self._router_state_dir = router_state_dir
         self._now = now_fn or _utcnow
         self._boot_id: str | None = None
+        self._pending_flush = pending_flush
+
+    def bind_pending_flush(
+        self, flush: Callable[[], Awaitable[None]] | None
+    ) -> None:
+        """Hook the loop's staged-reasons flush into every drive (#587).
+
+        Wired once at boot (``ceo_loop.flush_queued_reasons``): each drive
+        persists reasons a failed push left staged before planning, so no
+        company event waits for the next wake.
+        """
+        self._pending_flush = flush
 
     def _interval(self) -> int:
         return _reactive_min_interval_for(self._settings)
+
+    async def _flush_staged_reasons(self) -> None:
+        """Persist loop-staged reasons before planning (#587).
+
+        Fail-open: a failed flush re-arms its own bounded-delay retry
+        inside the loop, and the drive continues with the persisted state.
+        Never raises.
+        """
+        flush = self._pending_flush
+        if flush is None:
+            return
+        try:
+            await flush()
+        except Exception:
+            logger.warning(
+                "ceo: staged reasons flush failed", exc_info=True)
 
     # ------------------------------------------------------------ Agenda
 
@@ -136,7 +165,9 @@ class CeoScheduleAgenda:
         now so the claim promptly ensures the document. A seal of another
         boot means nothing claimable for us; our own seal stays readable
         so a settle that failed to land re-drives instead of wedging.
+        Staged reasons flush first (#587), so the due sees them.
         """
+        await self._flush_staged_reasons()
         trigger = await self._repo.get_ceo_trigger()
         if not isinstance(trigger, dict):
             return self._now()
@@ -165,10 +196,13 @@ class CeoScheduleAgenda:
         The ensure runs first (a missing trigger is built, never claimed),
         then the same due-ness the old cycle decided. A foreign seal or a
         debounce that has not elapsed claims nothing; a lost seal (another
-        driver won the race) is skipped.
+        driver won the race) is skipped. Staged reasons flush first
+        (#587), so the claim payload carries them even on a hot drive
+        that skipped the due re-read.
         """
         if self._boot_id is None or limit <= 0:
             return []
+        await self._flush_staged_reasons()
         trigger = await self._ensure_trigger()
         seal = trigger.get("claimed_boot_id")
         if seal is not None and seal != self._boot_id:

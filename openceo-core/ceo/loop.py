@@ -24,6 +24,7 @@ __all__ = [
     "CADENCE_INTERVALS",
     "CEOLoop",
     "DEFAULT_CADENCE",
+    "FLUSH_RETRY_DELAY_SECONDS",
     "next_scheduled_after",
 ]
 
@@ -51,6 +52,13 @@ MAX_QUEUED_REASONS = 50
 #: Sleep cap. Not polling: the clock-jump/suspend net, same as
 #: Horizon's (one single-doc read per hour while idle).
 MAX_SLEEP_SECONDS = 3600
+
+#: Failed-push retry delay (#587). Not polling: a single timer armed only
+#: while staged reasons wait for a persist that failed, plus the flush on
+#: the next agenda drive. The old hourly cap tick that re-drained the
+#: queue no longer exists (the kernel owns the wait, uncapped), so without
+#: this a failed push parked company events in memory until the next wake.
+FLUSH_RETRY_DELAY_SECONDS = 60.0
 
 #: Free-router alert freshness. The 6 h refresh re-emits while the
 #: fault persists, so anything older saw at least one clean cycle.
@@ -194,6 +202,7 @@ class CEOLoop:
         ],
         now_fn: Callable[[], datetime] | None = None,
         router_state_dir: Any = None,
+        flush_retry_delay: float = FLUSH_RETRY_DELAY_SECONDS,
     ) -> None:
         self._repo = repo
         self._settings = settings
@@ -201,12 +210,14 @@ class CEOLoop:
         self._review_runner = review_runner
         self._now = now_fn or (lambda: datetime.now(timezone.utc))
         self._router_state_dir = router_state_dir
+        self._flush_retry_delay = flush_retry_delay
         self._job: asyncio.Task[Any] | None = None
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
         self._queued: list[str] = []
         self._wake_delegate: Callable[[], None] | None = None
         self._flush_lock = asyncio.Lock()
+        self._flush_retry_handle: asyncio.TimerHandle | None = None
 
     # ------------------------- lifecycle -------------------------
 
@@ -236,7 +247,9 @@ class CEOLoop:
         a task on the running loop. The immediate poke drives the kernel
         at once, and the flush re-pokes after its push lands, so a claim
         that raced ahead of the push never loses the reason: the second
-        poke drives the claim that sees it. Never raises.
+        poke drives the claim that sees it. A flush that fails (or no
+        running loop to flush on) leaves the reasons staged for the next
+        agenda drive and the bounded-delay retry (#587). Never raises.
         """
         try:
             text = str(reason or "").strip()
@@ -253,13 +266,25 @@ class CEOLoop:
         except Exception:
             logger.warning("CEO loop wake failed", exc_info=True)
 
+    async def flush_queued_reasons(self) -> None:
+        """Push staged reasons now; the agenda-drive retry hook (#587).
+
+        The kernel agenda awaits this before planning, so reasons staged
+        while the store was down (or with no running loop to flush them)
+        land on the next drive instead of waiting for the next wake.
+        Never raises.
+        """
+        await self._flush_queued_reasons()
+
     async def _flush_queued_reasons(self) -> None:
         """Push staged reasons, then re-poke the kernel (ticket #575).
 
         Serialized so concurrent wakes land in order; the push itself is
         atomic and seal-safe (it never touches the claim). A failed push
-        re-stages its reasons for the next flush instead of dropping
-        company events. Never raises: this runs fire-and-forget.
+        re-stages its reasons and retries them: on the next agenda drive
+        (via :meth:`flush_queued_reasons`) and after
+        ``FLUSH_RETRY_DELAY_SECONDS`` (#587). Never raises: this runs
+        fire-and-forget.
         """
         try:
             async with self._flush_lock:
@@ -276,6 +301,7 @@ class CEOLoop:
                         exc_info=True)
                     self._queued = _merge_reasons(
                         reasons, self._queued, MAX_QUEUED_REASONS)
+                    self._schedule_flush_retry()
                     return
                 try:
                     delegate = self._wake_delegate
@@ -285,6 +311,48 @@ class CEOLoop:
                     logger.warning("CEO loop wake failed", exc_info=True)
         except Exception:
             logger.warning("CEO loop wake flush failed", exc_info=True)
+
+    def _schedule_flush_retry(self) -> None:
+        """Arm one bounded-delay retry while reasons wait (#587).
+
+        Coalesced: a single timer, re-armed by each failed flush. Firing
+        with an empty queue is a no-op (a wake or an agenda drive already
+        drained it). With no running loop there is nothing to arm on and
+        the next agenda drive owns the retry. Never raises.
+        """
+        try:
+            if not self._queued:
+                return
+            handle = self._flush_retry_handle
+            if handle is not None and not handle.cancelled():
+                return
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            delay = max(0.0, float(self._flush_retry_delay))
+            self._flush_retry_handle = running.call_later(
+                delay, self._on_flush_retry_due)
+        except Exception:
+            logger.warning(
+                "CEO loop flush retry not scheduled", exc_info=True)
+
+    def _on_flush_retry_due(self) -> None:
+        """Fire the bounded-delay retry as a flush task (#587)."""
+        self._flush_retry_handle = None
+        try:
+            if not self._queued:
+                return
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        except Exception:
+            logger.warning("CEO loop flush retry failed", exc_info=True)
+            return
+        try:
+            running.create_task(self._flush_queued_reasons())
+        except Exception:
+            logger.warning("CEO loop flush retry failed", exc_info=True)
 
     async def start(self) -> None:
         """Ensure the trigger, run an overdue scheduled review, loop."""
@@ -304,6 +372,9 @@ class CEOLoop:
     async def stop(self) -> None:
         self._stop.set()
         self._wake.set()
+        handle, self._flush_retry_handle = self._flush_retry_handle, None
+        if handle is not None and not handle.cancelled():
+            handle.cancel()
         if self._job is not None:
             self._job.cancel()
             with suppress(asyncio.CancelledError):

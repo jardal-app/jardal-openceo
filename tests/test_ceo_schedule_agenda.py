@@ -7,6 +7,8 @@ properties from TASK-2026-00441 §5.5: the derived debounce due with no new
 persisted field and no 3600 s cap (D4), the boot-stamped atomic seal with
 no age threshold (D3), the wake that stages, persists and delegates with
 the producers untouched, and the hot reactive path that never spins.
+Ticket #587 adds the failed-push retry: restaged reasons flush on the
+next agenda drive and after a bounded delay, never waiting for a wake.
 """
 
 from __future__ import annotations
@@ -26,7 +28,11 @@ CORE_DIR = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
-from ceo.loop import CEOLoop, MAX_PENDING_REASONS  # noqa: E402
+from ceo.loop import (  # noqa: E402
+    CEOLoop,
+    FLUSH_RETRY_DELAY_SECONDS,
+    MAX_PENDING_REASONS,
+)
 from ceo.schedule_agenda import CeoScheduleAgenda  # noqa: E402
 from schedule_kernel import ScheduleKernel  # noqa: E402
 
@@ -686,6 +692,173 @@ class WakePathTests(unittest.IsolatedAsyncioTestCase):
         loop.wake("first incident")
         self.assertEqual(loop._queued, ["first incident"])
         self.assertEqual(pokes, [1])
+
+
+class FlushRetryTests(unittest.IsolatedAsyncioTestCase):
+    """Ticket #587: a failed push retries, never waiting for a wake."""
+
+    def _loop(
+        self,
+        repo: _FakeRepo,
+        pokes: list[int],
+        delay: float = FLUSH_RETRY_DELAY_SECONDS,
+    ) -> CEOLoop:
+        loop = CEOLoop(
+            repo=repo,
+            settings=_settings(),
+            mandate_fn=_mandate_fn("semanal"),
+            review_runner=_FakeRunner(),
+            now_fn=_Clock(),
+            flush_retry_delay=delay,
+        )
+        loop.delegate_wake_to(lambda: pokes.append(1))
+        return loop
+
+    def _agenda(self, repo: _FakeRepo) -> CeoScheduleAgenda:
+        return CeoScheduleAgenda(
+            repo=repo,
+            review_runner=_FakeRunner(),
+            mandate_fn=_mandate_fn("semanal"),
+            settings=_settings(),
+            now_fn=_Clock(),
+        )
+
+    async def _staged_by_failure(
+        self, repo: _FakeRepo, loop: CEOLoop, pokes: list[int]
+    ) -> None:
+        repo.fail_push_once = True
+        loop.wake("first incident")
+        await asyncio.sleep(0.01)
+        self.assertEqual(pokes, [1])
+        self.assertEqual(repo.trigger["pending_reasons"], [])
+        self.assertEqual(loop._queued, ["first incident"])
+
+    async def test_failed_push_retries_after_a_bounded_delay(self) -> None:
+        repo = _FakeRepo(_trigger())
+        pokes: list[int] = []
+        loop = self._loop(repo, pokes, delay=0.02)
+        try:
+            await self._staged_by_failure(repo, loop, pokes)
+            await asyncio.sleep(0.1)
+            # No second wake: the timer flushed and re-poked.
+            self.assertEqual(repo.push_calls, 2)
+            self.assertEqual(
+                repo.trigger["pending_reasons"], ["first incident"])
+            self.assertEqual(pokes, [1, 1])
+            self.assertEqual(loop._queued, [])
+        finally:
+            await loop.stop()
+
+    async def test_concurrent_failures_coalesce_to_one_retry(self) -> None:
+        repo = _FakeRepo(_trigger())
+        pokes: list[int] = []
+        loop = self._loop(repo, pokes)
+        try:
+            await self._staged_by_failure(repo, loop, pokes)
+            first = loop._flush_retry_handle
+            self.assertIsNotNone(first)
+            repo.fail_push_once = True
+            loop.wake("second incident")
+            await asyncio.sleep(0.05)
+            self.assertIs(loop._flush_retry_handle, first)
+            self.assertEqual(
+                loop._queued, ["first incident", "second incident"])
+        finally:
+            await loop.stop()
+            self.assertIsNone(loop._flush_retry_handle)
+
+    async def test_next_due_flushes_staged_reasons_before_planning(
+        self,
+    ) -> None:
+        repo = _FakeRepo(_trigger())
+        pokes: list[int] = []
+        loop = self._loop(repo, pokes)
+        try:
+            await self._staged_by_failure(repo, loop, pokes)
+            agenda = self._agenda(repo)
+            await agenda.recover_at_boot("boot-1")
+            agenda.bind_pending_flush(loop.flush_queued_reasons)
+            due = await agenda.next_due()
+            self.assertEqual(
+                repo.trigger["pending_reasons"], ["first incident"])
+            self.assertEqual(loop._queued, [])
+            # Pending with no reactive review yet is due now.
+            self.assertEqual(due, NOW)
+        finally:
+            await loop.stop()
+
+    async def test_claim_due_carries_reasons_flushed_on_a_hot_drive(
+        self,
+    ) -> None:
+        repo = _FakeRepo(_trigger())
+        pokes: list[int] = []
+        loop = self._loop(repo, pokes)
+        try:
+            await self._staged_by_failure(repo, loop, pokes)
+            agenda = self._agenda(repo)
+            await agenda.recover_at_boot("boot-1")
+            agenda.bind_pending_flush(loop.flush_queued_reasons)
+            claims = await agenda.claim_due(NOW, 1)
+            self.assertEqual(len(claims), 1)
+            self.assertEqual(
+                claims[0].payload["pending_reasons"], ["first incident"])
+        finally:
+            await loop.stop()
+
+    async def test_drive_flush_failure_stays_fail_open(self) -> None:
+        repo = _FakeRepo(_trigger())
+        pokes: list[int] = []
+        loop = self._loop(repo, pokes)
+        try:
+            loop._queued.append("staged incident")
+            repo.fail_push_once = True
+            agenda = self._agenda(repo)
+            await agenda.recover_at_boot("boot-1")
+            agenda.bind_pending_flush(loop.flush_queued_reasons)
+            due = await agenda.next_due()
+            self.assertEqual(due, NOW + WEEK)
+            self.assertEqual(loop._queued, ["staged incident"])
+            self.assertIsNotNone(loop._flush_retry_handle)
+        finally:
+            await loop.stop()
+
+    async def test_failed_push_reviews_without_a_second_wake(self) -> None:
+        start = datetime.now(timezone.utc)
+        clock = _Clock(start)
+        repo = _FakeRepo(_trigger(start))
+        repo.fail_push_once = True
+        runner = _FakeRunner()
+        kernel = ScheduleKernel(
+            now_fn=clock, waiter=_VirtualWaiter(clock))
+        agenda = CeoScheduleAgenda(
+            repo=repo,
+            review_runner=runner,
+            mandate_fn=_mandate_fn("semanal"),
+            settings=_settings(),
+            now_fn=clock,
+        )
+        kernel.register(agenda)
+        loop = CEOLoop(
+            repo=repo,
+            settings=_settings(),
+            mandate_fn=_mandate_fn("semanal"),
+            review_runner=runner,
+            now_fn=clock,
+            flush_retry_delay=0.05,
+        )
+        loop.delegate_wake_to(lambda: kernel.wake(agenda.name))
+        agenda.bind_pending_flush(loop.flush_queued_reasons)
+        try:
+            await kernel.start()
+            await asyncio.sleep(0.05)
+            loop.wake("first incident")
+            await asyncio.sleep(0.3)
+            self.assertEqual(
+                runner.calls, [("reactive", ["first incident"])])
+            self.assertEqual(repo.trigger["pending_reasons"], [])
+        finally:
+            await kernel.stop()
+            await loop.stop()
 
 
 class AgendaKernelTests(unittest.IsolatedAsyncioTestCase):

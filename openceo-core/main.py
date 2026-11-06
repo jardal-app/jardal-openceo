@@ -654,6 +654,9 @@ async def lifespan(_: FastAPI):
         schedule_kernel.register(ceo_agenda)
         ceo_loop.delegate_wake_to(
             lambda: schedule_kernel.wake(ceo_agenda.name))
+        # Ticket #587: cada pasada persiste antes las razones que un push
+        # fallido dejo en memoria, ademas del reintento acotado del loop.
+        ceo_agenda.bind_pending_flush(ceo_loop.flush_queued_reasons)
         # Recuperacion (ticket #570): siempre activa, sobre el mismo kernel
         # compartido y registrada antes del arranque para que el recover la
         # cubra. Cada park sigue despertando por ``recovery_wake``, ahora
