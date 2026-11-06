@@ -1085,6 +1085,13 @@ _REVIEW_FIELD_LINES = (
     'round is needed, or the user instruction>",',
 )
 
+#: The per-ticket empty-diff flag as both planner prompts describe it.
+_EMPTY_DIFF_FIELD_LINES = (
+    '    "allow_empty_diff?": "<dev only: true when zero changes are a '
+    'valid success (read-only verification or decision ticket); omit '
+    'otherwise. Rejects oracle and includes_findings>",',
+)
+
 
 def _planner_prompt(
     objective: Mapping[str, Any],
@@ -1320,6 +1327,7 @@ def _planner_prompt(
         '    "blocked_by": ["<local_ref or existing task_id, acyclic>"],',
         '    "coding_tool": "<dev only: tier_s|tier_a|tier_b|tier_c>",',
         *_REVIEW_FIELD_LINES,
+        *_EMPTY_DIFF_FIELD_LINES,
         '    "tier_reason": "<dev only: why this tier>",',
         '    "oracle": {"type": "<oracle type>", "refs": [{"ref": "...",',
         '      "description?": "..."}]},',
@@ -2069,6 +2077,7 @@ def _pedido_prompt(
         '    "coding_tool": "<REQUIRED for dev: tier_s|tier_a|tier_b|'
         'tier_c; FORBIDDEN otherwise>",',
         *_REVIEW_FIELD_LINES,
+        *_EMPTY_DIFF_FIELD_LINES,
         '    "tier_reason": "<REQUIRED for dev: why this tier>",',
         '    "oracle?": {"type": "<oracle type>", "refs": [{"ref": '
         '"..."}]},',
@@ -2883,6 +2892,11 @@ def _planned_description(ticket: planner_mod.PlannedTicket) -> str:
     if ticket.why_not_c:
         sections.extend(
             ["", f"WHY NOT THE DEFAULT TIER (C): {ticket.why_not_c}"])
+    if ticket.allow_empty_diff:
+        sections.extend(
+            ["", "EMPTY DIFF ALLOWED: zero changes are a valid success "
+             "when the verification confirms nothing must change; close "
+             "with hecho and the decision recorded in evidencia."])
     return "\n".join(sections)
 
 
@@ -2914,6 +2928,8 @@ def _planned_params(ticket: planner_mod.PlannedTicket) -> dict[str, Any]:
         params["why_not_c"] = ticket.why_not_c
     if ticket.review_reason:
         params["review_reason"] = ticket.review_reason
+    if ticket.allow_empty_diff:
+        params["allow_empty_diff"] = True
     return params
 
 
@@ -3189,6 +3205,7 @@ class TicketCloseContext:
     gotchas: list[str] = field(default_factory=list)
     decisions: list[str] = field(default_factory=list)
     handoff_excerpt: str = ""
+    evidencia: str = ""
 
 
 def _park_resumes_on_close(objective: Mapping[str, Any]) -> bool:
@@ -3397,6 +3414,7 @@ async def _absorb_close(
         "deviations": [str(entry)[:300] for entry in close.deviations[:5]],
         "gotchas": [str(entry)[:300] for entry in close.gotchas[:5]],
         "handoff_excerpt": str(close.handoff_excerpt or "")[:500],
+        "evidencia": str(close.evidencia or "")[:500],
     })
     files = dict(objective.get("tickets_files") or {})
     files[close.task_id] = list(close.files)

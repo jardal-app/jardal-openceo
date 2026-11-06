@@ -7200,7 +7200,8 @@ class TaskService:
                     sha=str(stashed.get("sha") or ""),
                     files=list(stashed.get("files") or []),
                     handoff_excerpt=str(
-                        stashed.get("handoff_excerpt") or ""))
+                        stashed.get("handoff_excerpt") or ""),
+                    evidencia=str(stashed.get("evidencia") or ""))
             else:
                 persisted = ticket.get("params") or {}
                 close = TicketCloseContext(
