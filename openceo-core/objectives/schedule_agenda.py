@@ -16,7 +16,8 @@ plus their children (D4) becomes one indexed query over
 ``(status, recovery.due_at)``; the claim is sealed with the ``boot_id`` (D3:
 boot ownership, no age threshold); the wait is owned by the kernel (single
 point, no cap); spent parks carry no due, so the agenda is hot on wake and
-their ticket round is driven by the wake every park already sends.
+the wait query reports now while an unsealed no-due exhausted park exists
+(#586), draining a backlog one per lane end without further wakes.
 """
 
 from __future__ import annotations
@@ -41,11 +42,13 @@ class ObjectivesRecoveryAgenda:
 
     ``lanes = 1`` keeps the serial semantics of the old scheduler: one
     recovery in flight per process. ``hot_on_wake = True`` because spent
-    parks carry no due: the wake every park already sends is what drives
-    their ticket round. The run handler is total (it decides and acts per
-    objective, liquidating domain failures as re-parks or ticket state), so
-    an exception out of ``run`` is unexpected and propagates to the
-    kernel's supervisor; ``settle`` releases the seal either way.
+    parks carry no due: the wake every park already sends drives their
+    ticket round at once, and the wait query stays due now while any
+    unsealed no-due exhausted park remains (#586). The run handler is
+    total (it decides and acts per objective, liquidating domain failures
+    as re-parks or ticket state), so an exception out of ``run`` is
+    unexpected and propagates to the kernel's supervisor; ``settle``
+    releases the seal either way.
     """
 
     name = "objectives-recovery"
@@ -67,7 +70,7 @@ class ObjectivesRecoveryAgenda:
     # ------------------------------------------------------------ Agenda
 
     async def next_due(self) -> datetime | None:
-        """One indexed query for the nearest claimable due."""
+        """Nearest claimable due; now while a spent park waits (#586)."""
         return await self._repo.next_objective_recovery_due_at()
 
     async def claim_due(self, now: datetime, limit: int) -> list[Claim]:

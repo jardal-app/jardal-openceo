@@ -728,6 +728,10 @@ class ObjectiveService:
             return {**outcome, "ok": False, "reason": "not-found"}
         project = str(objective.get("project") or "")
         if not project or not self._config.has_project(project):
+            # #586: an unpaced no-due spent park with an unknown project
+            # would re-drive every lane end on the now-wait.
+            await self._pace_unactionable_recovery(
+                objective_id, objective, {}, "unknown-project", now=now)
             return {**outcome, "ok": False, "reason": "unknown-project"}
         cfg = self._objectives_cfg(project)
         try:
@@ -764,6 +768,13 @@ class ObjectiveService:
                     "action": action, "reason": reason, "result": result}
         if action == "ticket":
             result = await self.open_recovery_ticket(objective_id)
+            if not result.get("ok"):
+                # #586: a failed ticket round leaves the park no-due
+                # exhausted; without pacing the now-wait re-drives it
+                # every lane end (same shape as TASK-2026-00534).
+                await self._pace_unactionable_recovery(
+                    objective_id, objective, cfg,
+                    str(result.get("reason") or "ticket-failed"), now=now)
             return {**outcome, "ok": bool(result.get("ok")),
                     "action": action, "reason": reason, "result": result}
         if action in ("deploy", "deploy-deferred", "defer"):

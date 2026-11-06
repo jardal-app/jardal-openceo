@@ -1599,13 +1599,31 @@ class MongoRepository:
         return self._clean(row) if row is not None else None
 
     async def next_objective_recovery_due_at(self) -> datetime | None:
-        """Nearest recovery due of a waiting, unsealed objective (ticket #570).
+        """Nearest recovery due of a waiting, unsealed objective (#570, #586).
 
-        The only wait query of the objectives agenda: ``waiting`` + no
+        The wait query of the objectives agenda: ``waiting`` + no
         ``claimed_boot_id`` seal + a persisted due, oldest first. The due
         is an ISO string (``recovery_policy`` writes it); an unparsable
         value is not a due the kernel can wait on.
+
+        Spent parks carry no due but the claim query takes them, so while
+        an unsealed no-due exhausted park exists the agenda is due now:
+        otherwise a backlog of them drains at most one per wake and the
+        rest stall (the wake's hot flag is consumed by the first claim
+        and the lane end re-wakes without heat). A paced exhausted park
+        (future due) keeps waiting on its due, not now.
         """
+        now = datetime.now(timezone.utc)
+        spent = await self.dev_objectives.find_one(
+            {
+                "status": "waiting",
+                "claimed_boot_id": None,
+                "recovery.exhausted": True,
+                "recovery.due_at": None,
+            },
+            {"_id": 1},
+        )
+        nearest: datetime | None = None
         rows = (
             self.dev_objectives.find(
                 {
@@ -1618,8 +1636,10 @@ class MongoRepository:
         )
         async for row in rows:
             recovery = row.get("recovery") or {}
-            return recovery_mod.parse_due(recovery.get("due_at"))
-        return None
+            nearest = recovery_mod.parse_due(recovery.get("due_at"))
+        if spent is not None and (nearest is None or nearest > now):
+            return now
+        return nearest
 
     async def list_due_objective_recoveries(
         self, now: datetime, limit: int = 20
