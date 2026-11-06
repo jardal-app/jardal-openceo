@@ -101,6 +101,7 @@ from agents.dev.tier_s.telemetry import (
     record_session,
     record_sizes,
 )
+from agents.dev.merge_lock import MergeLockBusy, merge_locked
 from agents.dev.scratch import stage_work
 from state import BLOCKER_RELEASED_STATUSES, CodingTool, TaskStatus
 
@@ -2331,23 +2332,31 @@ class TierSCycle:
     async def _close(self, ctx: _Ctx) -> CycleOutcome:
         await self._runs.patch_run(ctx.run_id, {
             "phase": "closing", "updated_at": _utcnow_iso()})
-        # F3: round1 → muse FIX → round2 → muse FIX → arbitration (§6.7–§6.9).
-        parked = await self._review_rounds(ctx)
-        if parked is not None:
-            return parked
-        ctx.brake_phase = "closing"
-        await self._runs.patch_run(ctx.run_id, {
-            "phase": "closing", "rounds": ctx.rounds,
-            "arbitrations": ctx.arbitrations, "metrics": ctx.metrics,
-            "updated_at": _utcnow_iso()})
-        final = await asyncio.to_thread(
-            gate_mod.run_gates, ctx.repo, ctx.gate_specs)
-        self._record_gates(ctx, "final", final)
-        if gate_mod.gates_failed(final):
-            names = ", ".join(item.name for item in gate_mod.gates_failed(final))
-            return await self._park(
-                ctx, "needs_owner", f"final gates failed: {names}",
-                patch_run=True)
+        if ctx.resumed and ctx.resume_phase == "close":
+            # Merge retry: the tree already passed review and final gates
+            # and the checkpoint pins it, so only the merge is retried.
+            ctx.brake_phase = "closing"
+            final = [self._gate_result(entry) for entry in ctx.gate_runs
+                     if entry.get("phase") == "final"]
+        else:
+            # F3: round1 → muse FIX → round2 → muse FIX → arbitration (§6.7–§6.9).
+            parked = await self._review_rounds(ctx)
+            if parked is not None:
+                return parked
+            ctx.brake_phase = "closing"
+            await self._runs.patch_run(ctx.run_id, {
+                "phase": "closing", "rounds": ctx.rounds,
+                "arbitrations": ctx.arbitrations, "metrics": ctx.metrics,
+                "updated_at": _utcnow_iso()})
+            final = await asyncio.to_thread(
+                gate_mod.run_gates, ctx.repo, ctx.gate_specs)
+            self._record_gates(ctx, "final", final)
+            if gate_mod.gates_failed(final):
+                names = ", ".join(
+                    item.name for item in gate_mod.gates_failed(final))
+                return await self._park(
+                    ctx, "needs_owner", f"final gates failed: {names}",
+                    patch_run=True)
         # Last look before the irreversible effects: a business
         # cancellation that landed mid-cycle stops the squash, the merge,
         # the push and the objective trigger (TASK-2026-00177).
@@ -2373,12 +2382,35 @@ class TierSCycle:
         task_id = str(ctx.ticket.get("task_id", ""))
         production = None
         if ctx.auto_merge:
-            merged, conflict = self._merge(ctx)
+            try:
+                with merge_locked(ctx.repo):
+                    merged, merge_kind, conflict = self._merge(ctx)
+                    if merged:
+                        self._drop_branch(ctx)
+            except MergeLockBusy:
+                merged, merge_kind, conflict = (
+                    False, "checkout",
+                    "merge lock busy: another close is merging")
             if not merged:
+                # The branch keeps the squashed candidate: checkpoint it so
+                # the resume retries the merge instead of rebuilding.
+                ctx.head_sha = ctx.final_sha
+                close_checkpoint = self._review_checkpoint(ctx)
+                close_checkpoint["phase"] = "close"
+                await self._runs.patch_run(ctx.run_id, {
+                    "checkpoint": close_checkpoint,
+                    "updated_at": _utcnow_iso()})
+                if merge_kind == "checkout":
+                    # A checkout failure is transient (a concurrent close,
+                    # a lock held elsewhere): retry, never page the owner.
+                    return await self._park(
+                        ctx, "transient",
+                        f"merge_conflict: {conflict}",
+                        resume_in_min=self._backoff(ctx, 0),
+                        patch_run=True)
                 return await self._park(
                     ctx, "needs_owner", f"merge_conflict: {conflict}",
                     patch_run=True)
-            self._drop_branch(ctx)
             if self._push is not None:
                 await self._push(ctx.repo, ctx.base_branch)
             # Post-merge production step (TASK-2026-00415): publish the
@@ -2414,18 +2446,30 @@ class TierSCycle:
             status="completed", run_id=ctx.run_id, branch=ctx.branch,
             commit_sha=ctx.final_sha)
 
-    def _merge(self, ctx: _Ctx) -> tuple[bool, str]:
-        if _git(ctx.repo, "checkout", "-q", ctx.base_branch).returncode != 0:
-            return False, f"cannot checkout {ctx.base_branch}"
+    def _merge(self, ctx: _Ctx) -> tuple[bool, str, str]:
+        """Merge the ticket branch into the base (§12).
+
+        The caller holds the checkout's merge lock. Returns
+        ``(merged, kind, detail)`` with ``kind`` in
+        ``{"", "checkout", "conflict"}``; ``detail`` keeps the git stderr
+        (truncated) so a failed close stays diagnosable.
+        """
+        checkout = _git(ctx.repo, "checkout", "-q", ctx.base_branch)
+        if checkout.returncode != 0:
+            err = checkout.stderr.strip()[:300]
+            detail = f"cannot checkout {ctx.base_branch}"
+            if err:
+                detail += f": {err}"
+            return False, "checkout", detail
         # Fast-forward keeps "one commit per ticket" on the base; a moved
         # base falls back to an explicit merge (§12).
         if _git(ctx.repo, "merge", "--ff-only", "-q", ctx.branch).returncode == 0:
-            return True, ""
+            return True, "", ""
         proc = _git(ctx.repo, "merge", "--no-ff", "--no-edit", ctx.branch)
         if proc.returncode != 0:
             _git(ctx.repo, "merge", "--abort")
-            return False, proc.stderr.strip()[:300] or "conflict"
-        return True, ""
+            return False, "conflict", proc.stderr.strip()[:300] or "conflict"
+        return True, "", ""
 
     async def _objective_trigger(
         self, ctx: _Ctx, files: Sequence[str], handoff: str) -> None:
