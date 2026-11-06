@@ -2,6 +2,36 @@
 
 Resumen operativo corto del estado real del repo.
 
+## 2026-11-06 — Solo systemd, topes por motor fuera, plan que no quema sesiones y despliegue sin esperar a la misión (TASK-2026-00510)
+
+- Órdenes del Owner (misma sesión): «elimina el legacy para que no exista esa via y deploya las correcciones que hicimos con todos los casos deterministas que no tienen fin y siempre erran»; luego, tras ver claudej agotado, que un fallo de formato no queme una sesión completa.
+- **Solo systemd (6f4cc22):** `scripts/openceo-core-host.sh` pierde el arranque por script (314 → 156 líneas). `start`/`stop`/`restart`/`status`/`logs` van siempre a `systemctl --user`/journal y fallan con el comando de instalación si la unidad falta. Antes, `start` arrancaba por script aunque la unidad estuviera habilitada: dejó el core fuera de la unidad a las 01:10.
+- **Topes por motor fuera:** los tres contadores `scheduled_wait` (00350 en genérico y A/B/C, 00366 en Tier S) se borraron. Los cubre la regla genérica, porque el resultado de Tier S llega a `run_task` con su `resume_at`.
+- **Despliegue forzado:** un fix pendiente más de `deploy_force_after_minutes` (30) se despliega en cuanto el checkout del servicio está limpio en main y no hay planner en vuelo. Antes había que esperar a que la misión entera quedara ociosa.
+- **Plan de Tier S (23d4545, 8a32753):** la causa exacta de #549/#550 salió del plan real rechazado. El prompt mostraba `ESTIMATE files=<n> lines=<n>` sin dos puntos, el planner lo copió y el parser exigía `ESTIMATE:`. Ahora:
+  - ESTIMATE se lee con o sin dos puntos;
+  - GOAL y ACCEPTANCE se toman del ticket si faltan;
+  - FILES acepta cualquier separador;
+  - un create/modify mal etiquetado es un aviso;
+  - solo vuelven al planner FILES/STEPS ausentes, una línea FILES ilegible o una ruta fuera del repo, y ese reintento edita solo esas líneas;
+  - `_inside_repo` ya no deja pasar `../x` (el `lstrip("./")` se comía el `..`).
+
+  El plan real de #550 valida limpio, con estimación 7/90. Reanudar la sesión en el reintento no es posible hoy: el sandbox monta `~/.claude-j` en tmpfs por run y descarta la transcripción.
+- **Ticket convertido (6936654):** el análisis de su planner se truncaba a 4000 caracteres guardados y 3000 en el prompt; #541 perdió el 76 % de sus 12.518. Ahora se guarda entero, va en `SIZING_HINT.md` y el planner del objetivo construye sobre él. La herencia ya era correcta: dentro de un objetivo, mismo grupo y misión; un ticket suelto se convierte él mismo en el grupo.
+- **claudej agotado a las 01:52:** 8 runs de Opus a esfuerzo máximo (#541, #549×3, #550×3, #563) más el builder tier_a de #486, sin reintentos en bucle. Unos 30-40 min se perdieron en planes rechazados por el ESTIMATE.
+  - **Hallazgo abierto:** el control de cuota vigila `~/.local/bin/claude` (la cuenta principal), no `claudej` (`~/.claude-j`). Por eso #550 y #563 se lanzaron con claudej ya agotado. El cambio está pendiente de decisión del Owner.
+- **El mecánico, solo:**
+  - #560: detectó una carrera de merges, la corrigió con un ticket de fix y lo desplegó a las 01:45 por systemd en cuanto el servicio quedó ocioso;
+  - #565: abrió el fix #566 (guardia anti-vagancia con cero cambios legítimos);
+  - #566: ante el aviso de DeadlineWatch, solo comentó (no había cuelgue).
+- **research:** el módulo (16.8k líneas) no está activado en ningún proyecto y tiene 0 sesiones. Se conserva: es el investigador del Owner, falta activarlo y el piloto real.
+- **Traspaso:**
+  - En producción corre `424a7ea`, bajo systemd.
+  - 23d4545, 8a32753 y 6936654 están en main (`a236aad`); el mecánico los despliega en cuanto #566 libere el checkout de openceo (`mechanic_state.deploy`).
+  - #549, #550 y #563 están en cola tras el reinicio de la ventana de claudej (02:30).
+  - Pendiente de decisión: la cuenta que vigila el control de cuota y la reanudación de sesión en el reintento (persistir la transcripción por ticket).
+  - Fase 2: el core corre desde el mismo checkout donde construyen los tickets de openceo; el despliegue forzado lo mitiga, falta desacoplarlo.
+
 ## 2026-11-05 — Mecánico: lo imprevisto ya no se parchea caso a caso (TASK-2026-00510)
 
 - Orden del Owner, tras preguntar si los bugs diarios venían de la lógica determinista del núcleo: «corrigelo elimnia 50k lineas de codigo si es necesario comentarios y todo lo que quieras pero reestructura rapidamente para que sea proactivo no importa si gasta mas tokens», y analizar un cron con musej.
