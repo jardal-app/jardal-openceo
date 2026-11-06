@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "openceo-core"))
 from catalog import load_role_profile  # noqa: E402
 from config_loader import ConfigLoader  # noqa: E402
 from mcp_identity import READONLY_PRINCIPALS  # noqa: E402
+from mechanic.handoff import HANDOFF_KEY  # noqa: E402
 from mechanic.actions import ActionRunner  # noqa: E402
 from mechanic.models import (  # noqa: E402
     MechanicAction,
@@ -39,7 +40,7 @@ from mechanic.service import (  # noqa: E402
     mechanic_config,
 )
 from mechanic.situation import Finding, compile_situation  # noqa: E402
-from mechanic.stall import STREAK_KEY, streak_outcome  # noqa: E402
+from mechanic.stall import PENDING_KEY, STREAK_KEY, streak_outcome  # noqa: E402
 from orchestration.role_contracts import is_read_only  # noqa: E402
 from settings import Settings  # noqa: E402
 from reliability.deadlines import DeadlineWatch  # noqa: E402
@@ -79,13 +80,22 @@ def test_any_reason_counts_the_same_way() -> None:
     assert trigger == "stall"
 
 
-def test_new_reason_or_long_gap_restarts_the_count() -> None:
+def test_changing_reason_keeps_count_and_long_gap_restarts_it() -> None:
     first, _ = _outcome()
     fields, _ = _outcome(reason="rate_limit: reset", params={STREAK_KEY: first[STREAK_KEY]})
-    assert fields[STREAK_KEY]["count"] == 1
+    assert fields[STREAK_KEY]["count"] == 2
     later = NOW + GAP + timedelta(minutes=1)
     fields, _ = _outcome(params={STREAK_KEY: first[STREAK_KEY]}, now=later)
     assert fields[STREAK_KEY]["count"] == 1
+
+
+def test_alternating_wait_reasons_cannot_evade_the_shared_brake() -> None:
+    params = {}
+    for reason in ("repo_busy: x", "provider_wait: x", "scheduled_wait: x"):
+        fields, trigger = _outcome(reason=reason, params=params)
+        params = {STREAK_KEY: fields[STREAK_KEY]}
+    assert trigger == "stall"
+    assert fields["resume_at"] is None
 
 
 def test_wait_without_resume_is_a_give_up_unless_human_or_self_healing() -> None:
@@ -221,7 +231,8 @@ def repo(tmp_path: Path) -> Path:
 
 
 def _runner(**overrides) -> tuple[ActionRunner, SimpleNamespace]:
-    tasks = SimpleNamespace(patch_task=AsyncMock(return_value={"task_id": "t1"}),
+    tasks = SimpleNamespace(get_task=AsyncMock(return_value={"task_id": "t1", "status": "waiting"}),
+                            patch_task=AsyncMock(return_value={"task_id": "t1"}),
                             comment_on_ticket=AsyncMock(return_value=True))
     kwargs = dict(task_service=tasks,
                   create_ticket=AsyncMock(return_value={"task_id": "fix-1"}),
@@ -243,8 +254,56 @@ def test_resume_requeues_and_wakes_the_dispatcher() -> None:
     runner, deps = _runner()
     assert _apply(runner, kind="resume", task_id="t1", text="ok")["ok"]
     updates = deps.tasks.patch_task.await_args.args[1]
-    assert updates["status"] == "queued" and updates["params"] == {STREAK_KEY: None}
+    assert updates["status"] == "queued"
+    assert updates["params"] == {STREAK_KEY: None, PENDING_KEY: None}
     deps.wake_dispatcher.assert_called_once()
+
+
+def test_delegate_reuses_the_ticket_and_preserves_its_checkpoint(tmp_path: Path) -> None:
+    checkpoint = {"run_id": "workflow-1", "outputs": {"sent": {"id": "receipt-1"}}}
+    repo = _Repo([_task(params={"_workflow": checkpoint, "skill": "probe"})])
+    service, deps = _service(tmp_path, repo, [{
+        "summary": "Resolver con criterio", "diagnosis": "La receta no contempla la respuesta",
+        "actions": [{"kind": "delegate", "task_id": "t1",
+                     "text": "Verifica el recibo y completa el trabajo pendiente"}]}])
+    service.wake("t1", "gave_up")
+    asyncio.run(service.tick())
+    task = repo.rows["t1"]
+    assert task["status"] == "queued"
+    assert task["params"]["_workflow"] == checkpoint
+    assert task["params"]["skill"] == "probe"
+    assert "Verifica el recibo" in task["params"][HANDOFF_KEY]["instruction"]
+    assert deps.executor.prompts and "delegate" in deps.executor.prompts[0]
+    service._create_ticket.assert_not_awaited()
+
+
+@pytest.mark.parametrize("task", [
+    {"status": "completed"},
+    {"status": "waiting", "waiting_reason": "tool_lock:email"},
+    {"status": "waiting", "params": {"owner_question_id": "q1"}},
+])
+def test_delegate_does_not_override_a_gate_or_a_finished_ticket(task: dict) -> None:
+    runner, deps = _runner()
+    deps.tasks.get_task.return_value = task
+    assert not _apply(runner, kind="delegate", task_id="t1", text="continuar")["ok"]
+    deps.tasks.patch_task.assert_not_awaited()
+    deps.wake_dispatcher.assert_not_called()
+
+
+def test_service_wait_write_wakes_mechanic_and_metadata_write_does_not() -> None:
+    repo = _Repo([_task(status="in_progress", params={"kept": "checkpoint"})])
+    service = _service_with_wake()
+    service._repo = repo
+    service._hub = SimpleNamespace(broadcast=AsyncMock())
+    service._mechanic_wake = MagicMock()
+    asyncio.run(service.patch_task("t1", {
+        "status": "waiting", "waiting_reason": "novel_failure", "params": {"new": 1}}))
+    service._mechanic_wake.assert_called_once_with("t1", "gave_up", "novel_failure")
+    assert repo.rows["t1"]["params"]["kept"] == "checkpoint"
+    assert repo.rows["t1"]["params"][PENDING_KEY] == "gave_up"
+    service._mechanic_wake.reset_mock()
+    asyncio.run(service.patch_task("t1", {"last_response_summary": "mirror refresh"}))
+    service._mechanic_wake.assert_not_called()
 
 
 def test_wait_and_escalate_write_their_reasons() -> None:
@@ -413,7 +472,7 @@ def _service(tmp_path: Path, repo: _Repo, payloads: list[dict], **cfg) -> tuple[
             updates["params"] = merged
         return await repo.patch_task(task_id, updates)
 
-    tasks = SimpleNamespace(patch_task=AsyncMock(side_effect=funnel_patch),
+    tasks = SimpleNamespace(get_task=repo.get_task, patch_task=AsyncMock(side_effect=funnel_patch),
                             comment_on_ticket=AsyncMock(return_value=True))
     executor = _Executor(tmp_path, payloads)
 
@@ -551,6 +610,31 @@ def test_hourly_budget_holds_runs(tmp_path: Path) -> None:
     service, deps = _service(tmp_path, repo, [], max_runs_per_hour=1)
     repo["mechanic_runs"].docs.append({"at": NOW - timedelta(minutes=5)})
     service.wake("t1", "gave_up")
+    asyncio.run(service.tick())
+    assert deps.executor.prompts == []
+    assert "t1" in service._queue
+
+
+def test_pending_diagnosis_survives_restart_and_old_activity(tmp_path: Path) -> None:
+    repo = _Repo([_task(updated_at=NOW - timedelta(days=30),
+                        params={PENDING_KEY: "gave_up"})])
+    service, deps = _service(tmp_path, repo, [{
+        "summary": "atendido", "diagnosis": "Se requiere criterio",
+        "actions": [{"kind": "delegate", "task_id": "t1", "text": "Completa con las herramientas del rol"}]}])
+    asyncio.run(service.tick())
+    assert len(deps.executor.prompts) == 1
+    assert repo.rows["t1"]["status"] == "queued"
+    assert PENDING_KEY not in repo.rows["t1"]["params"]
+
+
+def test_pending_diagnosis_respects_human_holds_and_personal_scope(tmp_path: Path) -> None:
+    repo = _Repo([
+        _task("human", waiting_reason="phase:qa_review", params={PENDING_KEY: "gave_up"}),
+        _task("personal", params={PENDING_KEY: "gave_up", "horizon_scope": "personal"}),
+    ])
+    service, deps = _service(tmp_path, repo, [])
+    service.wake("human", "gave_up")
+    service.wake("personal", "gave_up")
     asyncio.run(service.tick())
     assert deps.executor.prompts == []
 

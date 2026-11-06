@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 class ActionKind(str, Enum):
     RESUME = "resume"
+    DELEGATE = "delegate"
     WAIT = "wait"
     FAIL = "fail"
     ESCALATE = "escalate"
@@ -27,7 +28,7 @@ class ActionKind(str, Enum):
     REMOVE_INDEX_LOCK = "remove_index_lock"
 
 
-STATE_ACTIONS = frozenset({ActionKind.RESUME, ActionKind.WAIT,
+STATE_ACTIONS = frozenset({ActionKind.RESUME, ActionKind.DELEGATE, ActionKind.WAIT,
                            ActionKind.FAIL, ActionKind.ESCALATE})
 TASK_ACTIONS = STATE_ACTIONS | {ActionKind.COMMENT}
 REPO_ACTIONS = frozenset({ActionKind.GIT_UNSTAGE, ActionKind.GIT_STASH,

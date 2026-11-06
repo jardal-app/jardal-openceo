@@ -16,6 +16,7 @@ import yaml
 from db.mongo import MongoRepository
 from events import RealtimeHub
 from horizon import privacy as privacy_module
+from mechanic.handoff import agent_handoff
 from settings import Settings, get_settings
 from state import TaskStatus, WorkflowRunStatus
 from tool_locks import (
@@ -941,6 +942,8 @@ class WorkflowService:
         return await self.execute_task_workflow(task, resolution.workflow, resolution=resolution)
 
     def resolve_task_workflow(self, task: dict[str, Any]) -> WorkflowResolution | None:
+        if agent_handoff(task) is not None:
+            return None
         workflows = self._load_workflows()
         if not workflows:
             return None
@@ -1083,19 +1086,24 @@ class WorkflowService:
             )
         except Exception as exc:
             logger.warning("Workflow run %s failed", run.get("run_id"), exc_info=True)
+            refused = isinstance(exc, ToolLockError)
             updated_run = await self._repo.patch_workflow_run(
                 str(run["run_id"]),
                 {
-                    "status": WorkflowRunStatus.FAILED.value,
+                    "status": (WorkflowRunStatus.FAILED.value if refused
+                               else WorkflowRunStatus.BLOCKED_TOOL.value),
                     "error": str(exc),
                     "steps": steps + [_run_event("workflow", "failed", str(exc))],
-                    "completed_at": _utc_now(),
+                    "outputs": outputs,
+                    "context": context,
+                    "completed_at": _utc_now() if refused else None,
                 },
             )
             return self._run_outcome(
                 updated_run or run,
                 workflow,
-                task_status=TaskStatus.FAILED.value,
+                task_status=TaskStatus.FAILED.value if refused else TaskStatus.WAITING.value,
+                waiting_reason=None if refused else "workflow_unhandled",
                 error=str(exc),
             )
 
@@ -1422,6 +1430,12 @@ class WorkflowService:
             "workflow": workflow.get("workflow"),
             "status": run.get("status"),
         }
+        if task_status == TaskStatus.WAITING.value:
+            params["_workflow"].update(
+                current_step_id=run.get("current_step_id"),
+                current_step_index=run.get("current_step_index"),
+                outputs=run.get("outputs") or {},
+                error=error)
         run_steps = [
             _task_step(str(item.get("id") or item.get("step") or "workflow_step"), str(item.get("status") or ""), item.get("detail"))
             for item in (run.get("steps") or [])

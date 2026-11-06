@@ -166,6 +166,9 @@ class _FakeTasks:
         self._repo = repo
         self.comments: list[tuple[str, str]] = []
 
+    async def get_task(self, task_id: str) -> dict | None:
+        return await self._repo.get_task(task_id)
+
     async def patch_task(self, task_id: str, updates: dict) -> dict | None:
         updates = dict(updates)
         if isinstance(updates.get("params"), dict):

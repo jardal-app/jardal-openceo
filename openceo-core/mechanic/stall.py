@@ -1,6 +1,6 @@
 """Generic stall detection: one rule for every wait reason (TASK-2026-00510).
 
-A wait the engine re-parks with the same reason N times in a row is a
+A wait the engine re-parks N times in a row is a
 stall, whatever the reason says; a wait that names no resume and no human
 is the engine giving up. Both wake the mechanic. Pure functions only.
 """
@@ -21,6 +21,7 @@ from state import (
 )
 
 STREAK_KEY = "wait_streak"
+PENDING_KEY = "mechanic_pending"
 STALLED_PREFIX = "stalled"
 NO_PROGRESS_PREFIX = "stalled_no_progress"
 OWNER_ACTION_PREFIX = "owner_action"
@@ -92,7 +93,9 @@ def next_streak(previous: Any, reason: Any, now: datetime, *,
                 gap: timedelta) -> dict[str, Any]:
     key = wait_key(reason)
     count, since = 1, now
-    if isinstance(previous, Mapping) and previous.get("key") == key:
+    if isinstance(previous, Mapping) and (
+            previous.get("key") == key
+            or not (self_healing_wait(previous.get("key")) or self_healing_wait(reason))):
         last = as_utc(previous.get("last_at"))
         if last is not None and now - last <= gap:
             try:

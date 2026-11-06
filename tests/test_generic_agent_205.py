@@ -16,7 +16,7 @@ import asyncio
 import sys
 import tempfile
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -36,6 +36,7 @@ from catalog import (  # noqa: E402
     load_catalog,
 )
 from graph import OpenCEOGraph, resolve_agent_gate  # noqa: E402
+from mechanic.handoff import HANDOFF_KEY  # noqa: E402
 from objectives.agent_result import AgentResult  # noqa: E402
 from orchestration.generic_agent import (  # noqa: E402
     GENERIC_AGENT_TIMEOUT_S,
@@ -562,16 +563,40 @@ class ExactSkillTest(unittest.TestCase):
         self.assertTrue(any("probe_exact" in str(step.get("detail"))
                             for step in out["steps"]))
 
-    def test_exact_skill_failure_maps_to_bloqueado(self) -> None:
+    def test_partial_recipe_yields_to_agent_with_confirmed_effects(self) -> None:
+        workflow = ECHO_SKILL_WORKFLOW.replace("tool: core.echo", "tool: test.send") + (
+            "  - id: unsupported\n    tool: test.next\n    params: {}\n")
+        wiring, task = self._skill_world(workflow, {"skill": "probe"})
+        send = AsyncMock(return_value={"receipt": "receipt-1"})
+        wiring.workflow_service._tools.register("test.send", send)
+        wiring.workflow_service._tools.register("test.next", AsyncMock(side_effect=RuntimeError("new situation")))
+        out = asyncio.run(run_generic_agent("operations", task, wiring))
+        self.assertEqual("waiting", out["status"])
+        self.assertEqual("workflow_unhandled", out["waiting_reason"])
+        self.assertEqual({"echo_it": {"receipt": "receipt-1"}}, out["params"]["_workflow"]["outputs"])
+        factory, recorded = scripted_executor(ExecResult(0, hecho_stdout(), 0.1))
+        attended = replace(wiring, executor_factory=factory)
+        task["params"] = {**out["params"], HANDOFF_KEY: {
+            "run_id": "MEC-1", "diagnosis": "unsupported response",
+            "instruction": "Verify the receipt and finish using existing tools"}}
+        out = asyncio.run(run_generic_agent("operations", task, attended))
+        self.assertEqual("completed", out["status"])
+        send.assert_awaited_once()
+        prompt = next(call["prompt"] for call in recorded if "prompt" in call)
+        self.assertIn("receipt-1", prompt)
+        self.assertIn("Suggested skill: probe", prompt)
+        self.assertIn("grants no new authority", prompt)
+        self.assertIsNone(wiring.workflow_service.resolve_task_workflow(task))
+
+    def test_unexpected_exact_skill_failure_waits_for_mechanic(self) -> None:
         bad_step = ECHO_SKILL_WORKFLOW.replace(
             "    tool: core.echo\n", "")
         wiring, task = self._skill_world(bad_step, {"skill": "probe"})
         out = asyncio.run(run_generic_agent("operations", task, wiring))
-        self.assertEqual(TaskStatus.FAILED.value, out["status"])
-        verdict = AgentResult.model_validate(
-            out["params"]["agent_result"])
-        self.assertEqual("bloqueado", verdict.resultado.value)
-        self.assertIn("operations.probe_exact", out["result_comment"])
+        self.assertEqual(TaskStatus.WAITING.value, out["status"])
+        self.assertEqual("workflow_unhandled", out["waiting_reason"])
+        self.assertIn("does not define a tool", out["error"])
+        self.assertEqual("operations.probe_exact", out["params"]["_workflow"]["workflow"])
 
     def test_unknown_tool_wait_propagates(self) -> None:
         bad_step = ECHO_SKILL_WORKFLOW.replace(

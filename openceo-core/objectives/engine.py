@@ -1981,8 +1981,11 @@ def _pedido_prompt(
     agent_return: Mapping[str, Any] | None = None,
 ) -> str:
     """Planner prompt for one pedido (self-contained decision contract)."""
+    from mechanic.handoff import handoff_prompt
+
     task_id = str(ticket.get("task_id") or "")
     lines = [
+        handoff_prompt(ticket),
         "You are the single OpenCEO planner. Decide this ONE pedido: a "
         "loose ticket with no explicit decision.",
         "",
@@ -2131,7 +2134,7 @@ async def plan_pedido(
     ``{"ok": True, "action": "decided", ...}`` with the spend verdict
     for the caller to hold on. capability_gap: nothing is patched and
     the caller converts (``action: convert``). Invalid twice: attempts
-    are counted on the ticket and the caller backs off
+    are counted on the ticket and the caller requests mechanic diagnosis
     (``reason: planner_error``); unreadable policy or an empty
     registry fail fast (``reason: config``).
     """

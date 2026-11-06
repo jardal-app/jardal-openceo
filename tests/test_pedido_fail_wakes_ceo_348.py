@@ -1,17 +1,4 @@
-"""Pedido terminally failed wakes the CEO as an incident (TASK-2026-00348).
-
-Contract fixed here:
-
-- ``_stop_pedido_failed`` signals the CEO loop via ``_wake_ceo_incident``
-  on top of the ERP comment, so a pedido that fails 3/3 in planning never
-  stalls silently until the next weekly review.
-- No double wake: the signal fires only on the transition into a terminal
-  state, mirroring the ``update_task`` funnel (an already-failed ticket
-  stays silent).
-- Personal scope stays out of the company review (privacy).
-
-No network, no CLI, no LLM. Wake is simulated.
-"""
+"""Unexpected pedido failures yield to the mechanic; personal scope stays private."""
 
 from __future__ import annotations
 
@@ -19,6 +6,7 @@ import sys
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 CORE = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE) not in sys.path:
@@ -68,31 +56,34 @@ def _service(task: dict[str, Any]) -> tuple[TaskService, _FakeRepo, list]:
     return service, repo, wakes
 
 
-class StopPedidoFailedWakesCeoTests(unittest.IsolatedAsyncioTestCase):
-    async def test_terminal_pedido_fail_wakes_ceo(self) -> None:
+class PedidoMechanicHandoffTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_pedido_wakes_mechanic_without_a_ceo_incident(self) -> None:
         service, repo, wakes = _service(_company_task())
-
-        result = await service._stop_pedido_failed(
-            "task-1", "planner failed 3x: information_gaps invalid")
-
-        self.assertEqual(result["status"], TaskStatus.FAILED.value)
-        self.assertEqual(len(wakes), 1)
-        self.assertIn("task-1", wakes[0])
-
-    async def test_already_failed_pedido_does_not_wake_again(self) -> None:
-        service, repo, wakes = _service(
-            _company_task(status=TaskStatus.FAILED.value))
-
-        await service._stop_pedido_failed("task-1", "planner failed 3x: x")
-
+        mechanic = MagicMock()
+        service.set_mechanic_wake(mechanic)
+        result = await service._park_execution_error("task-1", "invalid planner output")
+        self.assertEqual(result["status"], TaskStatus.WAITING.value)
+        self.assertIsNone(result["resume_at"])
+        mechanic.assert_called_once_with("task-1", "gave_up", "execution_exception")
         self.assertEqual(wakes, [])
 
-    async def test_personal_scope_pedido_stays_silent(self) -> None:
-        service, repo, wakes = _service(_company_task(params={
-            "horizon_scope": "personal", "planner_attempts": 3}))
+    async def test_cancelled_pedido_is_not_reopened(self) -> None:
+        service, repo, wakes = _service(
+            _company_task(status=TaskStatus.CANCELLED.value))
+        mechanic = MagicMock()
+        service.set_mechanic_wake(mechanic)
+        result = await service._park_execution_error("task-1", "late failure")
+        self.assertEqual(result["status"], TaskStatus.CANCELLED.value)
+        mechanic.assert_not_called()
+        self.assertEqual(wakes, [])
 
-        await service._stop_pedido_failed("task-1", "planner failed 3x: x")
-
+    async def test_personal_scope_pedido_stays_out_of_company_agents(self) -> None:
+        service, repo, wakes = _service(_company_task(params={"horizon_scope": "personal"}))
+        mechanic = MagicMock()
+        service.set_mechanic_wake(mechanic)
+        result = await service._park_execution_error("task-1", "private failure")
+        self.assertEqual(result["status"], TaskStatus.FAILED.value)
+        mechanic.assert_not_called()
         self.assertEqual(wakes, [])
 
 
