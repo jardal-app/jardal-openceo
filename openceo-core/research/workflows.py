@@ -95,6 +95,9 @@ class ResearchScheduleHandler:
 class ResearchScheduleRuntime:
     """One coordinator per process; disabled unless both explicit flags are enabled.
 
+    Disabled, its agenda is not registered on the kernel, so nothing is recovered,
+    claimed or executed even though the shared kernel runs for other agendas.
+
     Desde el ticket #564 la planificacion corre en el kernel de schedule global
     con ``ResearchScheduleAgenda``; ``scheduler`` conserva el bucle aislado solo
     como compatibilidad (oraculo congelado e integracion) y ya no se arranca.
@@ -106,6 +109,8 @@ class ResearchScheduleRuntime:
                  now_fn: Callable | None = None, waiter: Callable | None = None,
                  kernel: ScheduleKernel | None = None) -> None:
         self.settings = settings
+        self.enabled = bool(getattr(settings, "RESEARCH_ENABLED", False)
+                            and getattr(settings, "RESEARCH_SCHEDULER_ENABLED", False))
         self.service = service
         self.repo = repo
         workflows.set_research_service(service)
@@ -138,9 +143,12 @@ class ResearchScheduleRuntime:
             backoff_base=getattr(settings, "RESEARCH_SCHEDULER_BACKOFF_SECONDS", 60),
         )
         self.kernel = kernel if kernel is not None else ScheduleKernel(now_fn=now_fn, waiter=waiter)
-        self.kernel.register(self.agenda)
-        self.store.bind_waker(lambda: self.kernel.wake(self.agenda.name))
-        self.scheduler.delegate_wake_to(lambda: self.kernel.wake(self.agenda.name))
+        # El kernel compartido arranca siempre (otras agendas lo exigen): solo una agenda
+        # registrada se recupera, reclama y ejecuta, asi que apagado no se registra.
+        if self.enabled:
+            self.kernel.register(self.agenda)
+            self.store.bind_waker(lambda: self.kernel.wake(self.agenda.name))
+            self.scheduler.delegate_wake_to(lambda: self.kernel.wake(self.agenda.name))
 
     async def _guarded(self, claimed: dict[str, Any]) -> dict[str, Any]:
         """Un acceso revocado PAUSA la suscripcion; un fallo transitorio se reintenta.
@@ -159,8 +167,7 @@ class ResearchScheduleRuntime:
             return {"skipped": reason}
 
     async def start(self) -> bool:
-        if not (getattr(self.settings, "RESEARCH_ENABLED", False)
-                and getattr(self.settings, "RESEARCH_SCHEDULER_ENABLED", False)):
+        if not self.enabled:
             return False
         await self.kernel.start()
         return True

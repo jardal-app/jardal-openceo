@@ -470,6 +470,43 @@ class RuntimeWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(repo.method_calls, [])
         self.assertFalse(runtime.kernel.status()["running"])
 
+    async def test_apagado_el_kernel_compartido_no_ejecuta_los_schedules(self) -> None:
+        from unittest.mock import AsyncMock, Mock
+
+        from research.workflows import ResearchScheduleRuntime
+        from settings import Settings
+
+        for research_enabled, scheduler_enabled in [(False, False), (False, True), (True, False)]:
+            with self.subTest(research=research_enabled, scheduler=scheduler_enabled):
+                repo = _FakeRepo()
+                clock = _Clock()
+                kernel = ScheduleKernel(now_fn=clock, waiter=_VirtualWaiter(clock))
+                workflows = Mock()
+                workflows.execute_research_workflow = AsyncMock(return_value={"ok": True})
+                cfg = Settings(_env_file=None, DEEPSEEK_API_KEY="",
+                               RESEARCH_ENABLED=research_enabled,
+                               RESEARCH_SCHEDULER_ENABLED=scheduler_enabled)
+                runtime = ResearchScheduleRuntime(
+                    repo=repo, workflows=workflows, service=Mock(), settings=cfg,
+                    project_cfg_for=lambda _: {}, kernel=kernel, now_fn=clock)
+                doc = _seed(repo, run_at=NOW - timedelta(seconds=1),
+                            workflow="research.investigate")
+                try:
+                    # main.py arranca siempre el kernel compartido, con research apagado o no.
+                    await kernel.start()
+                    await asyncio.sleep(0.05)
+                    with self.assertNoLogs("schedule_kernel.kernel", level="WARNING"):
+                        runtime.store.notify()
+                        runtime.scheduler.wake()
+                    await asyncio.sleep(0.05)
+                    workflows.execute_research_workflow.assert_not_awaited()
+                    self.assertEqual((repo.claim_calls, repo.next_due_calls), (0, 0))
+                    stored = await repo.get_research_schedule(doc["schedule_id"])
+                    self.assertEqual(stored["run_state"], "idle")
+                    self.assertNotIn("research", kernel.status()["agendas"])
+                finally:
+                    await runtime.stop()
+
 
 if __name__ == "__main__":
     unittest.main()
