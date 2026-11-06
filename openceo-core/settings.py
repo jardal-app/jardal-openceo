@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     # API authentication (Bearer token for /v1/ endpoints)
     OPENCEO_API_KEY: str = ""
 
+    # Machine Bearer exclusive to POST /api/ceo/wake (D5, ticket #580).
+    # Out-of-process writers present it to poke the schedule kernel.
+    # Empty disables the route fail-closed; one value per environment,
+    # revocable by rotation, never logged or sent to browsers.
+    OPENCEO_CEO_WAKE_BEARER: str = ""
+
     # CEO routing LLM
     DEEPSEEK_API_KEY: str = ""
     CEO_LLM_MODEL: str = "deepseek-flash"

@@ -95,6 +95,8 @@ def _route_auth_kind(route: APIRoute) -> str | None:
             return kind
         if call is main.verify_api_key:
             return "api_key"
+        if call is main.verify_ceo_wake_bearer:
+            return "machine_bearer"
     dependant = getattr(route, "dependant", None)
     headers = getattr(dependant, "header_params", None) if dependant is not None else None
     for param in headers or []:
@@ -191,6 +193,13 @@ class RestAuthInventoryTests(unittest.TestCase):
                 seen.add(route.path)
                 self.assertEqual(_route_auth_kind(route), "api_key", route.path)
         self.assertTrue(seen, "no /v1 write routes found")
+
+    def test_ceo_wake_exception_still_guarded_by_machine_bearer(self) -> None:
+        for route in _iter_write_routes():
+            if route.path == "/api/ceo/wake":
+                self.assertEqual(_route_auth_kind(route), "machine_bearer")
+                return
+        self.fail("CEO wake route disappeared")
 
 
 if __name__ == "__main__":

@@ -860,10 +860,52 @@ async def verify_api_key(authorization: str = Header(default="")) -> None:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
+async def verify_ceo_wake_bearer(authorization: str = Header(default="")) -> None:
+    """Validate the exclusive machine Bearer for POST /api/ceo/wake.
+
+    Fail-closed like ``require_erp_webhook``, never fail-open like
+    ``verify_api_key``: an unconfigured secret disables the route and a
+    missing or wrong Bearer is rejected. Constant-time comparison; the
+    secret never reaches the logs.
+    """
+    expected = str(getattr(settings, "OPENCEO_CEO_WAKE_BEARER", "") or "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="CEO wake not configured")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+    if not hmac.compare_digest(authorization[7:], expected):
+        raise HTTPException(status_code=401, detail="Invalid wake bearer")
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "service": "openceo-core",
             "release": read_release(Path(__file__).resolve().parents[1])}
+
+
+# ------------------------- CEO wake (D5) -------------------------
+
+
+@app.post("/api/ceo/wake", dependencies=[Depends(verify_ceo_wake_bearer)])
+async def wake_ceo_agenda(payload: dict = Body(...)) -> dict:
+    """Wake the CEO agenda of the shared schedule kernel (D5, ticket #580).
+
+    Out-of-process writers (today only ``ops/resume_pedido.py``) persist
+    first via ``save_ceo_trigger`` and then poke here best-effort so the
+    kernel re-reads the trigger without waiting for the previous due.
+    The body carries the agenda name; only ``ceo`` is served (wakes of
+    other agendas are out of scope) while the kernel itself discards
+    unknown names. Idempotent: ``kernel.wake`` is synchronous, coalesced
+    and never raises.
+    """
+    agenda = str((payload or {}).get("agenda") or "").strip()
+    if agenda != "ceo":
+        raise HTTPException(status_code=400, detail="Only the ceo agenda is served")
+    kernel = getattr(app.state, "schedule_kernel", None)
+    if kernel is None:
+        raise HTTPException(status_code=503, detail="Schedule kernel not started")
+    kernel.wake("ceo")
+    return {"ok": True, "agenda": "ceo"}
 
 
 # ------------------------- file upload (R2) -------------------------
