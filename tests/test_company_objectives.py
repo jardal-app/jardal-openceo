@@ -1574,6 +1574,61 @@ class DeadQueuedHistoryTests(unittest.TestCase):
         self.assertIn("kid-zomb: still queued", verdict["open_gaps"])
         self.assertEqual(verdict["dead_children"], [])
 
+    def test_queued_behind_failed_plus_released_is_dead(self) -> None:
+        objective = {"objective_id": "OBJ-1",
+                     "conversion_source_task_id": "shell-1"}
+        zombie = _child("kid-zomb", "queued", dev=True)
+        zombie["blocked_by"] = ["kid-fail", "kid-done", "kid-cancel"]
+        children = [_child("shell-1", "converted", dev=True),
+                    _child("kid-fail", "failed", dev=True),
+                    _child("kid-done", "completed", dev=True),
+                    _child("kid-cancel", "cancelled", dev=True),
+                    zombie]
+        verdict = verify_delivery(objective, children)
+        self.assertEqual(verdict["open_gaps"], [])
+        self.assertEqual(verdict["dead_children"], ["kid-zomb"])
+
+    def test_queued_behind_released_only_stays_open(self) -> None:
+        objective = {"objective_id": "OBJ-1",
+                     "conversion_source_task_id": "shell-1"}
+        zombie = _child("kid-zomb", "queued", dev=True)
+        zombie["blocked_by"] = ["kid-done"]
+        children = [_child("shell-1", "converted", dev=True),
+                    _child("kid-done", "completed", dev=True),
+                    zombie]
+        verdict = verify_delivery(objective, children)
+        self.assertFalse(verdict["ok"])
+        self.assertIn("kid-zomb: still queued", verdict["open_gaps"])
+        self.assertEqual(verdict["dead_children"], [])
+
+    def test_queued_behind_failed_plus_live_stays_open(self) -> None:
+        objective = {"objective_id": "OBJ-1",
+                     "conversion_source_task_id": "shell-1"}
+        zombie = _child("kid-zomb", "queued", dev=True)
+        zombie["blocked_by"] = ["kid-fail", "kid-live"]
+        children = [_child("shell-1", "converted", dev=True),
+                    _child("kid-fail", "failed", dev=True),
+                    _child("kid-live", "in_progress", dev=True),
+                    zombie]
+        verdict = verify_delivery(objective, children)
+        self.assertFalse(verdict["ok"])
+        self.assertIn("kid-zomb: still queued", verdict["open_gaps"])
+        self.assertEqual(verdict["dead_children"], [])
+
+    def test_queued_behind_failed_plus_converted_stays_open(self) -> None:
+        objective = {"objective_id": "OBJ-1",
+                     "conversion_source_task_id": "shell-1"}
+        zombie = _child("kid-zomb", "queued", dev=True)
+        zombie["blocked_by"] = ["kid-fail", "kid-conv"]
+        children = [_child("shell-1", "converted", dev=True),
+                    _child("kid-fail", "failed", dev=True),
+                    _child("kid-conv", "converted", dev=True),
+                    zombie]
+        verdict = verify_delivery(objective, children)
+        self.assertFalse(verdict["ok"])
+        self.assertIn("kid-zomb: still queued", verdict["open_gaps"])
+        self.assertEqual(verdict["dead_children"], [])
+
 
 class BootResumeDecisionTests(unittest.TestCase):
     """Pure boot-resume call: resume_fresh, replan, park or leave."""

@@ -3516,24 +3516,33 @@ def _is_dead_queued(
     by_id: Mapping[str, Mapping[str, Any]],
     item: Mapping[str, Any],
 ) -> bool:
-    """Queued work whose blockers all failed terminally: it can never run.
+    """Queued work no live blocker can release: it can never run.
 
-    The dispatcher skips it (``_blocked``) while the planner replaces it
+    Dead means at least one failed blocker and nothing else live:
+    released blockers (completed/cancelled) are already satisfied, so a
+    mix of failed + released is as dead as all-failed (TASK-2026-00534:
+    counting the mix as active wedged the recovery retry forever). The
+    dispatcher skips it (``_blocked``) while the planner replaces it
     instead of unblocking it, so counting it as an open gap wedges final
-    review forever (TASK-2026-00396). Unknown or live blockers stay open
-    gaps (fail-closed).
+    review forever (TASK-2026-00396). Unknown or live blockers
+    (queued/waiting/running/converted/...) stay open gaps (fail-closed).
     """
     if str(item.get("status") or "") != "queued":
         return False
     deps = item.get("blocked_by") or []
     if not deps:
         return False
+    seen_failed = False
     for dep in deps:
         blocker = by_id.get(str(dep))
-        if blocker is None or str(blocker.get("status") or "") \
-                != FAILED_HISTORY_STATUS:
+        if blocker is None:
             return False
-    return True
+        status = str(blocker.get("status") or "")
+        if status == FAILED_HISTORY_STATUS:
+            seen_failed = True
+        elif status not in BLOCKER_RELEASED_STATUSES:
+            return False
+    return seen_failed
 
 
 def _brake_active_children(

@@ -198,6 +198,35 @@ class TestServiceRecovery:
         result = asyncio.run(service.recovery_tick())
         assert result["next_seconds"] == 3600
 
+    def test_none_decision_paces_a_stale_due(self) -> None:
+        repo = FakeRepo([_objective()])
+        repo.task_rows.append({"task_id": "child-1",
+                               "objective_id": "OBJ-TEST",
+                               "status": "in_progress"})
+        service = _service(repo)
+        before = datetime.now(timezone.utc)
+        result = asyncio.run(service.recover_waiting_objective("OBJ-TEST"))
+        assert result["action"] == "none"
+        assert result["reason"] == "children still active"
+        paced = policy.parse_due(
+            repo.docs["OBJ-TEST"]["recovery"]["due_at"])
+        assert paced is not None
+        assert before + timedelta(minutes=10) <= paced <= \
+            datetime.now(timezone.utc) + timedelta(minutes=10)
+
+    def test_none_decision_leaves_a_future_due_alone(self) -> None:
+        future = (datetime.now(timezone.utc)
+                  + timedelta(minutes=30)).isoformat()
+        repo = FakeRepo([_objective(recovery={
+            "attempts": 0, "due_at": future, "exhausted": False})])
+        repo.task_rows.append({"task_id": "child-1",
+                               "objective_id": "OBJ-TEST",
+                               "status": "in_progress"})
+        service = _service(repo)
+        result = asyncio.run(service.recover_waiting_objective("OBJ-TEST"))
+        assert result["action"] == "none"
+        assert repo.docs["OBJ-TEST"]["recovery"]["due_at"] == future
+
     def test_recover_claims_once_and_plans(self) -> None:
         repo = FakeRepo([_objective()])
         service = _service(repo)

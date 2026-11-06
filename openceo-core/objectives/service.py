@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -656,6 +656,56 @@ class ObjectiveService:
         rows = await self._repo.list_boot_resumable_objectives(100)
         return recovery_mod.recovery_seconds_to_next(rows or [])
 
+    async def _pace_unactionable_recovery(
+        self, objective_id: str, objective: Mapping[str, Any],
+        cfg: Mapping[str, Any], reason: str,
+        *, now: datetime | None = None,
+    ) -> None:
+        """Push a stale due forward after a none-decision (TASK-2026-00534).
+
+        The kernel re-drives past-dues right after every lane end, so a
+        park that keeps deciding none (children active, ticket open, ...)
+        seals, decides and releases in a tight loop (live: a core at 86%).
+        Rewriting a missing-or-past due to a bounded recheck delay makes
+        the lane sleep; a future due is left alone, and a park that lands
+        meanwhile still wakes the lane sooner. Never raises.
+        """
+        if self._repo is None or reason == "not due":
+            return
+        if str(objective.get("status") or "") != "waiting":
+            return
+        moment = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        recovery = objective.get("recovery")
+        recovery = dict(recovery) if isinstance(recovery, Mapping) else {}
+        due = recovery_mod.parse_due(recovery.get("due_at"))
+        if due is not None and due > moment:
+            return
+        try:
+            fresh = await self._repo.get_objective(objective_id)
+        except Exception:  # noqa: BLE001 - pacing is best-effort
+            return
+        if fresh is None or str(fresh.get("status") or "") != "waiting":
+            return
+        fresh_recovery = fresh.get("recovery")
+        fresh_recovery = dict(fresh_recovery) \
+            if isinstance(fresh_recovery, Mapping) else {}
+        if fresh_recovery.get("due_at") != recovery.get("due_at"):
+            return  # A park moved the due under us; leave its schedule.
+        try:
+            minutes = int(cfg.get("none_recheck_minutes", 10))
+        except (TypeError, ValueError):
+            minutes = 10
+        try:
+            await self._repo.patch_objective(objective_id, {"recovery": {
+                **fresh_recovery,
+                "due_at": (moment + timedelta(minutes=minutes)).isoformat(),
+            }})
+        except Exception:  # noqa: BLE001 - pacing is best-effort
+            logger.warning("recovery pacing failed for %s", objective_id,
+                           exc_info=True)
+
     async def recover_waiting_objective(
         self, objective_id: str, *, now: datetime | None = None,
     ) -> dict[str, Any]:
@@ -699,6 +749,9 @@ class ObjectiveService:
         )
         action = str(decision.get("action") or "none")
         reason = str(decision.get("reason") or "")
+        if action == "none":
+            await self._pace_unactionable_recovery(
+                objective_id, objective, cfg, reason, now=now)
         if action == "deploy" and self._deploy_spawned:
             # One restart per process life: a spawned restart kills this
             # process in seconds, so a second deploy would only race it;

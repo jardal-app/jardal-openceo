@@ -69,6 +69,10 @@ DEFAULT_RECOVERY: dict[str, Any] = {
     "deploy_on_close": True,
     "deploy_retry_minutes": 10,
     "deploy_max_wait_minutes": 120,
+    # A none-decision on a stale due rechecks after this delay instead of
+    # spinning: the kernel re-drives past-dues right after every lane end
+    # (TASK-2026-00534).
+    "none_recheck_minutes": 10,
 }
 
 #: Park reason while a merged recovery fix waits for its restart.
@@ -133,7 +137,8 @@ def recovery_config(objectives_cfg: Mapping[str, Any] | None) -> dict[str, Any]:
         cfg["ticket_tier"] = DEFAULT_RECOVERY["ticket_tier"]
     for key, low, high in (("max_tickets", 0, 10),
                            ("deploy_retry_minutes", 1, 240),
-                           ("deploy_max_wait_minutes", 1, 24 * 60)):
+                           ("deploy_max_wait_minutes", 1, 24 * 60),
+                           ("none_recheck_minutes", 1, 60)):
         try:
             cfg[key] = max(low, min(high, int(cfg[key])))
         except (TypeError, ValueError):
