@@ -184,6 +184,7 @@ def validate_plan(
     budget_lines: int | None = None,
     fallback_goal: str = "",
     fallback_acceptance: Sequence[str] = (),
+    allow_empty_diff: bool = False,
 ) -> PlanValidation:
     """Structural validation (design §6.3): format, routes, size budget."""
     errors: list[str] = []
@@ -201,7 +202,11 @@ def validate_plan(
         else:
             errors.append("missing ACCEPTANCE criteria")
     if not plan.files:
-        errors.append("missing FILES")
+        if allow_empty_diff:
+            warnings.append("FILES empty: planner-allowed verification "
+                            "with zero changes (TASK-2026-00566)")
+        else:
+            errors.append("missing FILES")
     if not plan.steps:
         errors.append("missing STEPS")
     if plan.estimate_lines is None:

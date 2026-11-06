@@ -49,6 +49,7 @@ from objectives import ticket_cost as cost_mod
 from objectives.agent_result import (
     AGENT_RESULT_PROMPT,
     AgentResult,
+    empty_diff_close_allowed,
     parse_agent_result,
     scheduled_resume,
 )
@@ -1199,6 +1200,8 @@ class TierSCycle:
                 budget_lines=int(ctx.budgets.get("lines_per_ticket", 400)),
                 fallback_goal=str(ctx.ticket.get("title") or ""),
                 fallback_acceptance=self._acceptance(ctx),
+                allow_empty_diff=(ctx.ticket.get("params") or {}).get(
+                    "allow_empty_diff") is True,
             ) if plan else None
             if plan is not None and validation is not None and validation.valid:
                 await self._runs.patch_run(ctx.run_id, {
@@ -1345,11 +1348,34 @@ class TierSCycle:
         if head != ctx.base_sha:
             _git(ctx.repo, "reset", "--soft", ctx.base_sha)
         if not self._changed_files(ctx):
-            if not (verdict is not None and verdict.resultado.value == "hecho"
-                    and verdict.entregables and verdict.evidencia.strip()):
+            # TASK-2026-00566: the shared helper keeps one contract for
+            # both engines; without the flag the guard stays intact.
+            verdict_resultado = (verdict.resultado.value
+                                 if verdict is not None else "")
+            verdict_evidencia = (verdict.evidencia
+                                 if verdict is not None else "")
+            if empty_diff_close_allowed(
+                    ctx.ticket.get("params"), verdict_resultado,
+                    verdict_evidencia):
+                ok = True
+            else:
+                ok = (verdict is not None
+                      and verdict.resultado.value == "hecho"
+                      and bool(verdict.entregables)
+                      and bool(verdict.evidencia.strip()))
+            if not ok:
                 await self._park(ctx, "needs_owner", "builder produced no changes",
                                  patch_run=True, drop_branch=True)
                 return False
+            if verdict is not None and empty_diff_close_allowed(
+                    ctx.ticket.get("params"), verdict_resultado,
+                    verdict_evidencia):
+                # The close step has no verdict: carry the recorded
+                # decision forward so it lands in the objective log and
+                # the business mirror.
+                params = dict(ctx.ticket.get("params") or {})
+                params["empty_diff_evidence"] = verdict.evidencia.strip()[:1500]
+                ctx.ticket["params"] = params
         handoff = self._read_artifact(ctx, "HANDOFF.md")
         if not handoff or _handoff_word_count(handoff) > 600:
             fix = await self._exec.run(
@@ -2354,7 +2380,18 @@ class TierSCycle:
             completed, encoding="utf-8")
         task_id = str(ctx.ticket.get("task_id", ""))
         production = None
-        if ctx.auto_merge:
+        # TASK-2026-00566: same no-op rule as the simple engine — a
+        # planner-allowed verification with zero files skips the merge,
+        # the push and the production step (same base, nothing to ship).
+        allow_empty_close = (ctx.ticket.get("params") or {}).get(
+            "allow_empty_diff") is True
+        empty_evidence = str(
+            (ctx.ticket.get("params") or {}).get("empty_diff_evidence")
+            or "").strip()
+        empty_close = allow_empty_close and not files and bool(empty_evidence)
+        if empty_close:
+            self._drop_branch(ctx)
+        elif ctx.auto_merge:
             try:
                 with merge_locked(ctx.repo):
                     merged, merge_kind, conflict = self._merge(ctx)
@@ -2407,14 +2444,25 @@ class TierSCycle:
         await self._ticket_knowledge_note(ctx, completed)
         _write_status(ctx.repo, SIGNALS["ticket_complete"])
         self._archive(ctx)
-        branch_note = (f"merged into {ctx.base_branch}"
-                       if ctx.auto_merge else f"branch kept: {ctx.branch}")
+        if empty_close:
+            branch_note = ("no changes (verification documented; "
+                           "merge skipped as no-op)")
+        else:
+            branch_note = (f"merged into {ctx.base_branch}"
+                           if ctx.auto_merge else f"branch kept: {ctx.branch}")
         review_note = self._review_summary(ctx)
         production_note = (f" Production: {production.summary}."
                            if production is not None else "")
-        await self._say(
-            ctx, f"Tier S cycle closed: {branch_note}, {ctx.final_sha[:12]}, "
-            f"{len(files)} files. {review_note}{production_note}")
+        if empty_close:
+            evidence_note = " ".join(empty_evidence.split())[:300]
+            await self._say(
+                ctx, f"Tier S cycle closed: {branch_note}, "
+                f"{ctx.final_sha[:12]}, 0 files. {review_note} "
+                f"Evidence: {evidence_note}")
+        else:
+            await self._say(
+                ctx, f"Tier S cycle closed: {branch_note}, {ctx.final_sha[:12]}, "
+                f"{len(files)} files. {review_note}{production_note}")
         return CycleOutcome(
             status="completed", run_id=ctx.run_id, branch=ctx.branch,
             commit_sha=ctx.final_sha)
@@ -2461,7 +2509,10 @@ class TierSCycle:
             gotchas=self._handoff_list(handoff, "Gotchas"),
             decisions=[str(entry) for entry in plan.decisions]
             if plan else [],
-            handoff_excerpt=handoff[:1500])
+            handoff_excerpt=handoff[:1500],
+            evidencia=str(
+                (ctx.ticket.get("params") or {}).get(
+                    "empty_diff_evidence") or "")[:1500])
         try:
             await objectives_mod.on_ticket_closed(
                 self._objective_env, ctx.ticket, close)
@@ -2987,11 +3038,18 @@ class TierSCycle:
                     f"{comment or '(no text)'}\n"
                     "Use it as a binding decision for this plan.\n"
                 )
+        empty_note = ""
+        if (ticket.get("params") or {}).get("allow_empty_diff") is True:
+            empty_note = (
+                "This ticket allows zero changes when the verification "
+                "confirms nothing must change: then write PLAN.md with an "
+                "empty FILES section and ESTIMATE files=0 lines=0.\n")
         body = (
             f"You plan ticket {ctx.ref}: {ticket.get('title', '')}\n"
             f"{ticket.get('description', '')}\n"
             f"Acceptance:\n{criteria or '- (derive verifiable criteria in PLAN.md)'}\n"
             f"{owner_note}"
+            f"{empty_note}"
             "First decide SIZE: if this cannot fit one session "
             f"(≤{ctx.budgets.get('files_per_ticket', 8)} files, "
             f"≤{ctx.budgets.get('lines_per_ticket', 400)} lines, tests excluded), "

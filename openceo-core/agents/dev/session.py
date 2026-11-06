@@ -113,6 +113,7 @@ from objectives.agent_result import (
     AGENT_RESULT_PROMPT,
     AgentResult,
     SCHEMA_PATH as AGENT_RESULT_SCHEMA_PATH,
+    empty_diff_close_allowed,
     parse_agent_result,
     scheduled_resume,
 )
@@ -2104,8 +2105,20 @@ class DevSessionManager:
             self._simple_git(repo, "reset", "--soft", branch.base_sha)
         if not self._simple_changed_files(branch):
             verdict = (output.params or {}).get("agent_result") or {}
-            if not (verdict.get("resultado") == "hecho" and verdict.get("entregables")
-                    and str(verdict.get("evidencia") or "").strip()):
+            hecho = verdict.get("resultado") == "hecho"
+            evidencia = str(verdict.get("evidencia") or "").strip()
+            entregables = bool(verdict.get("entregables"))
+            # TASK-2026-00566: the shared helper (task params only, never
+            # executor output) allows a documented verification with zero
+            # changes. Without it the guard stays intact so a lazy
+            # executor cannot close with hecho+evidencia and no work.
+            if empty_diff_close_allowed(
+                    task.get("params"), verdict.get("resultado") or "",
+                    evidencia):
+                ok = True
+            else:
+                ok = hecho and entregables and bool(evidencia)
+            if not ok:
                 self._drop_simple_branch(branch)
                 output.status = TaskStatus.WAITING
                 output.waiting_reason = "needs_owner: executor produced no changes"
@@ -2232,8 +2245,23 @@ class DevSessionManager:
             handoff_path.write_text(completed_handoff, encoding="utf-8")
         except OSError:
             pass
+        # TASK-2026-00566: a planner-allowed verification with zero files
+        # closes without a merge or a production step (a merge would be a
+        # no-op and must not redeploy the same base). Gates already ran.
+        close_verdict = (output.params or {}).get("agent_result") or {}
+        close_evidencia = str(close_verdict.get("evidencia") or "").strip()
+        empty_close = not files and empty_diff_close_allowed(
+            task.get("params"), close_verdict.get("resultado") or "",
+            close_evidencia)
         auto_merge = bool(dev_cfg.get("auto_merge", True))
-        if auto_merge or task.get("objective_id"):
+        if empty_close:
+            self._drop_simple_branch(branch)
+            branch_note = ("no changes (verification documented; "
+                           "merge skipped as no-op)")
+            output.steps.append(self._step(
+                "production", "skipped",
+                "no changes: production step skipped (same base)"))
+        elif auto_merge or task.get("objective_id"):
             try:
                 merged, merge_kind, merge_detail = self._close_simple_merge(
                     branch)
@@ -2288,6 +2316,7 @@ class DevSessionManager:
                 "sha": sha,
                 "files": list(files),
                 "handoff_excerpt": completed_handoff[:1500],
+                "evidencia": close_evidencia[:1500],
             }
             params.pop("_objective_close_notified", None)
             output.params = params
@@ -2296,9 +2325,18 @@ class DevSessionManager:
             await self._record_tier_c_event(task, "closed", attributable=True)
         output.status = TaskStatus.COMPLETED
         output.modified_files = files
-        output.last_response_summary = (
-            f"{tool.value} closed: {branch_note}, {sha[:12]}, "
-            f"{len(files)} files.")
+        if empty_close:
+            # The business mirror carries last_response_summary as its
+            # evidence (business/work.py): a zero-file verification must
+            # still persist the recorded decision there.
+            evidence_note = " ".join(close_evidencia.split())[:300]
+            output.last_response_summary = (
+                f"{tool.value} closed: {branch_note}, {sha[:12]}, "
+                f"0 files. Evidence: {evidence_note}")
+        else:
+            output.last_response_summary = (
+                f"{tool.value} closed: {branch_note}, {sha[:12]}, "
+                f"{len(files)} files.")
         output.steps.append(self._step(
             "close", "ok", output.last_response_summary))
         return output

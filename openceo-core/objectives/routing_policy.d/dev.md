@@ -1,9 +1,9 @@
 ---
 document_id: objective-planner-routing-policy-dev
 title: OpenCEO Objective Planner Routing Policy — dev detail
-version: 1.1
+version: 1.2
 status: NORMATIVE
-updated: 2026-11-05
+updated: 2026-11-06
 runtime_document: true
 planner_reads_this_document: on_demand
 language: en
@@ -292,6 +292,16 @@ A reviewed A/B/C ticket runs build → gates → one quorum round
 (three reviewers, two independent families) → builder fix verdicts →
 final gates → close; the round never recurses and never copies the S
 pipeline.
+
+The empty-diff flag is orthogonal too: `allow_empty_diff: true`
+(DEV-only) marks a verification or decision ticket whose legitimate
+success is zero changes. Set it only when the ticket asks to confirm
+that nothing must change; the engines then accept 0 files with hecho
+plus the recorded decision in evidencia (gates still run; the merge
+and the production step are skipped as no-ops). It rejects `oracle`
+and `includes_findings`: an oracle judges a candidate implementation
+and a claimed finding needs its fix in the diff, so neither fits a
+zero-change close. Without the flag the no-changes guard is unchanged.
 
 ## 28. Quota is separate from technical routing
 

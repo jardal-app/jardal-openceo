@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -27,6 +28,7 @@ __all__ = [
     "SCHEMA_PATH",
     "AgentOutcome",
     "AgentResult",
+    "empty_diff_close_allowed",
     "legacy_blocked_result",
     "parse_agent_result",
     "scheduled_resume",
@@ -124,7 +126,8 @@ Reglas:
 - Al reanudarte, comprueba el estado y la evidencia antes de actuar. No repitas un despliegue o un efecto confirmado. La llegada de resume_at solo permite volver a verificar: no demuestra que la prueba pasó.
 - Decisiones técnicas rutinarias se resuelven en el alcance. Solo pide al Owner decisiones reservadas, sus datos o credenciales que únicamente él pueda aportar; no uses resume_at para saltarte esa espera humana.
 - Si dudas entre hecho y bloqueado sobre si terminaste lo pedido, elige bloqueado: los gates deciden el cierre, no tu veredicto.
-- Una verificación que tu entorno no puede ejecutar (contenedores, servicios del host) no es un impedimento: cierra hecho y anótala en evidencia."""
+- Una verificación que tu entorno no puede ejecutar (contenedores, servicios del host) no es un impedimento: cierra hecho y anótala en evidencia.
+- En un ticket de verificación, la decisión registrada en evidencia cuenta como entregable: si confirmaste que nada debe cambiar, cierra hecho con la decisión documentada (el motor solo acepta el diff vacío cuando el planner lo permitió)."""
 
 
 def scheduled_resume(verdict: AgentResult, now: datetime | None = None) -> datetime | None:
@@ -133,6 +136,27 @@ def scheduled_resume(verdict: AgentResult, now: datetime | None = None) -> datet
     if verdict.resume_at <= (now or datetime.now(timezone.utc)):
         raise ValueError("resume_at must be in the future; verify the condition now")
     return verdict.resume_at
+
+
+def empty_diff_close_allowed(
+    params: Mapping[str, Any] | None,
+    resultado: str,
+    evidencia: str,
+) -> bool:
+    """Single empty-diff rule both dev engines call (TASK-2026-00566).
+
+    The planner flag (task params only, strict ``True``) plus hecho
+    plus non-blank evidencia lets a documented verification close with
+    zero files. Anything else falls back to the legacy no-changes
+    guard, so one definition serves both engines and the contract
+    cannot bifurcate.
+    """
+    if not isinstance(params, Mapping):
+        return False
+    return (
+        params.get("allow_empty_diff") is True
+        and resultado == "hecho"
+        and bool(str(evidencia or "").strip()))
 
 
 _FENCE_RE = re.compile(r"```agent-result\s*\n(.*?)\n```", re.DOTALL)

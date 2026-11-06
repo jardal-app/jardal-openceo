@@ -230,6 +230,13 @@ class PlannedTicket(BaseModel):
     review: Literal["on", "off"] | None = None
     review_reason: str | None = None
 
+    # Verification/decisión tickets whose legitimate success is zero
+    # changes (TASK-2026-00566): the planner sets it when an empty diff
+    # with hecho+evidencia is a valid close. The engines propagate it
+    # to params and accept 0 files only with the flag; without it the
+    # no-changes guard stays intact.
+    allow_empty_diff: bool = False
+
     # Suggested skill for any agent (TASK-2026-00198): a hint, the agent
     # decides. Checked against the real role skills by TASK-2026-00203.
     skill: str | None = None
@@ -312,6 +319,9 @@ class PlannedTicket(BaseModel):
             if self.review_reason is not None:
                 raise ValueError(
                     "review_reason is only valid for DEV tickets")
+            if self.allow_empty_diff:
+                raise ValueError(
+                    "allow_empty_diff is only valid for DEV tickets")
             return self
 
         if self.coding_tool is None:
@@ -350,6 +360,17 @@ class PlannedTicket(BaseModel):
             raise ValueError(
                 "review=off requires review_reason: why this ticket needs "
                 "no review round, or the user's explicit instruction")
+
+        if self.allow_empty_diff:
+            if self.oracle is not None:
+                raise ValueError(
+                    "allow_empty_diff rejects oracle: an oracle judges a "
+                    "candidate implementation, and zero changes leave "
+                    "nothing to judge")
+            if self.includes_findings:
+                raise ValueError(
+                    "allow_empty_diff claims no findings: a claimed "
+                    "finding needs its fix in the diff")
 
         return self
 
