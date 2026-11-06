@@ -29,6 +29,13 @@ from state import (
 
 logger = logging.getLogger(__name__)
 
+#: Markers written by :meth:`MongoRepository.mark_interrupted_tasks` on the
+#: runs and tickets a restart killed. The boot orphan-lock pass matches on
+#: them, so they must stay the single source of truth for both writers and
+#: readers (#582).
+_RESTART_RUN_FAILURE = "interrupted by service restart"
+_RESTART_TASK_ERROR = "Service restart interrupted task execution"
+
 #: Task statuses that end execution for good: their waiting Tier S runs
 #: can never resume (TASK-2026-00162).
 _TERMINAL_TASK_STATUSES = frozenset({
@@ -1152,7 +1159,7 @@ class MongoRepository:
         await self.tier_s_runs.update_many(
             {"status": {"$in": ["running", "active", "resuming"]}},
             {"$set": {"status": "failed",
-                      "failure": "interrupted by service restart",
+                      "failure": _RESTART_RUN_FAILURE,
                       "active_repo": None,
                       "updated_at": datetime.now(timezone.utc)}},
         )
@@ -1161,12 +1168,58 @@ class MongoRepository:
             {
                 "$set": {
                     "status": TaskStatus.INTERRUPTED.value,
-                    "error": "Service restart interrupted task execution",
+                    "error": _RESTART_TASK_ERROR,
                     "updated_at": datetime.now(timezone.utc),
                 }
             },
         )
+        # The dead holders can never release their repo lock (TTL 24h), so
+        # without this pass every retry parks on ``repo_busy`` until the
+        # ticket stalls (live: #558). Never fails boot.
+        try:
+            await self.release_restart_orphan_repo_locks()
+        except Exception:
+            logger.warning("Restart orphan lock release failed", exc_info=True)
         return result.modified_count + tier_result.modified_count
+
+    async def release_restart_orphan_repo_locks(self, limit: int = 500) -> int:
+        """Boot reconcile: free repo locks held by executions a restart killed.
+
+        One bounded pass, never a sweep loop. Deletes exactly the orphan
+        holders: ``tier-s:<run_id>`` of Tier S runs carrying the restart
+        failure marker and ``<task_id>`` of tickets carrying the restart
+        error marker. Waiting tickets are never matched, so a simple tier's
+        deliberately retained lock across a resumable wait (``session.py``:
+        touch on wait-with-resume) survives the reboot. Safe to run before
+        the dispatcher admits anything, and idempotent: a second pass
+        deletes nothing new.
+        """
+        bound = max(1, int(limit))
+        run_rows = self.tier_s_runs.find(
+            {"status": "failed", "failure": _RESTART_RUN_FAILURE},
+            {"run_id": 1},
+        ).limit(bound)
+        run_ids = sorted(
+            {str(row.get("run_id") or "") async for row in run_rows} - {""})
+        task_rows = self.tasks.find(
+            {"status": TaskStatus.INTERRUPTED.value,
+             "error": _RESTART_TASK_ERROR},
+            {"task_id": 1},
+        ).limit(bound)
+        task_ids = sorted(
+            {str(row.get("task_id") or "") async for row in task_rows} - {""})
+        holders = [f"tier-s:{run_id}" for run_id in run_ids] + task_ids
+        freed = 0
+        for holder in holders:
+            try:
+                result = await self.repo_locks.delete_many(
+                    {"holder": holder})
+                freed += int(result.deleted_count)
+            except Exception:
+                logger.warning(
+                    "Restart orphan lock release failed for %s",
+                    holder, exc_info=True)
+        return freed
 
     async def apply_restart_recovery(
         self,
