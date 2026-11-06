@@ -44,9 +44,10 @@ Full suite (~8 min): `./.venv/bin/python -m pytest tests/ -q`
 scripts/openceo-core-host.sh restart|status
 ```
 
-`restart`/`status` delegate to `systemctl --user` when the user unit
-`openceo-core-host.service` is enabled or active, else use the legacy
-script path; never run both at once (single flock in
+The core runs only as the user unit `openceo-core-host.service`
+(TASK-2026-00510): `start`/`stop`/`restart`/`status`/`logs` always go
+through `systemctl --user`/`journalctl` and fail with the install command
+when the unit is missing; there is no script start path (single flock in
 `.runtime/openceo-core-host.lock`, exit 3). The unit runs
 `openceo-core-host.sh foreground`, restarts `on-failure` (`RestartSec=10`,
 burst 5 per 600s, no retry on exit 3), records every stop in

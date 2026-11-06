@@ -18,7 +18,6 @@ from reliability.sanitize import sanitize_message
 
 JARDAL_ROOT = str(Path(__file__).resolve().parents[3])
 SERVICE_UNIT = "openceo-core-host.service"
-LOG_FILE = Path(__file__).resolve().parents[2] / ".runtime" / "openceo-core-host.log"
 MAX_LOG_LINES = 40
 MAX_STATUS_LINES = 40
 
@@ -68,12 +67,8 @@ def log_lines(needles: Iterable[str], *, since_hours: int = 6) -> list[str]:
         return []
     text = _run(["journalctl", "--user", "-u", SERVICE_UNIT, "--since",
                  f"-{since_hours}h", "-o", "cat", "--no-pager"])
-    if text.startswith("<unavailable") or not text.strip():
-        try:
-            text = "\n".join(LOG_FILE.read_text(
-                encoding="utf-8", errors="replace").splitlines()[-5000:])
-        except OSError:
-            return []
+    if text.startswith("<unavailable"):
+        return []
     hits = [line for line in text.splitlines()
             if any(key in line for key in keys)]
     return [sanitize_message(line, JARDAL_ROOT)[:400]

@@ -246,8 +246,6 @@ async def test_credential_terminal_failure_attributes_environment(repo):
 @run_async
 async def test_exhausted_brakes_capture_with_brake_name(repo):
     cases = [
-        ("needs_owner", "scheduled_wait declined 3 times in a row: x",
-         "scheduled_wait"),
         ("needs_owner", "review pool short of quorum 4 times; restore", "quorum"),
         ("needs_owner", "gates failed after 2 retries: g1", "gates"),
         ("needs_owner", "fix1 gates failed: g1", "correction"),

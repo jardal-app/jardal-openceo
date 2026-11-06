@@ -57,6 +57,7 @@ from objectives.engine import (
     ObjectiveErpError,
     ObjectiveLimitReached,
     ObjectiveRejected,
+    planning_in_flight as objective_planning_in_flight,
 )
 from objectives.missions import (
     MissionDuplicate,
@@ -65,7 +66,7 @@ from objectives.missions import (
 )
 from objectives.recovery_scheduler import RecoveryScheduler
 from mechanic.service import MechanicService, mechanic_config
-from objectives.recovery_deploy import spawn_service_restart
+from objectives.recovery_deploy import live_checkout_ready, spawn_service_restart
 from objectives.service import ObjectiveService, create_internal_ticket
 from orchestration.live import ProcessExecutor
 from orchestration.role_muse import ReadonlyBadgeProvider, issuer_for_repo
@@ -287,6 +288,8 @@ mechanic_service = MechanicService(
     wake_dispatcher=dispatcher.wake,
     release_fn=lambda: read_release(Path(__file__).resolve().parents[1]),
     deploy_ready=objective_service.deploy_idle,
+    checkout_ready=lambda: (live_checkout_ready()
+                            and not objective_planning_in_flight()),
     spawn_restart=spawn_service_restart,
 )
 task_service.set_mechanic_wake(mechanic_service.wake)

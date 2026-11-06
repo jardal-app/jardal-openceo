@@ -67,6 +67,7 @@ DEFAULTS: dict[str, Any] = {
     "fix_ticket_tier": "tier_c",
     "fix_ticket_autorun": True,
     "max_open_fix_tickets": 2,
+    "deploy_force_after_minutes": 30,
 }
 
 
@@ -191,6 +192,7 @@ class MechanicService:
         wake_dispatcher: Callable[[], None],
         release_fn: Callable[[], Mapping[str, Any]] = dict,
         deploy_ready: Callable[[], Awaitable[bool]] | None = None,
+        checkout_ready: Callable[[], bool] | None = None,
         spawn_restart: Callable[[], bool] | None = None,
         clock: Callable[[], datetime] | None = None,
         situation_fn: Callable[..., Awaitable[dict[str, Any]]] = compile_situation,
@@ -205,6 +207,7 @@ class MechanicService:
         self._wake_dispatcher = wake_dispatcher
         self._release_fn = release_fn
         self._deploy_ready = deploy_ready
+        self._checkout_ready = checkout_ready
         self._spawn_restart = spawn_restart
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._situation_fn = situation_fn
@@ -584,13 +587,28 @@ class MechanicService:
         state = await self._repo.db[STATE_COLLECTION].find_one({"_id": DEPLOY_DOC_ID})
         if not state or not state.get("pending") or state.get("spawned_at"):
             return
-        if not await self._deploy_ready():
+        if not await self._deploy_ready() and not await self._forced_deploy_ready(state):
             return
         if await asyncio.to_thread(self._spawn_restart):
             await self._repo.db[STATE_COLLECTION].update_one(
                 {"_id": DEPLOY_DOC_ID}, {"$set": {"spawned_at": self._clock()}})
             logger.warning("Mechanic: restart scheduled to deploy fix(es) %s",
                            state.get("fixes"))
+
+    async def _forced_deploy_ready(self, state: Mapping[str, Any]) -> bool:
+        """A long-pending fix deploys once the service checkout is free.
+
+        Waiting for a fully idle service can last a whole mission; runs in
+        other repos are interrupted and requeued by the boot recovery.
+        """
+        if self._checkout_ready is None:
+            return False
+        since = as_utc(state.get("since"))
+        limit = timedelta(minutes=int(
+            self.config().get("deploy_force_after_minutes", 30)))
+        if since is None or self._clock() - since < limit:
+            return False
+        return bool(await asyncio.to_thread(self._checkout_ready))
 
     async def _resume_after_deploy(self) -> None:
         # Any pending fix completed before this boot, so this process runs it.
