@@ -211,3 +211,27 @@ def test_dispatcher_blocker_check(status: str, still_open: bool) -> None:
     service._repo = SimpleNamespace(get_task=AsyncMock(
         return_value={"status": status}))
     assert asyncio.run(service.blockers_open({"blocked_by": ["b"]})) is still_open
+
+
+# -- converted ticket: its planner analysis is kept whole ---------------------
+
+def test_converted_analysis_is_stored_whole() -> None:
+    analysis = "x" * 12518  # #541's SIZING.md lost 76% at the old 4000/3000 cut
+    doc = engine_mod._new_objective_doc(
+        objective_id="OBJ-1", project="p", entry="convert", anchor={},
+        source_task_id="t", cause="OBJECTIVE_NEEDED", sizing_hint=analysis,
+        erp_group_ref=None, base_sha="abc", branch="base")
+    assert doc["sizing_hint"] == analysis
+
+
+def test_planner_gets_the_head_and_the_full_file(tmp_path: Path) -> None:
+    analysis = "A" * 5000
+    path = engine_mod.stage_sizing_hint(tmp_path, analysis)
+    assert Path(path).read_text() == analysis
+    prompt = engine_mod._planner_prompt({"anchor": {}}, "", [], "", [],
+                                        sizing_hint=analysis, sizing_path=path)
+    assert "do not re-investigate what it covers" in prompt
+    assert f"Full analysis (5000 chars), read it before splitting: {path}" in prompt
+    assert engine_mod.stage_sizing_hint(tmp_path, "") == ""
+    assert not (tmp_path / "SIZING_HINT.md").exists()
+
