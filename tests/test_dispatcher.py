@@ -1497,3 +1497,55 @@ class DispatcherDeadlineTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FairQueueTests(unittest.IsolatedAsyncioTestCase):
+    """An older ticket waiting for slots is never overtaken (TASK-2026-00510)."""
+
+    def _monitor(self, levels: dict[str, tuple[float, float]] | None = None) -> RateMonitor:
+        monitor = RateMonitor(_rate_settings())
+
+        async def fake_get_status(provider: str) -> ProviderStatus:
+            five_h, weekly = (levels or {}).get(provider, (1.0, 1.0))
+            return _provider_status(provider, five_h, weekly)
+
+        monitor.get_status = fake_get_status  # type: ignore[method-assign]
+        return monitor
+
+    def _repo(self) -> _FakeRepo:
+        return _FakeRepo([
+            _ticket("running-c", status=TaskStatus.IN_PROGRESS.value,
+                    project="other", coding_tool="tier_c"),
+            _ticket("heavy-s", project="erp", coding_tool="tier_s",
+                    created_at=_NOW - timedelta(hours=3)),
+            _ticket("light-c", project="web", coding_tool="tier_c",
+                    created_at=_NOW - timedelta(hours=1)),
+        ])
+
+    async def test_newer_ticket_waits_behind_one_short_of_slots(self) -> None:
+        repo = self._repo()
+        launched: list[str] = []
+        dispatcher = _dispatcher(repo, _FakeService(repo), launched,
+                                 monitor=self._monitor())  # type: ignore[arg-type]
+        out = await dispatcher.dispatch_cycle(now=_NOW)
+        await _drain()
+        self.assertEqual(out["launched"], [])
+        self.assertEqual((await repo.get_task("heavy-s"))["waiting_reason"],
+                         WAIT_LIMIT_GLOBAL)
+        self.assertEqual((await repo.get_task("light-c"))["waiting_reason"],
+                         WAIT_LIMIT_GLOBAL)
+        await repo.patch_task("running-c", {"status": TaskStatus.COMPLETED.value})
+        out = await dispatcher.dispatch_cycle(now=_NOW)
+        await _drain()
+        self.assertEqual(out["launched"], ["heavy-s"])
+
+    async def test_a_quota_wait_reserves_nothing(self) -> None:
+        repo = self._repo()
+        await repo.patch_task("running-c", {"status": TaskStatus.COMPLETED.value})
+        launched: list[str] = []
+        exhausted = {"claude": (0.0, 0.9)}
+        dispatcher = _dispatcher(repo, _FakeService(repo), launched,
+                                 monitor=self._monitor(exhausted))  # type: ignore[arg-type]
+        out = await dispatcher.dispatch_cycle(now=_NOW)
+        await _drain()
+        self.assertEqual(out["launched"], ["light-c"])

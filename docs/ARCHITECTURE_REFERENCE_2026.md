@@ -93,7 +93,7 @@ The integration must preserve `TaskDocument`, task/source idempotency, explicit 
 | Web Search | SearXNG / Brave Search API / provider search API | Agents search the internet for information, then fetch or browse results |
 | Coding Tier 1 | Codex CLI + GPT-5.4 | Subscription. Complex features, architectural changes |
 | Coding Tier 2 | Claude Code + Opus 4.6 | Subscription. Security, math, logic, critical bugs |
-| Coding Tier S | Claude Code + Codex + Gemini via tmux + OpenCode headless review pipeline | Special multi-AI orchestration flow for work whose result gains from independent challenge (any domain) |
+| Coding Tier S | Claude Code + Codex + Gemini via tmux + OpenCode headless review pipeline | Special multi-AI orchestration flow for critical work (money, security/privacy, irreversible data, core contracts) whose result gains from independent challenge; owner order 2026-11-06, `routing_policy.d/dev.md` §19 |
 | Real-time | WebSocket (FastAPI native) | Dashboard live updates. No Redis needed |
 | In-memory cache | Python process memory | Active connections, live agent state. Rebuilds from MongoDB on restart |
 
@@ -946,7 +946,7 @@ Project creation is an operations skill run (`skills/operations/crear-proyecto/S
 
 ### Dispatcher
 
-Deterministic, 0 tokens: wakes on ticket created/ready, ticket closed/failed/cancelled (frees a slot), dependency resolved, quota reset (persisted trigger), and service start (bounded reconciliation). While ready tickets wait for a slot it keeps a single persisted backup trigger (e.g. every 5 min); with an empty queue there is no timer. Admission checks active limits (global, per project, per objective), Claude/Codex quota and reservations for Tier S (A/B tickets that would invade them wait as `waiting(quota_reserved)`, never silently drop to C), free resources, the per-repo lock, and lease/fencing against double dispatch.
+Deterministic, 0 tokens: wakes on ticket created/ready, ticket closed/failed/cancelled (frees a slot), dependency resolved, quota reset (persisted trigger), and service start (bounded reconciliation). While ready tickets wait for a slot it keeps a single persisted backup trigger (e.g. every 5 min); with an empty queue there is no timer. Admission checks active limits (global, per project, per objective), Claude/Codex quota and reservations for Tier S (A/B tickets that would invade them wait as `waiting(quota_reserved)`, never silently drop to C), free resources, the per-repo lock, and lease/fencing against double dispatch. Global capacity is `RATE_MAX_CONCURRENT_TICKETS` (7) slots, Tier S weighing 3 and the rest 1; the per-project limit (1) still applies. The queue is fair (TASK-2026-00510): once a ticket parks only for lack of free slots, newer tickets park behind it instead of taking the slots first, so a heavy ticket is never starved; quota and per-project parks reserve nothing.
 
 > Implemented by TASK-2026-00113 (`openceo-core/dispatcher.py`: `Dispatcher` with a coalesced wake event plus one conditional persisted backup trigger in `dispatcher_backup`; atomic conditional-update claim against concurrent dispatch cycles — crash recovery is startup `mark_interrupted_tasks` plus the bounded reconcile, and explicit manual `POST /run` stays outside the claim by design; typed `waiting_reason` taxonomy; `RateMonitor.admission_for_ticket` with Tier S reserves; limit/repo parks are event-held without `resume_at`, only quota parks carry the reset instant; "not cancelled in Jardal ERP" is structural via the inverse webhook, with no live Jardal ERP reads per ticket). Corrected by TASK-2026-00177 (cancel fencing: `run_task` guards entry — force relaunches completed/converted, never cancelled — re-reads after the project lock, and discards results/failures when the ticket was cancelled mid-run; `patch_task` atomically refuses any status move out of cancelled; the Tier S cycle fences parks and the pre-merge close; a material failure on a cancelled ticket skips record + replan). Corrected by TASK-2026-00180 (a cancel landing — desk webhook, explicit transition, objective cascade — requeues direct dependents like a finish, so event-held `blocked_by` parks never strand).
 
@@ -1224,7 +1224,7 @@ Each provider has configurable reserve thresholds. A ticket can only launch if r
 ### Concurrency Slots
 
 ```
-RATE_MAX_CONCURRENT_TICKETS = 3
+RATE_MAX_CONCURRENT_TICKETS = 7
 
 Tier S ticket = 3 slots (uses Claude + Codex + reviewers simultaneously)
 Normal ticket = 1 slot
@@ -1292,7 +1292,7 @@ Session IDs for Codex are captured from `/status` output at monitor initializati
 
 ```bash
 # Rate limit management
-RATE_MAX_CONCURRENT_TICKETS=3
+RATE_MAX_CONCURRENT_TICKETS=7
 RATE_CODEX_RESERVE_5H=0.20
 RATE_CODEX_RESERVE_WEEKLY=0.05
 RATE_CLAUDE_RESERVE_5H=0.0
@@ -1907,7 +1907,7 @@ SMTP_SIGNATURE_LOGO_PATH=../Isotipo.png
 SMTP_SIGNATURE_LOGO_WIDTH=104
 
 # Rate limit management
-RATE_MAX_CONCURRENT_TICKETS=3
+RATE_MAX_CONCURRENT_TICKETS=7
 RATE_CODEX_RESERVE_5H=0.20
 RATE_CODEX_RESERVE_WEEKLY=0.05
 RATE_CLAUDE_RESERVE_5H=0.0

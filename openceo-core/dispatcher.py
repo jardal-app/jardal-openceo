@@ -39,6 +39,7 @@ from agents.dev.review_policy import resolve_review, review_wait_reason
 from agents.dev.routing import ROUTING_MISSING_REASON, resolve_coding_tool
 from state import (
     WAIT_BLOCKED_BY,
+    WAIT_LIMIT_GLOBAL,
     WAIT_LIMIT_OBJECTIVE,
     WAIT_LIMIT_PROJECT,
     WAIT_QUOTA,
@@ -48,6 +49,9 @@ from state import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Admission outcome of a ticket parked only for lack of global slots.
+PARKED_FOR_CAPACITY = "parked_capacity"
 
 __all__ = [
     "Dispatcher",
@@ -321,11 +325,12 @@ class Dispatcher:
         launched: list[str] = []
         parked = 0
         repo_cache: dict[str, str | None] = {}
+        capacity_reserved = False
         for ticket in ordered:
             try:
                 outcome = await self._admit_and_launch(
                     ticket, active_view, project_active, objective_active,
-                    moment, repo_cache,
+                    moment, repo_cache, capacity_reserved=capacity_reserved,
                 )
             except Exception:
                 logger.warning(
@@ -340,6 +345,9 @@ class Dispatcher:
                 if objective_id:
                     objective_active[str(objective_id)] += 1
                 active_view.append({**ticket, "status": TaskStatus.IN_PROGRESS.value})
+            elif outcome == PARKED_FOR_CAPACITY:
+                parked += 1
+                capacity_reserved = True
             elif outcome == "parked":
                 parked += 1
 
@@ -404,6 +412,8 @@ class Dispatcher:
         objective_active: Counter[str],
         now: datetime,
         repo_cache: dict[str, str | None],
+        *,
+        capacity_reserved: bool = False,
     ) -> str:
         """Admit one ticket: ``launched``, ``parked`` or ``skipped``.
 
@@ -462,12 +472,18 @@ class Dispatcher:
             return "parked"
 
         if self._rate_monitor is not None:
+            if capacity_reserved:
+                # An older ticket waits for free slots: newer ones never
+                # take them first, or a heavy ticket could wait forever.
+                await self._park(ticket, WAIT_LIMIT_GLOBAL, None, now)
+                return "parked"
             can, new_resume, reason = await self._rate_monitor.admission_for_ticket(
                 effective, active_tickets=active_view,
             )
             if not can:
                 await self._park(ticket, reason or WAIT_QUOTA, new_resume, now)
-                return "parked"
+                return PARKED_FOR_CAPACITY if reason == WAIT_LIMIT_GLOBAL \
+                    else "parked"
 
         if effective_tier is not CodingTool.TIER_S:
             # Tier S owns its locking inside the cycle (run-scoped holder
