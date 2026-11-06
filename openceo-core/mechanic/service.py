@@ -44,6 +44,7 @@ VERDICT_FILE = "MECHANIC_VERDICT.json"
 RUNS_COLLECTION = "mechanic_runs"
 STATE_COLLECTION = "mechanic_state"
 DEPLOY_DOC_ID = "deploy"
+HEARTBEAT_DOC_ID = "heartbeat"
 OPEN_FIX_QUERY = {"params.mechanic_fix_for": {"$exists": True},
                   "status": {"$in": ["queued", "in_progress", "waiting"]}}
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -178,7 +179,15 @@ SITUATION
 
 
 class MechanicService:
-    """Owns the mechanic loop; every decision about a ticket is the model's."""
+    """Owns the mechanic loop; every decision about a ticket is the model's.
+
+    Since ticket #573 the loop below no longer starts in production: the
+    shared schedule kernel runs ``MechanicHeartbeatAgenda`` and ``tick()``
+    is its run body, with the heartbeat due persisted instead of held in
+    memory. The class stays behaviorally unchanged as the harness for the
+    frozen oracle (``tests/test_mechanic_510.py``); ``delegate_wake_to``
+    redirects ``wake`` to the kernel without touching the producers.
+    """
 
     def __init__(
         self,
@@ -214,6 +223,7 @@ class MechanicService:
         self._repo_root = repo_root
         self._queue: dict[str, Finding] = {}
         self._wake = asyncio.Event()
+        self._wake_delegate: Callable[[], None] | None = None
         self._task: asyncio.Task | None = None
         self._stopped = False
         self._next_heartbeat: datetime | None = None
@@ -227,17 +237,31 @@ class MechanicService:
             logger.warning("mechanic config unreadable; defaults", exc_info=True)
             return dict(DEFAULTS)
 
+    def delegate_wake_to(self, waker: Callable[[], None] | None) -> None:
+        """Redirect ``wake`` to the kernel (ticket #573). Unbound, as before."""
+        self._wake_delegate = waker
+
     def wake(self, task_id: str, trigger: str, detail: str = "") -> None:
         if not task_id or not self.config().get("enabled", True):
             return
         self._queue[str(task_id)] = Finding(str(task_id), str(trigger),
                                             str(detail or "")[:500])
+        self._poke()
+
+    def _poke(self) -> None:
+        """Drive whichever loop owns the wait: the kernel or the isolated one."""
+        if self._wake_delegate is not None:
+            self._wake_delegate()
+            return
         self._wake.set()
 
-    async def start(self) -> None:
-        if self._task is not None:
-            return
-        self._stopped = False
+    async def boot_resume(self) -> None:
+        """Post-deploy resume plus the runs index, without the loop.
+
+        The kernel path (ticket #573): the lifespan runs this where
+        ``start()`` ran, so resumed tickets keep their ordering ahead of
+        the dispatcher's boot cycle. Never raises, like ``start()``.
+        """
         try:
             await self._repo.db[RUNS_COLLECTION].create_index("at")
         except Exception:  # noqa: BLE001 - an index never blocks boot
@@ -246,6 +270,12 @@ class MechanicService:
             await self._resume_after_deploy()
         except Exception:  # noqa: BLE001
             logger.warning("mechanic post-deploy resume failed", exc_info=True)
+
+    async def start(self) -> None:
+        if self._task is not None:
+            return
+        self._stopped = False
+        await self.boot_resume()
         self._task = asyncio.create_task(self._loop(), name="mechanic")
         logger.warning("Mechanic started (heartbeat every %s min)",
                        self.config().get("heartbeat_minutes"))
@@ -286,20 +316,52 @@ class MechanicService:
 
     # -- tick ---------------------------------------------------------------
 
+    async def heartbeat_due_at(self) -> datetime | None:
+        """Persisted next heartbeat; None when never scheduled (ticket #573).
+
+        Single-doc ``_id`` read shared by the isolated loop (through
+        ``tick``) and the kernel agenda (``next_due``). A missing doc or an
+        unparsable value means due now: the first cycle scans, as before.
+        A read error propagates so the kernel records the incident and
+        backs off, like the research/horizon/objectives sisters.
+        """
+        doc = await self._repo.db[STATE_COLLECTION].find_one(
+            {"_id": HEARTBEAT_DOC_ID})
+        if not isinstance(doc, Mapping):
+            return None
+        return as_utc(doc.get("next_heartbeat"))
+
+    async def _persist_heartbeat_due(self, due: datetime) -> None:
+        """Upsert the next heartbeat. Fail-open: a lost write only rescans."""
+        try:
+            await self._repo.db[STATE_COLLECTION].update_one(
+                {"_id": HEARTBEAT_DOC_ID},
+                {"$set": {"next_heartbeat": due}},
+                upsert=True)
+        except Exception:  # noqa: BLE001 - the queued findings must still run
+            logger.warning("mechanic heartbeat due write failed; rescanning",
+                           exc_info=True)
+
     async def tick(self) -> dict[str, Any]:
         cfg = self.config()
         if not cfg.get("enabled", True):
             self._queue.clear()
-            self._next_heartbeat = self._clock() + timedelta(hours=1)
+            due = self._clock() + timedelta(hours=1)
+            self._next_heartbeat = due
+            await self._persist_heartbeat_due(due)
             return {"ran": 0, "disabled": True}
         now = self._clock()
         findings = list(self._queue.values())
         self._queue.clear()
-        if self._next_heartbeat is None or now >= self._next_heartbeat:
+        due = await self.heartbeat_due_at()
+        self._next_heartbeat = due
+        if due is None or now >= due:
             findings += await self.heartbeat_scan(now, cfg)
             await self._deploy_if_ready()
-            self._next_heartbeat = now + timedelta(
+            due = now + timedelta(
                 minutes=int(cfg.get("heartbeat_minutes", 30)))
+            self._next_heartbeat = due
+            await self._persist_heartbeat_due(due)
         fixes = [finding for finding in findings if finding.trigger == "fix_done"]
         for finding in fixes:
             await self._on_fix_done(finding)
@@ -570,7 +632,7 @@ class MechanicService:
                     f"fix ticket {finding.task_id} ended {fix.get('status')}: "
                     f"{str(fix.get('error') or '')[:300]}"))
             if targets:
-                self._wake.set()
+                self._poke()
             return
         state = self._repo.db[STATE_COLLECTION]
         await state.update_one(

@@ -68,6 +68,7 @@ from objectives.missions import (
 from objectives.recovery_scheduler import RecoveryScheduler
 from objectives.schedule_agenda import ObjectivesRecoveryAgenda
 from mechanic.service import MechanicService, mechanic_config
+from mechanic.schedule_agenda import MechanicHeartbeatAgenda
 from objectives.recovery_deploy import live_checkout_ready, spawn_service_restart
 from objectives.service import ObjectiveService, create_internal_ticket
 from orchestration.live import ProcessExecutor
@@ -297,6 +298,10 @@ def _mechanic_executor() -> ProcessExecutor:
 # Engine mechanic (TASK-2026-00510): stalls, give-ups and missed deadlines
 # go to one musej run that returns repair actions; the heartbeat spends no
 # tokens unless it finds a wait nobody will move.
+# Since ticket #573 the heartbeat runs on the shared schedule kernel (the
+# agenda is registered in the lifespan); the isolated loop never starts
+# and ``mechanic_service.wake`` delegates to the kernel, so TaskService
+# and DeadlineWatch are untouched.
 mechanic_service = MechanicService(
     repo=repo,
     task_service=task_service,
@@ -561,7 +566,10 @@ async def lifespan(_: FastAPI):
         await ceo_loop.start()
         # El bucle aislado de recuperacion ya no arranca (ticket #570): su
         # agenda corre en el kernel compartido, registrado mas abajo.
-        await mechanic_service.start()
+        # The isolated mechanic loop never starts either (ticket #573): its
+        # heartbeat agenda runs on the shared kernel below, while the
+        # post-deploy resume still runs here, where ``start()`` ran it.
+        await mechanic_service.boot_resume()
         # Ojo: dentro de ``lifespan`` hay un ``settings = get_settings()`` mas
         # abajo (bloque de auth) que vuelve ``settings`` local a toda la funcion.
         # Leerlo aqui antes de esa asignacion lanzaria UnboundLocalError, asi que
@@ -608,10 +616,10 @@ async def lifespan(_: FastAPI):
 
         # Kernel de schedule global (TASK-2026-00441): research (Fase 2, ticket #564),
         # Horizon (Fase 3, ticket #567), recuperacion de objetivos (Fase 5,
-        # ticket #570) y dispatcher + DeadlineWatch (Fase 6, ticket #572)
-        # comparten la espera unica; las siguientes fases registran las
-        # suyas en este mismo kernel. Los incidentes del kernel van a la
-        # coleccion de reliability, como los de DeadlineWatch.
+        # ticket #570), dispatcher + DeadlineWatch (Fase 6, ticket #572) y
+        # latido del mecanico (fase final, ticket #573) comparten la espera
+        # unica. Los incidentes del kernel van a la coleccion de reliability,
+        # como los de DeadlineWatch.
         schedule_kernel = ScheduleKernel(
             incidents=repo.db["reliability_incidents"],
             runtime_dir=Path(__file__).resolve().parents[1] / ".runtime",
@@ -673,6 +681,14 @@ async def lifespan(_: FastAPI):
         schedule_kernel.register(dispatcher_agenda)
         dispatcher.delegate_wake_to(
             lambda: schedule_kernel.wake(dispatcher_agenda.name))
+        # Mechanic heartbeat (ticket #573): always active, on the same
+        # shared kernel and registered before the start so the recover
+        # covers it. The finding queue stays in memory; every producer
+        # keeps calling ``mechanic_service.wake``, now delegated here.
+        mechanic_agenda = MechanicHeartbeatAgenda(service=mechanic_service)
+        schedule_kernel.register(mechanic_agenda)
+        mechanic_service.delegate_wake_to(
+            lambda: schedule_kernel.wake(mechanic_agenda.name))
         # Las parks heredadas reciben su primer vencimiento aqui (acotado,
         # nunca falla el arranque), donde antes sembraba el scheduler aislado.
         try:
@@ -712,6 +728,10 @@ async def lifespan(_: FastAPI):
         # plazos, admite listos) donde antes lo hacia ``dispatcher.start``:
         # este aviso mueve la pasada caliente de su agenda.
         schedule_kernel.wake(dispatcher_agenda.name)
+        # The mechanic ticks at boot (queued findings, plus the scan when
+        # the persisted due says so) where the old loop ticked at once:
+        # this wake drives the hot pass of its agenda.
+        schedule_kernel.wake(mechanic_agenda.name)
 
         if internal_mcp is not None:
             logger.info(
@@ -726,10 +746,11 @@ async def lifespan(_: FastAPI):
 
         await research_coordinator.stop()
         # El kernel compartido (research + Horizon + recuperacion +
-        # dispatcher) ya paro primero al detener el coordinador: cancela
-        # los carriles antes de cerrar el repositorio. Los bucles aislados
-        # de Horizon, recuperacion y dispatcher nunca arrancaron; pararlos
-        # solo limpia flags y desarma el watch (sin timer en el kernel).
+        # dispatcher + latido) ya paro primero al detener el coordinador:
+        # cancela los carriles antes de cerrar el repositorio. Los bucles
+        # aislados de Horizon, recuperacion, dispatcher y mecanico nunca
+        # arrancaron; pararlos solo limpia flags y desarma el watch (sin
+        # timer en el kernel).
         await horizon_scheduler.stop()
         await mechanic_service.stop()
         await recovery_scheduler.stop()
