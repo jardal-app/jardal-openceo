@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import sys
+import asyncio
+import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 CORE = Path(__file__).resolve().parents[1] / "openceo-core"
 if str(CORE) not in sys.path:
@@ -69,6 +73,39 @@ class ParseMuseUsageTests(unittest.TestCase):
         # TASK-2026-00138: pre-v2 provider values are not routing.
         self.assertEqual(resolved_tool_name({"coding_tool": "muse"}), "")
         self.assertEqual(resolved_tool_name({"coding_tool": "tier_c"}), "tier_c")
+
+
+class ResponsiveMonitorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_slow_monitors_leave_the_event_loop_available(self) -> None:
+        loop_thread = threading.get_ident()
+        for provider in ("codex", "claude", "muse"):
+            with self.subTest(provider=provider):
+                entered = threading.Event()
+                release = threading.Event()
+                monitor = RateMonitor(SimpleNamespace())
+
+                def send(_provider: str, _text: str) -> None:
+                    entered.set()
+                    if not release.wait(timeout=1):
+                        raise AssertionError("quota probe blocked the event loop")
+
+                def capture(_provider: str, lines: int) -> str:
+                    self.assertNotEqual(threading.get_ident(), loop_thread)
+                    return MUSE_USAGE + "\n100% left\n100% left"
+
+                async def respond() -> None:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                    release.set()
+
+                with patch.object(monitor, "_send_to_monitor", side_effect=send), \
+                     patch.object(monitor, "_capture_monitor", side_effect=capture), \
+                     patch("rate_monitor.asyncio.sleep", new=AsyncMock()):
+                    try:
+                        status, _ = await asyncio.wait_for(asyncio.gather(
+                            monitor.refresh_status(provider), respond()), timeout=3)
+                    finally:
+                        release.set()
+                self.assertEqual(status.provider, provider)
 
 
 if __name__ == "__main__":
