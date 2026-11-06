@@ -120,6 +120,7 @@ from .tmux_runtime import TmuxRuntime
 from config_loader import ConfigLoader
 from rate_monitor import RateMonitor
 from settings import Settings
+from agents.dev.merge_lock import MergeLockBusy, merge_locked
 from agents.dev.scratch import stage_work, unstage_scratch
 from state import CodingTool, TaskStatus
 
@@ -954,6 +955,76 @@ class DevSessionManager:
     def _drop_simple_branch(self, branch: _SimpleBranch) -> None:
         self._simple_git(branch.repo, "checkout", "-q", branch.base)
         self._simple_git(branch.repo, "branch", "-D", branch.branch)
+
+    def _close_simple_merge(
+        self, branch: _SimpleBranch,
+    ) -> tuple[bool, str, str]:
+        """Checkout base + merge + drop the branch (§12), serialized.
+
+        The window runs under the checkout's merge lock so concurrent
+        closes never interleave. Returns ``(merged, kind, detail)`` with
+        ``kind`` in ``{"", "checkout", "conflict"}``; ``detail`` keeps the
+        git stderr (truncated) so a failed close stays diagnosable.
+        Raises :class:`MergeLockBusy` when another close holds the lock
+        past the timeout.
+        """
+        with merge_locked(branch.repo):
+            checkout = self._simple_git(
+                branch.repo, "checkout", "-q", branch.base)
+            if checkout.returncode != 0:
+                err = checkout.stderr.strip()[:200]
+                detail = f"cannot checkout {branch.base}"
+                if err:
+                    detail += f": {err}"
+                return False, "checkout", detail
+            if self._simple_git(
+                    branch.repo, "merge", "--ff-only", "-q",
+                    branch.branch).returncode != 0:
+                merged = self._simple_git(
+                    branch.repo, "merge", "--no-ff", "--no-edit",
+                    branch.branch)
+                if merged.returncode != 0:
+                    self._simple_git(branch.repo, "merge", "--abort")
+                    return (False, "conflict",
+                            merged.stderr.strip()[:200] or "conflict")
+            self._drop_simple_branch(branch)
+            return True, "", ""
+
+    def _preserve_close_branch(
+        self, task: dict[str, Any], output: DevExecutionOutput,
+        branch: _SimpleBranch,
+    ) -> None:
+        """Record the merge-pending candidate so a close retry reuses it.
+
+        Unlike :meth:`_park_branch_for_wait` this never touches HEAD: a
+        failed checkout leaves HEAD on the branch (releasing it would hit
+        the same failure and drop the work) and a failed merge leaves it
+        on the base. The record mirrors ``dev_checkpoint`` so the resume
+        restores the committed branch instead of rebuilding from scratch.
+        """
+        params = dict(output.params if isinstance(output.params, dict)
+                      else (task.get("params") or {}))
+        tip = self._simple_git(
+            branch.repo, "rev-parse", "--verify",
+            f"refs/heads/{branch.branch}").stdout.strip()
+        if not tip:
+            output.params = params
+            return
+        artifacts = {}
+        handoff = branch.repo / ".openceo" / "HANDOFF.md"
+        if handoff.is_file():
+            artifacts["HANDOFF.md"] = handoff.read_text(
+                encoding="utf-8")[:64000]
+        params["dev_checkpoint"] = {
+            "branch": branch.branch, "base": branch.base,
+            "base_sha": branch.base_sha, "ref": branch.ref,
+            "head_sha": tip,
+            "oracle_frozen": branch.oracle_frozen,
+            "oracle_baseline_red": branch.oracle_baseline_red,
+            "build_done": True,
+            "artifacts": artifacts,
+        }
+        output.params = params
 
     def _park_branch_for_wait(
         self, task: dict[str, Any], output: DevExecutionOutput,
@@ -2163,24 +2234,31 @@ class DevSessionManager:
             pass
         auto_merge = bool(dev_cfg.get("auto_merge", True))
         if auto_merge or task.get("objective_id"):
-            if self._simple_git(repo, "checkout", "-q", branch.base).returncode != 0:
+            try:
+                merged, merge_kind, merge_detail = self._close_simple_merge(
+                    branch)
+            except MergeLockBusy:
+                merged, merge_kind, merge_detail = (
+                    False, "checkout",
+                    "merge lock busy: another close is merging")
+            if not merged:
+                self._preserve_close_branch(task, output, branch)
                 output.status = TaskStatus.WAITING
-                output.waiting_reason = (
-                    f"needs_owner: merge_conflict: cannot checkout {branch.base} "
-                    f"(branch kept: {branch.branch})")
-                return output
-            if self._simple_git(repo, "merge", "--ff-only", "-q", branch.branch).returncode != 0:
-                merged = self._simple_git(
-                    repo, "merge", "--no-ff", "--no-edit", branch.branch)
-                if merged.returncode != 0:
-                    self._simple_git(repo, "merge", "--abort")
-                    output.status = TaskStatus.WAITING
+                if merge_kind == "checkout":
+                    # A checkout failure is transient (a concurrent close,
+                    # a lock held elsewhere): retry, never page the owner.
+                    output.waiting_reason = (
+                        "transient: merge_conflict: "
+                        f"{merge_detail} "
+                        f"(branch kept: {branch.branch})")
+                    output.resume_at = (
+                        datetime.now(timezone.utc) + timedelta(minutes=15))
+                else:
                     output.waiting_reason = (
                         "needs_owner: merge_conflict: "
-                        f"{merged.stderr.strip()[:200]} "
+                        f"{merge_detail} "
                         f"(branch kept: {branch.branch})")
-                    return output
-            self._drop_simple_branch(branch)
+                return output
             branch_note = f"merged into {branch.base}"
             if auto_merge:
                 # Post-merge production step (TASK-2026-00415): with
