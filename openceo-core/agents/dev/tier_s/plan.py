@@ -55,7 +55,8 @@ class PlanValidation:
 _SECTION_RE = re.compile(r"^(TICKET|OBJECTIVE|GOAL|ACCEPTANCE|FILES|CONTRACTS|DECISIONS|STEPS|ESTIMATE|OUT_OF_SCOPE)\s*:\s*(.*)$")
 _BULLET_RE = re.compile(r"^-\s+(.*)$")
 _STEP_RE = re.compile(r"^\d+\.\s+(.*)$")
-_FILE_RE = re.compile(r"^(\S+)\s+\((create|modify|delete)\)\s*[—–-]\s*(.+)$")
+_FILE_RE = re.compile(
+    r"^(\S+)\s+\((create|modify|delete)\)\s*(?:[—–:-]\s*(.*))?$", re.IGNORECASE)
 _ESTIMATE_RE = re.compile(r"files\s*=\s*(\d+)\s+lines\s*=\s*(\d+)")
 _ESTIMATE_LINE_RE = re.compile(r"^\s*ESTIMATE\b\s*:?\s*(.*)$", re.IGNORECASE)
 _EST_FILES_RE = re.compile(
@@ -113,8 +114,8 @@ def parse_plan(text: str) -> Plan:
             files.append(PlannedFile(path=line, operation="?", reason=""))
             continue
         files.append(PlannedFile(
-            path=match.group(1), operation=match.group(2),
-            reason=match.group(3).strip()))
+            path=match.group(1), operation=match.group(2).lower(),
+            reason=(match.group(3) or "").strip()))
 
     steps: list[str] = []
     for line in sections.get("STEPS", []):
@@ -160,7 +161,9 @@ def _parse_estimate(lines: Sequence[str]) -> tuple[int | None, int | None]:
 
 def _inside_repo(repo: Path, raw_path: str) -> Path | None:
     """Resolve a planned path; None when it escapes the repo or is absolute."""
-    cleaned = raw_path.strip().lstrip("./")
+    cleaned = raw_path.strip()
+    while cleaned.startswith("./"):  # lstrip("./") also ate a leading "../"
+        cleaned = cleaned[2:]
     if not cleaned or cleaned.startswith(("/", "~")) or ".." in cleaned.split("/"):
         return None
     try:
@@ -179,6 +182,8 @@ def validate_plan(
     budget_files: int,
     budget_exclude: Sequence[str] = (),
     budget_lines: int | None = None,
+    fallback_goal: str = "",
+    fallback_acceptance: Sequence[str] = (),
 ) -> PlanValidation:
     """Structural validation (design §6.3): format, routes, size budget."""
     errors: list[str] = []
@@ -186,9 +191,15 @@ def validate_plan(
     if not plan.ticket:
         warnings.append("TICKET line missing (informational)")
     if not plan.goal:
-        errors.append("missing GOAL")
+        if fallback_goal.strip():
+            warnings.append("GOAL missing: the ticket title stands in")
+        else:
+            errors.append("missing GOAL")
     if not plan.acceptance:
-        errors.append("missing ACCEPTANCE criteria")
+        if any(str(item).strip() for item in fallback_acceptance):
+            warnings.append("ACCEPTANCE missing: the ticket criteria stand in")
+        else:
+            errors.append("missing ACCEPTANCE criteria")
     if not plan.files:
         errors.append("missing FILES")
     if not plan.steps:
@@ -207,10 +218,12 @@ def validate_plan(
         if target is None:
             errors.append(f"path outside repo: {item.path}")
             continue
+        # A mislabelled operation never costs a replan: the builder works
+        # on the path either way.
         if item.operation in {"modify", "delete"} and not target.exists():
-            errors.append(f"{item.operation} missing file: {item.path}")
+            warnings.append(f"{item.operation} of a missing file: {item.path}")
         if item.operation == "create" and target.exists():
-            errors.append(f"create over existing file: {item.path}")
+            warnings.append(f"create over an existing file: {item.path}")
         excluded = any(fnmatch.fnmatch(item.path, pat)
                        for pat in budget_exclude)
         if not excluded and not is_test_path(item.path):

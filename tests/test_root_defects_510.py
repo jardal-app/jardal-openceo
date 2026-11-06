@@ -107,6 +107,56 @@ def test_tolerant_estimate_still_enforces_the_budget(repo: Path) -> None:
     assert any("line budget exceeded" in error for error in validation.errors)
 
 
+@pytest.mark.parametrize("line", [
+    "- tracked.txt (modify) — the lines go here",
+    "- tracked.txt (modify): the lines go here",
+    "- tracked.txt (MODIFY) - the lines go here",
+    "- tracked.txt (modify)",
+])
+def test_files_line_wording_is_understood(repo: Path, line: str) -> None:
+    text = plan_md().replace("- tracked.txt (modify) — the lines go here", line)
+    plan = parse_plan(text)
+    assert [(f.path, f.operation) for f in plan.files] == [("tracked.txt", "modify")]
+    assert validate_plan(plan, repo, 8, budget_lines=400).valid
+
+
+def test_mislabelled_operations_are_repaired_not_replanned(repo: Path) -> None:
+    text = plan_md().replace(
+        "- tracked.txt (modify) — the lines go here",
+        "- tracked.txt (create) — exists already\n- new.py (modify) — missing")
+    validation = validate_plan(parse_plan(text), repo, 8, budget_lines=400)
+    assert validation.valid
+    assert any("create over an existing file" in w for w in validation.warnings)
+    assert any("modify of a missing file" in w for w in validation.warnings)
+
+
+def test_path_outside_the_repo_still_blocks(repo: Path) -> None:
+    text = plan_md().replace("- tracked.txt (modify) — the lines go here",
+                             "- ../escape.txt (create) — no")
+    validation = validate_plan(parse_plan(text), repo, 8, budget_lines=400)
+    assert not validation.valid
+    assert any("outside repo" in error for error in validation.errors)
+
+
+def test_missing_goal_and_acceptance_fall_back_to_the_ticket(repo: Path) -> None:
+    text = plan_md().replace("GOAL: grow tracked.txt\n", "").replace(
+        "ACCEPTANCE:\n- tracked.txt grows\n", "")
+    plan = parse_plan(text)
+    without = validate_plan(plan, repo, 8, budget_lines=400)
+    assert not without.valid
+    repaired = validate_plan(plan, repo, 8, budget_lines=400,
+                             fallback_goal="grow it",
+                             fallback_acceptance=["it grows"])
+    assert repaired.valid
+    assert {w.split()[0] for w in repaired.warnings} >= {"GOAL", "ACCEPTANCE"}
+
+
+def test_retry_asks_only_for_the_listed_lines(tmp_path: Path) -> None:
+    prompt = cycle_mod._plan_retry_prompt("missing FILES", "PLAN_READY", tmp_path)
+    assert "Edit only those lines" in prompt
+    assert "do not re-investigate the repository" in prompt
+
+
 def test_planner_prompt_asks_for_the_estimate_on_its_own_line() -> None:
     source = inspect.getsource(cycle_mod)
     assert "ESTIMATE: files=3 lines=180" in source
