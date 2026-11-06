@@ -1775,7 +1775,7 @@ async def _plan_objective_inner(
     planner_cfg = env.planner_cfg
     tickets = await env.tasks.list_by_objective(objective_id)
     active = _brake_active_children(tickets)
-    if len(tickets) >= int(cfg.get("max_tickets", 20)):
+    if len(tickets) >= int(cfg.get("max_tickets", 30)):
         # Cost brake, not an owner decision (TASK-2026-00118): no new
         # tickets are planned, but open work keeps running and the next
         # close re-triggers planning. With nothing open the objective
@@ -1783,7 +1783,7 @@ async def _plan_objective_inner(
         if active:
             return {"ok": False, "reason": "max_tickets_reached",
                     "detail": f"{len(tickets)} lifetime tickets "
-                              f"(max {cfg.get('max_tickets', 20)}); "
+                              f"(max {cfg.get('max_tickets', 30)}); "
                               f"{len(active)} still open"}
         return await run_final_review(env, objective_id)
     max_active = int(cfg.get("max_active_tickets_per_objective", 6))
@@ -2711,7 +2711,7 @@ async def apply_approved_plan(
     cfg = env.objectives_cfg
     tickets = await env.tasks.list_by_objective(objective_id)
     active = _brake_active_children(tickets)
-    if len(tickets) >= int(cfg.get("max_tickets", 20)):
+    if len(tickets) >= int(cfg.get("max_tickets", 30)):
         await env.objectives.patch_objective(
             objective_id, {"pending_plan": None})
         return {"ok": False, "reason": "max_tickets_reached",

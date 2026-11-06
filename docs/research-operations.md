@@ -15,6 +15,25 @@ saltos de línea se resuelven como en Settings, sin ejecutar texto del archivo
 XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus systemctl --user restart openceo-core-host.service
 ```
 
+## Línea dedicada de investigación
+
+Cuándo el research merece su propio objetivo (línea) en vez de vivir como
+tickets sueltos dentro de otro objetivo (ticket #592):
+
+- El tramo prevé más de 6 tickets de research vivos a la vez (el tope de
+  tickets activos por objetivo) o más de ~10 en el tramo (una fracción
+  significativa del presupuesto lifetime de 30 por objetivo).
+- El research tiene aceptación propia, independiente del objetivo principal:
+  su cierre y su evidencia se juzgan por separado.
+- El research competiría por slots activos con el trabajo principal y lo
+  frenaría (`objective-full`).
+
+Un research puntual sigue siendo un ticket hijo del objetivo que lo pide.
+La línea dedicada se abre por el canal normal (pedido del CEO u objetivo
+Jardal ERP-first); abrirla no habilita research en producción ni activa el
+scheduler recurrente — eso sigue siendo decisión del dueño (ver
+`Cierre humano único`).
+
 ## Lectura de X
 
 Instalar la dependencia opcional con el Python del proyecto:

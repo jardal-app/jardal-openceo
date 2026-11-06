@@ -698,7 +698,7 @@ class ConfigLoader:
             # TASK-2026-00114) owns the real capacity numbers; these are
             # safe deterministic defaults.
             "objectives": {
-                "max_tickets": 20,
+                "max_tickets": 30,
                 "max_planning_runs_without_progress": 2,
                 "max_final_reviews": 2,
                 "inbox_items_for_planner": 15,

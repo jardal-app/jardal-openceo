@@ -543,6 +543,46 @@ class EngineTopesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["status"], "waiting")
         self.assertEqual(stored.get("final_reviews", 0), 0)
 
+    async def test_default_lifetime_brake_is_thirty(self) -> None:
+        # Ticket #592: the company-level default rises 20 -> 30; the
+        # engine fallback trips at 30 lifetime tickets with open work.
+        repo = _scratch_repo(self)
+        tasks = {f"kid-{n}": _child(f"kid-{n}", "completed")
+                 for n in range(29)}
+        tasks["kid-open"] = _child("kid-open", "in_progress")
+        env, _planner, created = _env_for(
+            self, repo, [{}], tasks=tasks,
+            objectives_cfg={},
+            executor=_ExplodingExecutor())
+        await self._objective(env)
+
+        result = await plan_objective(env, "OBJ-1")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "max_tickets_reached")
+        self.assertIn("(max 30)", result["detail"])
+        self.assertEqual(created, [])
+
+    async def test_default_active_brake_stays_six(self) -> None:
+        # Ticket #592: max_active_tickets_per_objective stays 6 while
+        # the lifetime budget rises — 6 active of 6 lifetime defers as
+        # objective-full, never max_tickets_reached.
+        repo = _scratch_repo(self)
+        tasks = {f"kid-{n}": _child(f"kid-{n}", "in_progress")
+                 for n in range(6)}
+        env, _planner, created = _env_for(
+            self, repo, [{}], tasks=tasks,
+            objectives_cfg={},
+            executor=_ExplodingExecutor())
+        await self._objective(env)
+
+        result = await plan_objective(env, "OBJ-1")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "objective-full")
+        self.assertIn("(max 6)", result["detail"])
+        self.assertEqual(created, [])
+
     async def test_empty_planner_registry_parks_as_config(self) -> None:
         repo = _scratch_repo(self)
         env, _planner, _created = _env_for(

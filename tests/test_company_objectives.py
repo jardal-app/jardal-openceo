@@ -1319,7 +1319,7 @@ class ConfigSurfaceTests(unittest.TestCase):
         loader = ConfigLoader(
             Settings(_env_file=None, PROJECTS_DIR=tmp.name))
         objectives = loader.load_project("anything")["objectives"]
-        self.assertEqual(objectives["max_tickets"], 20)
+        self.assertEqual(objectives["max_tickets"], 30)
         self.assertEqual(objectives["max_planning_runs_without_progress"], 2)
         self.assertEqual(objectives["max_final_reviews"], 2)
         self.assertEqual(objectives["inbox_items_for_planner"], 15)
