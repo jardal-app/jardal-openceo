@@ -66,7 +66,6 @@ from objectives.missions import (
     MissionErpError,
     MissionRejected,
 )
-from objectives.recovery_scheduler import RecoveryScheduler
 from objectives.schedule_agenda import ObjectivesRecoveryAgenda
 from mechanic.service import MechanicService, mechanic_config
 from mechanic.schedule_agenda import MechanicHeartbeatAgenda
@@ -128,7 +127,6 @@ from horizon.models import (
     HorizonReviewRequest,
 )
 from horizon.schedule_agenda import HorizonScheduleAgenda
-from horizon.triggers import HorizonScheduler, HorizonTriggerStore
 from horizon.service import HorizonService
 from orchestration.finance_voice import FinanceVoiceWiring, run_finance_skill
 from orchestration.generic_agent import GenericAgentWiring
@@ -272,12 +270,6 @@ ceo_loop = CEOLoop(
 )
 task_service.set_ceo_wake(ceo_loop.wake)
 objective_service.set_ceo_wake(ceo_loop.wake)
-# La recuperacion de objetivos (TASK-2026-00481) corre en el kernel de
-# schedule global (ticket #570): la agenda vive en el lifespan. El scheduler
-# aislado se conserva sin arrancar (oraculo y delegacion de ``wake``); los
-# parks y cierres siguen avisando por ``recovery_wake``, re-enlazado abajo.
-recovery_scheduler = RecoveryScheduler(objective_service)
-objective_service.set_recovery_wake(recovery_scheduler.wake)
 
 
 async def _run_objective_recovery(claimed: dict[str, Any]) -> dict[str, Any]:
@@ -300,13 +292,6 @@ def _mechanic_executor() -> ProcessExecutor:
                            badge_provider=badge)
 
 
-# Engine mechanic (TASK-2026-00510): stalls, give-ups and missed deadlines
-# go to one musej run that returns repair actions; the heartbeat spends no
-# tokens unless it finds a wait nobody will move.
-# Since ticket #573 the heartbeat runs on the shared schedule kernel (the
-# agenda is registered in the lifespan); the isolated loop never starts
-# and ``mechanic_service.wake`` delegates to the kernel, so TaskService
-# and DeadlineWatch are untouched.
 mechanic_service = MechanicService(
     repo=repo,
     task_service=task_service,
@@ -344,16 +329,6 @@ except ValueError as exc:
     _horizon_erp = False
 _horizon_repo = ERPHorizonStore(repo, JardalERPPersonal(settings)) if _horizon_erp else repo
 horizon_service = HorizonService(settings=settings, repo=_horizon_repo)
-# Horizon planifica en el kernel de schedule global (ticket #567): el store avisa
-# con ``kernel.wake("horizon")`` y la agenda vive en el lifespan. El scheduler
-# aislado se conserva sin arrancar (compatibilidad y delegacion de ``wake``).
-horizon_store = HorizonTriggerStore(repo, settings=settings)
-horizon_scheduler = HorizonScheduler(
-    repo=repo,
-    store=horizon_store,
-    handler=horizon_service.handle_trigger,
-    settings=settings,
-)
 workflow_service.set_horizon_service(horizon_service)
 task_service.set_horizon_hooks(on_task_terminal=horizon_service.acknowledge_task_result)
 horizon_service.set_task_service(task_service)
@@ -574,9 +549,6 @@ async def lifespan(_: FastAPI):
         # del kernel reclama lo vencido donde corria ``_run_overdue_once``.
         # El bucle aislado de recuperacion ya no arranca (ticket #570): su
         # agenda corre en el kernel compartido, registrado mas abajo.
-        # The isolated mechanic loop never starts either (ticket #573): its
-        # heartbeat agenda runs on the shared kernel below, while the
-        # post-deploy resume still runs here, where ``start()`` ran it.
         await mechanic_service.boot_resume()
         # Ojo: dentro de ``lifespan`` hay un ``settings = get_settings()`` mas
         # abajo (bloque de auth) que vuelve ``settings`` local a toda la funcion.
@@ -664,10 +636,8 @@ async def lifespan(_: FastAPI):
                 settings=settings,
             )
             schedule_kernel.register(horizon_agenda)
-            horizon_store.bind_waker(lambda: schedule_kernel.wake(horizon_agenda.name))
             horizon_agenda.store.bind_waker(lambda: schedule_kernel.wake(horizon_agenda.name))
             horizon_service.bind_waker(lambda: schedule_kernel.wake(horizon_agenda.name))
-            horizon_scheduler.delegate_wake_to(lambda: schedule_kernel.wake(horizon_agenda.name))
         # CEO (ticket #575): siempre activo, sobre el mismo kernel compartido
         # y registrado antes del arranque para que el recover lo cubra. Sin
         # aviso de arranque: cada backlog (programado o en debounce) tiene
@@ -692,8 +662,6 @@ async def lifespan(_: FastAPI):
             repo=repo, handler=_run_objective_recovery)
         schedule_kernel.register(recovery_agenda)
         objective_service.set_recovery_wake(
-            lambda: schedule_kernel.wake(recovery_agenda.name))
-        recovery_scheduler.delegate_wake_to(
             lambda: schedule_kernel.wake(recovery_agenda.name))
         # Dispatcher (ticket #572): siempre activo, sobre el mismo kernel
         # compartido y registrado antes del arranque para que el recover
@@ -769,15 +737,6 @@ async def lifespan(_: FastAPI):
         yield
 
         await research_coordinator.stop()
-        # El kernel compartido (research + Horizon + CEO + recuperacion +
-        # dispatcher + latido) ya paro primero al detener el coordinador:
-        # cancela los carriles antes de cerrar el repositorio. Los bucles
-        # aislados de Horizon, CEO, recuperacion, dispatcher y mecanico
-        # nunca arrancaron; pararlos solo limpia flags y desarma el watch
-        # (sin timer en el kernel).
-        await horizon_scheduler.stop()
-        await mechanic_service.stop()
-        await recovery_scheduler.stop()
         await ceo_loop.stop()
         await dispatcher.stop()
         await dispatcher.close_deadline_watch()

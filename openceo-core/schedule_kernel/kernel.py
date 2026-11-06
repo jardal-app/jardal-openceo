@@ -233,7 +233,7 @@ class ScheduleKernel:
                     continue                           # launched: re-read first
                 timeout = self._timeout(now)
                 self._loop_supervisor.success()
-            except Exception as exc:  # noqa: BLE001 - the only timer never dies
+            except Exception as exc:  # noqa: BLE001 - shared timer reports and backs off; cancellation propagates
                 timeout = await self._failure(None, self._loop_supervisor, exc, "loop")
                 for state in self._states.values():
                     state.dirty = True

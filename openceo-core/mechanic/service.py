@@ -179,15 +179,7 @@ SITUATION
 
 
 class MechanicService:
-    """Owns the mechanic loop; every decision about a ticket is the model's.
-
-    Since ticket #573 the loop below no longer starts in production: the
-    shared schedule kernel runs ``MechanicHeartbeatAgenda`` and ``tick()``
-    is its run body, with the heartbeat due persisted instead of held in
-    memory. The class stays behaviorally unchanged as the harness for the
-    frozen oracle (``tests/test_mechanic_510.py``); ``delegate_wake_to``
-    redirects ``wake`` to the kernel without touching the producers.
-    """
+    """Run bounded mechanic passes driven by the shared schedule kernel."""
 
     def __init__(
         self,
@@ -225,7 +217,6 @@ class MechanicService:
         self._wake = asyncio.Event()
         self._wake_delegate: Callable[[], None] | None = None
         self._task: asyncio.Task | None = None
-        self._stopped = False
         self._next_heartbeat: datetime | None = None
 
     # -- events -----------------------------------------------------------
@@ -249,19 +240,13 @@ class MechanicService:
         self._poke()
 
     def _poke(self) -> None:
-        """Drive whichever loop owns the wait: the kernel or the isolated one."""
         if self._wake_delegate is not None:
             self._wake_delegate()
             return
         self._wake.set()
 
     async def boot_resume(self) -> None:
-        """Post-deploy resume plus the runs index, without the loop.
-
-        The kernel path (ticket #573): the lifespan runs this where
-        ``start()`` ran, so resumed tickets keep their ordering ahead of
-        the dispatcher's boot cycle. Never raises, like ``start()``.
-        """
+        """Create the runs index and resume deployments before dispatch; never raises."""
         try:
             await self._repo.db[RUNS_COLLECTION].create_index("at")
         except Exception:  # noqa: BLE001 - an index never blocks boot
@@ -271,57 +256,14 @@ class MechanicService:
         except Exception:  # noqa: BLE001
             logger.warning("mechanic post-deploy resume failed", exc_info=True)
 
-    async def start(self) -> None:
-        if self._task is not None:
-            return
-        self._stopped = False
-        await self.boot_resume()
-        self._task = asyncio.create_task(self._loop(), name="mechanic")
-        logger.warning("Mechanic started (heartbeat every %s min)",
-                       self.config().get("heartbeat_minutes"))
-
-    async def stop(self) -> None:
-        self._stopped = True
-        self._wake.set()
-        task, self._task = self._task, None
-        if task is None:
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            logger.debug("mechanic task cancelled")
-        except Exception:  # noqa: BLE001 - shutdown never raises
-            logger.warning("mechanic task failed on stop", exc_info=True)
-
-    async def _loop(self) -> None:
-        while not self._stopped:
-            self._wake.clear()
-            try:
-                await self.tick()
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001 - the mechanic never dies
-                logger.warning("mechanic tick failed", exc_info=True)
-            delay = self._seconds_to_heartbeat()
-            try:
-                await asyncio.wait_for(self._wake.wait(), timeout=delay)
-            except asyncio.TimeoutError:
-                continue
-
-    def _seconds_to_heartbeat(self) -> float:
-        if self._next_heartbeat is None:
-            return 1.0
-        return max(1.0, (self._next_heartbeat - self._clock()).total_seconds())
-
     # -- tick ---------------------------------------------------------------
 
     async def heartbeat_due_at(self) -> datetime | None:
         """Persisted next heartbeat; None when never scheduled (ticket #573).
 
-        Single-doc ``_id`` read shared by the isolated loop (through
-        ``tick``) and the kernel agenda (``next_due``). A missing doc or an
-        unparsable value means due now: the first cycle scans, as before.
+        Single-doc ``_id`` read shared by ``tick`` and the kernel agenda
+        (``next_due``). A missing doc or an unparsable value means due now:
+        the first cycle scans, as before.
         A read error propagates so the kernel records the incident and
         backs off, like the research/horizon/objectives sisters.
         """

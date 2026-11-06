@@ -1,10 +1,8 @@
 """Mechanic heartbeat -> global schedule kernel adapter (ticket #573).
 
 Moves the mechanic heartbeat onto the kernel contract (TASK-2026-00441,
-final phase, §5.5 heartbeat row): planning lives in this Agenda and the
-isolated ``MechanicService`` loop no longer starts in production. The
-service stays behaviorally unchanged as the harness for the frozen oracle
-(``tests/test_mechanic_510.py``).
+final phase, §5.5 heartbeat row): planning lives in this Agenda; the
+``MechanicService`` tick remains the harness for ``tests/test_mechanic_510.py``.
 
 Kept as-is: the in-process wake path (``MechanicService.wake`` stays
 injected into TaskService and DeadlineWatch ``on_missed``; the queue is
@@ -71,8 +69,7 @@ class MechanicHeartbeatAgenda:
     async def next_due(self) -> datetime | None:
         """Persisted next heartbeat; None when never scheduled.
 
-        Shared read with the isolated loop (``tick`` uses the same
-        method), so the due the kernel waits on is the one the tick
+        Shared read with ``tick``, so the kernel waits on the due the tick
         advances. None means no scan is scheduled yet: the boot wake
         drives the first cycle, which persists the due.
         """
