@@ -200,7 +200,7 @@ class Settings(BaseSettings):
     MCP_SERVER_API_KEY: str = ""
 
     # Rate limit management
-    RATE_MAX_CONCURRENT_TICKETS: int = 3
+    RATE_MAX_CONCURRENT_TICKETS: int = 7
     RATE_CODEX_RESERVE_5H: float = 0.0
     RATE_CODEX_RESERVE_WEEKLY: float = 0.0
     RATE_CLAUDE_RESERVE_5H: float = 0.0

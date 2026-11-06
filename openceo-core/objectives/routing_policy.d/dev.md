@@ -34,7 +34,7 @@ Use these mental labels:
 C = DEFAULT SAFE EXECUTION
 B = COMPLEX STRONG SOLVING
 A = DISCOVERY / ARCHITECTURE / RECOVERY
-S = INDEPENDENT CHALLENGE + VERIFY + CONVERGE
+S = CRITICAL WORK: INDEPENDENT CHALLENGE + VERIFY + CONVERGE
 ```
 
 The four executors are all top-tier programming models within a few
@@ -45,28 +45,32 @@ verifiable justification (§20, §21, §26); when none applies, C.
 
 Quota is not the technical definition of a tier. Quota admission is handled separately.
 
-## 19. Tier S — independent high assurance
+## 19. Tier S — independent high assurance for critical work
 
-Choose `tier_s` when orchestrating several independent model families
-(independent plan, plan challenge, build, multi-family review,
-arbitration) is expected to produce a materially more correct result than
-one session can: a result as close to fault-free as possible, or
-materially fewer residual errors.
+Choose `tier_s` only when both hold (owner order of 2026-11-06: only the
+critical reaches S):
 
-The criterion is the expected value of independent challenge, never a
-domain. No domain qualifies by itself and no domain is excluded: any work
-qualifies when the justification of §20 holds. The examples below are
-illustrative, not a closed list: critical security/auth boundaries, money
-movement/payment correctness, destructive migrations, high-impact
-data-integrity rules, critical multi-system incidents with unknown cause,
-durable architecture with expensive reversal, conflicting evidence on
-high-leverage decisions, subtle distributed invariants, cross-repository
-compatibility with large blast radius, privacy or compliance boundaries,
-public contracts whose breaking change is expensive, logic that fails
-silently (numerics, ordering, idempotency, concurrency) where the first
-plausible solution is often wrong, ambiguous specifications whose
-independent readings should be compared, and algorithm or strategy
-correctness where one wrong assumption compounds.
+1. **Critical residual failure.** A defect this ticket could leave behind
+   would, without an obvious error, cause one of:
+   - money loss or a wrong payment, ledger or accounting movement;
+   - a security or privacy breach: authentication, authorization,
+     permission evaluation, data isolation between companies or tenants,
+     secrets;
+   - irreversible data loss or corruption: a destructive migration or a
+     data-integrity rule;
+   - a broken core contract many components or systems rely on: the
+     engine's scheduling, dispatch or state core, a public API, a
+     cross-repository protocol.
+2. **Value of independent challenge.** Orchestrating several independent
+   model families (independent plan, plan challenge, build, multi-family
+   review, arbitration) is expected to catch that residual failure better
+   than one session.
+
+Inside a critical area, S goes to the ticket that defines the rule or the
+contract (the permission evaluator, the policy core, the migration, the
+ledger rule, the kernel). Tickets that apply or consume it (wiring,
+adapters, UI guards, tests, docs, refactors, follow-up fixes) take
+A, B or C with review: the rule they apply was already challenged.
 
 An explicit request from the owner or the ticket for maximum assurance, a
 near fault-free result or multi-model orchestration is itself a valid
@@ -74,11 +78,13 @@ reason to choose S: cite it.
 
 Tier S is not "big ticket mode".
 
-Do not choose S solely because many files change, a ticket is P1, the implementation is long, or premium quota is available.
+Do not choose S because many files change, a ticket is P1, the
+implementation is long, the specification is ambiguous or premium quota
+is available: ambiguity goes to Tier A discovery, length to
+decomposition.
 
-S is not rationed by percentage: when it is needed it is chosen and quota
-admission (§28) paces it. A really complex ticket is never forced into C,
-and a routine one is never promoted to S to spend capacity.
+S is not rationed by percentage or count: when both conditions hold it is
+chosen and quota admission (§28) paces it.
 
 ## 20. Mandatory Tier-S justification
 
@@ -89,13 +95,19 @@ why_consensus_is_needed
 why_single_session_is_insufficient
 ```
 
-The justification must identify the residual failure that independent model families or review stages are expected to catch, or cite the explicit request for maximum assurance or multi-model orchestration made by the owner or the ticket (§19).
+`why_consensus_is_needed` names the critical category (money,
+security/privacy, irreversible data, core contract) and the concrete
+residual failure independent families are expected to catch;
+`why_single_session_is_insufficient` says why one session would likely
+bake it in. Or cite the explicit request for maximum assurance or
+multi-model orchestration made by the owner or the ticket (§19).
 
-If this cannot be stated concretely, do not select S.
+If the residual failure is not critical, or cannot be stated concretely,
+do not select S.
 
 This pair already answers why the default tier is insufficient: when
-independent consensus has clear value, a single session cannot own the
-work, so Tier S needs no separate `why_not_c`.
+independent consensus has clear value on critical work, a single session
+cannot own it, so Tier S needs no separate `why_not_c`.
 
 ## 21. Tier A — discovery / architecture / recovery
 
@@ -232,9 +244,10 @@ Apply in this order:
 
 ```text
 1. S CHECK
-   Would orchestrating independent model families materially improve
-   correctness (any domain, or the owner/ticket asks for maximum
-   assurance)?
+   Is a critical residual failure at stake (money, security/privacy,
+   irreversible data, core contract) and would independent model
+   families materially reduce it? Or does the owner/ticket ask for
+   maximum assurance?
    YES -> tier_s (justify per §20)
 
 2. A CHECK

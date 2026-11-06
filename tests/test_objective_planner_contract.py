@@ -497,19 +497,20 @@ class PolicyTests(unittest.TestCase):
         # The planner prompt keeps the first 60000 chars of the policy.
         self.assertLess(len(planner_mod.load_policy_text().strip()), 60000)
 
-    def test_tier_s_is_defined_by_orchestration_value_not_domain(self) -> None:
-        # TASK-2026-00178 (owner direction 2026-10-09).
+    def test_tier_s_is_reserved_for_critical_work(self) -> None:
+        # Owner order 2026-11-06 (TASK-2026-00510) narrows 2026-10-09.
         text = self._flat()
-        self.assertIn("orchestrating several independent model families", text)
-        self.assertIn("The criterion is the expected value of independent "
-                      "challenge, never a domain.", text)
-        self.assertIn("no domain is excluded", text)
-        self.assertIn("illustrative, not a closed list", text)
+        self.assertIn("Critical residual failure.", text)
+        self.assertIn("Value of independent challenge.", text)
+        self.assertIn("S goes to the ticket that defines the rule or the "
+                      "contract", text)
+        self.assertNotIn("no domain is excluded", text)
         self.assertIn("maximum assurance, a near fault-free result or "
                       "multi-model orchestration is itself a valid reason",
                       text)
         self.assertIn("S is not rationed by percentage", text)
-        self.assertIn("limit Tier S to a fixed list of domains", text)
+        self.assertIn("ration Tier S by percentage or count, or choose it "
+                      "outside critical work", text)
         self.assertNotIn("Strong signals include", text)
 
     def test_weak_verification_is_never_a_b_prong_by_itself(self) -> None:

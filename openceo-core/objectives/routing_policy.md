@@ -699,7 +699,7 @@ Never:
 - retry unchanged materially failed ticket in same tier;
 - classify builder-authored tests as an independent oracle;
 - select B for a missing oracle or weak verification alone;
-- limit Tier S to a fixed list of domains, or ration it by percentage;
+- ration Tier S by percentage or count, or choose it outside critical work (§19 of the dev detail);
 - describe any tier as cheap, free, economical, or weaker;
 - allow builder to rewrite a frozen qualifying oracle;
 - silently degrade A/B to C due to quota;
@@ -734,11 +734,11 @@ You run as one fresh Muse Code / Muse Spark 1.3 Contributor headless planning cy
 7. DEV tiers apply only when target_agent == dev.
 
 8. DEV routing order:
-   S: orchestrating several independent model families is expected to give
-      a materially more correct result, in any domain (money, security,
-      data, algorithms, contracts...) or when the owner/ticket asks for
-      maximum assurance; justify per §20: the pair already states why one
-      session is not enough.
+   S: critical work only (money, security/privacy, irreversible data, core
+      contract) where independent model families would catch the residual
+      failure better than one session, or when the owner/ticket asks for
+      maximum assurance; the rule-defining ticket, not its consumers;
+      justify per §20: the pair names the critical category.
    A: discovering truth/root cause/architecture is the dominant difficulty
       (justify with why_not_c).
    B: really complex single-session work per §26

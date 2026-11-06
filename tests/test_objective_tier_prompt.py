@@ -64,15 +64,16 @@ class ObjectiveTierPromptTests(unittest.TestCase):
         self.assertIn("weak verification only aggravates those", prompt)
         self.assertNotIn("interpretation, weak verification, or", prompt)
 
-    def test_prompt_defines_s_by_orchestration_value_in_any_domain(self) -> None:
+    def test_prompt_reserves_s_for_critical_work(self) -> None:
+        # Owner order 2026-11-06 (TASK-2026-00510): only the critical reaches S.
         prompt = _prompt()
-        self.assertIn("orchestrating several independent model families",
-                      prompt)
-        self.assertIn("in ANY domain", prompt)
-        self.assertIn("never a domain list", prompt)
+        self.assertIn("tier_s: CRITICAL work only", prompt)
+        self.assertIn("orchestrating several", prompt)
+        self.assertIn("independent model families", prompt)
         self.assertIn("maximum assurance", prompt)
-        self.assertIn("Not rationed by percentage.", prompt)
-        self.assertNotIn("high-impact residual risk", prompt)
+        self.assertIn("consumers (wiring, UI", prompt)
+        self.assertIn("Not rationed by percentage or count.", prompt)
+        self.assertNotIn("in ANY domain", prompt)
 
     def test_prompt_forbids_modified_files_as_oracle(self) -> None:
         prompt = _prompt()
