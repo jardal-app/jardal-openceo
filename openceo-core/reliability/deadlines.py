@@ -258,6 +258,11 @@ class DeadlineWatch:
     limit)`` that indexed query is used instead of the fallback scan.
     ``record`` persists incidents (defaults to ``capture.record_incident``
     over ``incidents``); ``clock`` is injected for tests.
+
+    Since ticket #572 production drives this through
+    ``DispatcherScheduleAgenda`` (``next_future_deadline`` plus a
+    check-only cycle) and the timer below never arms there; it stays
+    for the isolated dispatcher loop and the frozen oracle.
     """
 
     SCAN_LIMIT = 500
@@ -356,6 +361,28 @@ class DeadlineWatch:
         if not items:
             return None
         return items[0]["deadline"]
+
+    async def next_future_deadline(
+        self, now: datetime | None = None,
+    ) -> datetime | None:
+        """Nearest strictly-future deadline; None when none exists.
+
+        The kernel-agenda read (ticket #572): already-due deadlines are
+        checked by ``check_due`` on every cycle but never drive the wait,
+        or a still-hung attempt would re-drive the agenda without
+        advancing time. Same rule ``arm`` already applies to its timer.
+        Fail-open: an unreadable store yields None, never raises.
+        """
+        moment = _as_utc(now) if now is not None else self._now()
+        try:
+            items = await self.pending(moment)
+        except Exception:
+            logger.warning("deadline scan failed (fail-open)", exc_info=True)
+            return None
+        for item in items:
+            if item["deadline"] > moment:
+                return item["deadline"]
+        return None
 
     async def check_due(
         self, now: datetime | None = None,

@@ -156,6 +156,12 @@ class Dispatcher:
     lock peek; ``None`` disables the peek (the build-time lock still
     enforces). ``rate_monitor`` may be ``None`` only outside production
     (quota/slot checks then pass); production always wires it.
+
+    Legacy since ticket #572: in production the global schedule kernel
+    runs ``DispatcherScheduleAgenda`` and this loop no longer starts. The
+    class stays behaviorally unchanged as the harness for the frozen
+    oracle (``tests/test_dispatcher.py``); ``delegate_wake_to`` redirects
+    ``wake`` to the kernel without touching the producers.
     """
 
     def __init__(
@@ -179,11 +185,19 @@ class Dispatcher:
         self._job: asyncio.Task[Any] | None = None
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
+        self._wake_delegate: Callable[[], None] | None = None
 
     # ------------------------- lifecycle -------------------------
 
+    def delegate_wake_to(self, waker: Callable[[], None] | None) -> None:
+        """Redirect ``wake`` to the kernel (ticket #572). Unbound, as before."""
+        self._wake_delegate = waker
+
     def wake(self) -> None:
         """A CRUD event says the queue may have changed. Coalesced."""
+        if self._wake_delegate is not None:
+            self._wake_delegate()
+            return
         self._wake.set()
 
     def set_deadline_watch(self, watch: Any | None) -> None:
@@ -279,30 +293,46 @@ class Dispatcher:
             except asyncio.TimeoutError:
                 pass
 
-    async def _seconds_until_backup(self) -> float | None:
+    async def backup_due_at(self, now: datetime | None = None) -> datetime | None:
+        """Backup due as an aware datetime; None when no backup exists.
+
+        Shared by the isolated loop and the kernel agenda (ticket #572):
+        one normalization, one fail-open rule. An unreadable store fails
+        open to ``now + interval`` (the lost-event net); a missing backup
+        means an empty queue and no timer at all.
+        """
         try:
             backup = await self._repo.get_dispatcher_backup()
         except Exception:
             logger.warning("Dispatcher: backup unreadable; retrying shortly", exc_info=True)
-            return float(self._backup_seconds())
+            moment = _aware(now) or datetime.now(timezone.utc)
+            return moment + timedelta(seconds=self._backup_seconds())
         if not backup or not backup.get("next_run_at"):
             return None
-        due_at = _aware(backup.get("next_run_at"))
+        return _aware(backup.get("next_run_at"))
+
+    async def _seconds_until_backup(self) -> float | None:
+        due_at = await self.backup_due_at()
         if due_at is None:
             return None
         return (due_at - datetime.now(timezone.utc)).total_seconds()
 
     # ------------------------- cycle -------------------------
 
-    async def dispatch_cycle(self, now: datetime | None = None) -> dict[str, Any]:
+    async def dispatch_cycle(
+        self, now: datetime | None = None, *, arm_deadlines: bool = True,
+    ) -> dict[str, Any]:
         """One bounded pass: requeue due waiting, launch ready, park the rest.
 
         Returns counts plus the backup due time (``None`` when the queue is
         empty and no backup exists). A bad ticket never starves the others.
+        ``arm_deadlines=False`` checks due deadlines without arming the
+        watch timer: the kernel path (ticket #572), where the kernel owns
+        the only wait and the deadline due arrives via the agenda.
         """
         moment = _aware(now) or datetime.now(timezone.utc)
         requeued = await self._requeue_due_waiting(moment)
-        await self._refresh_deadlines(moment)
+        await self._refresh_deadlines(moment, arm=arm_deadlines)
 
         queued = await self._repo.list_tasks_by_status(TaskStatus.QUEUED)
         active = await self._repo.list_tasks_by_status(TaskStatus.IN_PROGRESS)
@@ -359,17 +389,21 @@ class Dispatcher:
             "backup_at": backup_at,
         }
 
-    async def _refresh_deadlines(self, now: datetime) -> None:
+    async def _refresh_deadlines(self, now: datetime, *, arm: bool = True) -> None:
         """DeadlineWatch pass: record due misses, re-arm the timer.
 
         Fail-open and off by default: without a watch this is a no-op,
-        so existing cycles behave exactly as before.
+        so existing cycles behave exactly as before. With ``arm=False``
+        the due check runs but no timer is armed (kernel path).
         """
         watch = self._deadline_watch
         if watch is None:
             return
         try:
-            await watch.refresh(now)
+            if arm:
+                await watch.refresh(now)
+            else:
+                await watch.check_due(now)
         except Exception:
             logger.warning("Dispatcher: deadline refresh failed (fail-open)",
                            exc_info=True)

@@ -79,6 +79,7 @@ from rate_monitor import RateMonitor
 from release import read_release
 from router import CEORouter, resolve_explicit_name
 from dispatcher import Dispatcher, execution_repo_for_project_config
+from dispatcher_schedule_agenda import DispatcherScheduleAgenda
 from settings import get_settings
 from storage_r2 import delete_files_sync, delete_file_sync, upload_file_sync
 from state import (
@@ -226,6 +227,10 @@ def _dispatcher_repo_for(project: str) -> str | None:
 
 # F3 dispatcher (TASK-2026-00113): event-driven dispatch + one conditional
 # backup trigger. Replaces the retired WaitingTaskScheduler poll loop.
+# Since ticket #572 the cycles run on the shared schedule kernel (the
+# agenda is registered in the lifespan); the isolated loop never starts
+# and ``dispatcher.wake`` delegates to the kernel, so every producer
+# below (TaskService, mechanic, objectives engine, launch end) is untouched.
 dispatcher = Dispatcher(
     repo=repo,
     settings=settings,
@@ -523,19 +528,24 @@ async def lifespan(_: FastAPI):
                     _reliability_coll, runtime_dir=_repo_root / ".runtime"))
         except Exception:
             logger.warning("Reliability startup reconcile failed", exc_info=True)
-        # DeadlineWatch (TASK-2026-00383, §7): indexes plus the single
-        # timer on the dispatcher. Never fails boot; off stays off when
-        # the wiring below cannot complete.
+        # DeadlineWatch (TASK-2026-00383, §7): indexes plus the watch on
+        # the dispatcher. Since ticket #572 the watch no longer arms its
+        # own timer in production: it is the second next_due of the
+        # dispatcher agenda on the shared kernel. Never fails boot; off
+        # stays off when the wiring below cannot complete.
+        deadline_watch = None
         try:
             from reliability.deadlines import (
                 DeadlineWatch,
                 ensure_deadline_indexes,
             )
             await ensure_deadline_indexes(repo.tasks)
-            dispatcher.set_deadline_watch(DeadlineWatch(
+            deadline_watch = DeadlineWatch(
                 repo, incidents=repo.db["reliability_incidents"],
-                on_missed=mechanic_service.wake))
+                on_missed=mechanic_service.wake)
+            dispatcher.set_deadline_watch(deadline_watch)
         except Exception:
+            deadline_watch = None
             logger.warning("DeadlineWatch startup wiring failed",
                            exc_info=True)
         # Mirror workers + startup repairs (ex-WaitingTaskScheduler.start).
@@ -546,7 +556,8 @@ async def lifespan(_: FastAPI):
         await task_service.startup_reconcile_jardal_erp()
         await task_service.reset_stuck_erp_inbox()
         await task_service.drain_erp_outbox_startup()
-        await dispatcher.start()
+        # El bucle aislado del dispatcher ya no arranca (ticket #572): su
+        # agenda corre en el kernel compartido, registrado mas abajo.
         await ceo_loop.start()
         # El bucle aislado de recuperacion ya no arranca (ticket #570): su
         # agenda corre en el kernel compartido, registrado mas abajo.
@@ -596,10 +607,11 @@ async def lifespan(_: FastAPI):
         create_default_user_if_needed(_auth_db)
 
         # Kernel de schedule global (TASK-2026-00441): research (Fase 2, ticket #564),
-        # Horizon (Fase 3, ticket #567) y recuperacion de objetivos (Fase 5,
-        # ticket #570) comparten la espera unica; las siguientes fases
-        # registran las suyas en este mismo kernel. Los incidentes del kernel
-        # van a la coleccion de reliability, como los de DeadlineWatch.
+        # Horizon (Fase 3, ticket #567), recuperacion de objetivos (Fase 5,
+        # ticket #570) y dispatcher + DeadlineWatch (Fase 6, ticket #572)
+        # comparten la espera unica; las siguientes fases registran las
+        # suyas en este mismo kernel. Los incidentes del kernel van a la
+        # coleccion de reliability, como los de DeadlineWatch.
         schedule_kernel = ScheduleKernel(
             incidents=repo.db["reliability_incidents"],
             runtime_dir=Path(__file__).resolve().parents[1] / ".runtime",
@@ -651,6 +663,16 @@ async def lifespan(_: FastAPI):
             lambda: schedule_kernel.wake(recovery_agenda.name))
         recovery_scheduler.delegate_wake_to(
             lambda: schedule_kernel.wake(recovery_agenda.name))
+        # Dispatcher (ticket #572): siempre activo, sobre el mismo kernel
+        # compartido y registrado antes del arranque para que el recover
+        # lo cubra. DeadlineWatch es el segundo next_due de la agenda (o
+        # None si su cableado fallo: apagado sigue apagado). Cada productor
+        # sigue llamando a ``dispatcher.wake``, ahora delegado al kernel.
+        dispatcher_agenda = DispatcherScheduleAgenda(
+            dispatcher=dispatcher, watch=deadline_watch)
+        schedule_kernel.register(dispatcher_agenda)
+        dispatcher.delegate_wake_to(
+            lambda: schedule_kernel.wake(dispatcher_agenda.name))
         # Las parks heredadas reciben su primer vencimiento aqui (acotado,
         # nunca falla el arranque), donde antes sembraba el scheduler aislado.
         try:
@@ -686,6 +708,10 @@ async def lifespan(_: FastAPI):
         # no tiene vencimiento: este aviso de arranque lo mueve ahora por la
         # pasada caliente de la agenda, sin esperar al siguiente park.
         schedule_kernel.wake(recovery_agenda.name)
+        # El dispatcher reconcilia al arrancar (recola vencidos, revisa
+        # plazos, admite listos) donde antes lo hacia ``dispatcher.start``:
+        # este aviso mueve la pasada caliente de su agenda.
+        schedule_kernel.wake(dispatcher_agenda.name)
 
         if internal_mcp is not None:
             logger.info(
@@ -699,10 +725,11 @@ async def lifespan(_: FastAPI):
         yield
 
         await research_coordinator.stop()
-        # El kernel compartido (research + Horizon + recuperacion) ya paro
-        # primero al detener el coordinador: cancela los carriles antes de
-        # cerrar el repositorio. Los bucles aislados de Horizon y
-        # recuperacion nunca arrancaron; pararlos solo limpia flags.
+        # El kernel compartido (research + Horizon + recuperacion +
+        # dispatcher) ya paro primero al detener el coordinador: cancela
+        # los carriles antes de cerrar el repositorio. Los bucles aislados
+        # de Horizon, recuperacion y dispatcher nunca arrancaron; pararlos
+        # solo limpia flags y desarma el watch (sin timer en el kernel).
         await horizon_scheduler.stop()
         await mechanic_service.stop()
         await recovery_scheduler.stop()
