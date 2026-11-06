@@ -123,6 +123,7 @@ from horizon.models import (
     HorizonPromoteRequest,
     HorizonReviewRequest,
 )
+from horizon.schedule_agenda import HorizonScheduleAgenda
 from horizon.triggers import HorizonScheduler, HorizonTriggerStore
 from horizon.service import HorizonService
 from orchestration.finance_voice import FinanceVoiceWiring, run_finance_skill
@@ -316,8 +317,9 @@ except ValueError as exc:
     _horizon_erp = False
 _horizon_repo = ERPHorizonStore(repo, JardalERPPersonal(settings)) if _horizon_erp else repo
 horizon_service = HorizonService(settings=settings, repo=_horizon_repo)
-# El timer unico de Horizon: duerme hasta el proximo vencimiento y lo despierta
-# cada encolado. No es un barrido (reglas permanentes de AGENTS.md).
+# Horizon planifica en el kernel de schedule global (ticket #567): el store avisa
+# con ``kernel.wake("horizon")`` y la agenda vive en el lifespan. El scheduler
+# aislado se conserva sin arrancar (compatibilidad y delegacion de ``wake``).
 horizon_store = HorizonTriggerStore(repo, settings=settings)
 horizon_scheduler = HorizonScheduler(
     repo=repo,
@@ -542,12 +544,13 @@ async def lifespan(_: FastAPI):
         # se consulta el ajuste por su cuenta.
         if get_settings().HORIZON_ENABLED:
             # Deja encolada la proxima ocurrencia de cada trabajo recurrente. El
-            # espacio personal tiene un solo dueño, asi que se siembra ese.
+            # espacio personal tiene un solo dueño, asi que se siembra ese. El
+            # bucle aislado ya no se arranca: la espera la posee el kernel, que
+            # se registra y arranca mas abajo.
             with suppress(Exception):
                 await horizon_service.ensure_upcoming_triggers(
                     get_settings().HORIZON_OWNER_USER_ID
                 )
-            await horizon_scheduler.start()
         else:
             logger.info("Horizon deshabilitado: no se programan disparadores")
 
@@ -579,11 +582,12 @@ async def lifespan(_: FastAPI):
         from auth.service import create_default_user_if_needed
         create_default_user_if_needed(_auth_db)
 
-        # Kernel de schedule global (TASK-2026-00441, Fase 2, ticket #564): research
-        # es la primera agenda migrada; las siguientes fases registran las suyas en
-        # este mismo kernel. Los incidentes del kernel van a la coleccion de
-        # reliability, como los de DeadlineWatch.
-        research_kernel = ScheduleKernel(
+        # Kernel de schedule global (TASK-2026-00441): research (Fase 2, ticket #564)
+        # y Horizon (Fase 3, ticket #567) comparten la espera unica; las
+        # siguientes fases registran las suyas en este mismo kernel. Los
+        # incidentes del kernel van a la coleccion de reliability, como los de
+        # DeadlineWatch.
+        schedule_kernel = ScheduleKernel(
             incidents=repo.db["reliability_incidents"],
             runtime_dir=Path(__file__).resolve().parents[1] / ".runtime",
         )
@@ -599,9 +603,9 @@ async def lifespan(_: FastAPI):
                 max_items=settings.RESEARCH_WATCH_MAX_ITEMS_PER_SOURCE,
             ),
             discover=research_resources.discover,
-            kernel=research_kernel,
+            kernel=schedule_kernel,
         )
-        app.state.schedule_kernel = research_kernel
+        app.state.schedule_kernel = schedule_kernel
         app.state.research_schedule_store = research_coordinator.store
         app.state.research_scheduler = research_coordinator.scheduler
         research_subscriptions = ResearchSubscriptions(
@@ -609,6 +613,20 @@ async def lifespan(_: FastAPI):
             resolve_principal=principal_resolver_for(repo),
         )
         app.state.research_subscriptions = research_subscriptions
+        # Horizon (ticket #567): agenda sin tope de espera sobre el mismo kernel,
+        # registrada antes del arranque para que el recover la cubra. Solo con
+        # Horizon activo: apagado, nada suyo se reclama ni se ejecuta.
+        if settings.HORIZON_ENABLED:
+            horizon_agenda = HorizonScheduleAgenda(
+                repo=repo,
+                handler=horizon_service.handle_trigger,
+                settings=settings,
+            )
+            schedule_kernel.register(horizon_agenda)
+            horizon_store.bind_waker(lambda: schedule_kernel.wake(horizon_agenda.name))
+            horizon_agenda.store.bind_waker(lambda: schedule_kernel.wake(horizon_agenda.name))
+            horizon_service.bind_waker(lambda: schedule_kernel.wake(horizon_agenda.name))
+            horizon_scheduler.delegate_wake_to(lambda: schedule_kernel.wake(horizon_agenda.name))
         if _research_consumers is not None:
             # Revocar un consumidor pausa lo que programo en su nombre, de inmediato.
             _loop = asyncio.get_running_loop()
@@ -630,6 +648,10 @@ async def lifespan(_: FastAPI):
         stack.push_async_callback(research_coordinator.stop)
         research_schedules_started = await research_coordinator.start()
         logger.info("Research scheduler %s", "habilitado" if research_schedules_started else "deshabilitado")
+        if settings.HORIZON_ENABLED:
+            # No-op si research ya arranco el kernel compartido; imprescindible
+            # con research apagado (su defecto), porque Horizon viene activo.
+            await schedule_kernel.start()
 
         if internal_mcp is not None:
             logger.info(
@@ -643,8 +665,9 @@ async def lifespan(_: FastAPI):
         yield
 
         await research_coordinator.stop()
-        # Horizon se para antes que el resto para que ninguna escritura suya
-        # caiga despues de cerrar el repositorio.
+        # El kernel compartido (research + Horizon) ya paro primero al detener
+        # el coordinador: cancela los carriles antes de cerrar el repositorio.
+        # El bucle aislado de Horizon nunca arranco; pararlo solo limpia flags.
         await horizon_scheduler.stop()
         await mechanic_service.stop()
         await recovery_scheduler.stop()

@@ -2130,24 +2130,49 @@ class MongoRepository:
             return row.get("next_run_at")
         return None
 
-    async def mark_horizon_trigger_running(self, trigger_id: str) -> dict[str, Any] | None:
-        """Toma atomica del disparador. Devuelve None si otro ya lo tomo."""
+    async def mark_horizon_trigger_running(
+        self, trigger_id: str, *, boot_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Toma atomica del disparador. Devuelve None si otro ya lo tomo.
+
+        Con ``boot_id`` (Agenda del kernel, ticket #567) la toma ademas sella el
+        campo aditivo opcional ``claimed_boot_id`` para que ``recover_*_for_boot``
+        libere por propiedad de arranque en vez de por edad. Sin ``boot_id`` la
+        toma es la de siempre.
+        """
         now = datetime.now(timezone.utc)
+        claimed: dict[str, Any] = {
+            "status": "running",
+            "started_at": now,
+            "updated_at": now,
+        }
+        if boot_id is not None:
+            claimed["claimed_boot_id"] = boot_id
         row = await self.horizon_triggers.find_one_and_update(
             {"trigger_id": trigger_id, "status": "pending"},
-            {"$set": {"status": "running", "started_at": now, "updated_at": now}},
+            {"$set": claimed},
             return_document=ReturnDocument.AFTER,
         )
         return self._clean(row)
 
     async def patch_horizon_trigger(
-        self, trigger_id: str, updates: dict[str, Any]
+        self, trigger_id: str, updates: dict[str, Any], *, boot_id: str | None = None
     ) -> dict[str, Any] | None:
+        """Aplica cambios. Con ``boot_id``, solo si la toma sigue siendo de este arranque.
+
+        La valla es ``(status=running, claimed_boot_id)``: un settle viejo no puede
+        cerrar una toma que la recuperacion ya libero. Sin ``boot_id`` el parche es
+        el de siempre (bucle aislado y caminos sin reclamar).
+        """
         payload = dict(updates)
         payload.pop("_id", None)
         payload["updated_at"] = datetime.now(timezone.utc)
+        query: dict[str, Any] = {"trigger_id": trigger_id}
+        if boot_id is not None:
+            query["status"] = "running"
+            query["claimed_boot_id"] = boot_id
         row = await self.horizon_triggers.find_one_and_update(
-            {"trigger_id": trigger_id},
+            query,
             {"$set": payload},
             return_document=ReturnDocument.AFTER,
         )
@@ -2188,6 +2213,44 @@ class MongoRepository:
                         "next_run_at": now,
                         "last_error": "recovered_after_restart",
                         "updated_at": now,
+                    }
+                },
+            )
+            recovered += 1
+        return recovered
+
+    async def recover_horizon_triggers_for_boot(
+        self, boot_id: str, *, now: datetime | None = None
+    ) -> int:
+        """Libera las tomas de otro arranque, sin umbral de edad (ticket #567).
+
+        La Agenda Horizon la llama una vez desde ``recover_at_boot`` con el
+        ``boot_id`` fresco del kernel: con instancia unica por flock, todo
+        ``running`` de otro arranque esta huerfano al instante (D3 de
+        TASK-2026-00441). ``$ne`` tambien iguala documentos sin
+        ``claimed_boot_id`` (tomas del bucle aislado o manuales). Misma
+        liquidacion que ``recover_stale_*``: un intento mas, se declara al
+        agotar, y un solo catch-up (``next_run_at=ahora``).
+        """
+        moment = now or datetime.now(timezone.utc)
+        recovered = 0
+        stale = self.horizon_triggers.find(
+            {"status": "running", "claimed_boot_id": {"$ne": boot_id}}
+        )
+        async for row in stale:
+            attempts = int(row.get("attempts") or 0) + 1
+            max_attempts = int(row.get("max_attempts") or 3)
+            exhausted = attempts >= max_attempts
+            await self.horizon_triggers.update_one(
+                {"trigger_id": row.get("trigger_id"), "status": "running"},
+                {
+                    "$set": {
+                        "status": "failed" if exhausted else "pending",
+                        "attempts": attempts,
+                        "next_run_at": moment,
+                        "claimed_boot_id": None,
+                        "last_error": "recovered_after_restart",
+                        "updated_at": moment,
                     }
                 },
             )

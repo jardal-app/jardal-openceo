@@ -17,7 +17,7 @@ from business.links import business_mirror
 import hashlib
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from company_mandate import SECRET_BLOCK_PARAM
 from objectives import ticket_cost as cost_mod
@@ -178,9 +178,18 @@ class HorizonService:
         self._task_service = task_service
         self._company_reader: Any | None = None
         self._company_config: Any | None = None
+        self._waker: Callable[[], None] | None = None
 
     def set_task_service(self, task_service: Any) -> None:
         self._task_service = task_service
+
+    def bind_waker(self, waker: Callable[[], None] | None) -> None:
+        """Aviso al timer tras encolar. Lo enlaza el arranque a ``kernel.wake("horizon")``.
+
+        Sin enlazar, los stores desechables que este servicio crea se comportan
+        igual que antes (D1 de TASK-2026-00441: el encolado no despertaba).
+        """
+        self._waker = waker
 
     def set_company_reader(self, reader: Any | None) -> None:
         """Lector del registro de negocio (Jardal ERP). Opcional.
@@ -1522,6 +1531,10 @@ class HorizonService:
         resolved_store = store or triggers_module.HorizonTriggerStore(
             self._repo, settings=self._settings
         )
+        if store is None and self._waker is not None:
+            # Solo el desechable: un store prestado por el llamador trae su
+            # propio aviso y no se toca.
+            resolved_store.bind_waker(self._waker)
         return await resolved_store.ensure_upcoming(
             user_id=user_id,
             timezone_name=self._timezone(profile),
@@ -1540,6 +1553,10 @@ class HorizonService:
         resolved_store = store or triggers_module.HorizonTriggerStore(
             self._repo, settings=self._settings
         )
+        if store is None and self._waker is not None:
+            # Solo el desechable: un store prestado por el llamador trae su
+            # propio aviso y no se toca.
+            resolved_store.bind_waker(self._waker)
         key = triggers_module.dedupe_key(
             TriggerKind.REACTIVE_REPLAN.value, user_id, task_id=task_id, status=status
         )

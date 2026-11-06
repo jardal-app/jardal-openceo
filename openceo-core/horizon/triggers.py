@@ -210,11 +210,24 @@ def upcoming_occurrences(
 
 
 class HorizonTriggerStore:
-    """Acceso a los disparadores persistidos, con deduplicacion."""
+    """Acceso a los disparadores persistidos, con deduplicacion.
+
+    El aviso es **en proceso**: ``asyncio.Event`` no cruza procesos. Desde el
+    ticket #567 el aviso se enlaza a ``kernel.wake("horizon")``; sin enlazar,
+    el store se comporta igual que antes.
+    """
 
     def __init__(self, repo: Any, *, settings: Any = None) -> None:
         self._repo = repo
         self._settings = settings
+        self._waker: Callable[[], None] | None = None
+
+    def bind_waker(self, waker: Callable[[], None] | None) -> None:
+        self._waker = waker
+
+    def notify(self) -> None:
+        if self._waker is not None:
+            self._waker()
 
     def _max_attempts(self) -> int:
         try:
@@ -270,6 +283,7 @@ class HorizonTriggerStore:
             # Carrera perdida contra otro escritor con la misma clave: el indice
             # unico hizo su trabajo y devolvemos el que gano.
             return await self._repo.get_horizon_trigger_by_dedupe(dedupe)
+        self.notify()
         return created
 
     async def ensure_upcoming(self, *, user_id: str, timezone_name: str, now: datetime | None = None) -> int:
@@ -318,6 +332,10 @@ class HorizonScheduler:
     No sondea: pide el proximo vencimiento, duerme exactamente ese tiempo, y
     ademas lo despierta cualquier encolado (``wake``). Los dos juntos cubren lo
     que un ``sleep`` fijo no cubre: precision sin espera desperdiciada.
+
+    Legado desde el ticket #567: en produccion planifica el kernel de schedule
+    global (``horizon/schedule_agenda.py``) y este bucle ya no se arranca. Se
+    conserva intacto como arreo del oraculo congelado.
     """
 
     def __init__(
@@ -341,6 +359,7 @@ class HorizonScheduler:
         self._job: asyncio.Task[Any] | None = None
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
+        self._wake_delegate: Callable[[], None] | None = None
 
     # ------------------------- ciclo de vida -------------------------
 
@@ -363,8 +382,15 @@ class HorizonScheduler:
                 await self._job
             self._job = None
 
+    def delegate_wake_to(self, waker: Callable[[], None] | None) -> None:
+        """Redirige ``wake`` al kernel (ticket #567). Sin delegado, igual que antes."""
+        self._wake_delegate = waker
+
     def wake(self) -> None:
         """Avisa al timer de que hay trabajo nuevo. Lo llama el encolado."""
+        if self._wake_delegate is not None:
+            self._wake_delegate()
+            return
         self._wake.set()
 
     async def _recover(self) -> None:
