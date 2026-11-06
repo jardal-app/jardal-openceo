@@ -68,6 +68,12 @@ from state import BLOCKER_RELEASED_STATUSES
 
 logger = logging.getLogger(__name__)
 
+#: A converted ticket's planner analysis (SIZING.md or the oversize PLAN.md)
+#: is kept whole for the objective planner: it cost a full planner run
+#: (TASK-2026-00510). The prompt carries a head; the rest rides a file.
+SIZING_HINT_MAX_CHARS = 60000
+SIZING_HINT_INLINE_CHARS = 3000
+
 
 class Runner(Protocol):
     """Structural executor (see :class:`orchestration.live.Executor`)."""
@@ -440,7 +446,7 @@ def _new_objective_doc(
         "branch": branch,
         "conversion_source_task_id": source_task_id,
         "conversion_cause": cause,
-        "sizing_hint": sizing_hint[:4000],
+        "sizing_hint": sizing_hint[:SIZING_HINT_MAX_CHARS],
     }
 
 
@@ -728,7 +734,7 @@ async def convert_ticket(
             })
             patch: dict[str, Any] = {}
             if sizing_text.strip():
-                patch["sizing_hint"] = sizing_text[:4000]
+                patch["sizing_hint"] = sizing_text[:SIZING_HINT_MAX_CHARS]
             dependents = await _open_dependents(env, own_id, task_id)
             if dependents:
                 patch["pending_rewires"] = [
@@ -946,6 +952,16 @@ def _planner_catalog() -> Catalog | None:
         return None
 
 
+def stage_sizing_hint(scratch: Path, text: str) -> str:
+    """Write the full sizing hint where the fenced planner can read it."""
+    target = scratch / "SIZING_HINT.md"
+    if not text.strip():
+        target.unlink(missing_ok=True)
+        return ""
+    target.write_text(text, encoding="utf-8")
+    return str(target)
+
+
 def _stage_agent_details(
     scratch: Path,
     catalog: Catalog,
@@ -1092,6 +1108,7 @@ def _planner_prompt(
     playbooks_md: str = "",
     parked_md: str = "",
     mission_md: str = "",
+    sizing_path: str = "",
 ) -> str:
     """Planner prompt: bounded state + JSON contract (self-contained).
 
@@ -1189,8 +1206,13 @@ def _planner_prompt(
             "recreate them as new tickets):",
             *bare])
     if sizing_hint:
-        lines.extend(["", "SIZING HINT from the converted ticket:",
-                      sizing_hint[:3000]])
+        lines.extend(["", "SIZING HINT from the converted ticket (its planner "
+                      "already analyzed the code: build on it, do not "
+                      "re-investigate what it covers):",
+                      sizing_hint[:SIZING_HINT_INLINE_CHARS]])
+        if sizing_path and len(sizing_hint) > SIZING_HINT_INLINE_CHARS:
+            lines.append(f"Full analysis ({len(sizing_hint)} chars), read it "
+                         f"before splitting: {sizing_path}")
     if agents_md:
         lines.extend(["", agents_md])
     if playbooks_md.strip():
@@ -1830,6 +1852,7 @@ async def _plan_objective_inner(
     agent_catalog = _planner_catalog()
     agent_staged = _stage_agent_details(scratch, agent_catalog) \
         if agent_catalog is not None else []
+    sizing_path = stage_sizing_hint(scratch, str(objective.get("sizing_hint") or ""))
     prompt = _planner_prompt(
         objective, (objective.get("capsule") or {}).get("text", ""),
         ready, inbox_md or "INBOX\n(none)\n", deferred,
@@ -1855,6 +1878,7 @@ async def _plan_objective_inner(
                 [item.get("cost") for item in tickets])),
         playbooks_md=playbooks_md,
         parked_md=parked_md,
+        sizing_path=sizing_path,
         mission_md=mission_md)
     timeout_s = int(planner_cfg.get("timeout_minutes", 15)) * 60
     errors: list[str] = []

@@ -308,7 +308,7 @@ _SIZE_CONVERSION_NOTE = (
 
 
 def _size_sizing(detail: str, plan_text: str) -> str:
-    """Sizing hint for a size conversion; the planner sees only its head."""
+    """Sizing hint for a size conversion; the objective planner gets it whole."""
     parts = [_SIZE_CONVERSION_NOTE, detail.strip()]
     if plan_text.strip():
         parts.append("PLAN.md (split basis):\n" + plan_text.strip())
