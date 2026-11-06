@@ -45,6 +45,7 @@ from research.wiring import build_research_service, build_social_broker, close_r
 from research.subscriptions import ResearchSubscriptions
 from research.watch import build_watch_adapters
 from research.workflows import ResearchScheduleRuntime, principal_resolver_for
+from schedule_kernel import ScheduleKernel
 from integrations.openwebui_compat import (
     chat_response,
     extract_latest_user_message,
@@ -578,6 +579,14 @@ async def lifespan(_: FastAPI):
         from auth.service import create_default_user_if_needed
         create_default_user_if_needed(_auth_db)
 
+        # Kernel de schedule global (TASK-2026-00441, Fase 2, ticket #564): research
+        # es la primera agenda migrada; las siguientes fases registran las suyas en
+        # este mismo kernel. Los incidentes del kernel van a la coleccion de
+        # reliability, como los de DeadlineWatch.
+        research_kernel = ScheduleKernel(
+            incidents=repo.db["reliability_incidents"],
+            runtime_dir=Path(__file__).resolve().parents[1] / ".runtime",
+        )
         research_coordinator = ResearchScheduleRuntime(
             repo=repo, workflows=workflow_service, service=research_service,
             settings=settings,
@@ -590,7 +599,9 @@ async def lifespan(_: FastAPI):
                 max_items=settings.RESEARCH_WATCH_MAX_ITEMS_PER_SOURCE,
             ),
             discover=research_resources.discover,
+            kernel=research_kernel,
         )
+        app.state.schedule_kernel = research_kernel
         app.state.research_schedule_store = research_coordinator.store
         app.state.research_scheduler = research_coordinator.scheduler
         research_subscriptions = ResearchSubscriptions(

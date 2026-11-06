@@ -143,10 +143,46 @@ class Deployment:
     async def start(self) -> None:
         self.vt.parked.clear()
         assert await self.runtime.start(), "el coordinator exige ambas flags"
-        await self.vt.settle()
+        await self.settle()
 
     async def stop(self) -> None:
         await self.runtime.stop()
+
+    async def settle(self) -> None:
+        await self.vt.settle()
+        await self.drain()
+
+    async def drain(self, timeout: float = 10.0) -> None:
+        """Quiescencia bajo el kernel (#564): el carril liquida despues del parked.
+
+        Con el bucle aislado, ``settle()`` implicaba tick liquidado (ejecucion
+        inline). Con carriles hay que esperar ademas a que no quede nada en
+        vuelo ni nada vencido sin reclamar. Cada ronda fuerza una pasada del
+        kernel (lectura fresca, sin CACHE) y exige dos rondas quietas seguidas:
+        observar ``status`` y el repo en dos lecturas separadas tiene una
+        carrera (una toma puede caer en medio), pero no dos veces seguidas.
+        Solo arnes de test.
+        """
+        calm = 0
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            if asyncio.get_running_loop().time() > deadline:
+                status = self.runtime.kernel.status()["agendas"]["research"]
+                due = await self.repo.next_research_schedule_due_at()
+                raise AssertionError(
+                    f"sin quiescence: in_flight={status['in_flight']} due={due} now={self.vt.now}")
+            self.vt.parked.clear()
+            self.scheduler.wake()  # delega al kernel: pasada con lectura fresca
+            await asyncio.wait_for(self.vt.parked.wait(), timeout)
+            status = self.runtime.kernel.status()["agendas"]["research"]
+            due = await self.repo.next_research_schedule_due_at()
+            if status["in_flight"] == 0 and (due is None or utc(due) > self.vt.now):
+                calm += 1
+                if calm >= 2:
+                    return
+            else:
+                calm = 0
+                await asyncio.sleep(0.01)
 
     async def run_until(self, limit: datetime) -> None:
         """Mueve el tiempo de vencimiento en vencimiento hasta ``limit`` (inclusive)."""
@@ -155,6 +191,7 @@ class Deployment:
             if due is None or utc(due) > limit:
                 break
             await self.vt.move_to(self.scheduler, max(utc(due), self.vt.now))
+            await self.drain()
         self.vt.now = max(self.vt.now, limit)
 
 
@@ -488,7 +525,7 @@ class AcceptanceBTests(unittest.IsolatedAsyncioTestCase):
         url = "https://example.org/wake.xml"
         self.feed.publish(url, self.item("a"))
         await self.subscribe(url)
-        await self.vt.settle()
+        await self.dep.settle()
         self.assertEqual(self.vt.timeouts[-1], HOUR)
         self.assertGreaterEqual(due.await_count, 1)
 
@@ -502,7 +539,7 @@ class AcceptanceBTests(unittest.IsolatedAsyncioTestCase):
         self.vt.parked.clear()
         await self.dep.subs.pause(a, principal=principal(OWNER))
         await self.dep.subs.cancel(b, principal=principal(OWNER))
-        await self.vt.settle()
+        await self.dep.settle()
         self.assertEqual(self.vt.timeouts[-1], None)  # nada activo: vuelve a esperar sin tope
         calls = (len(self.feed.times(url_a)), len(self.feed.times(url_b)))
         await self.dep.run_until(START + timedelta(hours=10))
@@ -510,7 +547,7 @@ class AcceptanceBTests(unittest.IsolatedAsyncioTestCase):
         # reanudar tras una pausa larga ejecuta UN catch-up y retoma su cadencia
         self.vt.parked.clear()
         resumed = await self.dep.subs.resume(a, principal=principal(OWNER), project_cfg_for=lambda _: CFG)
-        await self.vt.settle()
+        await self.dep.settle()
         self.assertEqual(resumed["status"], "active")
         self.assertEqual(len(self.feed.times(url_a)), calls[0] + 1)
         self.assertGreater(utc((await self.doc(a))["next_run_at"]), self.vt.now)

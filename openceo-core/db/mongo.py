@@ -2502,6 +2502,7 @@ class MongoRepository:
         lease_owner: str,
         lease_seconds: int,
         now: datetime | None = None,
+        boot_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Toma atomica del schedule vencido. Devuelve None si no hay ninguno.
 
@@ -2510,27 +2511,31 @@ class MongoRepository:
         dispatchers no pueden tomar la misma ocurrencia. ``scheduled_for`` congela el
         vencimiento ejecutado y el ``fencing_token`` se incrementa para que un ejecutor
         viejo no cierre una toma que ya no es suya.
+
+        Con ``boot_id`` (Agenda del kernel, ticket #564) la toma ademas sella el
+        campo aditivo opcional ``claimed_boot_id`` para que ``recover_*_for_boot``
+        libere por propiedad de arranque en vez de por edad. Sin ``boot_id`` el
+        pipeline es el de siempre.
         """
         moment = now or datetime.now(timezone.utc)
+        claimed: dict[str, Any] = {
+            "run_state": "running",
+            "lease_owner": lease_owner,
+            "lease_expires_at": moment + timedelta(seconds=lease_seconds),
+            # Retry/recovery keeps the original occurrence identity.
+            "scheduled_for": {"$ifNull": ["$scheduled_for", "$next_run_at"]},
+            "fencing_token": {"$add": [{"$ifNull": ["$fencing_token", 0]}, 1]},
+            "updated_at": moment,
+        }
+        if boot_id is not None:
+            claimed["claimed_boot_id"] = boot_id
         row = await self.research_schedules.find_one_and_update(
             {
                 "status": "active",
                 "run_state": "idle",
                 "next_run_at": {"$lte": moment},
             },
-            [
-                {
-                    "$set": {
-                        "run_state": "running",
-                        "lease_owner": lease_owner,
-                        "lease_expires_at": moment + timedelta(seconds=lease_seconds),
-                        # Retry/recovery keeps the original occurrence identity.
-                        "scheduled_for": {"$ifNull": ["$scheduled_for", "$next_run_at"]},
-                        "fencing_token": {"$add": [{"$ifNull": ["$fencing_token", 0]}, 1]},
-                        "updated_at": moment,
-                    }
-                }
-            ],
+            [{"$set": claimed}],
             sort=[("next_run_at", ASCENDING), ("priority", DESCENDING)],
             return_document=ReturnDocument.AFTER,
         )
@@ -2623,6 +2628,49 @@ class MongoRepository:
                 "run_state": "idle",
                 "lease_owner": None,
                 "lease_expires_at": None,
+                # La reentrega no se afirma como exactly-once: el handler debe reconciliar
+                # el cursor/la adquisicion antes de repetir gasto.
+                "pending_reconcile": True,
+                "last_error": "recovered_after_restart",
+                "updated_at": moment,
+            }
+            next_at = row.get("next_run_at")
+            if next_at is not None and next_at.tzinfo is None:
+                next_at = next_at.replace(tzinfo=timezone.utc)
+            if row.get("status") == "active" and (next_at is None or next_at <= moment):
+                # Un solo catch-up: se ejecuta una vez ahora y el posterior vencimiento
+                # queda futuro, en vez de una rafaga por cada intervalo perdido.
+                patch["next_run_at"] = moment
+            await self.research_schedules.update_one(
+                {"schedule_id": row.get("schedule_id"), "run_state": "running"},
+                {"$set": patch},
+            )
+            recovered += 1
+        return recovered
+
+    async def recover_research_schedules_for_boot(
+        self, boot_id: str, *, now: datetime | None = None
+    ) -> int:
+        """Libera las tomas de otro arranque, sin umbral de edad (ticket #564).
+
+        La Agenda research la llama una vez desde ``recover_at_boot`` con el
+        ``boot_id`` fresco del kernel: con instancia unica por flock, todo
+        ``running`` de otro arranque esta huerfano al instante (D3 de
+        TASK-2026-00441). ``$ne`` tambien iguala documentos sin
+        ``claimed_boot_id`` (tomas del scheduler viejo o manuales). Un solo
+        catch-up por elemento atrasado, como ``recover_stale_*``.
+        """
+        moment = now or datetime.now(timezone.utc)
+        recovered = 0
+        stale = self.research_schedules.find(
+            {"run_state": "running", "claimed_boot_id": {"$ne": boot_id}}
+        )
+        async for row in stale:
+            patch: dict[str, Any] = {
+                "run_state": "idle",
+                "lease_owner": None,
+                "lease_expires_at": None,
+                "claimed_boot_id": None,
                 # La reentrega no se afirma como exactly-once: el handler debe reconciliar
                 # el cursor/la adquisicion antes de repetir gasto.
                 "pending_reconcile": True,

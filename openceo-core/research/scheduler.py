@@ -574,6 +574,11 @@ class ResearchScheduler:
     vencimiento espera la fecha concreta. ``max_sleep_seconds`` por defecto es ``None``
     (sin tope); fijarlo solo tiene sentido como red de seguridad explicita, nunca para
     reproducir el barrido horario que el epico prohibe.
+
+    Legado desde el ticket #564: en produccion el runtime arranca el kernel de
+    schedule global con ``ResearchScheduleAgenda`` y este bucle ya no se inicia.
+    La clase se conserva con la misma conducta como arreo del oraculo congelado
+    (``tests/test_research_scheduler.py``) y de la integracion de workflows.
     """
 
     def __init__(
@@ -605,6 +610,7 @@ class ResearchScheduler:
         self._job: asyncio.Task[Any] | None = None
         self._stop = asyncio.Event()
         self._wake = asyncio.Event()
+        self._wake_delegate: Callable[[], None] | None = None
         if store is not None:
             store.bind_waker(self.wake)
 
@@ -627,8 +633,15 @@ class ResearchScheduler:
                 await self._job
             self._job = None
 
+    def delegate_wake_to(self, waker: Callable[[], None] | None) -> None:
+        """Redirige ``wake`` al kernel (ticket #564). Sin delegado, igual que antes."""
+        self._wake_delegate = waker
+
     def wake(self) -> None:
         """Avisa al timer de que hay trabajo nuevo (CRUD o parada)."""
+        if self._wake_delegate is not None:
+            self._wake_delegate()
+            return
         self._wake.set()
 
     async def _recover(self) -> None:

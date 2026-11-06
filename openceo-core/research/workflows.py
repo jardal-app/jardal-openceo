@@ -16,10 +16,12 @@ from research.execution import (  # noqa: F401 - re-exportados: son la API histo
     ResearchExecutionContext, admit_job, require_research_context,
 )
 from research.policies import ResearchAccessDenied, ResearchPolicyError, Principal, principal_from_user
+from research.schedule_agenda import ResearchScheduleAgenda
 from research.scheduler import (
     ResearchScheduleStore, ResearchScheduler, execution_key_for, schedule_fingerprint,
 )
 from research.watch import WORKFLOW_DISCOVERY, WORKFLOW_WATCH, WatchEngine
+from schedule_kernel import ScheduleKernel
 
 logger = logging.getLogger(__name__)
 
@@ -91,12 +93,18 @@ class ResearchScheduleHandler:
 
 
 class ResearchScheduleRuntime:
-    """One coordinator per process; disabled unless both explicit flags are enabled."""
+    """One coordinator per process; disabled unless both explicit flags are enabled.
+
+    Desde el ticket #564 la planificacion corre en el kernel de schedule global
+    con ``ResearchScheduleAgenda``; ``scheduler`` conserva el bucle aislado solo
+    como compatibilidad (oraculo congelado e integracion) y ya no se arranca.
+    """
     def __init__(self, *, repo: Any, workflows: Any, service: Any, settings: Any,
                  project_cfg_for: Callable, on_admitted: Callable | None = None,
                  resolve_principal: Callable | None = None,
                  adapters: dict[str, Any] | None = None, discover: Callable | None = None,
-                 now_fn: Callable | None = None, waiter: Callable | None = None) -> None:
+                 now_fn: Callable | None = None, waiter: Callable | None = None,
+                 kernel: ScheduleKernel | None = None) -> None:
         self.settings = settings
         self.service = service
         self.repo = repo
@@ -112,8 +120,8 @@ class ResearchScheduleRuntime:
             resolve_principal=resolve_principal or principal_resolver_for(repo),
             project_cfg_for=project_cfg_for, on_admitted=on_admitted, now_fn=now_fn,
         )
-        # No capped wait: absence of a due time means indefinite event wait. ``now_fn`` y
-        # ``waiter`` son costuras de test (reloj virtual); en produccion quedan en su defecto.
+        # Compatibilidad: el bucle aislado ya no se arranca, pero el objeto sigue
+        # expuesto (oraculo e integracion) y su wake delega al kernel.
         self.scheduler = ResearchScheduler(
             repo=repo, handler=self._guarded, store=self.store, settings=settings,
             now_fn=now_fn, waiter=waiter,
@@ -121,6 +129,18 @@ class ResearchScheduleRuntime:
             batch_limit=getattr(settings, "RESEARCH_SCHEDULER_BATCH_LIMIT", 20),
             backoff_base=getattr(settings, "RESEARCH_SCHEDULER_BACKOFF_SECONDS", 60),
         )
+        # No capped wait: absence of a due time means indefinite event wait. ``now_fn`` y
+        # ``waiter`` son costuras de test (reloj virtual); en produccion quedan en su defecto.
+        # El lifespan puede inyectar el kernel compartido; sin el, el runtime crea el suyo.
+        self.agenda = ResearchScheduleAgenda(
+            repo=repo, handler=self._guarded, now_fn=now_fn,
+            lease_seconds=getattr(settings, "RESEARCH_SCHEDULER_LEASE_SECONDS", 120),
+            backoff_base=getattr(settings, "RESEARCH_SCHEDULER_BACKOFF_SECONDS", 60),
+        )
+        self.kernel = kernel if kernel is not None else ScheduleKernel(now_fn=now_fn, waiter=waiter)
+        self.kernel.register(self.agenda)
+        self.store.bind_waker(lambda: self.kernel.wake(self.agenda.name))
+        self.scheduler.delegate_wake_to(lambda: self.kernel.wake(self.agenda.name))
 
     async def _guarded(self, claimed: dict[str, Any]) -> dict[str, Any]:
         """Un acceso revocado PAUSA la suscripcion; un fallo transitorio se reintenta.
@@ -142,8 +162,11 @@ class ResearchScheduleRuntime:
         if not (getattr(self.settings, "RESEARCH_ENABLED", False)
                 and getattr(self.settings, "RESEARCH_SCHEDULER_ENABLED", False)):
             return False
-        await self.scheduler.start()
+        await self.kernel.start()
         return True
 
     async def stop(self) -> None:
+        # El kernel primero (cancela sus carriles); el scheduler aislado nunca
+        # arranco y su parada es un no-op que conserva el invariante _job None.
+        await self.kernel.stop()
         await self.scheduler.stop()
