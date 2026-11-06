@@ -464,30 +464,30 @@ class RateMonitor:
         lock = self._locks.setdefault(provider, asyncio.Lock())
         async with lock:
             if provider == "codex":
-                self._send_to_monitor(provider, "/status")
+                await asyncio.to_thread(self._send_to_monitor, provider, "/status")
                 # The TUI sometimes eats the first Enter (autocomplete popup):
                 # a second Enter submits, while a stray empty submit is harmless.
-                self._send_to_monitor(provider, "")
+                await asyncio.to_thread(self._send_to_monitor, provider, "")
             elif provider == "claude":
-                self._send_to_monitor(provider, "/usage")
+                await asyncio.to_thread(self._send_to_monitor, provider, "/usage")
             elif provider == "muse":
-                self._send_to_monitor(provider, "/usage")
+                await asyncio.to_thread(self._send_to_monitor, provider, "/usage")
             else:
                 # unsupported – return full availability
                 return ProviderStatus(provider=provider)
 
             # Wait for the CLI to respond
             await asyncio.sleep(3)
-            content = self._capture_monitor(provider, lines=40)
+            content = await asyncio.to_thread(self._capture_monitor, provider, lines=40)
             missing_output = (
                 (provider == "codex" and "left" not in content.lower())
                 or (provider == "muse" and "resets" not in content.lower())
             )
             if missing_output:
                 # Command did not execute — one more Enter before giving up.
-                self._send_to_monitor(provider, "")
+                await asyncio.to_thread(self._send_to_monitor, provider, "")
                 await asyncio.sleep(3)
-                content = self._capture_monitor(provider, lines=60)
+                content = await asyncio.to_thread(self._capture_monitor, provider, lines=60)
 
             if provider == "codex":
                 status = self._parse_codex_status(content)

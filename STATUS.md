@@ -4,7 +4,7 @@ Resumen operativo corto del estado real del repo.
 
 ## 2026-11-06 — Excepciones atendidas por agentes (TASK-2026-00536)
 
-El mecánico puede delegar el mismo ticket con diagnóstico y checkpoint a su agente; la receta exacta cede al criterio del agente y conserva los permisos. Los errores inesperados de YAML, del planner y del grafo pasan al mismo manejador; se retiró el backoff 5/15/30 del pedido. El detector cubre escrituras de espera del servicio y motivos alternantes; la atención pendiente se conserva frente a límites y reinicios. Los detalles y el estado de entrega se mantienen en el ticket; contrato en `docs/ARCHITECTURE_REFERENCE_2026.md` §Engine mechanic.
+El mecánico puede delegar el mismo ticket con diagnóstico y checkpoint a su agente; la receta exacta cede al criterio del agente y conserva los permisos. Los errores inesperados de YAML, del planner y del grafo pasan al mismo manejador; se retiró el backoff 5/15/30 del pedido. El detector cubre escrituras de espera del servicio y motivos alternantes; la atención pendiente se conserva frente a límites y reinicios. Los detalles y el estado de entrega se mantienen en el ticket; contrato en `docs/ARCHITECTURE_REFERENCE_2026.md` §Engine mechanic. La consulta de cuotas ejecuta comandos y captura de tmux fuera del event loop; sus esperas de arranque no congelan HTTP ni el kernel.
 
 ## 2026-11-06 — Solo systemd, topes por motor fuera, plan que no quema sesiones y despliegue sin esperar a la misión (TASK-2026-00510)
 
