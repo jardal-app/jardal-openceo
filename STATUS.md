@@ -25,10 +25,13 @@ Resumen operativo corto del estado real del repo.
   - #565: abrió el fix #566 (guardia anti-vagancia con cero cambios legítimos);
   - #566: ante el aviso de DeadlineWatch, solo comentó (no había cuelgue).
 - **research:** el módulo (16.8k líneas) no está activado en ningún proyecto y tiene 0 sesiones. Se conserva: es el investigador del Owner, falta activarlo y el piloto real.
+- **Capacidad, cola justa y Tier S (e151866)**, por orden del Owner («aumentalo a 7 … arregla esto … endurecelo para que solo pase lo critico … pushea todo y reinicia»), sin topes de Tier S:
+  - `RATE_MAX_CONCURRENT_TICKETS` pasa de 3 a 7. Tier S sigue pesando 3 y se mantiene 1 por proyecto.
+  - Cola justa: si un ticket aparca solo por cupo, los de detrás no le quitan el sitio. Antes un Tier S podía esperar sin fin detrás de tier_c de otros proyectos.
+  - Criterio de Tier S: fallo residual crítico (dinero, seguridad/privacidad, datos irreversibles, contrato del núcleo) y valor de la revisión independiente; S para el ticket que define la regla, no para sus consumidores. Alineado en el detalle de la política, el núcleo y el prompt del planner. Los 9 Tier S de la semana encajan.
+- **Despliegue final:** 64cebc5 a las 03:13 UTC, bajo systemd (`start` ya pasa por la unidad), dirty=false, /health ok, capacidad 7. El despliegue pendiente se consumió y #549 (Tier S) arrancó junto a #566 (tier_c de otro proyecto); #550 y #563 esperan por su proyecto y #558/#559 por sus dependencias.
 - **Traspaso:**
-  - En producción corre `424a7ea`, bajo systemd.
-  - 23d4545, 8a32753 y 6936654 están en main (`a236aad`); el mecánico los despliega en cuanto #566 libere el checkout de openceo (`mechanic_state.deploy`).
-  - #549, #550 y #563 están en cola tras el reinicio de la ventana de claudej (02:30).
+  - En producción corre `64cebc5`, bajo systemd, con todo lo de esta sesión.
   - Pendiente de decisión: la cuenta que vigila el control de cuota y la reanudación de sesión en el reintento (persistir la transcripción por ticket).
   - Fase 2: el core corre desde el mismo checkout donde construyen los tickets de openceo; el despliegue forzado lo mitiga, falta desacoplarlo.
 
