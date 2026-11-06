@@ -90,6 +90,17 @@ def test_estimate_wording_is_understood(wording: str, expected: tuple) -> None:
     assert (plan.estimate_files, plan.estimate_lines) == expected
 
 
+def test_estimate_without_colon_is_read(repo: Path) -> None:
+    # Live #549/#550: the prompt showed the colon-less form and the planner
+    # followed it; the section grammar required "ESTIMATE:" and lost it.
+    text = plan_md().replace("OUT_OF_SCOPE:", "ESTIMATE files=7 lines=90\nOUT_OF_SCOPE:")
+    plan = parse_plan(text)
+    assert (plan.estimate_files, plan.estimate_lines) == (7, 90)
+    validation = validate_plan(plan, repo, 8, budget_lines=400)
+    assert validation.valid
+    assert not any("ESTIMATE" in warning for warning in validation.warnings)
+
+
 def test_tolerant_estimate_still_enforces_the_budget(repo: Path) -> None:
     validation = validate_plan(parse_plan(plan_md(estimate="2 files, 900 lines")),
                                repo, 8, budget_lines=400)

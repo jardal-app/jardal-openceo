@@ -57,6 +57,7 @@ _BULLET_RE = re.compile(r"^-\s+(.*)$")
 _STEP_RE = re.compile(r"^\d+\.\s+(.*)$")
 _FILE_RE = re.compile(r"^(\S+)\s+\((create|modify|delete)\)\s*[—–-]\s*(.+)$")
 _ESTIMATE_RE = re.compile(r"files\s*=\s*(\d+)\s+lines\s*=\s*(\d+)")
+_ESTIMATE_LINE_RE = re.compile(r"^\s*ESTIMATE\b\s*:?\s*(.*)$", re.IGNORECASE)
 _EST_FILES_RE = re.compile(
     r"(?:files?|ficheros?|archivos?)\s*[=:]?\s*~?(\d+)"
     r"|(\d+)\s*(?:files?|ficheros?|archivos?)\b", re.IGNORECASE)
@@ -120,8 +121,12 @@ def parse_plan(text: str) -> Plan:
         match = _STEP_RE.match(line)
         steps.append(match.group(1).strip() if match else line)
 
+    # The planner prompt long showed "ESTIMATE files=<n> lines=<n>" without
+    # a colon, so a line the section grammar misses still counts.
+    loose = [match.group(1) for line in text.splitlines()
+             if (match := _ESTIMATE_LINE_RE.match(line))]
     est_files, est_lines = _parse_estimate(
-        [inline.get("ESTIMATE", ""), *sections.get("ESTIMATE", [])])
+        [inline.get("ESTIMATE", ""), *sections.get("ESTIMATE", []), *loose])
 
     return Plan(
         ticket=inline.get("TICKET", ""),
