@@ -2470,6 +2470,14 @@ async def _record_and_apply_plan(
         "sizing_hint": "",
         "planner_telemetry": _telemetry_after_run(objective, runs),
     })
+    # Owner questions ride on every outcome (#615): a blocked or
+    # capability_gap cycle parks below, and a proposal that never reaches
+    # the Owner leaves a park with no trigger. The loose path already asks
+    # before dispatching; idempotent per source_id, answered skipped.
+    await create_tool_proposal_questions(
+        env, objective_id, str(objective.get("project") or ""), result)
+    await create_playbook_update_questions(
+        env, objective_id, str(objective.get("project") or ""), result)
     if status == "complete_candidate":
         return await run_final_review(env, objective_id)
     if status == "blocked":
@@ -2491,10 +2499,6 @@ async def _record_and_apply_plan(
         env, objective, result, return_from, run_tag=run_tag)
     await _apply_pending_rewires(
         env, objective_id, [item["task_id"] for item in created])
-    await create_tool_proposal_questions(
-        env, objective_id, str(objective.get("project") or ""), result)
-    await create_playbook_update_questions(
-        env, objective_id, str(objective.get("project") or ""), result)
     tele = dict((await env.objectives.get_objective(objective_id) or {}
                  ).get("planner_telemetry") or {})
     tele["tickets_created"] = int(tele.get("tickets_created", 0)) + len(created)
