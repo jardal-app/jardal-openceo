@@ -9,6 +9,7 @@ network, no CLI, no LLM.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import subprocess
@@ -1615,7 +1616,10 @@ class DeadQueuedHistoryTests(unittest.TestCase):
         self.assertIn("kid-zomb: still queued", verdict["open_gaps"])
         self.assertEqual(verdict["dead_children"], [])
 
-    def test_queued_behind_failed_plus_converted_stays_open(self) -> None:
+    def test_queued_behind_failed_plus_converted_is_dead(self) -> None:
+        # TASK-2026-00553 (deliberate contract change from 00534): a
+        # converted blocker never releases by itself either; only the
+        # plan that creates its substitutes rewires the dependent.
         objective = {"objective_id": "OBJ-1",
                      "conversion_source_task_id": "shell-1"}
         zombie = _child("kid-zomb", "queued", dev=True)
@@ -1625,8 +1629,63 @@ class DeadQueuedHistoryTests(unittest.TestCase):
                     _child("kid-conv", "converted", dev=True),
                     zombie]
         verdict = verify_delivery(objective, children)
-        self.assertFalse(verdict["ok"])
-        self.assertIn("kid-zomb: still queued", verdict["open_gaps"])
+        self.assertEqual(verdict["open_gaps"], [])
+        self.assertEqual(verdict["dead_children"], ["kid-zomb"])
+
+    def test_queued_behind_converted_is_dead(self) -> None:
+        # Live wedge (OBJ-E7A67DBA): the dependent of an in-objective
+        # decomposition held the objective open with no event to come.
+        objective = {"objective_id": "OBJ-1",
+                     "conversion_source_task_id": "shell-1"}
+        zombie = _child("kid-zomb", "queued", dev=True)
+        zombie["blocked_by"] = ["kid-conv"]
+        children = [_child("shell-1", "converted", dev=True),
+                    _child("kid-conv", "converted", dev=True),
+                    _child("kid-1", "completed", dev=True),
+                    zombie]
+        verdict = verify_delivery(objective, children)
+        self.assertTrue(verdict["ok"])
+        self.assertEqual(verdict["dead_children"], ["kid-zomb"])
+        self.assertEqual(engine_mod._brake_active_children(children), [])
+
+    def test_queued_behind_dead_queued_is_dead(self) -> None:
+        objective = {"objective_id": "OBJ-1",
+                     "conversion_source_task_id": "shell-1"}
+        first = _child("kid-a", "queued", dev=True)
+        first["blocked_by"] = ["kid-fail"]
+        second = _child("kid-b", "queued", dev=True)
+        second["blocked_by"] = ["kid-a", "kid-done"]
+        children = [_child("shell-1", "converted", dev=True),
+                    _child("kid-fail", "failed", dev=True),
+                    _child("kid-done", "completed", dev=True),
+                    first, second]
+        verdict = verify_delivery(objective, children)
+        self.assertEqual(verdict["open_gaps"], [])
+        self.assertEqual(verdict["dead_children"], ["kid-a", "kid-b"])
+
+    def test_dependency_cycle_stays_open(self) -> None:
+        objective = {"objective_id": "OBJ-1",
+                     "conversion_source_task_id": "shell-1"}
+        first = _child("kid-a", "queued", dev=True)
+        first["blocked_by"] = ["kid-b"]
+        second = _child("kid-b", "queued", dev=True)
+        second["blocked_by"] = ["kid-a"]
+        verdict = verify_delivery(objective, [
+            _child("shell-1", "converted", dev=True), first, second])
+        self.assertEqual(verdict["dead_children"], [])
+        self.assertEqual(len(verdict["open_gaps"]), 2)
+
+    def test_rewired_dependent_is_open_again(self) -> None:
+        objective = {"objective_id": "OBJ-1",
+                     "conversion_source_task_id": "shell-1"}
+        dependent = _child("kid-dep", "queued", dev=True)
+        dependent["blocked_by"] = ["kid-sub"]
+        children = [_child("shell-1", "converted", dev=True),
+                    _child("kid-conv", "converted", dev=True),
+                    _child("kid-sub", "queued", dev=True),
+                    dependent]
+        verdict = verify_delivery(objective, children)
+        self.assertIn("kid-dep: still queued", verdict["open_gaps"])
         self.assertEqual(verdict["dead_children"], [])
 
 
@@ -1706,6 +1765,17 @@ class BootResumeDecisionTests(unittest.TestCase):
         call = boot_resume_decision(
             self._objective(status="active"), children)
         self.assertEqual(call["action"], "leave")
+
+    def test_active_with_only_dead_work_resumes_fresh(self) -> None:
+        # TASK-2026-00553: work queued behind a converted ticket waits
+        # on a plan, not on an event; the restart must replan it.
+        dependent = _child("kid-dep", "queued", dev=True)
+        dependent["blocked_by"] = ["kid-conv"]
+        children = self._clean() + [
+            _child("kid-conv", "converted", dev=True), dependent]
+        call = boot_resume_decision(
+            self._objective(status="active"), children)
+        self.assertEqual(call["action"], "resume_fresh")
 
     def test_spend_gated_stays(self) -> None:
         call = boot_resume_decision(
@@ -1800,6 +1870,151 @@ class BootResumeOneTests(unittest.IsolatedAsyncioTestCase):
         assert stored is not None
         self.assertEqual(stored["status"], "active")
         self.assertEqual(stored["final_reviews"], 2)
+
+
+class OrphanResumeTests(unittest.IsolatedAsyncioTestCase):
+    """Heartbeat liveness: actives no event can move replan (00553)."""
+
+    OLD = "2026-11-06T14:40:14+00:00"
+    IDLE_BEFORE = engine_mod.recovery_mod.parse_due("2026-11-07T13:00:00Z")
+
+    def _env(self, objective: dict[str, Any],
+             tasks: list[dict[str, Any]],
+             notices: list[tuple[str, str]]) -> ObjectiveEnv:
+        store = InMemoryObjectiveStore()
+        store.docs[str(objective["objective_id"])] = dict(objective)
+
+        async def notify(ref: str, text: str) -> None:
+            notices.append((ref, text))
+
+        return ObjectiveEnv(
+            objectives=store,
+            tasks=InMemoryTaskLister(
+                {str(row["task_id"]): dict(row) for row in tasks}),
+            create_ticket=AsyncMock(return_value=None),
+            patch_task=AsyncMock(),
+            executor=MagicMock(), quota=MagicMock(), slots=MagicMock(),
+            reviews=None, inbox=None, notify=notify,
+            repo=Path("/tmp"),
+            objectives_cfg={"max_final_reviews": 2})
+
+    def _wedged(self) -> list[dict[str, Any]]:
+        dependent = _child("kid-dep", "queued", dev=True)
+        dependent["blocked_by"] = ["kid-conv"]
+        return [_child("shell-1", "converted", dev=True),
+                _child("kid-1", "completed", dev=True),
+                _child("kid-conv", "converted", dev=True), dependent]
+
+    def _objective(self, **over: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "objective_id": "OBJ-1", "conversion_source_task_id": "shell-1",
+            "status": "active", "final_reviews": 1, "waiting_reason": None,
+            "updated_at": self.OLD}
+        base.update(over)
+        return base
+
+    async def _resume(self, env: ObjectiveEnv) -> tuple[dict, AsyncMock]:
+        plan = AsyncMock(return_value={"ok": True, "action": "planned"})
+        with patch.object(engine_mod, "plan_objective", new=plan):
+            result = await engine_mod.resume_orphaned_one(
+                env, "OBJ-1", idle_before=self.IDLE_BEFORE)
+        return result, plan
+
+    async def test_wedged_active_replans_keeping_review_budget(self) -> None:
+        notices: list[tuple[str, str]] = []
+        env = self._env(self._objective(), self._wedged(), notices)
+        result, plan = await self._resume(env)
+        self.assertEqual(result["action"], "replan")
+        plan.assert_awaited_once_with(env, "OBJ-1")
+        self.assertEqual(len(notices), 1)
+        stored = await env.objectives.get_objective("OBJ-1")
+        assert stored is not None
+        self.assertEqual(stored["final_reviews"], 1)
+
+    async def test_open_work_recent_activity_or_park_leave(self) -> None:
+        live = self._wedged() + [_child("kid-wait", "queued", dev=True)]
+        cases = [
+            (self._objective(), live),
+            (self._objective(updated_at="2026-11-07T13:30:00+00:00"),
+             self._wedged()),
+            (self._objective(status="waiting",
+                             waiting_reason="capability_gap: x"),
+             self._wedged()),
+            (self._objective(pending_plan={"question_task_id": "q"}),
+             self._wedged()),
+        ]
+        for objective, children in cases:
+            notices: list[tuple[str, str]] = []
+            env = self._env(objective, children, notices)
+            result, plan = await self._resume(env)
+            self.assertEqual(result["action"], "leave", objective)
+            plan.assert_not_awaited()
+            self.assertEqual(notices, [])
+
+    async def test_plan_in_flight_leaves(self) -> None:
+        notices: list[tuple[str, str]] = []
+        env = self._env(self._objective(), self._wedged(), notices)
+        engine_mod._PLAN_FLIGHTS["OBJ-1"] = SimpleNamespace(  # type: ignore[assignment]
+            task=SimpleNamespace(done=lambda: False))
+        self.addCleanup(engine_mod._PLAN_FLIGHTS.pop, "OBJ-1", None)
+        result, plan = await self._resume(env)
+        self.assertEqual(result["reason"], "plan in flight")
+        plan.assert_not_awaited()
+
+
+class OrphanResumePassTests(unittest.IsolatedAsyncioTestCase):
+    """The service pass is bounded, isolated and single-flight (00553)."""
+
+    def _service(self, rows: list[dict[str, Any]]) -> Any:
+        from objectives.service import ObjectiveService
+
+        cfg = MagicMock()
+        cfg.has_project = MagicMock(
+            side_effect=lambda project: project != "gone")
+        repo = SimpleNamespace(
+            list_active_objectives=AsyncMock(return_value=rows))
+        service = ObjectiveService(repo=repo, task_service=MagicMock(),
+                                   config_loader=cfg, settings=MagicMock())
+        service.env_for = MagicMock(return_value="env")  # type: ignore[method-assign]
+        return service
+
+    async def test_pass_replans_orphans_and_isolates_errors(self) -> None:
+        service = self._service([
+            {"objective_id": "OBJ-A", "project": "p"},
+            {"objective_id": "OBJ-B", "project": "p"},
+            {"objective_id": "OBJ-C", "project": "p"},
+            {"objective_id": "OBJ-X", "project": "gone"}])
+        outcomes = {"OBJ-A": {"action": "replan"},
+                    "OBJ-B": {"action": "leave"}}
+
+        async def resume(env: Any, objective_id: str, *,
+                         idle_before: Any) -> dict[str, Any]:
+            if objective_id == "OBJ-C":
+                raise RuntimeError("boom")
+            return outcomes[objective_id]
+
+        with patch.object(engine_mod, "resume_orphaned_one", new=resume):
+            summary = await service.resume_orphaned_objectives(
+                idle_minutes=30)
+        self.assertEqual(summary["replanned"], ["OBJ-A"])
+        self.assertEqual(summary["left"], 1)
+        self.assertEqual(summary["errors"], ["OBJ-C"])
+
+    async def test_spawn_is_single_flight(self) -> None:
+        service = self._service([])
+        gate = asyncio.Event()
+
+        async def slow_pass(**_: Any) -> dict[str, Any]:
+            await gate.wait()
+            return {"replanned": [], "errors": []}
+
+        service.resume_orphaned_objectives = slow_pass  # type: ignore[method-assign]
+        self.assertTrue(service.spawn_orphan_resume(30))
+        self.assertFalse(service.spawn_orphan_resume(30))
+        gate.set()
+        await service._orphan_pass
+        self.assertTrue(service.spawn_orphan_resume(30))
+        await service._orphan_pass
 
 
 class BootResumableListTests(unittest.IsolatedAsyncioTestCase):

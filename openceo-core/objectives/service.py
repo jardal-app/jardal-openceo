@@ -216,6 +216,7 @@ class ObjectiveService:
         # One deploy restart per process life (ticket #570): a spawned
         # restart kills this process in seconds, so the flag dies with it.
         self._deploy_spawned = False
+        self._orphan_pass: asyncio.Task | None = None
 
     def set_recovery_wake(self, wake: Any | None) -> None:
         """Inject the recovery scheduler wake (TASK-2026-00481)."""
@@ -580,6 +581,64 @@ class ObjectiveService:
                 summary["errors"].append(objective_id)
         summary["ok"] = True
         return summary
+
+    async def resume_orphaned_objectives(
+        self, *, idle_minutes: int = 30, limit: int = 100,
+    ) -> dict[str, Any]:
+        """One bounded liveness pass over active objectives (TASK-2026-00553).
+
+        Replans each active objective that nothing can move any more
+        (:func:`engine.resume_orphaned_one`); one objective never breaks
+        the pass for the rest.
+        """
+        if self._repo is None:
+            return {"ok": False, "reason": "no-store"}
+        idle_before = datetime.now(timezone.utc) - timedelta(
+            minutes=max(0, int(idle_minutes)))
+        summary: dict[str, Any] = {"replanned": [], "left": 0, "errors": []}
+        for row in await self._repo.list_active_objectives(limit=limit):
+            objective_id = str((row or {}).get("objective_id") or "")
+            project = str((row or {}).get("project") or "")
+            if not objective_id or not project \
+                    or not self._config.has_project(project):
+                continue
+            try:
+                result = await engine_mod.resume_orphaned_one(
+                    self.env_for(project), objective_id,
+                    idle_before=idle_before)
+            except Exception:  # noqa: BLE001 - isolated per objective
+                logger.warning("Orphan resume failed for %s", objective_id,
+                               exc_info=True)
+                summary["errors"].append(objective_id)
+                continue
+            if result.get("action") == "replan":
+                summary["replanned"].append(objective_id)
+            else:
+                summary["left"] += 1
+        summary["ok"] = True
+        return summary
+
+    def spawn_orphan_resume(self, idle_minutes: int = 30) -> bool:
+        """Start the liveness pass in background unless one still runs.
+
+        The heartbeat calls this: planner runs take minutes and must not
+        hold the mechanic lane. Returns whether a pass started.
+        """
+        if self._orphan_pass is not None and not self._orphan_pass.done():
+            return False
+
+        async def _pass() -> None:
+            try:
+                summary = await self.resume_orphaned_objectives(
+                    idle_minutes=idle_minutes)
+            except Exception:  # noqa: BLE001 - next heartbeat retries
+                logger.warning("Orphan resume pass failed", exc_info=True)
+                return
+            if summary.get("replanned") or summary.get("errors"):
+                logger.info("Orphan resume pass: %s", summary)
+
+        self._orphan_pass = asyncio.create_task(_pass())
+        return True
 
     # -- automatic recovery (TASK-2026-00481) ---------------------------
 

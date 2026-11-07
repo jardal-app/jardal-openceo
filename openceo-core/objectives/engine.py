@@ -1775,14 +1775,15 @@ async def _plan_objective_inner(
     planner_cfg = env.planner_cfg
     tickets = await env.tasks.list_by_objective(objective_id)
     active = _brake_active_children(tickets)
-    if len(tickets) >= int(cfg.get("max_tickets", 30)):
+    spent = len(_budget_children(tickets))
+    if spent >= int(cfg.get("max_tickets", 30)):
         # Cost brake, not an owner decision (TASK-2026-00118): no new
         # tickets are planned, but open work keeps running and the next
         # close re-triggers planning. With nothing open the objective
         # attempts completion instead of stalling.
         if active:
             return {"ok": False, "reason": "max_tickets_reached",
-                    "detail": f"{len(tickets)} lifetime tickets "
+                    "detail": f"{spent} lifetime tickets "
                               f"(max {cfg.get('max_tickets', 30)}); "
                               f"{len(active)} still open"}
         return await run_final_review(env, objective_id)
@@ -2711,7 +2712,7 @@ async def apply_approved_plan(
     cfg = env.objectives_cfg
     tickets = await env.tasks.list_by_objective(objective_id)
     active = _brake_active_children(tickets)
-    if len(tickets) >= int(cfg.get("max_tickets", 30)):
+    if len(_budget_children(tickets)) >= int(cfg.get("max_tickets", 30)):
         await env.objectives.patch_objective(
             objective_id, {"pending_plan": None})
         return {"ok": False, "reason": "max_tickets_reached",
@@ -3515,37 +3516,61 @@ def _work_children(
             and str(item.get("status") or "") != "converted"]
 
 
+#: Blockers that never release a dependent by themselves: the planner
+#: replaces work queued behind a failed one, and its next created tickets
+#: rewire a converted one's dependents (TASK-2026-00492).
+NON_RELEASING_BLOCKER_STATUS = frozenset({FAILED_HISTORY_STATUS, "converted"})
+
+
 def _is_dead_queued(
     by_id: Mapping[str, Mapping[str, Any]],
     item: Mapping[str, Any],
+    _visiting: frozenset[str] = frozenset(),
 ) -> bool:
-    """Queued work no live blocker can release: it can never run.
+    """Queued work no live blocker can release: only a new plan moves it.
 
-    Dead means at least one failed blocker and nothing else live:
-    released blockers (completed/cancelled) are already satisfied, so a
-    mix of failed + released is as dead as all-failed (TASK-2026-00534:
-    counting the mix as active wedged the recovery retry forever). The
-    dispatcher skips it (``_blocked``) while the planner replaces it
-    instead of unblocking it, so counting it as an open gap wedges final
-    review forever (TASK-2026-00396). Unknown or live blockers
-    (queued/waiting/running/converted/...) stay open gaps (fail-closed).
+    Dead means at least one non-releasing blocker (failed, converted or
+    itself dead-queued) and nothing else live: released blockers
+    (completed/cancelled) are already satisfied, so a mix with them is as
+    dead as the bare case (TASK-2026-00534). The dispatcher skips it
+    (``_blocked``), so counting it as in flight or as an open gap wedges
+    the objective: final review (TASK-2026-00396) and max_tickets, held
+    forever behind a converted blocker (TASK-2026-00553). Unknown or live
+    blockers and dependency cycles stay open (fail-closed).
     """
     if str(item.get("status") or "") != "queued":
         return False
     deps = item.get("blocked_by") or []
     if not deps:
         return False
-    seen_failed = False
+    visiting = _visiting | {str(item.get("task_id") or "")}
+    seen_dead = False
     for dep in deps:
         blocker = by_id.get(str(dep))
-        if blocker is None:
+        if blocker is None or str(dep) in visiting:
             return False
         status = str(blocker.get("status") or "")
-        if status == FAILED_HISTORY_STATUS:
-            seen_failed = True
-        elif status not in BLOCKER_RELEASED_STATUSES:
-            return False
-    return seen_failed
+        if status in BLOCKER_RELEASED_STATUSES:
+            continue
+        if (status in NON_RELEASING_BLOCKER_STATUS
+                or _is_dead_queued(by_id, blocker, visiting)):
+            seen_dead = True
+            continue
+        return False
+    return seen_dead
+
+
+def _budget_children(
+    tickets: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Children that spend the lifetime ``max_tickets`` budget.
+
+    A converted ticket is superseded, not work: its decomposition replaces
+    budget already admitted, and counting it refused the very substitutes
+    its dependents wait for (TASK-2026-00553).
+    """
+    return [item for item in tickets
+            if str(item.get("status") or "") != "converted"]
 
 
 def _brake_active_children(
@@ -3554,9 +3579,9 @@ def _brake_active_children(
     """In-flight children for the admission brake (TASK-2026-00406).
 
     Failed tickets are settled history (never slots), like terminal
-    ones, and dead-queued work (blocked only by failed blockers) can
-    never run: counting either wedges planning once history fills the
-    cap. Fail-closed: unknown or live blockers stay in flight.
+    ones, and dead-queued work (behind non-releasing blockers only) can
+    never run alone: counting either wedges planning once history fills
+    the cap. Fail-closed: unknown or live blockers stay in flight.
     """
     by_id = {str(item.get("task_id") or ""): item for item in tickets}
     return [item for item in tickets
@@ -3578,7 +3603,7 @@ def verify_delivery(
     failed child without acceptance criteria or expected artefacts)
     park it — no planner run can fix a closed ticket. Failed children
     are history (``failed_children``), never open gaps, and so is queued
-    work blocked only by failed-terminal blockers (``dead_children``).
+    work behind non-releasing blockers only (``dead_children``).
     No LLM is involved, ever.
     """
     work = _work_children(objective, children)
@@ -3851,6 +3876,41 @@ async def boot_resume_one(
             f"({action}): {call.get('reason')}.")
     plan = await plan_objective(env, objective_id)
     return {"ok": True, "action": action, "plan": plan}
+
+
+async def resume_orphaned_one(
+    env: ObjectiveEnv, objective_id: str, *, idle_before: datetime,
+) -> dict[str, Any]:
+    """Replan an active objective that no event can move (TASK-2026-00553).
+
+    Runtime twin of the boot resume, driven by the mechanic heartbeat:
+    the same deterministic call finds an ``active`` objective with no open
+    work and no data gap, which no close will ever re-trigger. An
+    objective with a plan in flight or activity after ``idle_before`` is
+    left alone, and the final-review budget is kept: only a boot starts a
+    fresh episode.
+    """
+    objective = await env.objectives.get_objective(objective_id)
+    if objective is None or str(objective.get("status") or "") != "active":
+        return {"ok": True, "action": "leave", "reason": "not active"}
+    flight = _PLAN_FLIGHTS.get(objective_id)
+    if flight is not None and not flight.task.done():
+        return {"ok": True, "action": "leave", "reason": "plan in flight"}
+    touched = recovery_mod.parse_due(objective.get("updated_at"))
+    if touched is not None and touched > idle_before:
+        return {"ok": True, "action": "leave", "reason": "recent activity"}
+    call = boot_resume_decision(
+        objective, await env.tasks.list_by_objective(objective_id))
+    if call.get("action") != "resume_fresh":
+        return {"ok": True, "action": "leave",
+                "reason": str(call.get("reason") or "")}
+    if env.notify is not None:
+        await env.notify(
+            _notify_ref(objective),
+            f"Objective {objective_id} replanned by the heartbeat: nothing "
+            "in flight and no event pending (orphaned cycle).")
+    plan = await plan_objective(env, objective_id)
+    return {"ok": True, "action": "replan", "plan": plan}
 
 
 async def _run_routed_reviewer(

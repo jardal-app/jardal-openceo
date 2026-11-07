@@ -2,6 +2,15 @@
 
 Resumen operativo corto del estado real del repo.
 
+## 2026-11-07 — Objetivos sin deadlock por tope o dependencia muerta (TASK-2026-00553)
+
+- Orden del Owner: «corrige todo lo que me decías», tras el diagnóstico de OBJ-E7A67DBA (misión MIS-8C06FB6C). Estaba parado desde el 06-nov 14:40: un Tier S convertido por tamaño dejó a su dependiente esperando sustitutos que el tope de 20 tickets no dejaba planificar. Además, el freno contaba a ese dependiente como trabajo vivo y difería para siempre.
+- **Motor:** los tickets `converted` no gastan el presupuesto de vida (`max_tickets`). El trabajo encolado solo tras bloqueadores que nunca liberan (failed, converted o, de forma transitiva, otro encolado muerto) no ocupa slot ni es hueco abierto. Es un cambio deliberado del contrato de 00534 para `converted`.
+- **Liveness:** un objetivo `active` sin trabajo abierto ni planner en vuelo se replanifica en el arranque y, en tiempo de ejecución, desde el latido del mecánico (`ObjectiveService.spawn_orphan_resume`, 0 tokens salvo replan).
+- **Mecánico:** el latido lee en una sola consulta acotada los tickets waiting y los queued con `blocked_by`. Una dependencia failed, converted o inexistente que pasa de 24 h es `long_wait` y admite acciones de estado.
+- **jardal-erp:** `budget_exclude` para `pnpm-lock.yaml` y `*/drizzle/meta/*`. Los tres frenos de tamaño del objetivo eran archivos generados: 961, 524 y 542 líneas de 1055, 922 y 1026.
+- **CEO:** el resumen de cada misión lleva el `roadmap_remaining`/`deferred` de su último objetivo cerrado, para que el siguiente tramo no arranque sin el plan.
+
 ## 2026-11-06 — Excepciones atendidas por agentes (TASK-2026-00536)
 
 El mecánico puede delegar el mismo ticket con diagnóstico y checkpoint a su agente; la receta exacta cede al criterio del agente y conserva los permisos. Los errores inesperados de YAML, del planner y del grafo pasan al mismo manejador; se retiró el backoff 5/15/30 del pedido. El detector cubre escrituras de espera del servicio y motivos alternantes; la atención pendiente se conserva frente a límites y reinicios. Los detalles y el estado de entrega se mantienen en el ticket; contrato en `docs/ARCHITECTURE_REFERENCE_2026.md` §Engine mechanic. La consulta de cuotas ejecuta comandos y captura de tmux fuera del event loop; sus esperas de arranque no congelan HTTP ni el kernel.

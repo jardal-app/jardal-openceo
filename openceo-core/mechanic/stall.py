@@ -89,6 +89,26 @@ def self_healing_wait(reason: Any) -> bool:
     return str(reason or "").strip().startswith(SELF_HEALING_PREFIXES)
 
 
+#: Blocker states that never release a dependent; a missing blocker reads
+#: as ``None`` and never releases either.
+DEAD_BLOCKER_STATUSES = frozenset({"failed", "converted"})
+
+
+def dead_dependencies(blocked_by: Any,
+                      statuses: Mapping[str, str | None]) -> list[str]:
+    """Blockers that will never release the ticket, as ``id (status)``.
+
+    A dependency hold heals only while each unreleased blocker can still
+    finish; one dead blocker makes the hold permanent (TASK-2026-00553).
+    """
+    dead: list[str] = []
+    for dep in blocked_by or []:
+        status = statuses.get(str(dep))
+        if status is None or status in DEAD_BLOCKER_STATUSES:
+            dead.append(f"{dep} ({status or 'missing'})")
+    return dead
+
+
 def next_streak(previous: Any, reason: Any, now: datetime, *,
                 gap: timedelta) -> dict[str, Any]:
     key = wait_key(reason)

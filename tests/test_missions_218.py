@@ -709,6 +709,21 @@ class MissionPromptTests(unittest.TestCase):
         self.assertIn("open (deadline 2026-10-15)", section)
         self.assertIn("cost: ", section)
 
+    def test_missions_section_hands_over_the_closed_tramo(self) -> None:
+        # TASK-2026-00553: the roadmap of a closed objective reaches the
+        # pedido of the next one.
+        section = _missions_section(CEOSignals(missions=[_mission_signal(
+            last_closed={"objective_id": "OBJ-1",
+                         "roadmap_remaining": ["Tramo 2: criterios 6-14"],
+                         "deferred": ["walkthrough cruzado"]})]))
+        self.assertIn("last closed OBJ-1 left:", section)
+        self.assertIn("roadmap_remaining: Tramo 2: criterios 6-14", section)
+        self.assertIn("deferred: walkthrough cruzado", section)
+        quiet = _missions_section(CEOSignals(missions=[_mission_signal(
+            last_closed={"objective_id": "OBJ-1",
+                         "roadmap_remaining": [], "deferred": []})]))
+        self.assertNotIn("last closed", quiet)
+
     def test_missions_section_empty_and_unknown(self) -> None:
         self.assertIn("(none active)",
                       _missions_section(CEOSignals()))
@@ -729,6 +744,35 @@ class MissionPromptTests(unittest.TestCase):
         self.assertIn("close_mission", prompt)
         self.assertIn("mission_id", prompt)
         self.assertNotIn("one of the four", prompt)
+
+
+class MissionDigestHandoffTests(unittest.IsolatedAsyncioTestCase):
+    async def test_digest_carries_the_last_closed_roadmap(self) -> None:
+        from ceo.review import _mission_digest
+
+        objectives = {
+            "OBJ-1": {"objective_id": "OBJ-1", "status": "closed",
+                      "roadmap_remaining": ["viejo"]},
+            "OBJ-2": {"objective_id": "OBJ-2", "status": "closed",
+                      "roadmap_remaining": ["x" * 400, "Tramo 3"],
+                      "deferred": ["walkthrough"]},
+            "OBJ-3": {"objective_id": "OBJ-3", "status": "active",
+                      "roadmap_remaining": ["vivo"]},
+        }
+        env = SimpleNamespace(
+            objectives=SimpleNamespace(get_objective=AsyncMock(
+                side_effect=lambda oid: objectives.get(oid))),
+            tasks=SimpleNamespace(list_by_objective=AsyncMock(return_value=[]),
+                                  get_task=AsyncMock(return_value=None)))
+        digest = await _mission_digest(env, {  # type: ignore[arg-type]
+            "mission_id": "MIS-1", "project": "shop", "goal": "g",
+            "status": "active", "acceptance": [],
+            "objectives": [{"objective_id": oid} for oid in objectives]})
+        handoff = digest["last_closed"]
+        self.assertEqual(handoff["objective_id"], "OBJ-2")
+        self.assertEqual(handoff["roadmap_remaining"][1], "Tramo 3")
+        self.assertLessEqual(len(handoff["roadmap_remaining"][0]), 160)
+        self.assertEqual(handoff["deferred"], ["walkthrough"])
 
 
 class MissionGuideTests(unittest.IsolatedAsyncioTestCase):

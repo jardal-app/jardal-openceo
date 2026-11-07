@@ -305,6 +305,7 @@ mechanic_service = MechanicService(
     checkout_ready=lambda: (live_checkout_ready()
                             and not objective_planning_in_flight()),
     spawn_restart=spawn_service_restart,
+    objective_liveness=objective_service.spawn_orphan_resume,
 )
 task_service.set_mechanic_wake(mechanic_service.wake)
 # Ticket research bridge (TASK-2026-00222): per-ticket consumers over the

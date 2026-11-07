@@ -147,6 +147,15 @@ class _FakeRepo:
         return [t for t in self.rows.values()
                 if t["status"] == status.value][:limit]
 
+    async def list_heartbeat_tasks(self, limit: int = 500) -> list[dict]:
+        if self.fail_lists:
+            raise RuntimeError("store down")
+        self.list_calls += 1
+        return [t for t in self.rows.values()
+                if t["status"] == TaskStatus.WAITING.value
+                or (t["status"] == TaskStatus.QUEUED.value
+                    and t.get("blocked_by"))][:limit]
+
     async def patch_task(self, task_id: str, updates: dict) -> dict | None:
         task = self.rows.get(task_id)
         if task is None:

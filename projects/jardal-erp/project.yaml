@@ -22,6 +22,11 @@ dev:
   # the engine delivers to origin/main and never touches production.
   deploy:
     mode: none
+  # Machine-written files never count toward the size budget (TASK-2026-00553):
+  # the lockfile and drizzle-kit snapshots tripped the 800-line brake alone.
+  budget_exclude:
+    - "pnpm-lock.yaml"
+    - "*/drizzle/meta/*"
   create_pr: true
   providers:
     muse:

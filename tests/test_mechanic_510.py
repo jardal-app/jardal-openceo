@@ -426,6 +426,11 @@ class _Repo:
     async def list_tasks_by_status(self, status, limit=200):
         return [t for t in self.rows.values() if t["status"] == status.value]
 
+    async def list_heartbeat_tasks(self, limit=500):
+        return [t for t in self.rows.values()
+                if t["status"] == "waiting"
+                or (t["status"] == "queued" and t.get("blocked_by"))][:limit]
+
     async def patch_task(self, task_id: str, updates: dict):
         task = self.rows[task_id]
         for key, value in updates.items():
@@ -539,6 +544,82 @@ def test_heartbeat_clock_ignores_mirror_writes(tmp_path: Path) -> None:
     assert [(f.task_id, f.trigger) for f in found] == [("synced", "stale_wait")]
     assert last_activity({"steps": [{"timestamp": "2026-11-05 21:37:36.112000"}]}) \
         == datetime(2026, 11, 5, 21, 37, 36, 112000, tzinfo=timezone.utc)
+
+
+def _held(task_id: str, blockers: list[str], hours: int = 30, **over) -> dict:
+    return _task(task_id, status="queued", blocked_by=blockers,
+                 waiting_reason=f"blocked_by: {','.join(blockers)}",
+                 updated_at=NOW - timedelta(hours=hours), **over)
+
+
+def _blockers() -> list[dict]:
+    return [_task("f1", status="failed"), _task("c1", status="converted"),
+            _task("r1", status="in_progress"), _task("d1", status="completed")]
+
+
+def test_heartbeat_finds_queued_holds_on_dead_dependencies(tmp_path: Path) -> None:
+    # TASK-2026-00553: dependency holds stay queued, so a waiting-only scan
+    # never saw a blocker that can no longer close (live OBJ-E7A67DBA).
+    repo = _Repo(_blockers() + [
+        _held("on_failed", ["f1"]),
+        _held("on_converted", ["d1", "c1"]),
+        _held("on_missing", ["gone"]),
+        _held("on_live", ["r1"]),
+        _held("fresh", ["f1"], hours=3),
+        _held("legacy", ["f1"], autorun=None),
+        _held("ancient", ["f1"], hours=24 * 30),
+        _task("free", status="queued", updated_at=NOW - timedelta(hours=30)),
+    ])
+    service, _ = _service(tmp_path, repo, [])
+    found = asyncio.run(service.heartbeat_scan(NOW, service.config()))
+    assert {(f.task_id, f.trigger) for f in found} == {
+        ("on_failed", "long_wait"), ("on_converted", "long_wait"),
+        ("on_missing", "long_wait")}
+    detail = {f.task_id: f.detail for f in found}
+    assert detail["on_converted"] == "blocked_by: c1 (converted)"
+    assert detail["on_missing"] == "blocked_by: gone (missing)"
+
+
+def test_dead_dependency_hold_takes_state_actions(tmp_path: Path) -> None:
+    repo = _Repo(_blockers() + [_held("q1", ["f1"]), _held("q2", ["r1"])])
+    verdict = {"summary": "dependencia muerta", "diagnosis": "f1 falló",
+               "actions": [{"kind": "fail", "task_id": "q1",
+                            "text": "el planner lo reemplaza"}]}
+    service, deps = _service(tmp_path, repo, [verdict])
+    service.wake("q1", "long_wait", "blocked_by: f1 (failed)")
+    service.wake("q2", "long_wait", "blocked_by: r1")
+    asyncio.run(service.tick())
+    assert len(deps.executor.prompts) == 1
+    assert "q2:" not in deps.executor.prompts[0]
+    assert repo.rows["q1"]["status"] == "failed"
+    assert repo.rows["q2"]["status"] == "queued"
+
+
+def test_runner_rechecks_the_dependency_hold() -> None:
+    rows = {"q1": {"task_id": "q1", "status": "queued", "blocked_by": ["b1"]},
+            "b1": {"task_id": "b1", "status": "converted"}}
+    tasks_get = AsyncMock(side_effect=lambda task_id: rows.get(task_id))
+    runner, deps = _runner()
+    deps.tasks.get_task = tasks_get
+    assert _apply(runner, kind="fail", task_id="q1", text="x")["ok"]
+    rows["b1"]["status"] = "completed"
+    outcome = _apply(runner, kind="fail", task_id="q1", text="x")
+    assert not outcome["ok"]
+    assert "no longer an unattended wait" in outcome["detail"]
+
+
+def test_heartbeat_starts_the_objective_liveness_pass(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path, _Repo([]), [], stale_wait_minutes=45)
+    liveness = MagicMock(side_effect=[True, RuntimeError("boom")])
+    service._objective_liveness = liveness
+    asyncio.run(service.tick())
+    liveness.assert_called_once_with(45)
+    asyncio.run(service.tick())
+    assert liveness.call_count == 1
+    repo_state = service._repo["mechanic_state"].state
+    repo_state["heartbeat"]["next_heartbeat"] = NOW - timedelta(minutes=1)
+    assert asyncio.run(service.tick())["ran"] == 0
+    assert liveness.call_count == 2
 
 
 def test_run_applies_verdict_comments_and_records(tmp_path: Path) -> None:
