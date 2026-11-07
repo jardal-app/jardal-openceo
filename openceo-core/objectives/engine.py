@@ -100,6 +100,9 @@ class ObjectiveErp(Protocol):
     async def set_dependencies(
         self, identifier: str, depends_on: list[str]) -> dict[str, Any]: ...
 
+    async def thread_of(
+        self, task_name: str, *, limit: int = 20) -> dict[str, Any]: ...
+
 
 class ObjectiveRejected(ValueError):
     """The objective was refused deterministically (bad input, no capacity)."""
@@ -1037,6 +1040,7 @@ def _agents_section(
                     f"{head}: DISABLED ({reason}) — never route here")
     lines.append("Never invent an agent. If no enabled agent can do required "
                  "work, return capability_gap with no tickets.")
+    lines.append(_AGENT_REACH)
     if skills_md.strip():
         lines.extend(["", skills_md.strip()])
     staged = {name: str(path) for name, path in (detail_paths or {}).items()
@@ -1093,6 +1097,202 @@ _EMPTY_DIFF_FIELD_LINES = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Planner memory: business record, objective notes, agent reach (00571)
+# ---------------------------------------------------------------------------
+
+#: Heads of the comments OpenCEO posts by itself (engine notices, mechanic,
+#: return notes): they echo its own conclusions and are never evidence.
+AUTOMATED_NOTE_HEADS = (
+    "Objective ", "Planner ", "Ticket converted to objective",
+    "Ticket decomposes inside objective", "Plan aprobado",
+    "El plan retenido", "Gasto aprobado", "objective trigger failed",
+    "[mecánico", "Agent ", "Ticket failed without verdict",
+)
+OBJECTIVE_NOTES_MAX = 6
+OBJECTIVE_NOTES_SCAN = 60
+CLOSED_CHILDREN_MAX = 15
+
+_AGENT_REACH = (
+    "BUSINESS-RECORD REACH (enforced by each agent's badge, not by the "
+    "prompt): an AI agent reads, comments and attaches only on its OWN "
+    "ticket and searches only its own project. Work that must read or "
+    "write OTHER business tickets (publish comments, change states, paste "
+    "texts into another ticket) is Owner work: return blocked with the "
+    "exact Owner action, or propose a boundary tool when it should become "
+    "automatable. Never route it to an AI agent.")
+
+
+def _ticket_mirror(ticket: Mapping[str, Any]) -> Mapping[str, Any]:
+    params = ticket.get("params")
+    if not isinstance(params, Mapping):
+        return {}
+    mirror = business_mirror(params.get("_mirrors") or {})
+    return mirror if isinstance(mirror, Mapping) else {}
+
+
+def business_decision(ticket: Mapping[str, Any]) -> dict[str, str] | None:
+    """The human business decision that closed a child, if any.
+
+    Both human channels audit it on the business mirror: an Owner
+    session's ``openceo_transition_ticket`` (reason + evidence) and a
+    close in the Jardal ERP desk (``channel: desk``). The agent cycle
+    never writes it.
+    """
+    transition = _ticket_mirror(ticket).get("transition")
+    if not isinstance(transition, Mapping):
+        return None
+    target = str(transition.get("to") or "")
+    if target not in ("Completed", "Cancelled") \
+            or target.lower() != str(ticket.get("status") or ""):
+        return None
+    channel = "ERP desk" if transition.get("channel") == "desk" \
+        else "Owner session"
+    return {"to": target, "at": str(transition.get("at") or "")[:16],
+            "channel": channel,
+            "reason": str(transition.get("reason") or "").strip(),
+            "evidence": str(transition.get("evidence") or "").strip()}
+
+
+def business_completion(ticket: Mapping[str, Any]) -> str:
+    """Evidence of a completion a person decided in the business, or ``""``.
+
+    Jardal ERP business status is authoritative: work a person closed as
+    Completed is delivered, with no agent verdict behind it.
+    """
+    decision = business_decision(ticket)
+    if decision is None or decision["to"] != "Completed":
+        return ""
+    return decision["evidence"] or decision["reason"] \
+        or f"closed in the {decision['channel']}"
+
+
+def _closed_at(ticket: Mapping[str, Any]) -> datetime:
+    moment = recovery_mod.parse_due(
+        ticket.get("completed_at") or ticket.get("updated_at"))
+    return moment or datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _closed_child_line(ticket: Mapping[str, Any],
+                       logged: Mapping[str, Any] | None) -> str:
+    params = ticket.get("params")
+    params = params if isinstance(params, Mapping) else {}
+    number = ticket.get("ticket_number")
+    ref = str(_ticket_mirror(ticket).get("name") or "") \
+        or (f"#{number}" if number else str(ticket.get("task_id") or "")[:8])
+    who = str(params.get("target_agent") or ticket.get("agent_hint")
+              or ticket.get("agent") or "?")
+    if ticket.get("coding_tool"):
+        who += f"/{ticket['coding_tool']}"
+    status = str(ticket.get("status") or "")
+    decision = business_decision(ticket)
+    if decision is not None:
+        label = (f"{status.upper()} by business decision "
+                 f"({decision['channel']} {decision['at']})")
+        detail = decision["reason"]
+        if decision["evidence"]:
+            detail += f" | evidence: {decision['evidence']}"
+    elif status == "cancelled":
+        label, detail = "CANCELLED", str(ticket.get("error") or "")
+    else:
+        verdict = params.get("agent_result")
+        label = "COMPLETED"
+        detail = str((logged or {}).get("evidencia")
+                     or (verdict.get("evidencia")
+                         if isinstance(verdict, Mapping) else "")
+                     or ticket.get("last_response_summary") or "")
+    detail = " ".join(detail.split())[:400] or "(no detail recorded)"
+    return (f"- {ref} {str(ticket.get('title') or '')[:140]} [{who}] "
+            f"{label}: {detail}")
+
+
+def closed_children_lines(
+    objective: Mapping[str, Any],
+    tickets: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Completed and cancelled children, newest last, whoever closed them."""
+    shell = str(objective.get("conversion_source_task_id") or "")
+    logged = {str(entry.get("task_id") or ""): entry
+              for entry in objective.get("tickets_log") or []
+              if isinstance(entry, Mapping)}
+    closed = sorted(
+        (item for item in tickets
+         if str(item.get("status") or "") in ("completed", "cancelled")
+         and str(item.get("task_id") or "") != shell),
+        key=_closed_at)
+    return [_closed_child_line(item, logged.get(str(item.get("task_id"))))
+            for item in closed[-CLOSED_CHILDREN_MAX:]]
+
+
+def superseded_returns(
+    objective: Mapping[str, Any],
+    tickets: Sequence[Mapping[str, Any]],
+) -> dict[str, str]:
+    """Returned tickets a later close settled: their return is history."""
+    returned = {str(entry.get("task_id") or "")
+                for entry in objective.get("planner_returns") or []
+                if isinstance(entry, Mapping)}
+    settled: dict[str, str] = {}
+    for item in tickets:
+        task_id = str(item.get("task_id") or "")
+        status = str(item.get("status") or "")
+        if task_id not in returned or status not in ("completed", "cancelled"):
+            continue
+        decision = business_decision(item)
+        why = (decision or {}).get("reason") or (
+            str(item.get("error") or "") if status == "cancelled" else "")
+        why = " ".join(why.split())[:160]
+        settled[task_id] = f"since {status}" + (f": {why}" if why else "")
+    return settled
+
+
+def repeated_boundary_denials(
+    objective: Mapping[str, Any], denials: Sequence[str],
+) -> list[str]:
+    """Denials an earlier return of this objective already hit.
+
+    A badge does not widen by replanning: the same refusal on a second
+    ticket means the need is outside every agent's reach.
+    """
+    seen = {str(item) for entry in objective.get("planner_returns") or []
+            if isinstance(entry, Mapping)
+            for item in entry.get("denials") or []}
+    return [item for item in denials if item in seen]
+
+
+async def objective_notes(
+    env: ObjectiveEnv, objective: Mapping[str, Any],
+) -> list[str]:
+    """Comments on the objective ticket written by people, newest last.
+
+    Fail-soft: without the business reader or on any error the planner
+    plans without notes, as before.
+    """
+    reader = getattr(getattr(env, "erp", None), "thread_of", None)
+    name = str(objective.get("erp_group_ref") or "").strip()
+    if reader is None or not name:
+        return []
+    try:
+        thread = await reader(name, limit=OBJECTIVE_NOTES_SCAN)
+    except Exception:  # noqa: BLE001 - notes enrich, never block planning
+        logger.warning("objective notes unreadable for %s", name,
+                       exc_info=True)
+        return []
+    rows = thread.get("comments") if isinstance(thread, Mapping) else None
+    notes: list[str] = []
+    for row in rows or []:
+        if not isinstance(row, Mapping):
+            continue
+        text = " ".join(str(row.get("content") or "").split())
+        if not text or text.startswith(AUTOMATED_NOTE_HEADS):
+            continue
+        when = str(row.get("createdAt") or row.get("creation") or "")[:16]
+        notes.append(f"- {when} {text[:700]}")
+        if len(notes) >= OBJECTIVE_NOTES_MAX:
+            break
+    return list(reversed(notes))
+
+
 def _planner_prompt(
     objective: Mapping[str, Any],
     capsule_text: str,
@@ -1116,12 +1316,19 @@ def _planner_prompt(
     parked_md: str = "",
     mission_md: str = "",
     sizing_path: str = "",
+    closed_children: Sequence[str] = (),
+    superseded: Mapping[str, str] | None = None,
+    notes: Sequence[str] = (),
+    group_ref: str = "",
 ) -> str:
     """Planner prompt: bounded state + JSON contract (self-contained).
 
     The prompt carries the full ``PlannerResult`` shape inline: the planner
     runs in the project repo and cannot rely on reading OpenCEO sources.
+    Closed children, settled returns and the objective notes are the
+    business memory (TASK-2026-00571): every replan starts from them.
     """
+    settled = dict(superseded or {})
     criteria = [f"- {item}" for item in (objective.get("anchor") or {}).get(
         "acceptance", [])] or ["- (derive verifiable criteria)"]
 
@@ -1147,10 +1354,17 @@ def _planner_prompt(
         if not isinstance(item, Mapping):
             return "- (unreadable return entry)"
         need = str(item.get("necesidad") or "").strip() or "-"
-        return (f"- {item.get('title')} [{item.get('agent')}/"
+        line = (f"- {item.get('title')} [{item.get('agent')}/"
                 f"{item.get('resultado')}]: "
                 f"{str(item.get('motivo') or '')[:300]} | "
                 f"Necesidad: {need[:200]}")
+        denials = [str(entry) for entry in item.get("denials") or []]
+        if denials:
+            line += f" | Badge denied: {'; '.join(denials)[:300]}"
+        settled_as = settled.get(str(item.get("task_id") or ""))
+        if settled_as:
+            line += f" | SUPERSEDED, {settled_as}"
+        return line
 
     opened = [_ticket_line(item) for item in open_tickets] or ["- (none)"]
     blocked = [_ticket_line(item) for item in blocked_tickets] or ["- (none)"]
@@ -1176,6 +1390,19 @@ def _planner_prompt(
         "CAPSULE (compiled state):",
         capsule_text or "(empty: first planning)",
         "",
+        "CLOSED CHILDREN (business record, newest last; terminal evidence",
+        "whoever closed them: agent cycle, Owner session or ERP desk).",
+        "Never plan again what a completed child delivered; a cancelled",
+        "child's reason binds (e.g. a duplicate). Rework names a new",
+        "defect in the delivery, never the same goal again:",
+        *(list(closed_children) or ["- (none)"]),
+        "",
+        "OBJECTIVE NOTES (comments by people on the objective ticket"
+        + (f" {group_ref}" if group_ref else "") + ", newest last; engine",
+        "notices left out). Terminal evidence: what a note reports done or",
+        "decided is done, and its scope decisions bind this plan:",
+        *(list(notes) or ["- (none)"]),
+        "",
         "OPEN TICKETS:",
         *opened,
         "",
@@ -1193,7 +1420,9 @@ def _planner_prompt(
         *(failures or ["- (none)"]),
         "",
         "AGENT RETURNS (latest last; relaunch with guidance in the ticket",
-        "description, reassign, split, or return capability_gap):",
+        "description, reassign, split, or return capability_gap; a",
+        "SUPERSEDED return was settled by a later close and is history;",
+        "a badge denial never clears by replanning: see the reach rule):",
         *(returns or ["- (none)"]),
         "",
         "INBOX (pre-existing findings touching objective files, "
@@ -1228,10 +1457,14 @@ def _planner_prompt(
         lines.extend([
             "",
             "RECOVERY CONTEXT: the objective was parked and this planning",
-            "run is an automatic retry (bounded, no Owner action). Plan",
-            "differently from the attempt that parked it: split, change the",
-            "approach, or use another available agent/tier. Do not repeat",
-            "the same ticket unchanged.",
+            "run is an automatic re-check (bounded). First test the park",
+            "against the evidence above (closed children, objective notes,",
+            "agent returns): if it is resolved, continue, or declare",
+            "complete_candidate when the acceptance is met. If it still",
+            "needs a human, return blocked with the exact Owner action. Only",
+            "a failed approach changes (split, another agent or tier); never",
+            "repeat a ticket unchanged and never hand an AI agent work its",
+            "reach denies.",
             parked_md.strip(),
         ])
     lines.extend([
@@ -1370,8 +1603,9 @@ def _planner_prompt(
         "triggers final review, it",
         "never closes the objective directly. Every ticket has one",
         "responsibility and fits one bounded execution cycle. No",
-        "duplicate of an open ticket. Then emit PLANNER_READY in",
-        f"{SCRATCH_DIRNAME}/status.",
+        "duplicate of an open ticket, of a closed child's delivered goal",
+        "or of work an objective note reports done. Then emit",
+        f"PLANNER_READY in {SCRATCH_DIRNAME}/status.",
     ])
     if policy_text.strip():
         lines.extend(["", "NORMATIVE ROUTING POLICY (authoritative):",
@@ -1505,6 +1739,7 @@ async def record_planner_return(
     resultado: str = "",
     motivo: str = "",
     necesidad: str = "",
+    denials: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Record an agent verdict returned to the planner (TASK-2026-00202).
 
@@ -1513,12 +1748,13 @@ async def record_planner_return(
     planner relaunches with guidance, reassigns, splits or returns
     capability_gap. Unlike material failures this feeds no retry rule:
     the single return is enforced by the ``returns_from`` tag on the
-    relaunched tickets. Returns the entry ({} when missing).
+    relaunched tickets. ``denials`` are the exact badge refusals of the
+    run (TASK-2026-00571). Returns the entry ({} when missing).
     """
     objective = await objectives.get_objective(objective_id)
     if objective is None:
         return {}
-    entry = {
+    entry: dict[str, Any] = {
         "task_id": str(task_id or ""),
         "title": str(title or "").strip()[:300],
         "agent": str(agent or ""),
@@ -1527,6 +1763,8 @@ async def record_planner_return(
         "necesidad": str(necesidad or "")[:500],
         "at": _utcnow_iso(),
     }
+    if denials:
+        entry["denials"] = [str(item)[:200] for item in list(denials)[:10]]
     returns = list(objective.get("planner_returns") or [])
     returns.append(entry)
     await objectives.patch_objective(objective_id, {"planner_returns": returns})
@@ -1865,6 +2103,7 @@ async def _plan_objective_inner(
     agent_staged = _stage_agent_details(scratch, agent_catalog) \
         if agent_catalog is not None else []
     sizing_path = stage_sizing_hint(scratch, str(objective.get("sizing_hint") or ""))
+    notes = await objective_notes(env, objective)
     prompt = _planner_prompt(
         objective, (objective.get("capsule") or {}).get("text", ""),
         ready, inbox_md or "INBOX\n(none)\n", deferred,
@@ -1891,7 +2130,11 @@ async def _plan_objective_inner(
         playbooks_md=playbooks_md,
         parked_md=parked_md,
         sizing_path=sizing_path,
-        mission_md=mission_md)
+        mission_md=mission_md,
+        closed_children=closed_children_lines(objective, tickets),
+        superseded=superseded_returns(objective, tickets),
+        notes=notes,
+        group_ref=str(objective.get("erp_group_ref") or ""))
     timeout_s = int(planner_cfg.get("timeout_minutes", 15)) * 60
     errors: list[str] = []
     result: planner_mod.PlannerResult | None = None
@@ -3214,9 +3457,14 @@ class TicketCloseContext:
     decisions: list[str] = field(default_factory=list)
     handoff_excerpt: str = ""
     evidencia: str = ""
+    # A person closed it in the business (Owner session or ERP desk).
+    business: bool = False
 
 
-def _park_resumes_on_close(objective: Mapping[str, Any]) -> bool:
+def _park_resumes_on_close(
+    objective: Mapping[str, Any],
+    close: TicketCloseContext | None = None,
+) -> bool:
     """Which waiting parks a completed child close resumes (00430, #606).
 
     capability_gap parks always resume: the completion is terminal
@@ -3226,8 +3474,10 @@ def _park_resumes_on_close(objective: Mapping[str, Any]) -> bool:
     spent: its retry trigger is gone, boot leaves it, and a free-text
     Owner wait (prod flag, restart, ERP paste) emits no event the
     engine sees, so without the close it strands even after the Owner
-    acted (#606: OBJ-8E2257EF). Each close fires once, so a resume
-    consumes a distinct completion and the loop stays bounded.
+    acted (#606: OBJ-8E2257EF). A child a person closed in the business
+    is that Owner event, so it resumes any blocked park
+    (TASK-2026-00571). Each close fires once, so a resume consumes a
+    distinct completion and the loop stays bounded.
     """
     if objective.get("status") != "waiting":
         return False
@@ -3236,6 +3486,8 @@ def _park_resumes_on_close(objective: Mapping[str, Any]) -> bool:
         return True
     if waiting_reason.partition(":")[0].strip() != "blocked":
         return False
+    if close is not None and close.business:
+        return True
     recovery = objective.get("recovery")
     return isinstance(recovery, Mapping) and recovery.get("exhausted") is True
 
@@ -3277,7 +3529,15 @@ async def on_ticket_closed(
                 return await _await_recovery_deploy(
                     env, objective, ticket, close)
         if objective.get("status") != "active":
-            if not (_park_resumes_on_close(objective) or is_recovery_ticket):
+            if not (_park_resumes_on_close(objective, close)
+                    or is_recovery_ticket):
+                if close is not None and objective.get("status") == "waiting":
+                    # A park never drops memory (TASK-2026-00571): the
+                    # capsule and the final review read this close later.
+                    await _absorb_close(env, objective, close)
+                    await _recompile_capsule(
+                        env, await env.objectives.get_objective(objective_id)
+                        or objective)
                 return {"ok": True, "action": "objective-not-active"}
             await env.objectives.patch_objective(objective_id, {
                 "status": "active", "waiting_reason": None})
@@ -3286,7 +3546,7 @@ async def on_ticket_closed(
                     _notify_ref(objective),
                     f"Objective {objective_id} resumed: child evidence "
                     "arrived while parked ("
-                    f"{'recovery ticket' if is_recovery_ticket else 'capability_gap'}).")
+                    f"{'recovery ticket' if is_recovery_ticket else recovery_mod.park_reason(objective)}).")
             objective = await env.objectives.get_objective(objective_id) \
                 or objective
         # A child close (including a recovery ticket) is progress: the next
@@ -3680,7 +3940,9 @@ async def verify_evidence(
     Every non-dev delivery needs a deterministic domain runner:
     cancelled/failed children are history (never proof, never required),
     dev work verifies through the reviewer pool, and each completed
-    non-dev child must clear its domain verifier. Missing verifiers and
+    non-dev child must clear its domain verifier — unless a person closed
+    it as Completed in the business, which is the delivery verdict
+    (``verified_by`` ``business``, TASK-2026-00571). Missing verifiers and
     failed evidence park the objective (capability_gap / data_gaps in
     ``run_final_review``); an empty ``verified`` map means the acceptance
     has no coverage. No LLM is involved, ever.
@@ -3697,6 +3959,9 @@ async def verify_evidence(
             # layer already routed those): never evidence.
             continue
         if _is_dev_ticket(item):
+            continue
+        if business_completion(item):
+            verified[short] = "business"
             continue
         domain = _delivery_domain(item)
         verifier = runs.get(domain)

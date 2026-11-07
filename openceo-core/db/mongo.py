@@ -321,6 +321,11 @@ class MongoRepository:
             [("objective_id", ASCENDING), ("status", ASCENDING)],
             name="idx_tasks_objective",
         )
+        # An agent return reads its run's badge refusals (TASK-2026-00571).
+        await self.db["mcp_calls"].create_index(
+            [("ticket", ASCENDING), ("ok", ASCENDING)],
+            name="idx_mcp_calls_ticket_ok",
+        )
         await self.tier_s_runs.create_index(
             [("active_repo", ASCENDING)], unique=True,
             partialFilterExpression={"active_repo": {"$type": "string"}},

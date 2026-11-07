@@ -76,6 +76,10 @@ class ObjectiveErpAdapter:
         self, identifier: str, depends_on: list[str]) -> dict[str, Any]:
         return await self._adapter.set_dependencies(identifier, depends_on)
 
+    async def thread_of(
+        self, task_name: str, *, limit: int = 20) -> dict[str, Any]:
+        return await self._adapter.thread_of(task_name, limit=limit)
+
 
 def erp_for_task_service(task_service: Any) -> ObjectiveErpAdapter | None:
     """ObjectiveErp view of a TaskService, or None when ERP is unavailable."""
@@ -1157,19 +1161,41 @@ ACEPTACIÓN
         if not project or not self._config.has_project(project):
             return {"ok": False, "reason": "unknown-project"}
         env = self.env_for(project)
-        await engine_mod.record_planner_return(
+        await self._record(env, objective_id, entry)
+        if str(objective.get("status") or "") != "active":
+            return {"ok": False, "reason": "objective-not-active"}
+        return await engine_mod.plan_objective(
+            env, objective_id,
+            return_from=str(entry.get("task_id") or "") or None)
+
+    @staticmethod
+    async def _record(env: ObjectiveEnv, objective_id: str,
+                      entry: Mapping[str, Any]) -> dict[str, Any]:
+        return await engine_mod.record_planner_return(
             env.objectives, objective_id,
             task_id=str(entry.get("task_id") or ""),
             title=str(entry.get("title") or ""),
             agent=str(entry.get("agent") or ""),
             resultado=str(entry.get("resultado") or ""),
             motivo=str(entry.get("motivo") or ""),
-            necesidad=str(entry.get("necesidad") or ""))
-        if str(objective.get("status") or "") != "active":
-            return {"ok": False, "reason": "objective-not-active"}
-        return await engine_mod.plan_objective(
-            env, objective_id,
-            return_from=str(entry.get("task_id") or "") or None)
+            necesidad=str(entry.get("necesidad") or ""),
+            denials=list(entry.get("denials") or []))
+
+    async def record_return(
+        self,
+        objective_id: str,
+        entry: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Ledger an agent return that must not replan (TASK-2026-00571)."""
+        if self._repo is None:
+            return {}
+        objective = await self._repo.get_objective(objective_id)
+        if objective is None:
+            return {}
+        project = str(objective.get("project") or "")
+        if not project or not self._config.has_project(project):
+            return {}
+        return await self._record(self.env_for(project), objective_id, entry)
 
     async def apply_spend_approval(
         self,
@@ -1223,12 +1249,5 @@ ACEPTACIÓN
         if not project or not self._config.has_project(project):
             return {"ok": False, "reason": "unknown-project"}
         env = self.env_for(project)
-        await engine_mod.record_planner_return(
-            env.objectives, objective_id,
-            task_id=str(entry.get("task_id") or ""),
-            title=str(entry.get("title") or ""),
-            agent=str(entry.get("agent") or ""),
-            resultado=str(entry.get("resultado") or ""),
-            motivo=str(entry.get("motivo") or ""),
-            necesidad=str(entry.get("necesidad") or ""))
+        await self._record(env, objective_id, entry)
         return await engine_mod.park_return_gap(env, objective_id, entry)
