@@ -3213,14 +3213,27 @@ class TicketCloseContext:
 
 
 def _park_resumes_on_close(objective: Mapping[str, Any]) -> bool:
-    """Only capability_gap parks resume on a child close (00430).
+    """Which waiting parks a completed child close resumes (00430, #606).
 
-    Other parks keep their own trigger (owner answer, ERP fix, spend
-    approval, boot wedge check); each close fires once, so a resume
+    capability_gap parks always resume: the completion is terminal
+    evidence the park never considered. Other parks keep their own
+    trigger (owner answer, ERP fix, spend approval, boot wedge check,
+    recovery retry) — except a blocked park whose recovery budget is
+    spent: its retry trigger is gone, boot leaves it, and a free-text
+    Owner wait (prod flag, restart, ERP paste) emits no event the
+    engine sees, so without the close it strands even after the Owner
+    acted (#606: OBJ-8E2257EF). Each close fires once, so a resume
     consumes a distinct completion and the loop stays bounded.
     """
-    return objective.get("status") == "waiting" and str(
-        objective.get("waiting_reason") or "").startswith("capability_gap")
+    if objective.get("status") != "waiting":
+        return False
+    waiting_reason = str(objective.get("waiting_reason") or "")
+    if waiting_reason.startswith("capability_gap"):
+        return True
+    if waiting_reason.partition(":")[0].strip() != "blocked":
+        return False
+    recovery = objective.get("recovery")
+    return isinstance(recovery, Mapping) and recovery.get("exhausted") is True
 
 
 async def on_ticket_closed(
@@ -3231,8 +3244,9 @@ async def on_ticket_closed(
     """Triggers + capsule recompile after an objective ticket closes (§9.4).
 
     A close under a capability_gap park resumes it: the completion is
-    terminal evidence the park never considered (TASK-2026-00430).
-    Never raises: trigger failures are notified, never fatal.
+    terminal evidence the park never considered (TASK-2026-00430), as
+    does a close under a blocked park whose recovery budget is spent
+    (#606). Never raises: trigger failures are notified, never fatal.
     """
     objective_id = str(ticket.get("objective_id") or "")
     if not objective_id:
