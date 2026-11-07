@@ -43,6 +43,14 @@ def transient_provider_error(text: str, *, responded: bool = False) -> bool:
             "does not exist or you lack access", "model not found",
             "model_not_found", "modelnotfound")):
         return responded
+    if "limit" in lowered and (
+            "hour limit" in lowered
+            or re.search(r"\bhit your\b.{0,40}\blimit\b", lowered)):
+        # Window quota without a reset clock: transient with blind backoff.
+        # Context/token budgets are capacity, not a quota wait: never
+        # transient here (auth exclusions above still win).
+        if "context" not in lowered and "token limit" not in lowered:
+            return True
     return any(pattern in lowered for pattern in (
         "unavailable", "overloaded", "rate limit", "rate_limit",
         "too many requests", "resource_exhausted", "freeusagelimiterror",
@@ -54,7 +62,7 @@ def transient_provider_error(text: str, *, responded: bool = False) -> bool:
 
 
 _LIMIT_RESET_RE = re.compile(
-    r"resets?(?:\s+at)?\s+(\d{1,2}):(\d{2})\s*([ap])\.?\s*m\.?"
+    r"resets?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?"
     r"\s*(\(UTC\)|UTC)?",
     re.IGNORECASE,
 )
@@ -65,9 +73,11 @@ def provider_limit_reset(
 ) -> datetime | None:
     """Absolute reset clock from a quota-limit message (00438).
 
-    Matches "<limit> ... resets H:MMam/pm [(UTC)]" (e.g. a 5-hour
-    limit); returns the aware UTC reset or None when absent or
-    unparseable. A time already past today rolls to tomorrow.
+    Matches "<limit> ... resets H:MMam/pm [(UTC)]" and hour-only
+    "<limit> ... resets 8pm [(UTC)]" (minutes default to 00, the
+    documented clock rate_monitor already accepts); returns the aware
+    UTC reset or None when absent or unparseable. A time already past
+    today rolls to tomorrow.
     """
     lowered = str(text or "").lower()
     if "limit" not in lowered:
@@ -75,7 +85,8 @@ def provider_limit_reset(
     match = _LIMIT_RESET_RE.search(str(text or ""))
     if match is None:
         return None
-    hour, minute = int(match.group(1)), int(match.group(2))
+    hour = int(match.group(1))
+    minute = int(match.group(2)) if match.group(2) is not None else 0
     if hour < 1 or hour > 12 or minute > 59:
         return None
     hour24 = (hour % 12) + (12 if match.group(3).lower() == "p" else 0)
