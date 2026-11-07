@@ -583,6 +583,53 @@ class EngineTopesTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("(max 6)", result["detail"])
         self.assertEqual(created, [])
 
+    async def test_decomposition_spends_no_lifetime_budget(self) -> None:
+        # TASK-2026-00553 (live OBJ-E7A67DBA): at the cap, the planner must
+        # still create a converted ticket's substitutes and the queued
+        # dependent waiting on them gets rewired.
+        repo = _scratch_repo(self)
+        payload = {"objective_status": "active", "state_summary": "split",
+                   "tickets": [_dev_ticket_planned()]}
+        dependent = _child("kid-dep", "queued")
+        dependent["blocked_by"] = ["kid-conv"]
+        tasks = {"kid-1": _child("kid-1", "completed"),
+                 "kid-conv": _child("kid-conv", "converted"),
+                 "kid-dep": dependent}
+        env, planner, created = _env_for(
+            self, repo, [payload], tasks=tasks,
+            objectives_cfg={"max_tickets": 3})
+        await self._objective(env)
+        await env.objectives.patch_objective("OBJ-1", {"pending_rewires": [
+            {"from": "kid-conv", "dependents": ["kid-dep"]}]})
+
+        result = await plan_objective(env, "OBJ-1")
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(planner.runs, 1)
+        self.assertEqual(len(created), 1)
+        stored = await env.objectives.get_objective("OBJ-1")
+        assert stored is not None
+        self.assertEqual(stored["pending_rewires"], [])
+
+    async def test_dependent_of_converted_takes_no_active_slot(self) -> None:
+        repo = _scratch_repo(self)
+        payload = {"objective_status": "active", "state_summary": "split",
+                   "tickets": [_dev_ticket_planned()]}
+        dependent = _child("kid-dep", "queued")
+        dependent["blocked_by"] = ["kid-conv"]
+        tasks = {"kid-conv": _child("kid-conv", "converted"),
+                 "kid-dep": dependent}
+        env, planner, created = _env_for(
+            self, repo, [payload], tasks=tasks,
+            objectives_cfg={"max_active_tickets_per_objective": 1})
+        await self._objective(env)
+
+        result = await plan_objective(env, "OBJ-1")
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(planner.runs, 1)
+        self.assertEqual(len(created), 1)
+
     async def test_empty_planner_registry_parks_as_config(self) -> None:
         repo = _scratch_repo(self)
         env, _planner, _created = _env_for(

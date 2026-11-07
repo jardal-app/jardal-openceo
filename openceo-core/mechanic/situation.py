@@ -80,6 +80,18 @@ def _iso(value: Any) -> str | None:
     return moment.isoformat() if moment else None
 
 
+async def blocker_statuses(
+    task: Mapping[str, Any],
+    get_task: Callable[[str], Awaitable[Mapping[str, Any] | None]],
+) -> dict[str, str | None]:
+    """Live status of each ``blocked_by`` entry; ``None`` when it is gone."""
+    statuses: dict[str, str | None] = {}
+    for dep in task.get("blocked_by") or []:
+        row = await get_task(str(dep))
+        statuses[str(dep)] = str(row.get("status") or "") if row else None
+    return statuses
+
+
 def task_digest(task: Mapping[str, Any]) -> dict[str, Any]:
     raw_params = task.get("params")
     params: Mapping[str, Any] = raw_params if isinstance(raw_params, Mapping) else {}

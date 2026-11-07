@@ -27,17 +27,18 @@ from mechanic.models import (
     parse_verdict,
     validate_verdict,
 )
-from mechanic.situation import Finding, compile_situation
+from mechanic.situation import Finding, blocker_statuses, compile_situation
 from mechanic.stall import (
     OWNER_ACTION_PREFIX,
     PENDING_KEY,
     STREAK_KEY,
     as_utc,
+    dead_dependencies,
     human_wait,
     is_stalled_reason,
     self_healing_wait,
 )
-from state import TaskStatus
+from state import WAIT_BLOCKED_BY, TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +169,9 @@ You change nothing yourself: the core applies the actions you return.
 - git_unstage {{repo, paths, text}}: index-only reset of paths.
 - git_stash {{repo, text}}: stash tracked changes (recoverable).
 - remove_index_lock {{repo, text}}: delete a stale .git/index.lock.
+A queued ticket held by a dependency that will never close (failed,
+converted or missing blocker) takes state actions like a waiting one, but
+resume/delegate cannot free it while that dependency stays.
 `repo` must be a key of SITUATION.repos; ticket actions take task_ids
 from WHY YOU WERE WOKEN. One state action (resume/delegate/wait/fail/escalate) per
 ticket, at most 10 actions. Pair fix_ticket with wait on the affected
@@ -205,6 +209,7 @@ class MechanicService:
         deploy_ready: Callable[[], Awaitable[bool]] | None = None,
         checkout_ready: Callable[[], bool] | None = None,
         spawn_restart: Callable[[], bool] | None = None,
+        objective_liveness: Callable[[int], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
         situation_fn: Callable[..., Awaitable[dict[str, Any]]] = compile_situation,
         repo_root: Path = REPO_ROOT,
@@ -220,6 +225,7 @@ class MechanicService:
         self._deploy_ready = deploy_ready
         self._checkout_ready = checkout_ready
         self._spawn_restart = spawn_restart
+        self._objective_liveness = objective_liveness
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._situation_fn = situation_fn
         self._repo_root = repo_root
@@ -309,6 +315,7 @@ class MechanicService:
         self._next_heartbeat = due
         if due is None or now >= due:
             findings += await self.heartbeat_scan(now, cfg)
+            self._start_objective_liveness(cfg)
             await self._deploy_if_ready()
             due = now + timedelta(
                 minutes=int(cfg.get("heartbeat_minutes", 30)))
@@ -336,8 +343,7 @@ class MechanicService:
     async def heartbeat_scan(self, now: datetime,
                              cfg: Mapping[str, Any]) -> list[Finding]:
         """Deterministic, zero tokens: waits nobody is going to move."""
-        rows = await self._repo.list_tasks_by_status(
-            TaskStatus.WAITING, limit=500)
+        rows = await self._repo.list_heartbeat_tasks(limit=500)
         horizon = now - timedelta(days=int(cfg.get("recent_days", 7)))
         stale = timedelta(minutes=int(cfg.get("stale_wait_minutes", 30)))
         overdue = timedelta(minutes=int(cfg.get("resume_overdue_minutes", 30)))
@@ -345,6 +351,19 @@ class MechanicService:
         findings: list[Finding] = []
         for task in rows or []:
             if task.get("autorun") is not True or is_personal_scope(task):
+                continue
+            if task.get("status") == TaskStatus.QUEUED.value:
+                # Dependency holds stay queued (the dispatcher parks them in
+                # place): same self-heal limit, once a blocker can never close.
+                updated = last_activity(task)
+                if updated is None or updated < horizon \
+                        or now - updated < healing_max:
+                    continue
+                dead = await self._dead_dependencies(task)
+                if dead:
+                    findings.append(Finding(
+                        str(task.get("task_id") or ""), "long_wait",
+                        f"{WAIT_BLOCKED_BY}: {', '.join(dead)}"))
                 continue
             reason = task.get("waiting_reason")
             params = task.get("params") if isinstance(task.get("params"), Mapping) else {}
@@ -372,6 +391,25 @@ class MechanicService:
                 findings.append(Finding(task_id, "stale_wait", detail))
         return findings
 
+    async def _dead_dependencies(self, task: Mapping[str, Any]) -> list[str]:
+        return dead_dependencies(
+            task.get("blocked_by"),
+            await blocker_statuses(task, self._repo.get_task))
+
+    async def _dependency_held(self, task: Mapping[str, Any]) -> bool:
+        """Queued behind a dependency that will never close (TASK-2026-00553)."""
+        return (str(task.get("status") or "") == TaskStatus.QUEUED.value
+                and bool(await self._dead_dependencies(task)))
+
+    def _start_objective_liveness(self, cfg: Mapping[str, Any]) -> None:
+        if self._objective_liveness is None:
+            return
+        try:
+            self._objective_liveness(int(cfg.get("stale_wait_minutes", 30)))
+        except Exception:  # noqa: BLE001 - liveness never breaks the heartbeat
+            logger.warning("objective liveness pass failed to start",
+                           exc_info=True)
+
     async def _admit(self, findings: list[Finding], now: datetime,
                      cfg: Mapping[str, Any]) -> list[Finding]:
         cooldown = timedelta(minutes=int(cfg.get("cooldown_minutes", 60)))
@@ -381,9 +419,12 @@ class MechanicService:
             if finding.task_id in admitted:
                 continue
             task = await self._repo.get_task(finding.task_id)
-            status = str((task or {}).get("status") or "")
+            if task is None or is_personal_scope(task):
+                continue
+            status = str(task.get("status") or "")
             hung = finding.trigger == "deadline_missed" and status == "in_progress"
-            if task is None or is_personal_scope(task) or (status != "waiting" and not hung):
+            if status != "waiting" and not hung \
+                    and not await self._dependency_held(task):
                 continue
             if human_wait(task.get("waiting_reason"), task.get("params"),
                           phase=task.get("phase"), qa_state=task.get("qa_review_state")):
@@ -438,11 +479,17 @@ class MechanicService:
             release=self._release_fn(), tier_s_run=self._latest_tier_s_run)
         situation["open_fix_tickets"] = await self._open_fix_list()
         tickets = situation.get("tickets") or []
+        unattended = {str(t.get("task_id")) for t in tickets
+                      if t.get("status") == "waiting"}
+        for ticket in tickets:
+            if ticket.get("status") == TaskStatus.QUEUED.value:
+                task = await self._repo.get_task(str(ticket.get("task_id")))
+                if task is not None and await self._dependency_held(task):
+                    unattended.add(str(ticket.get("task_id")))
         ctx = VerdictContext(
             run_id=run_id,
             task_ids=frozenset(str(t.get("task_id")) for t in tickets),
-            waiting_ids=frozenset(str(t.get("task_id")) for t in tickets
-                                  if t.get("status") == "waiting"),
+            waiting_ids=frozenset(unattended),
             repos=frozenset(str(key) for key in situation.get("repos") or {}))
         for finding in findings:
             await self._note_run(finding.task_id, run_id, now)

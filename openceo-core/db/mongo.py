@@ -568,6 +568,20 @@ class MongoRepository:
         rows = self.tasks.find({"status": status.value}, sort=[("created_at", 1)]).limit(limit)
         return [self._clean(row) async for row in rows]
 
+    async def list_heartbeat_tasks(self, limit: int = 500) -> list[dict[str, Any]]:
+        """The mechanic heartbeat's single bounded query (TASK-2026-00553).
+
+        Waiting tickets plus queued ones held by a dependency, which the
+        dispatcher parks without leaving ``queued``; both through ``status``.
+        """
+        rows = self.tasks.find(
+            {"$or": [{"status": TaskStatus.WAITING.value},
+                     {"status": TaskStatus.QUEUED.value,
+                      "blocked_by.0": {"$exists": True}}]},
+            sort=[("created_at", 1)],
+        ).limit(limit)
+        return [self._clean(row) async for row in rows]
+
     async def list_tasks_needing_human(self, limit: int = 50) -> list[dict[str, Any]]:
         """Bandeja Requiere humano (misma fuente que HumanInbox, TASK-2026-00041).
 

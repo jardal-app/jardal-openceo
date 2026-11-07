@@ -280,6 +280,7 @@ async def _mission_digest(
               if isinstance(item, Mapping)][:CEO_OBJECTIVES_PER_MISSION]
     children: list[dict[str, Any]] = []
     costs: list[Any] = []
+    last_closed: dict[str, Any] | None = None
     for item in ledger:
         objective_id = str(item.get("objective_id") or "")
         try:
@@ -294,6 +295,8 @@ async def _mission_digest(
             continue
         status = str(objective.get("status") or "")
         children.append({"objective_id": objective_id, "status": status})
+        if status == "closed":
+            last_closed = _closed_handoff(objective_id, objective)
         try:
             tickets = await env.tasks.list_by_objective(objective_id)
         except Exception:  # noqa: BLE001
@@ -345,7 +348,29 @@ async def _mission_digest(
         "acceptance_disputed": bool(mission.get("acceptance_disputed")),
         "question_state": question_state,
         "objectives": children,
+        "last_closed": last_closed,
         "cost": cost_mod.aggregate_mission_cost(costs) if costs else None,
+    }
+
+
+def _closed_handoff(
+    objective_id: str, objective: Mapping[str, Any],
+) -> dict[str, Any]:
+    """What a closed tramo left for the next pedido (TASK-2026-00553).
+
+    Only active objectives carry their roadmap in the review, so without
+    this the next objective of a mission started without the plan.
+    """
+    return {
+        "objective_id": objective_id,
+        "roadmap_remaining": [
+            _short(item, 160)
+            for item in list(objective.get("roadmap_remaining") or [])[
+                :CEO_ROADMAP_PER_OBJECTIVE]],
+        "deferred": [
+            _short(item, 160)
+            for item in list(objective.get("deferred") or [])[
+                :CEO_DEFERRED_PER_OBJECTIVE]],
     }
 
 
@@ -575,6 +600,14 @@ def _missions_section(signals: CEOSignals) -> str:
             f"{child['objective_id']}={child['status']}"
             for child in children) or "(no objectives yet)"
         lines.append(f"  objectives: {states}")
+        handoff = item.get("last_closed")
+        if isinstance(handoff, dict) and (
+                handoff.get("roadmap_remaining") or handoff.get("deferred")):
+            lines.append(f"  last closed {handoff['objective_id']} left:")
+            lines.extend(f"    roadmap_remaining: {roadmap}"
+                         for roadmap in handoff.get("roadmap_remaining") or [])
+            lines.extend(f"    deferred: {deferred}"
+                         for deferred in handoff.get("deferred") or [])
         if isinstance(item.get("cost"), dict):
             lines.append(f"  cost: {cost_mod.cost_summary_line(item['cost'])}")
     return "\n".join(lines)

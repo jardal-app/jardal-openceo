@@ -18,7 +18,9 @@ from typing import Any, Awaitable, Callable, Mapping
 
 from mechanic.handoff import HANDOFF_KEY
 from mechanic.models import STATE_ACTIONS, ActionKind, MechanicAction
-from mechanic.stall import MECHANIC_WAIT_PREFIX, OWNER_ACTION_PREFIX, PENDING_KEY, STREAK_KEY, human_wait
+from mechanic.situation import blocker_statuses
+from mechanic.stall import (MECHANIC_WAIT_PREFIX, OWNER_ACTION_PREFIX, PENDING_KEY, STREAK_KEY,
+                            dead_dependencies, human_wait)
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +64,7 @@ class ActionRunner:
         try:
             if action.kind in STATE_ACTIONS:
                 task = await self._tasks.get_task(str(action.task_id))
-                if (task is None or str(task.get("status")) != "waiting"
-                        or human_wait(task.get("waiting_reason"), task.get("params"),
-                                      phase=task.get("phase"), qa_state=task.get("qa_review_state"))):
+                if task is None or not await self._unattended(task):
                     raise RuntimeError("ticket is no longer an unattended wait")
             detail = await handler(action, run_id=run_id,
                                    finding_ids=finding_ids, diagnosis=diagnosis)
@@ -74,6 +74,16 @@ class ActionRunner:
             return {"kind": action.kind.value, "ok": False, "detail": str(exc)[:300]}
         return {"kind": action.kind.value, "ok": True, "detail": detail,
                 "task_id": action.task_id, "repo": action.repo}
+
+    async def _unattended(self, task: Mapping[str, Any]) -> bool:
+        """A non-human wait, or a queued hold on a dependency that never closes."""
+        if str(task.get("status")) == "queued":
+            return bool(dead_dependencies(
+                task.get("blocked_by"),
+                await blocker_statuses(task, self._tasks.get_task)))
+        return str(task.get("status")) == "waiting" and not human_wait(
+            task.get("waiting_reason"), task.get("params"),
+            phase=task.get("phase"), qa_state=task.get("qa_review_state"))
 
     async def _patch(self, task_id: str, updates: dict[str, Any]) -> None:
         updates["params"] = {**updates.get("params", {}), PENDING_KEY: None}
