@@ -249,6 +249,54 @@ def _return_necesidad(verdict: Mapping[str, Any], fresh: Mapping[str, Any]) -> s
     return " | ".join(part for part in parts if part)[:500]
 
 
+async def _badge_denials(repo: Any, ticket: Mapping[str, Any]) -> list[str]:
+    """Exact badge refusals of the ticket's agent run (TASK-2026-00571).
+
+    The identity middleware audits every refused call in ``mcp_calls``;
+    surfaces and tool errors are not refusals. Fail-soft to none.
+    """
+    params = ticket.get("params")
+    mirror = business_mirror(params.get("_mirrors") or {}) \
+        if isinstance(params, Mapping) else {}
+    name = str((mirror or {}).get("name") or "").strip() \
+        if isinstance(mirror, Mapping) else ""
+    if not name:
+        return []
+    found: set[str] = set()
+    try:
+        rows = repo.db["mcp_calls"].find(
+            {"ticket": name, "ok": False, "kind": "agent"},
+            {"tool": 1, "reason": 1}).limit(50)
+        async for row in rows:
+            tool = str(row.get("tool") or "")
+            reason = str(row.get("reason") or "")
+            if tool and reason and "/" not in tool \
+                    and not reason.startswith("tool error"):
+                found.add(f"{tool}: {reason}")
+    except Exception:  # noqa: BLE001 - a lost audit read keeps the replan
+        logger.warning("badge denials unreadable for %s", name, exc_info=True)
+        return []
+    return sorted(found)
+
+
+async def _repeated_denials(
+    service: Any, objective_id: str, denials: Sequence[str],
+) -> list[str]:
+    """Refusals an earlier return of the objective already hit (00571)."""
+    getter: Any = getattr(service, "get_objective", None)
+    if not denials or not callable(getter):
+        return []
+    try:
+        objective = await getter(objective_id)
+    except Exception:  # noqa: BLE001 - unreadable keeps the replan
+        logger.warning("objective %s unreadable for denials", objective_id,
+                       exc_info=True)
+        return []
+    if not isinstance(objective, Mapping):
+        return []
+    return engine_mod.repeated_boundary_denials(objective, denials)
+
+
 def wait_comment_text(task: dict[str, Any], reason: str) -> str:
     """ERP one-shot text for a ``routing_missing`` wait (pure).
 
@@ -1908,12 +1956,25 @@ class TaskService:
             return {"ok": True, "status": "already_applied", "task_id": task.get("task_id")}
 
         params = self._task_params(task)
-        mirror = {
+        synced_at = datetime.now(timezone.utc).isoformat()
+        mirror: dict[str, Any] = {
             "business_status": "Deleted" if deleted else str(business_status or ""),
-            "business_synced_at": datetime.now(timezone.utc).isoformat(),
+            "business_synced_at": synced_at,
             # Guardia anti-eco: el observador compara contra este campo.
             "status_pushed": target,
         }
+        if target in {TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value}:
+            # Auditoria de la decision humana, como la de la transicion
+            # explicita: el motor de objetivos la lee como evidencia
+            # terminal (TASK-2026-00571).
+            mirror["transition"] = {
+                "at": synced_at,
+                "from": str(self._visibility_mirror(task).get("business_status") or ""),
+                "to": "Completed" if target == TaskStatus.COMPLETED.value else "Cancelled",
+                "reason": ("Eliminado en el desk de Jardal ERP" if deleted
+                           else f"Decidido en el desk de Jardal ERP: {business_status}"),
+                "channel": "desk",
+            }
         if parent_task is not _WEBHOOK_PARENT_UNSET:
             live_parent = str(parent_task or "").strip() or None
             if live_parent != self._visibility_mirror(task).get("parent_task"):
@@ -1939,6 +2000,8 @@ class TaskService:
             task.get("task_id"),
             "eliminado" if deleted else business_status,
         )
+        if "transition" in mirror:
+            self._notify_business_close(updated, mirror["transition"]["reason"], "")
         # A business close/cancel frees a slot: dispatch event.
         self._wake_dispatcher()
         self._enqueue_visibility(exec_id or None, self._webhook_name(task), "webhook:applied")
@@ -2839,6 +2902,9 @@ class TaskService:
                 healed = updated is not None
                 if healed:
                     exec_status = equivalent
+                    self._notify_business_close(
+                        updated, clean_reason,
+                        _transition_audit_text(evidence))
             return {
                 "ok": True,
                 "outcome": "already_applied",
@@ -3037,6 +3103,8 @@ class TaskService:
             if updated is not None:
                 task_status = equivalent
                 mirror_state = "aligned"
+                self._notify_business_close(
+                    updated, clean_reason, clean_evidence)
             else:
                 task_status = str(task.get("status") or "") or None
                 mirror_state = "execution_gone"
@@ -7160,7 +7228,8 @@ class TaskService:
                     files=list(stashed.get("files") or []),
                     handoff_excerpt=str(
                         stashed.get("handoff_excerpt") or ""),
-                    evidencia=str(stashed.get("evidencia") or ""))
+                    evidencia=str(stashed.get("evidencia") or ""),
+                    business=bool(stashed.get("business")))
             else:
                 persisted = ticket.get("params") or {}
                 close = TicketCloseContext(
@@ -7185,6 +7254,24 @@ class TaskService:
         except Exception:
             logger.warning("objective close trigger failed for %s",
                            ticket.get("task_id"), exc_info=True)
+
+    def _notify_business_close(
+        self, task: dict[str, Any] | None, reason: str, evidence: str,
+    ) -> None:
+        """A child a person completed in the business reaches its objective.
+
+        Same post-persist close the run path fires (§9.4): memory, capsule
+        and park resume see the human decision (TASK-2026-00571). In the
+        background, so the transition or webhook answers at once.
+        """
+        if not isinstance(task, dict) or not task.get("objective_id") \
+                or str(task.get("status") or "") != TaskStatus.COMPLETED.value:
+            return
+        stash = {"_objective_close": {
+            "sha": "", "files": [], "business": True,
+            "handoff_excerpt": f"Business decision: {reason}"[:500],
+            "evidencia": str(evidence or "")[:500]}}
+        asyncio.create_task(self._trigger_objective_close(task, stash))
 
     def _wake_objective_recovery(self) -> None:
         wake = getattr(getattr(self, "_objective_service", None),
@@ -7258,8 +7345,16 @@ class TaskService:
                     "resultado": resultado,
                     "motivo": str(verdict.get("motivo") or "")[:500],
                     "necesidad": _return_necesidad(verdict, fresh),
+                    "denials": await _badge_denials(
+                        getattr(self, "_repo", None), ticket),
                 }
                 actor = f"Agent {resultado}"
+                repeated = await _repeated_denials(
+                    service, objective_id, entry["denials"])
+                if repeated:
+                    await self._hold_for_owner(
+                        service, objective_id, entry, repeated)
+                    return
             elif has_verdict:
                 return  # unusable verdict dict: preserved no-op
             else:
@@ -7302,6 +7397,37 @@ class TaskService:
         except Exception:
             logger.warning("objective return trigger failed for %s",
                            ticket.get("task_id"), exc_info=True)
+
+    async def _hold_for_owner(
+        self, service: Any, objective_id: str, entry: dict[str, Any],
+        repeated: list[str],
+    ) -> None:
+        """A refusal an earlier return already hit: no replan (00571).
+
+        Replanning cannot widen a badge, so the ticket waits ``needs_owner``
+        with the exact need; the generic stall rule wakes the mechanic,
+        which escalates to the Owner or picks another way.
+        """
+        task_id = str(entry.get("task_id") or "")
+        await service.record_return(objective_id, entry)
+        need = str(entry.get("necesidad") or entry.get("motivo") or "")
+        await self.patch_task(task_id, {
+            "status": TaskStatus.WAITING.value,
+            "resume_at": None,
+            "waiting_reason": (f"needs_owner: badge refused again "
+                               f"({repeated[0]}); {need}")[:300],
+        })
+        try:
+            await self.comment_on_ticket(
+                task_id,
+                f"Agent {entry.get('resultado')} on a badge refusal an "
+                f"earlier return of {objective_id} already hit "
+                f"({'; '.join(repeated)[:300]}). Replanning cannot widen a "
+                "badge: no replan, the need goes to the Owner channel "
+                f"through the mechanic. Necesidad: {need[:400]}")
+        except Exception:
+            logger.warning("owner-hold comment failed for %s", task_id,
+                           exc_info=True)
 
     async def _trigger_loose_return(
         self,

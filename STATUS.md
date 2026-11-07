@@ -2,6 +2,14 @@
 
 Resumen operativo corto del estado real del repo.
 
+## 2026-11-07 — El planner planifica desde el registro de negocio (TASK-2026-00571)
+
+- Orden del Owner: «corrige» el bug de OBJ-8E2257EF (el planner re-creó el pegado ERP que el Owner cerró en 00551 como 00554 y 00566, y el smoke de 00552 como #613), «con un enfoque proactivo ágil no determinista estático según las reglas».
+- **Causas:** los cierres de negocio (transición del Owner, desk) no llegaban al motor; el prompt no veía hijos cerrados, notas del objetivo ni el alcance del badge; un park descartaba cierres de la memoria; la revisión final exigía veredicto de agente a un hijo no-dev cerrado por el Owner; la recuperación pedía «planificar distinto».
+- **Fix (información para el planner, no reglas por caso):** cada ciclo ve los hijos cerrados con su evidencia de negocio, los retornos resueltos como SUPERSEDED, las notas de personas en el ticket del objetivo y el alcance del badge. Un cierre humano llega al objetivo y reanuda un park blocked; el desk audita su decisión como la transición. La revisión final acepta ese Completed. La recuperación es un re-chequeo contra la evidencia.
+- **Denegación repetida:** si el retorno de un agente repite una denegación del badge que otro retorno del objetivo ya sufrió, no se replanifica: el ticket queda `needs_owner` y lo atiende el mecánico.
+- Contrato en ARCHITECTURE_REFERENCE §Single planner; tests `tests/test_planner_business_memory_571.py` (20, 12/12 mutaciones detectadas).
+
 ## 2026-11-07 — Objetivos sin deadlock por tope o dependencia muerta (TASK-2026-00553)
 
 - Orden del Owner: «corrige todo lo que me decías», tras el diagnóstico de OBJ-E7A67DBA (misión MIS-8C06FB6C). Estaba parado desde el 06-nov 14:40: un Tier S convertido por tamaño dejó a su dependiente esperando sustitutos que el tope de 20 tickets no dejaba planificar. Además, el freno contaba a ese dependiente como trabajo vivo y difería para siempre.
