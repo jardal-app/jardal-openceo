@@ -75,6 +75,17 @@ class ObjectiveTierPromptTests(unittest.TestCase):
         self.assertIn("Not rationed by percentage or count.", prompt)
         self.assertNotIn("in ANY domain", prompt)
 
+    def test_prompt_keeps_a_rule_with_its_tests_in_one_s_ticket(self) -> None:
+        # TASK-2026-00578: same rule as routing policy §19, prompt copy.
+        prompt = _prompt()
+        self.assertIn("the ticket that defines the rule, with the tests that "
+                      "pin it", prompt)
+        self.assertIn("(never split into sibling tickets)", prompt)
+        self.assertIn("One rule per S ticket:", prompt)
+        self.assertIn("bundled rules or a whole boundary are decomposed first.",
+                      prompt)
+        self.assertNotIn("the ticket that defines the rule; consumers", prompt)
+
     def test_prompt_forbids_modified_files_as_oracle(self) -> None:
         prompt = _prompt()
         self.assertIn("Never declare as oracle a file the\n"
