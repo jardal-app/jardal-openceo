@@ -2,6 +2,17 @@
 
 Resumen operativo corto del estado real del repo.
 
+## 2026-11-08 — Trabajo condenado y misiones sin objetivo (TASK-2026-00580, TASK-2026-00581)
+
+- Órdenes del Owner: «si correige arregla el bug o haz otra coas para que ya no aarezcan y garantice funcionliada» y «y destraba la mision».
+- **Destrabe manual (MIS-8C06FB6C):** se cancelaron #601 y #602 (superados por #603) y #605 (fallado; su replan #607 ya estaba completado). #559 arrancó a las 05:12.
+- **Trabajo condenado (00580):** un ticket en cola con algún bloqueador fallado, convertido o condenado (aunque tenga otro vivo) es condenado (`doomed_ids`). Esa es ahora la única regla del motor, que usan el tope de activos, la revisión final y el retiro.
+  - Antes de cada ciclo del planner se retira por la transición de negocio (`actor: engine`), dependientes primero, y no gasta `max_tickets`.
+  - El validador rechaza `blocked_by` hacia fallados, convertidos, cancelados o condenados.
+  - Cambio deliberado del contrato de 00534: fallado más vivo ya no cuenta como trabajo abierto.
+- **Misión sin objetivo (00581):** si el CEO, despertado para juzgar una misión, no la continúa, no la cierra ni escala, y la misión no tiene objetivo activo, se escala al Owner con la hoja de ruta pendiente, una vez por episodio. Caso vivo: MIS-47F6240D quedó en `keep_going` sin trabajo.
+- **Auditoría de piezas (misma sesión):** unas 7.000 líneas sin llamador de producción y unas 1.000 de bucles viejos del kernel. Hay conceptos definidos varias veces de forma distinta: estados terminados/abiertos (6), espera humana (4) y autorun (2). El plan está en TASK-2026-00582.
+
 ## 2026-11-08 — Tier S: una regla con sus propios tests por ticket (TASK-2026-00578)
 
 - Orden del Owner: «no bajaremos el tier s a high si no dejaria de ser tier s, pero si quieres puedes mejorar el prompt o las condiciones para escoger tier s». El pipeline, el esfuerzo y la ausencia de cupos de Tier S no cambian.
