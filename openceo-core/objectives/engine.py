@@ -39,7 +39,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
+from typing import Any, Awaitable, Callable, Collection, Mapping, Protocol, Sequence
 
 from catalog import (Catalog, agent_detail_text, load_all_role_skills,
                      load_catalog, load_role_profile,
@@ -90,9 +90,10 @@ class Quota(Protocol):
 class ObjectiveErp(Protocol):
     """Business-identity operations the engine needs (implemented by wiring).
 
-    The engine never imports the Jardal ERP adapter: group conversion is the
-    only ERP write it performs directly (children link through the common
-    ticket creation, close pushes through the parent ticket).
+    The engine never imports the Jardal ERP adapter: group conversion and
+    retiring doomed children are the only ERP writes it performs directly
+    (children link through the common ticket creation, close pushes through
+    the parent ticket).
     """
 
     async def convert_to_group(self, identifier: str) -> dict[str, Any]: ...
@@ -102,6 +103,10 @@ class ObjectiveErp(Protocol):
 
     async def thread_of(
         self, task_name: str, *, limit: int = 20) -> dict[str, Any]: ...
+
+    async def retire(self, identifier: str, reason: str) -> dict[str, Any]:
+        """Cancel a child in the business and its execution mirror."""
+        ...
 
 
 class ObjectiveRejected(ValueError):
@@ -1137,10 +1142,11 @@ def business_decision(ticket: Mapping[str, Any]) -> dict[str, str] | None:
     Both human channels audit it on the business mirror: an Owner
     session's ``openceo_transition_ticket`` (reason + evidence) and a
     close in the Jardal ERP desk (``channel: desk``). The agent cycle
-    never writes it.
+    never writes it, and a retirement by the engine is no person's decision.
     """
     transition = _ticket_mirror(ticket).get("transition")
-    if not isinstance(transition, Mapping):
+    if not isinstance(transition, Mapping) \
+            or transition.get("actor") == ENGINE_ACTOR:
         return None
     target = str(transition.get("to") or "")
     if target not in ("Completed", "Cancelled") \
@@ -1560,7 +1566,8 @@ def _planner_prompt(
         '    "inputs": [], "constraints": [], "out_of_scope": [],',
         '    "acceptance_criteria": ["<at least one>"],',
         '    "expected_artifacts": ["<at least one>"],',
-        '    "blocked_by": ["<local_ref or existing task_id, acyclic>"],',
+        '    "blocked_by": ["<local_ref or existing task_id, acyclic; never a '
+        'failed, converted, cancelled or doomed ticket>"],',
         '    "coding_tool": "<dev only: tier_s|tier_a|tier_b|tier_c>",',
         *_REVIEW_FIELD_LINES,
         *_EMPTY_DIFF_FIELD_LINES,
@@ -2015,6 +2022,8 @@ async def _plan_objective_inner(
     cfg = env.objectives_cfg
     planner_cfg = env.planner_cfg
     tickets = await env.tasks.list_by_objective(objective_id)
+    if await _retire_doomed_work(env, objective, tickets):
+        tickets = await env.tasks.list_by_objective(objective_id)
     active = _brake_active_children(tickets)
     spent = len(_budget_children(tickets))
     if spent >= int(cfg.get("max_tickets", 30)):
@@ -2178,6 +2187,7 @@ async def _plan_objective_inner(
                     horizon=planner_cfg.get("ticket_horizon"),
                     skills=skill_map,
                     playbooks=playbook_names,
+                    unreleasable=_dependency_guard(objective, tickets),
                 )
                 if not errors:
                     result = candidate
@@ -2982,6 +2992,7 @@ async def apply_approved_plan(
         horizon=env.planner_cfg.get("ticket_horizon"),
         skills=skill_map,
         playbooks=_planner_playbooks()[1],
+        unreleasable=_dependency_guard(objective, tickets),
     )
     if errors:
         await env.objectives.patch_objective(
@@ -3841,6 +3852,184 @@ def _is_dead_queued(
     return seen_dead
 
 
+#: Who the business audit names when the engine itself moves a ticket.
+ENGINE_ACTOR = "engine"
+
+
+def _awaiting_rewire(objective: Mapping[str, Any]) -> frozenset[str]:
+    """Children a pending conversion rewire will repoint (TASK-2026-00492)."""
+    return frozenset(
+        str(dep) for entry in objective.get("pending_rewires") or []
+        if isinstance(entry, Mapping)
+        for dep in entry.get("dependents") or [])
+
+
+def doomed_ids(
+    tickets: Sequence[Mapping[str, Any]],
+    awaiting: Collection[str] = frozenset(),
+) -> set[str]:
+    """Queued children that can never run as they stand (TASK-2026-00580).
+
+    Doomed: at least one blocker failed, was converted or is doomed itself.
+    A live blocker beside it does not save it, because the dead one never
+    releases. A child awaiting a conversion rewire is rescued by it, and so
+    is whatever waits on that child. Unknown blockers and cycles are no
+    evidence of death (fail-closed).
+    """
+    by_id = {str(item.get("task_id") or ""): item for item in tickets}
+
+    def doomed(task_id: str, visiting: frozenset[str]) -> bool:
+        item = by_id.get(task_id)
+        if (item is None or task_id in awaiting
+                or str(item.get("status") or "") != "queued"):
+            return False
+        inner = visiting | {task_id}
+        for dep in item.get("blocked_by") or []:
+            blocker_id = str(dep)
+            blocker = by_id.get(blocker_id)
+            if blocker is None or blocker_id in inner:
+                continue
+            if (str(blocker.get("status") or "") in NON_RELEASING_BLOCKER_STATUS
+                    or doomed(blocker_id, inner)):
+                return True
+        return False
+
+    return {task_id for task_id in by_id if doomed(task_id, frozenset())}
+
+
+def unreleasable_blockers(
+    tickets: Sequence[Mapping[str, Any]],
+    awaiting: Collection[str] = frozenset(),
+) -> dict[str, str]:
+    """Children a new ticket must not wait on, each with the reason.
+
+    Failed, converted and doomed work never releases, so the new ticket
+    would be born doomed; a cancelled one releases at once, so it would run
+    without the work it waits for (TASK-2026-00580).
+    """
+    doomed = doomed_ids(tickets, awaiting)
+    reasons: dict[str, str] = {}
+    for item in tickets:
+        task_id = str(item.get("task_id") or "")
+        status = str(item.get("status") or "")
+        if status == FAILED_HISTORY_STATUS:
+            reasons[task_id] = "failed, so it never releases"
+        elif status == "converted":
+            reasons[task_id] = "converted: its decomposition carries the work"
+        elif status == "cancelled":
+            reasons[task_id] = "cancelled: it would release without its work"
+        elif task_id in doomed:
+            reasons[task_id] = "doomed behind work that never releases"
+    return reasons
+
+
+def _dependency_guard(
+    objective: Mapping[str, Any], tickets: Sequence[Mapping[str, Any]],
+) -> dict[str, str]:
+    """Unreleasable children for the validator, minus the objective shell.
+
+    Creation already drops a dependency on the shell (TASK-2026-00492).
+    """
+    guard = unreleasable_blockers(tickets, _awaiting_rewire(objective))
+    guard.pop(str(objective.get("conversion_source_task_id") or ""), None)
+    return guard
+
+
+def _retirement_order(
+    tickets: Sequence[Mapping[str, Any]], doomed: Collection[str],
+) -> list[str]:
+    """Doomed ids safe to cancel now, every dependent before its blocker.
+
+    A cancelled blocker releases its dependents, so a doomed ticket that
+    some open ticket outside the set still waits on is kept for a later
+    cycle, and the rest go leaves first.
+    """
+    by_id = {str(item.get("task_id") or ""): item for item in tickets}
+    waits_on: dict[str, set[str]] = {}
+    for item in tickets:
+        status = str(item.get("status") or "")
+        if status in TERMINAL_TICKET_STATUS or status == FAILED_HISTORY_STATUS:
+            continue
+        for dep in item.get("blocked_by") or []:
+            waits_on.setdefault(str(dep), set()).add(
+                str(item.get("task_id") or ""))
+    keep = set(doomed)
+    changed = True
+    while changed:
+        changed = False
+        for task_id in sorted(keep):
+            if waits_on.get(task_id, set()) - keep:
+                keep.discard(task_id)
+                changed = True
+    order: list[str] = []
+    remaining = set(keep)
+    while remaining:
+        leaves = sorted(task_id for task_id in remaining
+                        if not waits_on.get(task_id, set()) & remaining)
+        order.extend(leaves or sorted(remaining))
+        remaining -= set(leaves or remaining)
+    return [task_id for task_id in order if task_id in by_id]
+
+
+async def _retire_doomed_work(
+    env: ObjectiveEnv,
+    objective: Mapping[str, Any],
+    tickets: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Cancel doomed children before the planner runs (TASK-2026-00580).
+
+    Doomed work never runs, yet left open it blocked the planner from
+    re-creating it (duplicate title) and from seeing its slot free, and new
+    tickets piled up behind it. It goes through the business transition, so
+    Jardal ERP and Mongo stay aligned, and the prompt then lists it as
+    CANCELLED with the dead blockers for the planner to re-create what is
+    still needed. The first failure stops the pass: cancelling a blocker
+    whose dependent stayed open would release that dependent.
+    """
+    if env.erp is None:
+        return []
+    awaiting = _awaiting_rewire(objective)
+    doomed = doomed_ids(tickets, awaiting)
+    if not doomed:
+        return []
+    by_id = {str(item.get("task_id") or ""): item for item in tickets}
+    retired: list[str] = []
+    for task_id in _retirement_order(tickets, doomed):
+        item = by_id[task_id]
+        name = str(_ticket_mirror(item).get("name") or "")
+        if not name:
+            break
+        dead = []
+        for dep in item.get("blocked_by") or []:
+            blocker = by_id.get(str(dep)) or {}
+            status = str(blocker.get("status") or "")
+            if status in NON_RELEASING_BLOCKER_STATUS or str(dep) in doomed:
+                number = blocker.get("ticket_number")
+                dead.append(f"#{number} {status}" if number else
+                            f"{str(dep)[:8]} {status}")
+        reason = ("Retired by the objective engine: it waits on work that "
+                  f"never releases ({', '.join(dead)}). The planner "
+                  "re-creates it with live blockers if it is still needed.")
+        try:
+            result = await env.erp.retire(name, reason)
+        except Exception:  # noqa: BLE001 - next planning cycle retries
+            logger.warning("retiring doomed %s failed", name, exc_info=True)
+            break
+        if not result.get("ok") or result.get("outcome") == "escalated":
+            logger.warning("retiring doomed %s refused: %s", name, result)
+            break
+        retired.append(task_id)
+    if retired and env.notify is not None:
+        refs = ", ".join(
+            f"#{by_id[task_id].get('ticket_number')}" for task_id in retired)
+        await env.notify(
+            _notify_ref(objective),
+            f"Objective {objective.get('objective_id')}: retired doomed "
+            f"work before planning ({refs}); it waited on failed or "
+            "converted tickets that never release.")
+    return retired
+
+
 def _budget_children(
     tickets: Sequence[Mapping[str, Any]],
 ) -> list[Mapping[str, Any]]:
@@ -3848,10 +4037,20 @@ def _budget_children(
 
     A converted ticket is superseded, not work: its decomposition replaces
     budget already admitted, and counting it refused the very substitutes
-    its dependents wait for (TASK-2026-00553).
+    its dependents wait for (TASK-2026-00553). Doomed work the engine
+    retired is superseded the same way: the planner re-creates it
+    (TASK-2026-00580).
     """
     return [item for item in tickets
-            if str(item.get("status") or "") != "converted"]
+            if str(item.get("status") or "") != "converted"
+            and not _retired_by_engine(item)]
+
+
+def _retired_by_engine(item: Mapping[str, Any]) -> bool:
+    transition = _ticket_mirror(item).get("transition")
+    return (str(item.get("status") or "") == "cancelled"
+            and isinstance(transition, Mapping)
+            and transition.get("actor") == ENGINE_ACTOR)
 
 
 def _brake_active_children(

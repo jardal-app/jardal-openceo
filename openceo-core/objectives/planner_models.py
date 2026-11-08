@@ -555,6 +555,7 @@ async def validate_planner_result(
     horizon: Any = None,
     skills: Mapping[str, Collection[str]] | None = None,
     playbooks: Collection[str] | None = None,
+    unreleasable: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Deterministic validation (routing policy §17). Returns errors.
 
@@ -567,6 +568,9 @@ async def validate_planner_result(
     maps each agent to its suggestable skill names (TASK-2026-00203):
     a suggested skill must name one of its target's (active or draft).
     Agents missing from the map, or no map at all, skip the skill check.
+    ``unreleasable`` maps existing tickets a new ticket must not wait on
+    to the reason (failed, converted, cancelled or doomed;
+    TASK-2026-00580).
     """
     errors: list[str] = []
     bounds = _effective_horizon(horizon)
@@ -649,6 +653,12 @@ async def validate_planner_result(
                     f"depend on {completion_tasks[dep]!r} instead")
                 continue
             if dep in refs:
+                continue
+            why = (unreleasable or {}).get(str(dep))
+            if why:
+                errors.append(
+                    f"{where}: blocked_by {dep!r} is {why}; depend on the "
+                    "ticket that carries that work, or drop the dependency")
                 continue
             try:
                 exists = await task_exists(str(dep))

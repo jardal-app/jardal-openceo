@@ -401,6 +401,18 @@ class ApplyTests(unittest.TestCase):
         self.assertIsNone(updated.get("waiting_reason"))
         self.assertIn("duplicado", updated.get("error") or "")
 
+    def test_el_actor_queda_en_la_auditoria_solo_si_se_indica(self):
+        # TASK-2026-00580: un retiro del motor no se lee como decision humana.
+        for actor, expected in (("engine", "engine"), (None, None)):
+            adapter = FakeBusinessAdapter([business_doc(status="Working")])
+            repo = FakeRepo([exec_doc(status="queued", objective_id="OBJ-1")])
+            service = make_service(adapter, repo)
+            result = run(service.transition_ticket(
+                "TASK-2026-00010", "Cancelled", "condenado", actor=actor))
+            self.assertEqual(result["outcome"], "applied")
+            audit = mirror_of(repo.tasks["exec-1"])["transition"]
+            self.assertEqual(audit.get("actor"), expected)
+
     def test_cancel_con_orden_del_dueno_aplica_y_la_cita(self):
         adapter = FakeBusinessAdapter([business_doc(status="Working")])
         repo = FakeRepo([exec_doc(status="in_progress")])
