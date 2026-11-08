@@ -48,8 +48,9 @@ flags quedan encendidas.
 Cuándo este research merece su propia línea en vez de tickets sueltos, ver
 `Línea dedicada de investigación` (criterio del ticket #592; aquí no se
 duplica). Fuera de alcance en este tramo: Serper, Firecrawl, deep con
-presupuesto, intake externo y perfil free-research. El enrutado del
-planner se cubre en `Enrutado del planner` (ticket #618).
+presupuesto y perfil free-research. El enrutado del planner se cubre en
+`Enrutado del planner` (ticket #618) y el intake externo en
+`Intake externo` (ticket #619).
 
 ## Enrutado del planner
 
@@ -83,8 +84,36 @@ planner, nunca continúa solo a DEV. Verificado con
 `tests/test_planner_research_routing_618.py` (detalle servido y
 firme, quick por defecto, deep denegado live sobre el yaml real,
 ciclo con planner simulado): sin modelos vivos ni red. El intake
-externo es ticket hermano, fuera de aquí; el scheduler sigue
-apagado.
+externo vive en `Intake externo` (ticket hermano #619); el scheduler
+sigue apagado.
+
+## Intake externo
+
+La puerta externa de research queda fijada sobre las fachadas y grants
+existentes (ticket #619): el ticket de solicitud (Jardal ERP first) es la
+vía por defecto y la API/MCP con grants explícitos es la vía programática.
+Fuente única de la matriz: `openceo-core/research/intake.py`
+(`CONSUMER_INTAKE`); lo que la tabla dice lo fijan los tests.
+
+| Consumidor | Vía | Autenticación | El owner sale de | Operaciones | Fachada |
+| --- | --- | --- | --- | --- | --- |
+| solicitante externo | ticket (por defecto) | ticket de solicitud en Jardal ERP | `ticket:<TASK-2026-NNNNN>` (lo acuña el puente en servidor) | submit, get | `research/ticket_bridge.py` |
+| cliente HTTP programatico | http | cookie de sesión + permisos run_research/read_research | principal autenticado (`get_current_user`) | submit, get, cancel | `research/router.py` |
+| consumidor MCP programatico | mcp | token opaco de consumidor en `Authorization: Bearer` | `grant.owner_id` del token | las del grant explícito (submit, get, cancel por defecto) | `research/mcp_facade.py` |
+
+Garantías en la vía programática: sin identidad no hay autorización (sin
+fail-open); el owner nunca viaja en argumentos ni `_meta`; un job ajeno se
+lee como 404, nunca 403. El token del consumidor se guarda hasheado y el del
+puente de ticket nunca sale del servidor. Jardal ERP es el registro de
+negocio; Mongo conserva la ejecución.
+
+La corrida por defecto admite una investigación bajo el consumidor del ticket
+(`openceo_research_submit`), la sondea (`openceo_research_get`) y devuelve el
+brief al solicitante; el enrutado del planner hacia esa corrida vive en
+`Enrutado del planner` (#618). Verificado con
+`tests/test_research_intake_619.py` (definición, ciclo ticket, grants
+explícitos, matriz en docs): servicio simulado, sin modelos vivos ni red. El
+scheduler sigue apagado.
 
 ## Línea dedicada de investigación
 
