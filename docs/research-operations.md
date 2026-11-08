@@ -31,7 +31,12 @@ El servicio está encendido en producción (`openceo-core/.env:142`
 en `settings.py`). Con `RESEARCH_ENABLED` abierto, `/api/research/*` admite jobs
 a quien tenga `run_research`; sin él, el servicio responde deshabilitado y no
 admite jobs. El scheduler recurrente exige ambas flags (`workflows.py:112-113`)
-y solo se activa con autorización explícita del Owner; queda apagado.
+y solo se activa con autorización explícita del Owner; queda apagado. El
+servidor trae gasto pagado `2.00` y techo deep `2.00` (`.env:169`, `.env:217`),
+en mínimo con el proyecto. El despacho quick usa el perfil free-research
+(#648): exige `RESEARCH_FREE_ROUTER_ENABLED=true` (ausente, defecto `false` en
+`settings.py:407`) y un snapshot free-research vigente, o la síntesis queda
+`blocked` con `failure_reason` (ver `Perfil gratuito del servicio`).
 
 Smoke #594 verificado sin tocar `.env` (8/8 con el flag en memoria): config
 real del yaml vía `ConfigLoader`, servicio disponible, `submit`→`queued`
@@ -63,8 +68,11 @@ soportados reciben solo su credencial `FREE_ROUTER_*` seleccionada. Researcher y
 verifier de deep mantienen su adapter pagado y presupuesto independiente.
 
 Decision de degradacion: ranking o catalogo ausente, invalido o caducado,
-router deshabilitado o ninguna ruta compatible dejan el job `blocked` con
+router deshabilitado (`RESEARCH_FREE_ROUTER_ENABLED`, defecto `false` en
+`settings.py:407`) o ninguna ruta compatible dejan el job `blocked` con
 `failure_reason`; nunca se usa la lista estatica del helper legacy de sintesis.
+Vigente significa ranking con perfil free-research generado dentro de
+`RESEARCH_FREE_ROUTER_SNAPSHOT_MAX_AGE_HOURS` (30 h por defecto).
 Tras recuperar elegibilidad, `POST /api/research/jobs/{research_id}/resume`
 (mismo owner, permiso `run_research`) reencola el mismo job y despierta el
 despachador. Conserva fase, evidencia, pasos restantes y checkpoint, sin repetir
@@ -89,7 +97,8 @@ Deep exige presupuesto efectivo positivo y falla cerrado (`forbidden`)
 con presupuesto cero, sin degradar a quick. La selección deep se define con criterios explícitos (§47:
 brecha de cobertura desde un brief quick previo, verificación
 independiente, decisión que desbloquea gasto/frontera/migración y
-presupuesto pagado positivo) y se verifica con servicio simulado.
+presupuesto pagado positivo); la admisión es en vivo bajo la política
+efectiva (#641) y el contrato se verifica con servicio simulado.
 
 La corrida admite una investigación bajo el consumidor del ticket
 (`openceo_research_submit`), la sondea (`openceo_research_get`),
@@ -103,7 +112,8 @@ modelos vivos ni red. La política efectiva vigente gobierna deep. El intake
 externo vive en `Intake externo` (ticket hermano #619); el scheduler
 sigue apagado.
 
-Tier S aplica §9 antes de desarrollar (#642): solo investiga si el planner
+Tier S aplica el §9 del core (`routing_policy.md`) antes de desarrollar
+(#642): solo investiga si el planner
 identifica dependencia material de información externa desconocida. Sin esa
 necesidad no hay investigación. Emite primero `research/investigar`, quick
 por defecto; `research_mode: deep` exige los cuatro `deep_criteria` de §47
@@ -255,7 +265,8 @@ demo y suscripciones/schedules activos verificables. La spec acotada vive en
 `openceo-core/research/demo_b.py`: fuente RSS exacta, intervalo horario,
 propósito y clave idempotente fijos (una sola Demo B por owner), primera pasada
 como línea base; los topes de ingestión por tick y de suscripciones activas los
-aplica el motor.
+aplica el motor. El scheduler es reactivo: sin vencimiento espera
+indefinidamente, sin sondeos.
 
 Sonda del feed autorizado (solo lectura, sin Mongo, modelo ni flags):
 
@@ -320,9 +331,11 @@ Los créditos nativos siguen siendo otra unidad y no compran presupuesto USD.
 y ledger presentes en ese proceso; `verified: null`, ninguna llamada correcta
 observada en ese job. Pasa a `true` tras búsqueda/extracción correcta o ambas
 fases researcher/verifier; no certifica facturación, calidad ni producción.
-La validación #641 usa servicio, HTTP y cuotas simulados sin red ni LLM vivo.
-El flip de `.env`, restart y verificación con proveedores reales son un paso
-manual del Owner; scheduler/Demo B pertenecen a otro ticket (#643).
+La validación #641 usa servicio, HTTP y cuotas simulados sin red ni LLM vivo
+(`tests/test_research_deep_live_641.py`). El servidor ya trae gasto 2.00 y
+techo deep 2.00 (`.env:169`, `.env:217`); la verificación con proveedores
+reales sigue siendo un paso manual del Owner; scheduler/Demo B pertenecen a
+otro ticket (#643).
 
 Hasta dos conjuntos researcher, verifier con contexto nuevo, una corrección y
 revisión final. Cada fase consume el mismo límite de pasos/deadline y libera su
@@ -397,11 +410,15 @@ impide devolver el job terminado ni arrancar el servicio.
 ## Cierre humano único
 
 La recurrencia y el piloto social se deciden al terminar todo el proyecto y
-nada de eso se activa antes. El research quick ya está encendido en producción:
+nada de eso se activa antes. El research quick ya está encendido en producción
+y deep autorizado dentro del mismo techo (#641):
 `projects/jardal-openceo/project.yaml` trae el bloque `research` (ver
 `Tramo vivo en jardal-openceo`), `RESEARCH_ENABLED=true` en el host y smoke prod
 #613 verde (12/12, release `1ce5eed`); el scheduler sigue apagado y no se activa
 salvo autorización explícita del Owner con `RESEARCH_SCHEDULER_ENABLED=true`.
+El despacho quick usa el perfil free-research (#648): el flip enciende
+`RESEARCH_FREE_ROUTER_ENABLED=true` con un snapshot vigente, o la síntesis
+queda `blocked` con `failure_reason`.
 El proyecto autoriza hasta `paid_budget_usd: "2.00"` (#641); la política
 efectiva sigue siendo el mínimo entre servidor y proyecto. `RESEARCH_ENABLED` abierto
 admite `/api/research/*` a quien tenga `run_research`; no inicia nada recurrente
