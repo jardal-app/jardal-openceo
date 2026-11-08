@@ -68,9 +68,18 @@ critical reaches S):
 
 Inside a critical area, S goes to the ticket that defines the rule or the
 contract (the permission evaluator, the policy core, the migration, the
-ledger rule, the kernel). Tickets that apply or consume it (wiring,
-adapters, UI guards, tests, docs, refactors, follow-up fixes) take
-A, B or C with review: the rule they apply was already challenged.
+ledger rule, the kernel), together with the tests that pin that rule:
+they are its oracle, so a rule and its own tests are one S ticket, never
+sibling tickets. Tickets that apply or consume it (wiring, adapters, UI
+guards, consumer tests, docs, refactors, follow-up fixes) take A, B or C
+with review: the rule they apply was already challenged.
+
+One S ticket defines one rule or contract and fits one Tier-S cycle
+(§30). A ticket that bundles several rules (catalog, roles, ABAC, SoD and
+audit at once) or a whole boundary (every endpoint's policy, RLS and leak
+tests together) is decomposed first at Objective level, one rule per
+child, each child taking its own §27 check: sent whole, it spends a full
+independent planning cycle only to come back as a conversion.
 
 An explicit request from the owner or the ticket for maximum assurance, a
 near fault-free result or multi-model orchestration is itself a valid
@@ -248,7 +257,9 @@ Apply in this order:
    irreversible data, core contract) and would independent model
    families materially reduce it? Or does the owner/ticket ask for
    maximum assurance?
-   YES -> tier_s (justify per §20)
+   YES -> tier_s (justify per §20), once the ticket is one rule with
+          its own tests that fits one cycle (§19); several rules ->
+          decompose first and run this check on each child
 
 2. A CHECK
    Is discovering what is true/wrong/correct-to-do the dominant difficulty?

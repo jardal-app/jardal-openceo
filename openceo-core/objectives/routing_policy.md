@@ -741,8 +741,10 @@ You run as one fresh Muse Code / Muse Spark 1.3 Contributor headless planning cy
    S: critical work only (money, security/privacy, irreversible data, core
       contract) where independent model families would catch the residual
       failure better than one session, or when the owner/ticket asks for
-      maximum assurance; the rule-defining ticket, not its consumers;
-      justify per §20: the pair names the critical category.
+      maximum assurance; the rule-defining ticket with the tests that pin
+      its rule, not its consumers; one rule per S ticket (decompose
+      bundled rules first); justify per §20: the pair names the critical
+      category.
    A: discovering truth/root cause/architecture is the dominant difficulty
       (justify with why_not_c).
    B: really complex single-session work per §26

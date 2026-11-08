@@ -513,6 +513,24 @@ class PolicyTests(unittest.TestCase):
                       "outside critical work", text)
         self.assertNotIn("Strong signals include", text)
 
+    def test_tier_s_ticket_is_one_rule_with_its_own_tests(self) -> None:
+        # TASK-2026-00578: an S migration split from its own tests (600 vs
+        # 601/602) and multi-rule S tickets (540/541) came back converted.
+        text = self._flat()
+        self.assertIn("together with the tests that pin that rule", text)
+        self.assertIn("a rule and its own tests are one S ticket, never "
+                      "sibling tickets", text)
+        self.assertIn("UI guards, consumer tests, docs", text)
+        self.assertNotIn("UI guards, tests, docs", text)
+        self.assertIn("One S ticket defines one rule or contract and fits "
+                      "one Tier-S cycle", text)
+        self.assertIn("is decomposed first at Objective level, one rule per "
+                      "child", text)
+        self.assertIn("once the ticket is one rule with its own tests that "
+                      "fits one cycle", text)
+        self.assertIn("the rule-defining ticket with the tests that pin its "
+                      "rule, not its consumers; one rule per S ticket", text)
+
     def test_weak_verification_is_never_a_b_prong_by_itself(self) -> None:
         text = self._flat()
         self.assertIn("Weak verification (builder-authored tests only, no "
