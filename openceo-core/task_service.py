@@ -52,6 +52,7 @@ from objectives.ticket_cost import COST_RUNS_KEY, record_runs
 from objectives.missions import (
     acceptance_question_marker as mission_acceptance_marker,
     apply_acceptance_answer,
+    served_mission_reason,
 )
 from objectives.plan_spend import (
     SPEND_WAITING_REASON,
@@ -4967,6 +4968,7 @@ class TaskService:
         decision: EscalationDecision,
         source_id: str | None = None,
         priority: TaskPriority = TaskPriority.HIGH,
+        mission_id: str | None = None,
     ) -> dict[str, Any]:
         """Owner-escalation entry (autonomy F4 TASK-2026-00114).
 
@@ -4981,6 +4983,11 @@ class TaskService:
         if not decision.escalate:
             raise ValueError("nothing to escalate: the decision is automatic")
         spec = build_escalation_ticket(action, decision)
+        params = dict(spec["params"])
+        if str(mission_id or "").strip():
+            # A question about a mission is its work in flight, and the
+            # answer joins its record (TASK-2026-00594).
+            params["mission_id"] = str(mission_id).strip()
         payload = TaskCreateRequest(
             project=action.project,
             source=TaskSource.API,
@@ -4988,7 +4995,7 @@ class TaskService:
             title=spec["title"],
             description=spec["description"],
             priority=priority,
-            params=spec["params"],
+            params=params,
             tags=spec["tags"],
             created_by="ceo",
             autorun=False,
@@ -5994,7 +6001,49 @@ class TaskService:
         )
         review = await self._repo.create_task_review(review_doc.model_dump(mode="python"))
         await self._hub.broadcast("task_review_created", review)
+        await self._return_owner_answer(task, verdict=verdict, comment=comment)
         return {"applied": True, "route": "escalation_close", "task": patched or task}
+
+    async def _return_owner_answer(
+        self, task: Mapping[str, Any], *, verdict: str, comment: str,
+    ) -> None:
+        """The Owner's answer goes back to the CEO that asked (TASK-2026-00594).
+
+        An answer about a mission also joins the mission record as a note
+        on its ticket, and the CEO is woken to judge that mission with it.
+        Never raises: the recorded decision stands either way.
+        """
+        title = " ".join(str(task.get("title") or "").split())[:80]
+        answer = f"{verdict}. {comment}".strip() if comment else f"{verdict}."
+        mission_id = str((task.get("params") or {}).get("mission_id") or "").strip()
+        if mission_id:
+            await self._note_owner_answer_on_mission(
+                mission_id, title=title, answer=answer)
+        wake = getattr(self, "_ceo_wake", None)
+        if wake is None:
+            return
+        head = served_mission_reason(mission_id) + " " if mission_id else ""
+        try:
+            wake(f"{head}Owner answered «{title}»: {answer}"[:300])
+        except Exception:
+            logger.warning("CEO wake on owner answer failed", exc_info=True)
+
+    async def _note_owner_answer_on_mission(
+        self, mission_id: str, *, title: str, answer: str,
+    ) -> None:
+        adapter = getattr(self, "_business", None)
+        if adapter is None or not getattr(adapter, "is_enabled", False):
+            return
+        try:
+            mission = await self._repo.get_mission(mission_id)
+            group = str((mission or {}).get("erp_group_ref") or "").strip()
+            if group:
+                day = datetime.now(timezone.utc).date().isoformat()
+                await adapter.add_comment(
+                    group, f"Respuesta del Owner ({day}) a «{title}»: {answer}")
+        except Exception:
+            logger.warning("Owner answer note failed for mission %s",
+                           mission_id, exc_info=True)
 
     async def _apply_decision_to_owner_question(
         self,
