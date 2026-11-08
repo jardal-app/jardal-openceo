@@ -227,6 +227,55 @@ suscripción; encender `RESEARCH_ENABLED` y el scheduler sigue siendo decisión 
 y se hace al final del proyecto. El guard de egress bloquea localhost y redes privadas:
 la fuente de la prueba recurrente debe ser una URL pública.
 
+## Demo B
+
+Demo B despliega la recurrencia sobre el feed autorizado único
+`https://github.com/Jardal/jardal-openceo/releases.atom` (Owner 2026-11-06,
+ticket #643) y deja el scheduler recurrente listo para quedar encendido, con
+`RESEARCH_ENABLED=true` y `RESEARCH_SCHEDULER_ENABLED=true` permanentes tras la
+demo y suscripciones/schedules activos verificables. La spec acotada vive en
+`openceo-core/research/demo_b.py`: fuente RSS exacta, intervalo horario,
+propósito y clave idempotente fijos (una sola Demo B por owner), primera pasada
+como línea base; los topes de ingestión por tick y de suscripciones activas los
+aplica el motor.
+
+Sonda del feed autorizado (solo lectura, sin Mongo, modelo ni flags):
+
+```bash
+./.venv/bin/python scripts/research_watch_probe.py --url https://github.com/Jardal/jardal-openceo/releases.atom
+```
+
+Registro 2026-11-08: `ok: false`, `Respuesta HTTP 404` (`source_unavailable`,
+0 items). El repo no responde en público (ni `Jardal` ni `jardal-app` devuelven
+la página ni el Atom; el remoto git apunta a `jardal-app/jardal-openceo`): sin
+releases públicamente legibles, el tick productivo degrada con causa y conserva
+el cursor en vez de admitir trabajo. Precondición del runbook: repetir la sonda
+y ver `ok: true` con items.
+
+Verificación pre-flip (`tests/test_research_demo_b_643.py`, servicio simulado
+sobre Mongo real con tiempo virtual, modelo Mock intacto, sin red ni LLM vivo):
+spec exacta y topes (`demo_b_bounds_problems`), gate de ambas flags, dos
+reinicios que conservan identidad/vencimiento/cursor con 304 tras reiniciar,
+tick que admite un único job quick público con presupuesto pagado cero y
+límites de la política efectiva, admisión acotada por tick sin duplicados y
+cancelación que detiene la adquisición. Oráculo intacto
+(`test_research_watch.py`, `test_research_subscriptions.py`).
+
+Runbook productivo (Owner, ya autorizado; sin editar `.env` en el repo):
+
+1. Repetir la sonda hasta `ok: true` (precondición: releases públicamente legibles).
+2. Poner `RESEARCH_ENABLED=true` y `RESEARCH_SCHEDULER_ENABLED=true` en
+   `openceo-core/.env` del host.
+3. `scripts/openceo-core-host.sh restart` + `status`.
+4. Crear la suscripción Demo B con la spec de `research/demo_b.py`
+   (`POST /api/research/subscriptions`).
+5. Verificar activas (`GET /api/research/subscriptions`, schedules activos),
+   observar un tick (un job quick, gasto 0) y reiniciar dos veces comprobando
+   que identidad, vencimiento y cursor sobreviven.
+6. Las flags quedan encendidas tras la demo. La cancelación que detiene la
+   adquisición está probada en tests; la suscripción Demo B queda activa para
+   que suscripciones y schedules sigan verificables.
+
 ## Deep
 
 Deep usa fases HTTP controladas por el servicio, sin llamadas auxiliares de CLI.
@@ -255,7 +304,7 @@ observada en ese job. Pasa a `true` tras búsqueda/extracción correcta o ambas
 fases researcher/verifier; no certifica facturación, calidad ni producción.
 La validación #641 usa servicio, HTTP y cuotas simulados sin red ni LLM vivo.
 El flip de `.env`, restart y verificación con proveedores reales son un paso
-manual del Owner; scheduler/Demo B pertenecen a otro ticket.
+manual del Owner; scheduler/Demo B pertenecen a otro ticket (#643).
 
 Hasta dos conjuntos researcher, verifier con contexto nuevo, una corrección y
 revisión final. Cada fase consume el mismo límite de pasos/deadline y libera su
@@ -340,23 +389,12 @@ efectiva sigue siendo el mínimo entre servidor y proyecto. `RESEARCH_ENABLED` a
 admite `/api/research/*` a quien tenga `run_research`; no inicia nada recurrente
 por sí solo.
 
-**Demostración B (recurrencia desplegada).** La persona elige una URL pública de feed
-que controle (comprobable con la sonda de arriba) y autoriza poner
-`RESEARCH_SCHEDULER_ENABLED=true` en `openceo-core/.env` (`RESEARCH_ENABLED` ya
-está en `true` y el bloque `research` ya existe desde #594; este es su mínimo):
-
-```yaml
-research:
-  enabled: true
-  allowed_modes: [quick]
-  classification_ceiling: public
-```
-
-El bloque vivo trae además adaptadores, presupuesto y límites (ver
-`Tramo vivo en jardal-openceo`). El agente reinicia la unidad, crea una
-suscripción acotada, la reinicia de nuevo para comprobar que identidad,
-vencimiento y cursor sobreviven, observa un tick, la cancela y comprueba que
-deja de adquirir. La persona decide si las flags quedan encendidas.
+**Demostración B (recurrencia desplegada).** Ver `Demo B` (ticket #643): feed
+autorizado único fijado por el Owner, sonda registrada, verificación pre-flip
+con servicio simulado y runbook productivo con ambas flags permanentes. El
+bloque vivo trae adaptadores, presupuesto y límites (ver
+`Tramo vivo en jardal-openceo`); encender el scheduler sigue siendo decisión
+del dueño.
 
 **Piloto X (hasta cinco posts).** La persona ejecuta `create` y `cookies` con su propia
 sesión (login/2FA incluido), acuerda una cuenta o consulta pública y añade
