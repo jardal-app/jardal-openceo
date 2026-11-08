@@ -3808,48 +3808,10 @@ def _work_children(
             and str(item.get("status") or "") != "converted"]
 
 
-#: Blockers that never release a dependent by themselves: the planner
-#: replaces work queued behind a failed one, and its next created tickets
-#: rewire a converted one's dependents (TASK-2026-00492).
+#: Blockers that never release a dependent by themselves: work queued
+#: behind them is doomed (``doomed_ids``) and retired before planning,
+#: unless a conversion rewire repoints it (TASK-2026-00492, -00580).
 NON_RELEASING_BLOCKER_STATUS = frozenset({FAILED_HISTORY_STATUS, "converted"})
-
-
-def _is_dead_queued(
-    by_id: Mapping[str, Mapping[str, Any]],
-    item: Mapping[str, Any],
-    _visiting: frozenset[str] = frozenset(),
-) -> bool:
-    """Queued work no live blocker can release: only a new plan moves it.
-
-    Dead means at least one non-releasing blocker (failed, converted or
-    itself dead-queued) and nothing else live: released blockers
-    (completed/cancelled) are already satisfied, so a mix with them is as
-    dead as the bare case (TASK-2026-00534). The dispatcher skips it
-    (``_blocked``), so counting it as in flight or as an open gap wedges
-    the objective: final review (TASK-2026-00396) and max_tickets, held
-    forever behind a converted blocker (TASK-2026-00553). Unknown or live
-    blockers and dependency cycles stay open (fail-closed).
-    """
-    if str(item.get("status") or "") != "queued":
-        return False
-    deps = item.get("blocked_by") or []
-    if not deps:
-        return False
-    visiting = _visiting | {str(item.get("task_id") or "")}
-    seen_dead = False
-    for dep in deps:
-        blocker = by_id.get(str(dep))
-        if blocker is None or str(dep) in visiting:
-            return False
-        status = str(blocker.get("status") or "")
-        if status in BLOCKER_RELEASED_STATUSES:
-            continue
-        if (status in NON_RELEASING_BLOCKER_STATUS
-                or _is_dead_queued(by_id, blocker, visiting)):
-            seen_dead = True
-            continue
-        return False
-    return seen_dead
 
 
 #: Who the business audit names when the engine itself moves a ticket.
@@ -4059,16 +4021,16 @@ def _brake_active_children(
     """In-flight children for the admission brake (TASK-2026-00406).
 
     Failed tickets are settled history (never slots), like terminal
-    ones, and dead-queued work (behind non-releasing blockers only) can
-    never run alone: counting either wedges planning once history fills
-    the cap. Fail-closed: unknown or live blockers stay in flight.
+    ones, and doomed work (``doomed_ids``) never runs: counting either
+    wedges planning once history fills the cap. Unknown blockers and
+    cycles stay in flight (fail-closed).
     """
-    by_id = {str(item.get("task_id") or ""): item for item in tickets}
+    doomed = doomed_ids(tickets)
     return [item for item in tickets
             if str(item.get("status")) not in TERMINAL_TICKET_STATUS
             and str(item.get("status")) != FAILED_HISTORY_STATUS
             and str(item.get("status")) != "converted"
-            and not _is_dead_queued(by_id, item)]
+            and str(item.get("task_id") or "") not in doomed]
 
 
 def verify_delivery(
@@ -4083,11 +4045,11 @@ def verify_delivery(
     failed child without acceptance criteria or expected artefacts)
     park it — no planner run can fix a closed ticket. Failed children
     are history (``failed_children``), never open gaps, and so is queued
-    work behind non-releasing blockers only (``dead_children``).
+    doomed work (``dead_children``, ``doomed_ids``).
     No LLM is involved, ever.
     """
     work = _work_children(objective, children)
-    by_id = {str(item.get("task_id") or ""): item for item in children}
+    doomed = doomed_ids(children)
     open_gaps: list[str] = []
     data_gaps: list[str] = []
     failed: list[str] = []
@@ -4098,7 +4060,7 @@ def verify_delivery(
         status = str(item.get("status") or "")
         if status == FAILED_HISTORY_STATUS:
             failed.append(short)
-        elif _is_dead_queued(by_id, item):
+        elif str(item.get("task_id") or "") in doomed:
             dead.append(short)
         elif status not in TERMINAL_TICKET_STATUS:
             open_gaps.append(f"{short}: still {status}")
@@ -5074,11 +5036,9 @@ async def _finish_objective(
     if env.ceo_wake is not None:
         reason = f"Objective {objective_id} closed: {closure}."
         if mission_id:
-            reason += (
-                f" It served mission {mission_id}: judge the mission "
-                "acceptance and emit its next objective pedido, or "
-                "close the mission."
-            )
+            from objectives import missions as missions_mod
+
+            reason += " " + missions_mod.served_mission_reason(mission_id)
         try:
             env.ceo_wake(reason)
         except Exception:  # noqa: BLE001, S110

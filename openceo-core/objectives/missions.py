@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from business.links import business_mirror
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -45,7 +46,27 @@ __all__ = [
     "normalize_mission_goal",
     "record_objective_closed",
     "record_objective_linked",
+    "served_mission_reason",
+    "served_missions",
 ]
+
+_SERVED_MISSION = re.compile(r"It served mission (MIS-[0-9A-Za-z]+): judge")
+
+
+def served_mission_reason(mission_id: str) -> str:
+    """CEO wake text of an objective close that served a mission."""
+    return (f"It served mission {mission_id}: judge the mission acceptance "
+            "and emit its next objective pedido, or close the mission.")
+
+
+def served_missions(reasons: Sequence[str]) -> list[str]:
+    """Missions a CEO review was woken to judge, in order, without repeats."""
+    found: list[str] = []
+    for reason in reasons:
+        for mission_id in _SERVED_MISSION.findall(str(reason or "")):
+            if mission_id not in found:
+                found.append(mission_id)
+    return found
 
 #: Valid ``entry`` values on the mission document.
 MISSION_ENTRIES = frozenset({"top_down", "horizon_promotion"})
