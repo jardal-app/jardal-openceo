@@ -2,6 +2,26 @@
 
 Resumen operativo corto del estado real del repo.
 
+## 2026-11-08 — La palabra del Owner llega a quien juzga una misión (TASK-2026-00594)
+
+- Órdenes del Owner: «si fue un bug corrige» y «corrige todo y que no falle con la orden de flujo antideterminista para evitar fixes por cada camino debe ser dinamico no determinista».
+- **Causa (MIS-47F6240D):** el 6-nov el Owner autorizó en notas del ticket de la misión (TASK-2026-00544) la demo B, el scheduler y `paid_budget_usd=2.00`. Del ERP el motor no consume comentarios y el CEO juzgaba solo objetivo, criterios y traspaso, así que tomó todo eso por pendiente del Owner, dejó la misión sin nada en curso y no preguntó a nadie. No faltaba ninguna decisión.
+- **Fix (información para quien juzga, no reglas por camino):**
+  - CEO, planner y conversión de pedidos leen las notas del ticket de la misión (`engine.mission_record_lines`, mismo lector que 00571).
+  - Una sola definición de «nada en curso» (`missions.mission_idle`, `state.OPEN_TICKET_STATUSES`, índice `idx_tasks_mission`).
+  - Liveness de misiones en el latido del mecánico (`ObjectiveService.wake_idle_missions`), una vez por episodio; una nota nueva abre episodio.
+  - Una misión juzgada sin nada en curso no admite `keep_going`/`do_nothing`; el último recurso de 00581 pregunta con las palabras del CEO.
+  - La respuesta del Owner a una escalación despierta al CEO y, si nombra una misión, queda como nota en ella.
+- **Cómo registra el Owner:** una orden sobre una misión ya creada va como nota en el ticket de la misión. Si el motor pregunta, se responde con Aprobar/Denegar y texto en Horizon; cambiar el estado del ticket en el ERP no cuenta como respuesta.
+- **Verificación:**
+  - 25 tests propios con 17/17 mutaciones detectadas; checks obligatorios (71) y vecinos (882) en verde.
+  - Los 10 fallos de `test_ticket_transition`/`test_research_subscriptions` son idénticos en `main` limpio.
+  - Deploy f535b97 (19:43 UTC). A las 19:46:56 el latido despertó al CEO y CEO-20261108T194656Z-5BCA creó en el primer intento el tramo final #640 (TASK-2026-00595) con las autorizaciones del 6-nov y sin gasto nuevo.
+- **Destrabes:** TASK-2026-00299 cerrado con la evidencia de sus dos corridas programadas (26-oct 18:20 y 27-oct 02:15).
+- **Hallazgos sin tocar:**
+  - Los benchmarks diarios del free-router fallan desde el 28-oct (salvo el 7-nov) con «AA index major changed: 4.3 vs 5.0» y se conserva el ranking previo.
+  - Cada arranque registra `INVALID_TRANSITION` del espejo para TASK-2026-00032…00041 (ya ocurría antes).
+
 ## 2026-11-08 — Trabajo condenado y misiones sin objetivo (TASK-2026-00580, TASK-2026-00581)
 
 - Órdenes del Owner: «si correige arregla el bug o haz otra coas para que ya no aarezcan y garantice funcionliada» y «y destraba la mision».
