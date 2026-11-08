@@ -20,7 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from research.budget import ResearchBudgetLedger
+from research.budget import ResearchBudgetLedger, ResearchPolicyLedger
+from research.money import parse_optional_micro
 from research.service import ResearchDependencies, ResearchService
 
 logger = logging.getLogger(__name__)
@@ -130,7 +131,16 @@ def _build_discovery(settings: Any, ledger: Any, *, repo=None, firecrawl=None) -
     clients = {}
     for name, factory in (("brave", BraveClient), ("serper", SerperClient)):
         if _setting(settings, f"RESEARCH_{name.upper()}_API_KEY", "") and _setting(settings, f"RESEARCH_{name.upper()}_ENABLED", True):
-            clients[name] = factory(settings=settings, ledger=ledger, max_attempts=1)
+            extra = {}
+            if name == "serper":
+                extra["adapter_enabled"] = ledger is not None and getattr(repo, "db", None) is not None
+            if name == "serper" and getattr(repo, "db", None) is not None:
+                from research.acquisition.base import parse_optional_int
+                from research.provider_credits import ProviderCredits
+                extra["credit_budget"] = ProviderCredits(repo.db, provider="serper", account="default",
+                    capacity=parse_optional_int(_setting(settings, "RESEARCH_SERPER_ACCOUNT_CREDIT_QUERIES", "")),
+                    window="nonrenewing")
+            clients[name] = factory(settings=settings, ledger=ledger, max_attempts=1, **extra)
     if firecrawl is not None:
         clients["firecrawl"] = firecrawl
     if not clients:
@@ -141,11 +151,11 @@ def _build_discovery(settings: Any, ledger: Any, *, repo=None, firecrawl=None) -
         # Subscription ticks supply policy derived by their authenticated runner.
         job = await repo.get_research_job(research_id) if repo is not None else None
         policy = kwargs.get("policy")
-        adapters = (job.get("adapters", {}) if job and job.get("project_key") == project_key
-                    else dict(policy.adapters) if policy is not None and policy.project_key == project_key else {})
+        adapters = (job.get("adapters", {}) if job and job.get("project_key") == project_key else
+                    dict(policy.adapters) if job is None and policy is not None and policy.project_key == project_key else {})
         classification = job.get("classification") if job else getattr(getattr(policy, "classification", None), "value", None)
-        selected = next((name for name in ("brave", "serper", "firecrawl") if adapters.get(name)), None)
-        if classification != "public" or selected not in clients:
+        selected = kwargs.get("provider") or next((name for name in ("brave", "serper", "firecrawl") if adapters.get(name)), None)
+        if classification != "public" or selected not in clients or not adapters.get(selected):
             return DiscoveryResult(provider=selected or "discovery", degradations=(ProviderDisabledError(
                 "No hay proveedor publico autorizado y montado", provider=selected or "discovery").degradation(),))
         count = int(kwargs.get("count") or 10)
@@ -159,6 +169,7 @@ def _build_discovery(settings: Any, ledger: Any, *, repo=None, firecrawl=None) -
         except AcquisitionError as exc:
             return DiscoveryResult(provider=selected, degradations=(exc.degradation(),))
 
+    discover.providers = frozenset(clients)
     return discover
 
 
@@ -171,11 +182,36 @@ def _build_firecrawl(settings, ledger, repo):
     key = _setting(settings, "RESEARCH_FIRECRAWL_API_KEY", "")
     window = _setting(settings, "RESEARCH_FIRECRAWL_CREDIT_WINDOW", "")
     db = getattr(repo, "db", None)
-    if not key or not window or db is None or not _setting(settings, "RESEARCH_FIRECRAWL_ENABLED", True):
+    if ledger is None or not key or not window or db is None or not _setting(settings, "RESEARCH_FIRECRAWL_ENABLED", True):
         return None
     budget = ProviderCredits(db, provider="firecrawl", account=hashlib.sha256(key.encode()).hexdigest()[:16],
         capacity=parse_optional_int(_setting(settings, "RESEARCH_FIRECRAWL_ACCOUNT_CREDITS", "")), window=window)
     return FirecrawlClient(settings=settings, ledger=ledger, credit_budget=budget, max_attempts=1)
+
+
+def _provider_status(settings, *, ledger, discover, firecrawl, deep_model):
+    from decimal import Decimal, InvalidOperation
+
+    def positive(name):
+        try:
+            value = Decimal(str(_setting(settings, name, "")))
+            return value.is_finite() and value > 0
+        except InvalidOperation:
+            return False
+
+    configured = {
+        "deep": bool(_setting(settings, "RESEARCH_DEEP_API_KEY", "") and _setting(settings, "RESEARCH_DEEP_MODEL", ""))
+            and all(positive(name) for name in ("RESEARCH_DEEP_INPUT_USD_PER_MILLION",
+                "RESEARCH_DEEP_OUTPUT_USD_PER_MILLION", "RESEARCH_DEEP_ACCOUNT_CEILING_USD", "RESEARCH_PAID_SPEND_USD")),
+        "serper": bool(_setting(settings, "RESEARCH_SERPER_API_KEY", "")) and positive("RESEARCH_SERPER_ACCOUNT_CREDIT_QUERIES"),
+        "firecrawl": bool(_setting(settings, "RESEARCH_FIRECRAWL_API_KEY", "")
+            and _setting(settings, "RESEARCH_FIRECRAWL_CREDIT_WINDOW", "")) and positive("RESEARCH_FIRECRAWL_ACCOUNT_CREDITS"),
+    }
+    mounted = {"deep": deep_model is not None and ledger is not None,
+               "serper": "serper" in getattr(discover, "providers", ()) and ledger is not None,
+               "firecrawl": firecrawl is not None and ledger is not None}
+    return {name: {"configured": ready, "mounted": mounted[name], "verified": None}
+            for name, ready in configured.items()}
 
 
 def _build_http_reader(settings: Any) -> Any | None:
@@ -296,6 +332,9 @@ def build_research_service(
             accounts=repo.research_budget_accounts,
             usage=repo.research_usage,
         )
+        ledger = ResearchPolicyLedger(ledger, repo,
+            parse_optional_micro(_setting(settings, "RESEARCH_PAID_SPEND_USD", "0.00")) or 0,
+            parse_optional_micro(_setting(settings, "RESEARCH_DEEP_ACCOUNT_CEILING_USD", "0.00")) or 0)
 
     evidence, vault = _build_evidence(settings)
     resources.vault = vault
@@ -311,37 +350,42 @@ def build_research_service(
     resources.firecrawl = firecrawl
     discover = _build_discovery(settings, ledger, repo=repo, firecrawl=firecrawl)
     http_read = reader
-    if firecrawl is not None:
-        async def selected_read(*, url, research_id, project_key, **kwargs):
-            job = await repo.get_research_job(research_id)
-            if (job is None or job.get("project_key") != project_key or job.get("read_provider") != "firecrawl"):
-                return await http_read(url=url, research_id=research_id, project_key=project_key, **kwargs)
-            from research.acquisition.base import ProviderDisabledError, DestinationBlockedError
-            from research.policies import EgressGuard, EgressError
-            if not job.get("adapters", {}).get("firecrawl") or job.get("classification") != "public":
-                raise ProviderDisabledError("Extraccion Firecrawl no autorizada", provider="firecrawl")
-            # The initial URL and returned URL are checked locally. Firecrawl's own
-            # remote redirect/network path cannot be attested by this API; declare it.
-            guard = EgressGuard()
-            try:
-                await guard.validate(url)
-                outcome = await firecrawl.scrape(url, research_id=research_id, project_key=project_key,
-                                                owner_id=job["owner_id"], deadline=kwargs.get("deadline"))
-                if outcome.degradations:
-                    from research.acquisition.base import AcquisitionError
-                    gap = outcome.degradations[0]
-                    error = AcquisitionError(gap.detail, provider=gap.provider)
-                    error.coverage_reason, error.kind = gap.coverage_reason, gap.reason
-                    raise error
-                await guard.validate(outcome.final_url)
-            except EgressError:
-                raise DestinationBlockedError("Destino no publico", provider="firecrawl") from None
-            from research.evidence import content_hash_of, normalize_content
-            return {"url": outcome.final_url, "text": outcome.text, "provider": "firecrawl",
-                    "access_method": "firecrawl", "observed_at": outcome.observed_at,
-                    "published_at": outcome.published_at, "content_hash": content_hash_of(normalize_content(outcome.text)),
-                    "remote_egress_unattested": True}
-        reader = selected_read
+    async def selected_read(*, url, research_id, project_key, **kwargs):
+        job = await repo.get_research_job(research_id)
+        from research.acquisition.base import ProviderDisabledError, DestinationBlockedError, MissingConfigError
+        if job is None or job.get("project_key") != project_key:
+            raise ProviderDisabledError("Lectura sin job autorizado", provider="read")
+        if job.get("read_provider", "http") != "firecrawl":
+            if http_read is None:
+                raise MissingConfigError("Lector HTTP no montado", provider="http")
+            return await http_read(url=url, research_id=research_id, project_key=project_key, **kwargs)
+        from research.policies import EgressGuard, EgressError
+        if not job.get("adapters", {}).get("firecrawl") or job.get("classification") != "public":
+            raise ProviderDisabledError("Extraccion Firecrawl no autorizada", provider="firecrawl")
+        if firecrawl is None:
+            raise MissingConfigError("Firecrawl no montado", provider="firecrawl")
+        # The initial URL and returned URL are checked locally. Firecrawl's own
+        # remote redirect/network path cannot be attested by this API; declare it.
+        guard = EgressGuard()
+        try:
+            await guard.validate(url)
+            outcome = await firecrawl.scrape(url, research_id=research_id, project_key=project_key,
+                                            owner_id=job["owner_id"], deadline=kwargs.get("deadline"))
+            if outcome.degradations:
+                from research.acquisition.base import AcquisitionError
+                gap = outcome.degradations[0]
+                error = AcquisitionError(gap.detail, provider=gap.provider)
+                error.coverage_reason, error.kind = gap.coverage_reason, gap.reason
+                raise error
+            await guard.validate(outcome.final_url)
+        except EgressError:
+            raise DestinationBlockedError("Destino no publico", provider="firecrawl") from None
+        from research.evidence import content_hash_of, normalize_content
+        return {"url": outcome.final_url, "text": outcome.text, "provider": "firecrawl",
+                "access_method": "firecrawl", "observed_at": outcome.observed_at,
+                "published_at": outcome.published_at, "content_hash": content_hash_of(normalize_content(outcome.text)),
+                "remote_egress_unattested": True}
+    reader = selected_read
     resources.http_reader = http_reader
     resources.discover = discover
 
@@ -383,6 +427,8 @@ def build_research_service(
     )
     from research.deep_model import BudgetedDeepModel
     deps.deep_model = BudgetedDeepModel(settings, ledger)
+    deps.provider_status = _provider_status(settings, ledger=ledger, discover=discover,
+                                          firecrawl=firecrawl, deep_model=deps.deep_model)
     from research.events import ResearchEvents
     event_db = getattr(repo, "db", None)
     if event_db is not None:

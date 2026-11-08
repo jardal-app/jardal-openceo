@@ -57,6 +57,7 @@ __all__ = [
     "Reservation",
     "ReconcileReport",
     "ResearchBudgetLedger",
+    "ResearchPolicyLedger",
     "Settlement",
     "account_key",
 ]
@@ -691,6 +692,48 @@ class ResearchBudgetLedger:
             "live_reservations": len(live),
             "updated_at": doc.get("updated_at"),
         }
+
+
+class ResearchPolicyLedger:
+    """Enforce persisted authority and a shared paid ceiling before provider I/O."""
+
+    def __init__(self, ledger: ResearchBudgetLedger, repo: Any, paid_ceiling: int, deep_ceiling: int) -> None:
+        self.ledger, self.repo = ledger, repo
+        self.paid_ceiling = min(paid_ceiling, deep_ceiling)
+
+    async def reserve(self, **kwargs: Any) -> ReserveDecision:
+        provider = kwargs["provider"]
+        if provider not in {"deepseek-research", "serper"}:
+            return await self.ledger.reserve(**kwargs)
+        job = await self.repo.get_research_job(kwargs["research_id"])
+        if (not job or job["project_key"] != kwargs["project_key"]
+                or job.get("classification") != "public"
+                or provider == "serper" and not job.get("adapters", {}).get("serper")
+                or provider == "deepseek-research" and job.get("mode") != "deep"):
+            raise PaidBudgetDisabled("Proveedor no autorizado por el job persistido")
+        ceiling = min(self.paid_ceiling, int(job.get("paid_budget_micro_usd") or 0))
+        paid = await self.ledger.reserve(**{**kwargs, "provider": "deepseek-research", "account": "default",
+            "operation_id": "paid:" + kwargs["operation_id"], "ceiling_micro_usd": ceiling,
+            "project_limit_micro_usd": ceiling, "job_limit_micro_usd": ceiling})
+        if not paid.accepted or paid.reused:
+            return ReserveDecision(False, reason="paid_budget_exhausted")
+        # There is no invoice reconciliation here. Retain the maximum across phases,
+        # jobs and providers; crashes between reservations can only reduce capacity.
+        await self.ledger.mark_uncertain(paid.reservation)
+        return paid if provider == "deepseek-research" else await self.ledger.reserve(**kwargs)
+
+    async def commit(self, reservation: Reservation, **kwargs: Any) -> Settlement:
+        if reservation.operation_id.startswith("paid:"):
+            return await self.ledger.mark_uncertain(reservation)
+        return await self.ledger.commit(reservation, **kwargs)
+
+    async def release(self, reservation: Reservation) -> Settlement:
+        if reservation.operation_id.startswith("paid:"):
+            return await self.ledger.mark_uncertain(reservation)
+        return await self.ledger.release(reservation)
+
+    async def mark_uncertain(self, reservation: Reservation) -> Settlement:
+        return await self.ledger.mark_uncertain(reservation)
 
 
 def _find_reservation(rows: list[dict[str, Any]], operation_id: str) -> dict[str, Any] | None:

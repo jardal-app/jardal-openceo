@@ -77,6 +77,7 @@ class SerperClient:
         phase_timeout: float = 10.0,
         backoff_seconds: float = 0.5,
         account: str = "default",
+        credit_budget: Any | None = None,
     ) -> None:
         self._settings = settings
         self._client = http_client
@@ -104,6 +105,7 @@ class SerperClient:
         self._phase_timeout = float(phase_timeout)
         self._backoff = float(backoff_seconds)
         self._account = account
+        self._credit_budget = credit_budget
 
     # ------------------------------------------------------------ operaciones
 
@@ -233,10 +235,19 @@ class SerperClient:
         json_body: dict[str, Any],
         timeout: float,
     ) -> httpx.Response:
+        reservation = await self._credit_budget.reserve(1) if self._credit_budget is not None else None
         if self._client is not None:
-            return await self._client.post(url, headers=headers, json=json_body, timeout=timeout)
-        async with httpx.AsyncClient(timeout=None) as client:
-            return await client.post(url, headers=headers, json=json_body, timeout=timeout)
+            response = await self._client.post(url, headers=headers, json=json_body, timeout=timeout)
+        else:
+            async with httpx.AsyncClient(timeout=None, follow_redirects=False, trust_env=False) as client:
+                response = await client.post(url, headers=headers, json=json_body, timeout=timeout)
+        if reservation is not None:
+            try:
+                actual = response.json().get("credits")
+            except (ValueError, AttributeError):
+                actual = None
+            await self._credit_budget.settle(reservation, actual)
+        return response
 
 
 def _parse(response: httpx.Response, *, form: str) -> dict[str, Any]:

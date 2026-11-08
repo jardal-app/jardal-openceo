@@ -70,6 +70,7 @@ _PUBLIC_FIELDS = (
     "started_at",
     "finished_at",
     "failure_reason",
+    "provider_status",
 )
 
 

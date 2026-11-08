@@ -17,12 +17,14 @@ XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/
 
 ## Tramo vivo en jardal-openceo
 
-`projects/jardal-openceo/project.yaml` trae el bloque `research` (ticket #594):
-`enabled: true`, solo `quick`, techo `public`, `brave` on y
-`serper`/`firecrawl`/`grounding` off, `paid_budget_usd: "0.00"`, límites quick
-(3 búsquedas, 5 páginas, 8 pasos, 120 s) y `allowed_account_refs: []`. La
-política efectiva solo recorta: deep denegado, gasto pagado cero, adaptadores
-recortados por proyecto y entorno.
+`projects/jardal-openceo/project.yaml` autoriza `quick` y `deep` (#641,
+Owner 2026-11-06), techo `public`, Brave y Serper para búsqueda y Firecrawl
+opcional para extracción. `grounding` sigue apagado, `read_provider: http`
+y `allowed_account_refs: []`. `paid_budget_usd: "2.00"` iguala el techo
+de servidor autorizado; el ceiling deep existente sigue en 2.00. La política
+efectiva toma el mínimo servidor/proyecto: el YAML no activa flags ni eleva
+ningún techo del entorno. Los límites quick son 3 búsquedas/5 páginas/8 pasos/120 s;
+deep, 15/25/30/900, siempre recortados por servidor y petición.
 
 El servicio está encendido en producción (`openceo-core/.env:142`
 `RESEARCH_ENABLED=true`; `RESEARCH_SCHEDULER_ENABLED` ausente, defecto `false`
@@ -47,8 +49,7 @@ flags quedan encendidas.
 
 Cuándo este research merece su propia línea en vez de tickets sueltos, ver
 `Línea dedicada de investigación` (criterio del ticket #592; aquí no se
-duplica). Fuera de alcance en este tramo: Serper, Firecrawl, deep con
-presupuesto y perfil free-research. El enrutado del planner se cubre en
+duplica). El perfil free-research se activa en su propio ticket. El enrutado del planner se cubre en
 `Enrutado del planner` (ticket #618) y el intake externo en
 `Intake externo` (ticket #619).
 
@@ -65,15 +66,12 @@ antes de asignar trabajo de research; el core la cita en la nota de
 split y en `Per-agent detail`.
 
 Quick live por defecto: el puente de ticket, la tool de submit y la
-receta `investigar` usan `quick` salvo que el ticket nombre `deep`;
-`jardal-openceo` es quick-only en este tramo
-(`allowed_modes: [quick]`, `paid_budget_usd: "0.00"`), así que un
-submit deep falla cerrado (`forbidden`), nunca degrada a quick en
-silencio. La selección deep se define con criterios explícitos (§47:
+receta `investigar` usan `quick` salvo que el ticket nombre `deep`.
+Deep exige presupuesto efectivo positivo y falla cerrado (`forbidden`)
+con presupuesto cero, sin degradar a quick. La selección deep se define con criterios explícitos (§47:
 brecha de cobertura desde un brief quick previo, verificación
 independiente, decisión que desbloquea gasto/frontera/migración y
-presupuesto pagado positivo) y se verifica con servicio simulado;
-la ejecución deep live pertenece al tramo deep.
+presupuesto pagado positivo) y se verifica con servicio simulado.
 
 La corrida admite una investigación bajo el consumidor del ticket
 (`openceo_research_submit`), la sondea (`openceo_research_get`),
@@ -222,6 +220,22 @@ del HTTP contra la cuenta compartida y el job; un fallo ambiguo conserva la
 reserva. No hay topups ni reintentos del modelo. Las tarifas estiman un máximo;
 la factura reconciliada queda `null` sin medición del proveedor.
 
+El montaje comparte la autoridad existente `deepseek-research:default` entre
+deep y Serper, conservando el gasto previo y el menor techo de servidor/deep.
+Serper reserva además contra su proveedor. Las reservas máximas quedan inciertas:
+sin factura no se repone capacidad entre fases, jobs, procesos o proveedores.
+Una interrupción entre reservas solo reduce capacidad; no autoriza gasto extra.
+Los créditos nativos siguen siendo otra unidad y no compran presupuesto USD.
+
+`GET /api/research/jobs/{id}` expone `provider_status` por job, sin secretos:
+`configured` indica prerrequisitos de entorno completos; `mounted`, adapter
+y ledger presentes en ese proceso; `verified: null`, ninguna llamada correcta
+observada en ese job. Pasa a `true` tras búsqueda/extracción correcta o ambas
+fases researcher/verifier; no certifica facturación, calidad ni producción.
+La validación #641 usa servicio, HTTP y cuotas simulados sin red ni LLM vivo.
+El flip de `.env`, restart y verificación con proveedores reales son un paso
+manual del Owner; scheduler/Demo B pertenecen a otro ticket.
+
 Hasta dos conjuntos researcher, verifier con contexto nuevo, una corrección y
 revisión final. Cada fase consume el mismo límite de pasos/deadline y libera su
 slot; quick y deep comparten un máximo de dos llamadas activas. Extractos e ids
@@ -229,7 +243,7 @@ deben pertenecer a la evidencia adquirida. Un veredicto del modelo es una opini�
 con soporte comprobable; no prueba independencia ni certeza. Contradicciones o
 soporte insuficiente producen `partial`.
 
-La muestra de aceptación pública es reproducible sin activar producción:
+La muestra de aceptación pública requiere una sesión Owner de validación separada:
 
 ```bash
 ./.venv/bin/python scripts/research_deep_probe.py --use-approved-budget --output /tmp/research-pilot-NUEVO
@@ -248,12 +262,18 @@ desde el job persistido, no desde argumentos del modelo. No se envían consultas
 privadas a estos proveedores públicos.
 
 Serper requiere saldo medido en `RESEARCH_SERPER_ACCOUNT_CREDIT_QUERIES`.
+Sus consultas debitan créditos compartidos no renovables en Mongo antes del HTTP;
+un fallo conserva el débito. Con ambos buscadores autorizados, el servicio alterna
+Brave y Serper mientras necesite cobertura y quede cupo; un fallo detiene la
+búsqueda, nunca selecciona el siguiente proveedor como failover.
 Firecrawl v2 requiere `RESEARCH_FIRECRAWL_ACCOUNT_CREDITS` y una ventana medida en
 `RESEARCH_FIRECRAWL_CREDIT_WINDOW`; su autoridad de créditos nativos es compartida
 en Mongo y está separada de los dólares. Cada intento debita antes del I/O y un
 fallo conserva incertidumbre. No hay renovación automática de ventanas ni compra.
 
 Para extracción se necesita `research.read_provider: firecrawl` además del adapter.
+Sin montaje o autorización devuelve un gap; no cambia a HTTP. El grant sale del
+job persistido, igual que la selección de buscador, nunca del texto del modelo.
 Se validan la URL inicial y la devuelta; el proveedor no acredita su cadena remota
 completa de DNS/redirecciones, así que se conserva un coverage gap y el informe
 es `partial`. El lector HTTP sigue siendo el predeterminado.
@@ -294,8 +314,8 @@ nada de eso se activa antes. El research quick ya está encendido en producción
 `Tramo vivo en jardal-openceo`), `RESEARCH_ENABLED=true` en el host y smoke prod
 #613 verde (12/12, release `1ce5eed`); el scheduler sigue apagado y no se activa
 salvo autorización explícita del Owner con `RESEARCH_SCHEDULER_ENABLED=true`.
-Con `paid_budget_usd: "0.00"` en el proyecto no hay gasto de pago (la política
-efectiva es el mínimo entre servidor y proyecto). `RESEARCH_ENABLED` abierto
+El proyecto autoriza hasta `paid_budget_usd: "2.00"` (#641); la política
+efectiva sigue siendo el mínimo entre servidor y proyecto. `RESEARCH_ENABLED` abierto
 admite `/api/research/*` a quien tenga `run_research`; no inicia nada recurrente
 por sí solo.
 

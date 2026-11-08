@@ -89,25 +89,22 @@ secretary:
 notifications: []
 
 research:
-  # Research quick habilitado (ticket #594): unico modo autorizado en este
-  # tramo. Deep, watch recurrente, Serper/Firecrawl/grounding y gasto pagado
-  # quedan fuera (tramos posteriores). El scheduler recurrente sigue APAGADO:
-  # RESEARCH_SCHEDULER_ENABLED=false por defecto (openceo-core/settings.py) y
-  # solo se activa con autorizacion explicita del Owner. RESEARCH_ENABLED=true
-  # en el .env del host + restart canonico es paso manual del Owner tras el
-  # merge (fuera de este ticket); sin el, el servicio responde 503.
+  # Owner 2026-11-06 (#641): deep dentro de los techos existentes de 2.00 USD.
+  # Activacion de entorno y restart manuales; scheduler en ticket separado.
   enabled: true
   default_mode: quick
-  allowed_modes: [quick]
+  allowed_modes: [quick, deep]
   classification_ceiling: public
   adapters:
     brave: true
-    serper: false
-    firecrawl: false
+    serper: true
+    firecrawl: true
     grounding: false
-  paid_budget_usd: "0.00"
+  read_provider: http
+  paid_budget_usd: "2.00"
   limits:
     quick: { search_requests: 3, pages: 5, steps: 8, seconds: 120 }
+    deep: { search_requests: 15, pages: 25, steps: 30, seconds: 900 }
   allowed_account_refs: []
 
 presets:

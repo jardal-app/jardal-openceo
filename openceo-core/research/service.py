@@ -59,7 +59,7 @@ from research.contracts import (
 )
 from research.events import EventError
 from research.money import format_micro
-from research.policies import EffectivePolicy, ResearchAccessDenied, derive_effective_policy
+from research.policies import EffectivePolicy, ResearchAccessDenied, ResearchPolicyError, derive_effective_policy
 from research.worker.capabilities import (
     BROKER_OPERATIONS,
     Capability,
@@ -178,6 +178,7 @@ class ResearchDependencies:
     evidence: Any | None = None
     runtime: Any | None = None
     deep_model: Any | None = None
+    provider_status: dict[str, dict[str, Any]] = field(default_factory=dict)
     events: Any | None = None
     discover: Callable[..., Awaitable[Any]] | None = None
     read: Callable[..., Awaitable[dict[str, Any]]] | None = None
@@ -278,7 +279,12 @@ class ResearchService:
             project_cfg=project_cfg,
             settings=self._settings,
         )
-        limits = effective_limits or policy.limits
+        if request.mode.value == "deep" and not policy.paid_budget_available():
+            raise ResearchPolicyError("Deep requiere presupuesto pagado efectivo positivo")
+        limits = policy.limits
+        if effective_limits is not None:
+            limits = ResearchLimits(**{name: min(value, getattr(effective_limits, name))
+                                      for name, value in limits.model_dump().items()})
         doc = {
             "research_id": new_research_id(),
             "project_key": policy.project_key,
@@ -295,6 +301,8 @@ class ResearchService:
             "freshness": request.freshness.model_dump(mode="json"),
             "adapters": dict(policy.adapters),
             "read_provider": "firecrawl" if project_cfg.get("research", {}).get("read_provider") == "firecrawl" else "http",
+            "provider_status": {name: {**state, "verified": None}
+                                for name, state in self._deps.provider_status.items()},
             "effective_limits": {
                 "search_requests": limits.search_requests,
                 "pages": limits.pages,
@@ -425,7 +433,8 @@ class ResearchService:
         if len(urls) >= int(limits.get("pages", 0)) or max_searches <= 0 or self._deps.discover is None:
             return urls, 0
         searches = 0
-        for _ in range(max_searches):
+        providers = [name for name in ("brave", "serper") if job.get("adapters", {}).get(name)]
+        for index in range(max_searches):
             if not budget.consume():
                 coverage.append(
                     ResearchCoverageGap(
@@ -438,7 +447,8 @@ class ResearchService:
             searches += 1
             try:
                 found = await self._deps.discover(
-                    question=job["question"], research_id=job["research_id"], project_key=job["project_key"]
+                    question=job["question"], research_id=job["research_id"], project_key=job["project_key"],
+                    **({"provider": providers[index % len(providers)]} if providers else {}),
                 )
             except AcquisitionError as exc:
                 coverage.append(
@@ -450,6 +460,9 @@ class ResearchService:
                     reason=degradation.coverage_reason, detail=degradation.detail))
             if getattr(found, "degradations", ()):
                 break
+            provider = getattr(found, "provider", None)
+            if provider in job.get("provider_status", {}):
+                job["provider_status"][provider]["verified"] = True
             for item in getattr(found, "items", ()) or ():
                 url = getattr(item, "url", None)
                 if isinstance(url, str) and url not in urls:
@@ -505,6 +518,8 @@ class ResearchService:
             if page.get("remote_egress_unattested"):
                 coverage.append(ResearchCoverageGap(source="firecrawl", reason=CoverageReason.SOURCE_UNAVAILABLE,
                     detail="La API remota no acredita su cadena de redirecciones/DNS; cobertura limitada"))
+            if page.get("provider") in job.get("provider_status", {}):
+                job["provider_status"][page["provider"]]["verified"] = True
             evidence_rows[evidence_id] = {
                 "url": page.get("url") or url,
                 "text": page.get("text") or "",
@@ -839,6 +854,11 @@ class ResearchService:
         }
         if "deep_execution" in job:
             updates["deep_execution"] = job["deep_execution"]
+        if "provider_status" in job:
+            phases = {row["phase"] for row in job.get("deep_execution", {}).get("phase_usage", [])}
+            if "deep" in job["provider_status"] and "researcher-1" in phases and "verifier" in phases:
+                job["provider_status"]["deep"]["verified"] = True
+            updates["provider_status"] = job["provider_status"]
         if result is not None:
             if coverage is not None:
                 result.coverage_gaps = list(coverage)
