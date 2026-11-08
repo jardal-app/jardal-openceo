@@ -1602,7 +1602,10 @@ class DeadQueuedHistoryTests(unittest.TestCase):
         self.assertIn("kid-zomb: still queued", verdict["open_gaps"])
         self.assertEqual(verdict["dead_children"], [])
 
-    def test_queued_behind_failed_plus_live_stays_open(self) -> None:
+    def test_queued_behind_failed_plus_live_is_doomed(self) -> None:
+        # TASK-2026-00580 (deliberate contract change from 00534): the
+        # failed blocker never releases, so the live one cannot save the
+        # ticket; delivery reads doom like the retirement (doomed_ids).
         objective = {"objective_id": "OBJ-1",
                      "conversion_source_task_id": "shell-1"}
         zombie = _child("kid-zomb", "queued", dev=True)
@@ -1613,8 +1616,8 @@ class DeadQueuedHistoryTests(unittest.TestCase):
                     zombie]
         verdict = verify_delivery(objective, children)
         self.assertFalse(verdict["ok"])
-        self.assertIn("kid-zomb: still queued", verdict["open_gaps"])
-        self.assertEqual(verdict["dead_children"], [])
+        self.assertEqual(verdict["open_gaps"], ["kid-live: still in_progress"])
+        self.assertEqual(verdict["dead_children"], ["kid-zomb"])
 
     def test_queued_behind_failed_plus_converted_is_dead(self) -> None:
         # TASK-2026-00553 (deliberate contract change from 00534): a

@@ -269,6 +269,25 @@ class ValidatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self._errors(["alive"]), [])
 
 
+class OneDoomedRuleTests(unittest.TestCase):
+    """Cap and delivery read doom like retirement (one engine rule)."""
+
+    def _rows(self) -> list[dict[str, Any]]:
+        return [_row("f", "failed"), _row("live", "in_progress"),
+                _row("mixed", "queued", "live", "f")]
+
+    def test_a_doomed_ticket_takes_no_active_slot(self) -> None:
+        active = {row["task_id"] for row in
+                  engine_mod._brake_active_children(self._rows())}
+        self.assertEqual(active, {"live"})
+
+    def test_a_doomed_ticket_is_no_open_gap(self) -> None:
+        verdict = engine_mod.verify_delivery(
+            {"objective_id": "OBJ-1"}, self._rows())
+        self.assertEqual(verdict["dead_children"], ["mixed"])
+        self.assertEqual(verdict["open_gaps"], ["live: still in_progress"])
+
+
 class BudgetTests(unittest.TestCase):
     def test_engine_retired_work_leaves_the_budget(self) -> None:
         retired = _row("retired", "cancelled", name="TASK-1")
