@@ -11,10 +11,11 @@ promotion (F5) — comes through :class:`ObjectiveService`.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from catalog import (
     load_all_role_skills,
@@ -87,6 +88,35 @@ class ObjectiveErpAdapter:
     async def thread_of(
         self, task_name: str, *, limit: int = 20) -> dict[str, Any]:
         return await self._adapter.thread_of(task_name, limit=limit)
+
+    async def get_attachment(self, attachment: str) -> dict[str, Any]:
+        return await self._adapter.get_attachment(attachment, include_content=True)
+
+    async def update_description(self, target: str, description: str) -> None:
+        result = await self._adapter.update_ticket(target, description=description)
+        if not result.get("ok"):
+            raise engine_mod.ObjectiveErpError("research decision text not saved")
+
+    async def attach_research_briefs(
+        self, target: str, briefs: Sequence[Mapping[str, Any]],
+    ) -> None:
+        for brief in briefs:
+            result = await self._adapter.attach_file(
+                target, file_name=brief["file_name"], private=True,
+                content_base64=base64.b64encode(
+                    str(brief["content_text"]).encode("utf-8")).decode("ascii"))
+            if not result.get("ok"):
+                raise engine_mod.ObjectiveErpError("research brief copy failed")
+            attachment = result["attachment"]
+            if not attachment.get("private"):
+                await self._adapter.update_attachment(
+                    attachment["id"], ticket=target, private=True)
+            verified = await self.get_attachment(attachment["id"])
+            stored = verified.get("attachment") or {}
+            if not verified.get("ok") or not stored.get("private") or (
+                    stored.get("attached_to") != result["ticket"]["name"]
+                    or stored.get("content_text") != brief["content_text"]):
+                raise engine_mod.ObjectiveErpError("research brief copy not verified")
 
 
 def erp_for_task_service(task_service: Any) -> ObjectiveErpAdapter | None:

@@ -1,9 +1,9 @@
 ---
 document_id: objective-planner-routing-policy
 title: OpenCEO Objective Planner Routing Policy
-version: 1.6
+version: 1.7
 status: NORMATIVE
-updated: 2026-11-05
+updated: 2026-11-08
 runtime_document: true
 planner_reads_this_document: true
 language: en
@@ -334,6 +334,16 @@ Do not produce detailed implementation tickets whose specification depends on th
 
 Put later work in `roadmap_remaining`.
 
+For Tier S, judge material dependence on **unknown external** information,
+never the tier alone. Without that need, do not research. With it, read
+RESEARCH ROUTING §§45–48, emit research first (quick by default), and leave
+development in the roadmap. After the private brief returns, replan and
+record the decision and its `research.brief_ids` on the downstream ticket.
+Tier S has no research bridge access or research-token budget.
+The same judgment applies to loose pedidos: research followed by development
+requires `capability_gap` conversion to an objective, preserving the goal;
+a self-contained research question can still be decided as one ticket.
+
 ## 10. Research returns to the Objective Planner
 
 > **Status.** The `research` agent is enabled: route research tickets
@@ -455,6 +465,8 @@ Invoke the Objective Planner when semantic state materially changes.
 Wired today (each of these starts a planning cycle):
 
 - the Objective is created (first cycle);
+- a research child closes: its private briefs return to a fresh planner
+  even when unrelated ready children remain;
 - a ticket closes and no valid ready child ticket remains, or its handoff reports a contract deviation or gotcha touching the Objective's files;
 - a simple DEV tier fails materially (once, §29);
 - an oversized ticket is decomposed inside an Objective, or converted into one (Tier S decides it must be decomposed);
@@ -463,7 +475,7 @@ Wired today (each of these starts a planning cycle):
 
 Reserved, not wired yet (the planner only sees these at the next cycle one of the triggers above starts):
 
-- research/discovery returns;
+- non-research discovery returns without closing its ticket;
 - a durable decision is produced;
 - a material out-of-scope finding affects the Objective (findings reach the planner as the INBOX of the next cycle);
 - evidence invalidates a previous assumption;

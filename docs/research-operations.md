@@ -79,11 +79,32 @@ escribe el brief solo desde la evidencia devuelta, lo adjunta
 privado al ticket solicitante (`openceo_attach_ticket_file`) y
 termina `hecho` nombrando el adjunto; el resultado vuelve al
 planner, nunca continúa solo a DEV. Verificado con
-`tests/test_planner_research_routing_618.py` (detalle servido y
-firme, quick por defecto, deep denegado live sobre el yaml real,
-ciclo con planner simulado): sin modelos vivos ni red. El intake
+`tests/test_planner_research_routing_618.py` (contrato original de
+detalle servido, quick por defecto y ciclo con planner simulado): sin
+modelos vivos ni red. La política efectiva vigente gobierna deep. El intake
 externo vive en `Intake externo` (ticket hermano #619); el scheduler
 sigue apagado.
+
+Tier S aplica §9 antes de desarrollar (#642): solo investiga si el planner
+identifica dependencia material de información externa desconocida. Sin esa
+necesidad no hay investigación. Emite primero `research/investigar`, quick
+por defecto; `research_mode: deep` exige los cuatro `deep_criteria` de §47
+nombrados y presupuesto efectivo positivo, sujeto a admisión del servicio.
+El desarrollo queda en `roadmap_remaining`, sin precrear su ticket.
+
+Al cerrar research se invoca de nuevo al planner, incluso con otros hijos
+listos. Recibe los briefs privados del objetivo como evidencia y decide de
+nuevo el agente y alcance. Si crea DEV dependiente, `research.needed: true`,
+`research.reason` y `research.brief_ids` registran la decisión; solo admite
+adjuntos de research completado del mismo objetivo. El ticket posterior
+lleva la decisión en el texto y copias privadas verificadas antes de autorun.
+Un fallo de copia retiene la ejecución. Un pedido suelto que necesita
+research y desarrollo se convierte en objetivo para conservar esa vuelta al
+planner; una pregunta autónoma sigue siendo un ticket research suelto.
+Los badges DEV, incluidos los de Tier S, no admiten submit/get de research,
+incluso con una caja mal ampliada; el consumidor y los tokens pertenecen a
+research. `tests/test_tier_s_research_first_642.py` verifica estos contratos
+con planner, servicio y adjuntos simulados, sin red ni modelos vivos.
 
 ## Intake externo
 

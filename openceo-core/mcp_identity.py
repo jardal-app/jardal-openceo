@@ -142,6 +142,10 @@ class TicketGrant:
     def check(self, tool: str, args: Mapping[str, Any] | None) -> None:
         if tool not in self.tools:
             raise McpDenied(f"Tool {tool} is outside this token's box")
+        if tool in ("openceo_research_submit", "openceo_research_get") and (
+                self.kind is not TokenKind.OWNER and (
+                    self.kind is not TokenKind.AGENT or self.agent != "research")):
+            raise McpDenied("Only research agents and the Owner use the ticket research bridge")
         # PM batches are owner-only (TASK-2026-00209 narrowed the
         # 00199 SERVICE exception away with the retiring PM subprocess).
         if (tool == "openceo_create_pm_tickets_batch"

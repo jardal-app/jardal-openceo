@@ -203,6 +203,38 @@ class PlannedCost(BaseModel):
         return value
 
 
+class ResearchDecision(BaseModel):
+    needed: bool
+    reason: str = Field(min_length=1)
+    brief_ids: list[str] = Field(default_factory=list, max_length=3)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("research reason must not be blank")
+        return value
+
+    @field_validator("brief_ids")
+    @classmethod
+    def _briefs_nonblank(cls, value: list[str]) -> list[str]:
+        return _string_list_nonblank(value)
+
+
+class DeepCriteria(BaseModel):
+    coverage_gap: str = Field(min_length=1, pattern=r"\S")
+    independent_verification: str = Field(min_length=1, pattern=r"\S")
+    decision_stakes: str = Field(min_length=1, pattern=r"\S")
+    paid_budget_usd: Decimal = Field(gt=0, allow_inf_nan=False)
+
+    @field_validator("paid_budget_usd", mode="before")
+    @classmethod
+    def _budget_is_decimal(cls, value: Any) -> Any:
+        if isinstance(value, (bool, float)):
+            raise ValueError("paid budget must be decimal money, never float/bool")
+        return value
+
+
 class PlannedTicket(BaseModel):
     local_ref: str = Field(min_length=1)
     title: str = Field(min_length=1)
@@ -223,6 +255,9 @@ class PlannedTicket(BaseModel):
     coding_tool: DevTier | None = None
     tier_reason: str | None = None
     oracle: Oracle | None = None
+    research: ResearchDecision | None = None
+    research_mode: Literal["quick", "deep"] = "quick"
+    deep_criteria: DeepCriteria | None = None
 
     # Per-ticket review switch (00249): on/off, omit = on. The planner
     # also decides off for A/B/C work a review round cannot pay for
@@ -296,6 +331,20 @@ class PlannedTicket(BaseModel):
     @model_validator(mode="after")
     def validate_routing_contract(self) -> "PlannedTicket":
         is_dev = self.target_agent == "dev"
+        if self.target_agent != "research" and (
+                self.research_mode != "quick" or self.deep_criteria):
+            raise ValueError("research mode/criteria belong to research tickets")
+        if self.research_mode == "deep" and self.deep_criteria is None:
+            raise ValueError("deep requires all four named §47 criteria")
+        if self.deep_criteria is not None and self.research_mode != "deep":
+            raise ValueError("deep criteria require mode deep")
+        if self.research is not None:
+            if not is_dev:
+                raise ValueError("research decision belongs to downstream DEV")
+            if self.research.needed and not self.research.brief_ids:
+                raise ValueError("§9: emit research first; put DEV in roadmap_remaining")
+            if not self.research.needed and self.research.brief_ids:
+                raise ValueError("unneeded research carries no briefs")
 
         if not is_dev:
             if self.coding_tool is not None:
@@ -556,6 +605,8 @@ async def validate_planner_result(
     skills: Mapping[str, Collection[str]] | None = None,
     playbooks: Collection[str] | None = None,
     unreleasable: Mapping[str, str] | None = None,
+    research_briefs: Collection[str] = (),
+    pending_research: Collection[str] = (),
 ) -> list[str]:
     """Deterministic validation (routing policy §17). Returns errors.
 
@@ -627,6 +678,21 @@ async def validate_planner_result(
                     str(entry.get("tier") or "")))
     for ticket in result.tickets:
         where = f"ticket {ticket.local_ref!r}"
+        if ticket.research is not None:
+            for brief in ticket.research.brief_ids:
+                if brief not in research_briefs:
+                    errors.append(f"{where}: research brief {brief!r} is not a "
+                                  "private brief from completed research in this objective")
+        if ticket.coding_tool == DevTier.TIER_S:
+            research_refs = {*pending_research, *(item.local_ref for item in
+                             result.tickets if item.target_agent == "research")}
+            dependencies = set(ticket.blocked_by)
+            for _ in result.tickets:
+                dependencies.update(dep for item in result.tickets
+                                    if item.local_ref in dependencies for dep in item.blocked_by)
+            if research_refs.intersection(dependencies):
+                errors.append(f"{where}: §9 research first, then replan; "
+                              "do not pre-create downstream Tier S")
         spec = agents.get(ticket.target_agent)
         if not isinstance(spec, Mapping):
             errors.append(f"{where}: unknown target_agent "
