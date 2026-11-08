@@ -66,8 +66,16 @@ def _generic_verifiers_or_empty() -> dict[str, Any]:
 class ObjectiveErpAdapter:
     """Engine-facing wrapper over the business work port."""
 
-    def __init__(self, adapter: Any) -> None:
+    def __init__(self, adapter: Any, task_service: Any = None) -> None:
         self._adapter = adapter
+        self._task_service = task_service
+
+    async def retire(self, identifier: str, reason: str) -> dict[str, Any]:
+        """Cancel through the business transition: ERP and Mongo in one step."""
+        if self._task_service is None:
+            return {"ok": False, "status": "not_configured"}
+        return await self._task_service.transition_ticket(
+            identifier, "Cancelled", reason, actor=engine_mod.ENGINE_ACTOR)
 
     async def convert_to_group(self, identifier: str) -> dict[str, Any]:
         return await self._adapter.convert_to_group(identifier)
@@ -86,7 +94,7 @@ def erp_for_task_service(task_service: Any) -> ObjectiveErpAdapter | None:
     adapter = getattr(task_service, "_business", None) or getattr(task_service, "_business", None)
     if adapter is None or not getattr(adapter, "is_enabled", False):
         return None
-    return ObjectiveErpAdapter(adapter)
+    return ObjectiveErpAdapter(adapter, task_service)
 
 
 async def create_internal_ticket(

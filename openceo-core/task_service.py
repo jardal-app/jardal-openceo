@@ -2608,6 +2608,7 @@ class TaskService:
         owner_instruction: str = "",
         previous: str = "",
         secret_block: dict[str, Any] | None = None,
+        actor: str = "",
     ) -> dict[str, Any] | None:
         """Parche unico: estado de ejecucion + espejo coherente + auditoria.
 
@@ -2636,6 +2637,8 @@ class TaskService:
             audit["evidence"] = _transition_audit_text(evidence)
         if owner_instruction:
             audit["owner_instruction"] = _transition_audit_text(owner_instruction)
+        if actor:
+            audit["actor"] = actor
         mirror = {
             "status_pushed": equivalent,
             "pending_status": None,
@@ -2790,7 +2793,8 @@ class TaskService:
         (sin ella se crea el escalado y no se cancela nada).
         `secret_block` (TASK-2026-00142) solo aparca en Working: escribe el
         marcador de secreto ausente que el cockpit lee como bloqueo.
-        `actor` nombra quien mueve el ticket (`engine` por defecto).
+        `actor` queda en la auditoria cuando se indica: el motor pasa
+        `engine` y sin el la transicion cuenta como decision de una persona.
 
         Devuelve `outcome` (`applied` | `already_applied` | `escalated`) con el
         estado de negocio RELEIDO, o `ok: False` con `status` clasificado. El
@@ -2898,6 +2902,7 @@ class TaskService:
                     owner_instruction=_transition_audit_text(owner_instruction),
                     previous=current,
                     secret_block=healed_marker,
+                    actor=str(actor or ""),
                 )
                 healed = updated is not None
                 if healed:
@@ -3099,6 +3104,7 @@ class TaskService:
                 owner_instruction=clean_instruction,
                 previous=current,
                 secret_block=clean_marker,
+                actor=str(actor or ""),
             )
             if updated is not None:
                 task_status = equivalent
