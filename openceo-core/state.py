@@ -83,6 +83,13 @@ WAIT_REPO_BUSY = "repo_busy"
 BLOCKER_RELEASED_STATUSES = frozenset({TaskStatus.COMPLETED.value,
                                        TaskStatus.CANCELLED.value})
 
+#: Tickets something will still move: the CEO duplicate check and mission
+#: liveness (TASK-2026-00594). Interrupted, failed and escalated never
+#: resume on their own, so they are not work in flight.
+OPEN_TICKET_STATUSES = frozenset({TaskStatus.QUEUED.value,
+                                  TaskStatus.IN_PROGRESS.value,
+                                  TaskStatus.WAITING.value})
+
 
 class WorkflowRunStatus(str, Enum):
     PENDING = "pending"

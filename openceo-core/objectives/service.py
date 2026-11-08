@@ -645,12 +645,76 @@ class ObjectiveService:
                     idle_minutes=idle_minutes)
             except Exception:  # noqa: BLE001 - next heartbeat retries
                 logger.warning("Orphan resume pass failed", exc_info=True)
+            else:
+                if summary.get("replanned") or summary.get("errors"):
+                    logger.info("Orphan resume pass: %s", summary)
+            try:
+                missions = await self.wake_idle_missions()
+            except Exception:  # noqa: BLE001 - next heartbeat retries
+                logger.warning("Mission liveness pass failed", exc_info=True)
                 return
-            if summary.get("replanned") or summary.get("errors"):
-                logger.info("Orphan resume pass: %s", summary)
+            if missions.get("woken"):
+                logger.info("Mission liveness pass: %s", missions)
 
         self._orphan_pass = asyncio.create_task(_pass())
         return True
+
+    async def wake_idle_missions(self, limit: int = 50) -> dict[str, Any]:
+        """Mission liveness (TASK-2026-00594): no mission idles unjudged.
+
+        Whatever left a mission with nothing in flight (a close, a cancel,
+        a failed pedido, a restart) or brought new Owner notes to it, the
+        CEO is woken to judge it, once per activity episode. What to do is
+        the CEO's call; this pass only keeps the invariant. 0 tokens.
+        """
+        if self._repo is None or self._ceo_wake is None:
+            return {"ok": False, "reason": "not-wired", "woken": []}
+        erp = (erp_for_task_service(self._task_service)
+               if self._task_service is not None else None)
+        reader = erp.thread_of if erp is not None else None
+        woken: list[str] = []
+        for mission in await self._repo.list_active_missions(limit=limit) or []:
+            mission_id = str((mission or {}).get("mission_id") or "")
+            if not mission_id:
+                continue
+            try:
+                statuses = await self._live_objective_statuses(mission)
+                tickets = list(
+                    await self._repo.list_mission_tickets(mission_id) or [])
+            except Exception:  # noqa: BLE001 - blind reads never wake
+                logger.warning("mission %s unreadable for liveness",
+                               mission_id, exc_info=True)
+                continue
+            if not missions_mod.mission_idle(
+                    statuses, [str(row.get("status") or "") for row in tickets]):
+                continue
+            notes = await engine_mod.ticket_note_rows(
+                reader, str(mission.get("erp_group_ref") or ""))
+            key = missions_mod.mission_activity_key(
+                mission,
+                latest_ticket=str(tickets[0].get("task_id") or "")
+                if tickets else "",
+                newest_note=notes[-1][0] if notes else "")
+            if (mission.get("liveness") or {}).get("key") == key:
+                continue
+            await self._repo.patch_mission(mission_id, {"liveness": {
+                "key": key, "at": datetime.now(timezone.utc).isoformat()}})
+            self._ceo_wake(missions_mod.mission_idle_reason(mission_id))
+            woken.append(mission_id)
+        return {"ok": True, "woken": woken}
+
+    async def _live_objective_statuses(
+        self, mission: Mapping[str, Any],
+    ) -> list[str]:
+        """Live status of the mission's newest objectives (ledger untrusted)."""
+        statuses: list[str] = []
+        ledger = [item for item in mission.get("objectives") or []
+                  if isinstance(item, Mapping)][-20:]
+        for item in ledger:
+            row = await self._repo.get_objective(
+                str(item.get("objective_id") or ""))
+            statuses.append(str((row or {}).get("status") or "unknown"))
+        return statuses
 
     # -- automatic recovery (TASK-2026-00481) ---------------------------
 

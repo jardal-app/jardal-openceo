@@ -76,8 +76,10 @@ class IdleMissionReviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome["idle_missions_asked"], ["MIS-47F6240D"])
         self.assertEqual(len(calls["escalations"]), 1)
         escalation = calls["escalations"][0]
-        self.assertEqual(escalation["source_id"],
-                         "mission-idle:MIS-47F6240D:OBJ-F3AAEE49")
+        # One question per activity episode, naming its mission (00594).
+        self.assertTrue(escalation["source_id"].startswith(
+            "mission-idle:MIS-47F6240D:"))
+        self.assertEqual(escalation["mission_id"], "MIS-47F6240D")
         self.assertTrue(escalation["action"].strategic_replan)
         self.assertIn("Scheduler recurrente",
                       escalation["decision"].human_action)

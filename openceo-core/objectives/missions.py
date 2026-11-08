@@ -12,6 +12,7 @@ proposal through the single human channel.
 from __future__ import annotations
 
 from business.links import business_mirror
+from state import OPEN_TICKET_STATUSES
 
 import re
 import uuid
@@ -40,7 +41,11 @@ __all__ = [
     "deadline_confirmation_patch",
     "find_mission_duplicate",
     "mission_acceptance_deadline",
+    "mission_activity_key",
     "mission_brief_lines",
+    "mission_idle",
+    "mission_idle_reason",
+    "mission_notes_lines",
     "mission_question_expired",
     "new_mission_id",
     "normalize_mission_goal",
@@ -67,6 +72,12 @@ def served_missions(reasons: Sequence[str]) -> list[str]:
             if mission_id not in found:
                 found.append(mission_id)
     return found
+
+
+def mission_idle_reason(mission_id: str) -> str:
+    """Liveness wake text: the same judging contract as an objective close."""
+    return (f"Mission {mission_id} has nothing in flight. "
+            + served_mission_reason(mission_id))
 
 #: Valid ``entry`` values on the mission document.
 MISSION_ENTRIES = frozenset({"top_down", "horizon_promotion"})
@@ -129,6 +140,45 @@ def mission_brief_lines(
 
 #: Objective statuses that end the ledger entry (read live, not trusted).
 MISSION_TERMINAL_OBJECTIVE = frozenset({"closed", "cancelled"})
+
+#: How judges read the Owner's word given on the mission ticket.
+MISSION_NOTES_HEADING = (
+    "Owner notes on the mission ticket (orders, authorizations and cuts, "
+    "newest last). They bind like the acceptance: what a note decided is "
+    "decided, never pending on the Owner.")
+
+
+def mission_notes_lines(notes: Sequence[str]) -> list[str]:
+    """The notes block of a mission record ([] without notes)."""
+    return [MISSION_NOTES_HEADING, *notes] if notes else []
+
+
+def mission_idle(objective_statuses: Sequence[str],
+                 ticket_statuses: Sequence[str]) -> bool:
+    """Nothing in flight: every objective ended and no open ticket names it.
+
+    The single definition (TASK-2026-00594) for the CEO judgment, its
+    last-resort question and the liveness pass. A pedido or an Owner
+    question naming the mission is work in flight; objectives read live.
+    """
+    return (all(str(status) in MISSION_TERMINAL_OBJECTIVE
+                for status in objective_statuses)
+            and not any(str(status) in OPEN_TICKET_STATUSES
+                        for status in ticket_statuses))
+
+
+def mission_activity_key(mission: Mapping[str, Any], *,
+                         latest_ticket: str, newest_note: str) -> str:
+    """What the mission did last: newest objective, ticket and Owner note.
+
+    A liveness wake or a last-resort question happens once per key; a new
+    objective, pedido, escalation or note opens a new episode.
+    """
+    ledger = [str(item.get("objective_id") or "")
+              for item in mission.get("objectives") or []
+              if isinstance(item, Mapping)]
+    return " | ".join((ledger[-1] if ledger else "-",
+                       str(latest_ticket or "-"), str(newest_note or "-")))
 
 
 class MissionRejected(Exception):

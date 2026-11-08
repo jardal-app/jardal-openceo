@@ -19,6 +19,7 @@ Jardal ERP decision.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -148,6 +149,12 @@ class CEOEnv:
     close_mission: (
         Callable[..., Awaitable[dict[str, Any]]] | None
     ) = None
+    # The Owner's word and work in flight per mission (TASK-2026-00594):
+    # the business thread reader and the tickets that name a mission.
+    thread_of: Callable[..., Awaitable[Any]] | None = None
+    mission_tickets: (
+        Callable[[str], Awaitable[list[dict[str, Any]]]] | None
+    ) = None
 
     def moment(self) -> datetime:
         return self.now() if self.now is not None else _utcnow()
@@ -275,9 +282,12 @@ async def _objective_digest(
 async def _mission_digest(
     env: CEOEnv, mission: Mapping[str, Any]
 ) -> dict[str, Any]:
+    from objectives import missions as missions_mod
+
     mission_id = str(mission.get("mission_id") or "")
+    # The newest objectives decide what is in flight and the last handoff.
     ledger = [item for item in mission.get("objectives") or []
-              if isinstance(item, Mapping)][:CEO_OBJECTIVES_PER_MISSION]
+              if isinstance(item, Mapping)][-CEO_OBJECTIVES_PER_MISSION:]
     children: list[dict[str, Any]] = []
     costs: list[Any] = []
     last_closed: dict[str, Any] | None = None
@@ -336,6 +346,13 @@ async def _mission_digest(
                     "open (deadline "
                     f"{mission.get('question_deadline')})"
                 )
+    notes = await engine_mod.ticket_note_rows(
+        getattr(env, "thread_of", None),
+        str(mission.get("erp_group_ref") or ""))
+    tickets = await _mission_ticket_rows(env, mission_id)
+    in_flight = tickets is None or not missions_mod.mission_idle(
+        [str(child.get("status") or "") for child in children],
+        [str(row.get("status") or "") for row in tickets])
     return {
         "mission_id": mission_id,
         "project": mission.get("project"),
@@ -350,7 +367,31 @@ async def _mission_digest(
         "objectives": children,
         "last_closed": last_closed,
         "cost": cost_mod.aggregate_mission_cost(costs) if costs else None,
+        "notes": engine_mod.note_lines(notes),
+        "in_flight": in_flight,
+        "activity_key": missions_mod.mission_activity_key(
+            mission,
+            latest_ticket=str((tickets or [{}])[0].get("task_id") or ""),
+            newest_note=notes[-1][0] if notes else ""),
     }
+
+
+async def _mission_ticket_rows(
+    env: CEOEnv, mission_id: str,
+) -> list[dict[str, Any]] | None:
+    """Tickets naming the mission, newest first; None when unreadable.
+
+    Unreadable reads as work in flight: a blind check never asks the
+    Owner. Without the reader wired (tests, partial envs) there are none.
+    """
+    reader = getattr(env, "mission_tickets", None)
+    if reader is None:
+        return []
+    try:
+        return list(await reader(mission_id) or [])
+    except Exception:  # noqa: BLE001
+        logger.warning("CEO: tickets of mission %s unreadable", mission_id)
+        return None
 
 
 def _closed_handoff(
@@ -593,6 +634,12 @@ def _missions_section(signals: CEOSignals) -> str:
             brief[-1] = ("Acceptance: (no criteria yet: propose them in "
                          "your next mission pedido)")
         lines.extend(f"  {line}" for line in brief)
+        lines.extend(f"  {line}" for line in
+                     missions_mod.mission_notes_lines(item.get("notes") or []))
+        if not item.get("in_flight", True):
+            lines.append("  NOTHING IN FLIGHT: no active objective and no "
+                         "open ticket names this mission; it stays stuck "
+                         "until you act on it.")
         if item["question_state"]:
             lines.append(f"  owner question: {item['question_state']}")
         children = item["objectives"] or []
@@ -709,6 +756,17 @@ def _ceo_prompt(
             "in title/description. When a mission has no criteria "
             "yet, propose them in the pedido acceptance: adoption "
             "asks the Owner without blocking.",
+            "- Owner notes on a mission ticket are the Owner's word given "
+            "after the mission was created: they bind like its "
+            "acceptance. Carry the ones the next objective needs into "
+            "the pedido, and never treat as pending, nor ask again, what "
+            "a note already decided.",
+            "- A mission marked NOTHING IN FLIGHT stays stuck until you "
+            "act: continue it (crear_pedido with mission_id), close it "
+            "(close_mission) when its acceptance is met, or escalate with "
+            "its mission_id exactly what only the Owner can still decide. "
+            "keep_going and do_nothing are rejected for a mission this "
+            "review was woken to judge.",
             "- close_mission declares one mission complete: use it "
             "only when its acceptance is met on delivered evidence "
             "(every mission objective terminal, at least one "
@@ -756,6 +814,7 @@ def _ceo_prompt(
             '"..."|null}], "project_key": "...", "display_name": "..."} '
             '| "escalation": '
             '{"kind": "...", "summary": "...", "project": null, '
+            '"mission_id?": "<mission the question is about>", '
             '"amount": null, "uses_paid_quota": false, '
             '"irreversible": false, "strategic_replan": false, '
             '"mandate_change": false, '
@@ -794,7 +853,9 @@ def _missing_decision_error(execution: Any) -> str:
     return base
 
 
-def _validation_context(env: CEOEnv, signals: CEOSignals) -> CEOValidationContext:
+def _validation_context(
+    env: CEOEnv, signals: CEOSignals, reasons: Sequence[str] = (),
+) -> CEOValidationContext:
     return CEOValidationContext(
         mandate=env.mandate,
         known_projects=list(env.known_projects),
@@ -830,7 +891,18 @@ def _validation_context(env: CEOEnv, signals: CEOSignals) -> CEOValidationContex
             for item in signals.missions
         },
         missions_unknown=signals.missions_unknown,
+        judged_idle_missions=frozenset(_judged_idle(signals, reasons)),
     )
+
+
+def _judged_idle(signals: CEOSignals, reasons: Sequence[str]) -> list[str]:
+    """Missions this review was woken to judge that have nothing in flight."""
+    from objectives import missions as missions_mod
+
+    idle = {str(item.get("mission_id") or "") for item in signals.missions
+            if not item.get("in_flight", True)}
+    return [mission_id for mission_id in missions_mod.served_missions(reasons)
+            if mission_id in idle]
 
 
 def _review_status(signals: CEOSignals) -> dict[str, Any]:
@@ -1001,20 +1073,18 @@ async def _run_no_mandate_review(
     return {**outcome, "review_id": review_id}
 
 
-#: Objective states that leave a mission with nothing in flight.
-_FINISHED_OBJECTIVE_STATUSES = frozenset({"closed", "cancelled"})
-
-
 async def _ask_owner_about_idle_missions(
-    env: CEOEnv, signals: CEOSignals, reasons: Sequence[str],
+    env: CEOEnv, signals: CEOSignals, reasons: Sequence[str], *,
+    summary: str = "",
 ) -> list[str]:
-    """Ask the Owner about a judged mission the review left idle.
+    """Last resort: a judged mission still has nothing in flight.
 
-    An objective close wakes the CEO to continue or close its mission; a
-    review that does neither leaves it with no active objective and nobody
-    told (MIS-47F6240D, TASK-2026-00581). The Owner gets the pending
-    roadmap of its last tramo, once per idle episode (recorded on the
-    mission). Fail-soft: the review record stands either way.
+    The review was woken to judge the mission (objective close, liveness or
+    the Owner's answer) and its action left nothing moving it, so the Owner
+    learns why from the CEO's own summary (TASK-2026-00581, 00594). Once
+    per activity episode, recorded on the mission; the question names the
+    mission, so it counts as work in flight and its answer joins the
+    mission record. Blind reads never ask. Fail-soft: the review stands.
     """
     from objectives import missions as missions_mod
 
@@ -1025,28 +1095,35 @@ async def _ask_owner_about_idle_missions(
     asked: list[str] = []
     for mission_id in missions_mod.served_missions(reasons):
         digest = digests.get(mission_id)
-        children = [item for item in (digest or {}).get("objectives") or []
-                    if isinstance(item, Mapping)]
-        if not children or any(
-                str(item.get("status") or "")
-                not in _FINISHED_OBJECTIVE_STATUSES for item in children):
+        if digest is None or digest.get("in_flight", True):
             continue
-        handoff = (digest or {}).get("last_closed") or {}
-        last_id = str(handoff.get("objective_id") or "")
         mission = await env.missions.get_mission(mission_id) or {}
-        previous = mission.get("idle_question")
-        if isinstance(previous, Mapping) \
-                and previous.get("objective_id") == last_id:
+        if mission.get("status") != "active":
             continue
+        tickets = await _mission_ticket_rows(env, mission_id)
+        if tickets is None or not missions_mod.mission_idle(
+                [str(child.get("status") or "")
+                 for child in digest.get("objectives") or []],
+                [str(row.get("status") or "") for row in tickets]):
+            continue
+        key = str(digest.get("activity_key") or "")
+        previous = mission.get("idle_question")
+        if isinstance(previous, Mapping) and previous.get("key") == key:
+            continue
+        handoff = digest.get("last_closed") or {}
+        last_id = str(handoff.get("objective_id") or "")
         pending = [str(item) for item in handoff.get("roadmap_remaining") or []]
-        hint = (f"La mision {mission_id} no tiene objetivo activo y el CEO no "
-                "la continuo ni la cerro. Decide si sigue (y con que), si se "
-                "cierra o si espera.")
+        hint = (f"La misión {mission_id} no tiene nada en curso y el CEO, "
+                "llamado a juzgarla, no la continuó ni la cerró.")
+        if summary.strip():
+            hint += f" El CEO dijo: «{_short(summary, 400)}»."
+        hint += (" Decide si sigue (y con qué), si se cierra o si espera; tu "
+                 "respuesta queda en la misión y el CEO la retoma enseguida.")
         if pending:
-            hint += " Pendiente de su ultimo tramo: " + "; ".join(pending)
+            hint += " Pendiente de su último tramo: " + "; ".join(pending)
         action = OwnerAction(
             kind="mission_idle",
-            summary=f"Mision {mission_id} sin objetivo activo",
+            summary=f"Misión {mission_id} sin nada en curso",
             project=str(mission.get("project") or "") or None,
             strategic_replan=True,
             human_action_hint=_short(hint, 1500),
@@ -1054,10 +1131,13 @@ async def _ask_owner_about_idle_missions(
         decision = requires_owner(action, env.mandate)
         if not decision.escalate:
             continue
+        episode = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
         created = await env.escalate(
             action=action, decision=decision,
-            source_id=f"mission-idle:{mission_id}:{last_id}")
+            source_id=f"mission-idle:{mission_id}:{episode}",
+            mission_id=mission_id)
         await env.missions.patch_mission(mission_id, {"idle_question": {
+            "key": key,
             "objective_id": last_id,
             "task_id": str((created or {}).get("task_id") or ""),
         }})
@@ -1171,6 +1251,8 @@ async def _act_on_decision(
         source_id=(
             f"ceo:{review_id}:escalation:{escalation.category.value}"
         ),
+        **({"mission_id": str(spec.mission_id).strip()}
+           if spec.mission_id else {}),
     )
     return {
         "ok": True, "action": "escalated",
@@ -1265,7 +1347,7 @@ async def run_review(
         )
     expired_questions = await _expire_mission_questions(env, moment)
     signals = await compile_signals(env)
-    ctx = _validation_context(env, signals)
+    ctx = _validation_context(env, signals, clean_reasons)
     prompt = _ceo_prompt(
         signals, kind=kind, reasons=clean_reasons,
         review_id=review_id, repo_root=env.repo_root,
@@ -1277,6 +1359,7 @@ async def run_review(
     timeout_s = int((env.ceo_cfg or {}).get("timeout_minutes", 15)) * 60
     errors: list[str] = []
     decision: CEODecision | None = None
+    said = ""
     model_runs = 0
     current_prompt = prompt
     for _attempt in range(2):
@@ -1303,6 +1386,7 @@ async def run_review(
             except ValueError as exc:
                 errors = [str(exc)]
             else:
+                said = str(candidate.summary or "")
                 errors = models_mod.validate_ceo_decision(candidate, ctx)
                 if not errors:
                     decision = candidate
@@ -1346,12 +1430,11 @@ async def run_review(
                 "ok": False, "action": "error",
                 "reason": f"{decision.action.value} failed: {exc}",
             }
-    if outcome.get("action") in {
-            CEOAction.KEEP_GOING.value, CEOAction.DO_NOTHING.value,
-            "rejected"}:
+    if outcome.get("action") not in {"escalated", "escalation_exists"}:
         try:
             asked = await _ask_owner_about_idle_missions(
-                env, signals, clean_reasons)
+                env, signals, clean_reasons,
+                summary=said or "; ".join(errors))
         except Exception:  # noqa: BLE001 - the review record stands
             logger.warning("CEO: idle-mission question failed",
                            exc_info=True)

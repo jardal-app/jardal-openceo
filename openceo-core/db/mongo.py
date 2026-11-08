@@ -20,6 +20,7 @@ from research.contracts import (
 )
 from settings import Settings
 from state import (
+    OPEN_TICKET_STATUSES,
     WAIT_QUOTA,
     WAIT_QUOTA_RESERVED,
     DevSessionStatus,
@@ -320,6 +321,11 @@ class MongoRepository:
         await self.tasks.create_index(
             [("objective_id", ASCENDING), ("status", ASCENDING)],
             name="idx_tasks_objective",
+        )
+        await self.tasks.create_index(
+            [("params.mission_id", ASCENDING), ("created_at", DESCENDING)],
+            name="idx_tasks_mission",
+            partialFilterExpression={"params.mission_id": {"$exists": True}},
         )
         # An agent return reads its run's badge refusals (TASK-2026-00571).
         await self.db["mcp_calls"].create_index(
@@ -1072,13 +1078,7 @@ class MongoRepository:
         """
         query: dict[str, Any] = {
             **mirror_exclusion_filter(),
-            "status": {
-                "$in": [
-                    TaskStatus.QUEUED.value,
-                    TaskStatus.IN_PROGRESS.value,
-                    TaskStatus.WAITING.value,
-                ]
-            },
+            "status": {"$in": sorted(OPEN_TICKET_STATUSES)},
         }
         rows = self.tasks.find(
             query, projection={"title": 1},
@@ -1088,6 +1088,21 @@ class MongoRepository:
             async for row in rows
             if str(row.get("title") or "").strip()
         ]
+
+    async def list_mission_tickets(
+        self, mission_id: str, limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Tickets that name a mission (pedidos, escalations), newest first.
+
+        Mission liveness reads it (TASK-2026-00594) through
+        ``idx_tasks_mission``: status and identity only.
+        """
+        rows = self.tasks.find(
+            {"params.mission_id": str(mission_id or "")},
+            projection={"task_id": 1, "status": 1, "created_at": 1},
+            sort=[("created_at", DESCENDING)],
+        ).limit(max(1, int(limit)))
+        return [self._clean(row) async for row in rows]
 
     async def list_recent_research_results(
         self, limit: int = 5

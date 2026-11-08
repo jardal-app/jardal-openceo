@@ -1109,7 +1109,7 @@ _EMPTY_DIFF_FIELD_LINES = (
 #: Heads of the comments OpenCEO posts by itself (engine notices, mechanic,
 #: return notes): they echo its own conclusions and are never evidence.
 AUTOMATED_NOTE_HEADS = (
-    "Objective ", "Planner ", "Ticket converted to objective",
+    "Objective ", "Mission ", "Planner ", "Ticket converted to objective",
     "Ticket decomposes inside objective", "Plan aprobado",
     "El plan retenido", "Gasto aprobado", "objective trigger failed",
     "[mecánico", "Agent ", "Ticket failed without verdict",
@@ -1266,37 +1266,67 @@ def repeated_boundary_denials(
     return [item for item in denials if item in seen]
 
 
-async def objective_notes(
-    env: ObjectiveEnv, objective: Mapping[str, Any],
-) -> list[str]:
-    """Comments on the objective ticket written by people, newest last.
+async def ticket_note_rows(
+    reader: Callable[..., Awaitable[Any]] | None, name: str,
+) -> list[tuple[str, str]]:
+    """Comments on a business ticket written by people: ``(when, text)``.
 
-    Fail-soft: without the business reader or on any error the planner
-    plans without notes, as before.
+    Newest last. One reader for objective and mission tickets
+    (TASK-2026-00571, TASK-2026-00594). Fail-soft: without the business
+    reader or on any error the judge works without notes, as before.
     """
-    reader = getattr(getattr(env, "erp", None), "thread_of", None)
-    name = str(objective.get("erp_group_ref") or "").strip()
+    name = str(name or "").strip()
     if reader is None or not name:
         return []
     try:
         thread = await reader(name, limit=OBJECTIVE_NOTES_SCAN)
-    except Exception:  # noqa: BLE001 - notes enrich, never block planning
-        logger.warning("objective notes unreadable for %s", name,
-                       exc_info=True)
+    except Exception:  # noqa: BLE001 - notes enrich, never block a judgment
+        logger.warning("ticket notes unreadable for %s", name, exc_info=True)
         return []
     rows = thread.get("comments") if isinstance(thread, Mapping) else None
-    notes: list[str] = []
+    notes: list[tuple[str, str]] = []
     for row in rows or []:
         if not isinstance(row, Mapping):
             continue
         text = " ".join(str(row.get("content") or "").split())
         if not text or text.startswith(AUTOMATED_NOTE_HEADS):
             continue
-        when = str(row.get("createdAt") or row.get("creation") or "")[:16]
-        notes.append(f"- {when} {text[:700]}")
+        notes.append((str(row.get("createdAt") or row.get("creation") or ""),
+                      text))
         if len(notes) >= OBJECTIVE_NOTES_MAX:
             break
     return list(reversed(notes))
+
+
+def note_lines(rows: Sequence[tuple[str, str]]) -> list[str]:
+    """Prompt lines for :func:`ticket_note_rows` output."""
+    return [f"- {when[:16]} {text[:700]}" for when, text in rows]
+
+
+async def objective_notes(
+    env: ObjectiveEnv, objective: Mapping[str, Any],
+) -> list[str]:
+    """Comments on the objective ticket written by people, newest last."""
+    reader = getattr(getattr(env, "erp", None), "thread_of", None)
+    return note_lines(await ticket_note_rows(
+        reader, str(objective.get("erp_group_ref") or "")))
+
+
+async def mission_record_lines(
+    reader: Callable[..., Awaitable[Any]] | None, mission: Mapping[str, Any],
+) -> list[str]:
+    """What every judge reads of a mission: brief plus the Owner's notes.
+
+    One definition for the CEO review and both planner sections
+    (TASK-2026-00594): notes on the mission ticket carry the Owner's
+    orders, authorizations and cuts given after the mission was created.
+    """
+    from objectives import missions as missions_mod
+
+    rows = await ticket_note_rows(
+        reader, str(mission.get("erp_group_ref") or ""))
+    return [*missions_mod.mission_brief_lines(mission),
+            *missions_mod.mission_notes_lines(note_lines(rows))]
 
 
 def _planner_prompt(
@@ -2441,11 +2471,12 @@ async def _objective_mission_section(
         return ""
     if mission is None:
         return ""
-    from objectives import missions as missions_mod
+    reader = getattr(getattr(env, "erp", None), "thread_of", None)
     return "\n".join([
         f"MISSION {mission_id} (the Owner's outcome this objective serves; "
-        "every ticket stays consistent with its goal and acceptance):",
-        *missions_mod.mission_brief_lines(mission),
+        "every ticket stays consistent with its goal, acceptance and the "
+        "Owner's notes):",
+        *await mission_record_lines(reader, mission),
     ])
 
 
@@ -2468,7 +2499,6 @@ async def _mission_guide_section(
         return ""
     if mission is None:
         return ""
-    from objectives import missions as missions_mod
     ledger = [item for item in mission.get("objectives") or []
               if isinstance(item, Mapping)]
     states = ", ".join(
@@ -2476,7 +2506,8 @@ async def _mission_guide_section(
         for item in ledger) or "(first objective)"
     lines = [
         f"MISSION {mission_id}",
-        *missions_mod.mission_brief_lines(mission),
+        *await mission_record_lines(
+            getattr(getattr(env, "erp", None), "thread_of", None), mission),
         f"Objectives so far: {states}",
         "This pedido continues the mission as its next objective: it "
         "outgrows one ticket by definition, so return capability_gap "

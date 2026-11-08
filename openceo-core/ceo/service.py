@@ -23,7 +23,7 @@ from objectives.engine import (
     MongoObjectiveTaskLister,
 )
 from objectives.missions import InMemoryMissionStore, MongoMissionStore
-from objectives.service import create_internal_ticket
+from objectives.service import create_internal_ticket, erp_for_task_service
 from orchestration.live import ProcessExecutor
 from orchestration.role_muse import ReadonlyBadgeProvider, issuer_for_repo
 from ceo.models import CEOKpiReading
@@ -148,6 +148,8 @@ class CEOService:
             ),
             patch_task=self._patch_task,
             close_mission=self._close_mission,
+            thread_of=self._thread_of,
+            mission_tickets=getattr(repo, "list_mission_tickets", None),
         )
 
     # -- readers ------------------------------------------------------
@@ -292,6 +294,13 @@ class CEOService:
 
     async def _escalate(self, **kwargs: Any) -> dict[str, Any]:
         return await self._task_service.create_owner_escalation(**kwargs)
+
+    async def _thread_of(self, name: str, *, limit: int = 20) -> Any:
+        erp = (erp_for_task_service(self._task_service)
+               if self._task_service is not None else None)
+        if erp is None:
+            return {}
+        return await erp.thread_of(name, limit=limit)
 
     async def _patch_task(
         self, task_id: str, updates: dict[str, Any]

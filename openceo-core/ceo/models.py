@@ -142,6 +142,8 @@ class EscalationSpec(BaseModel):
     kind: str = Field(min_length=1)
     summary: str = Field(min_length=1)
     project: str | None = None
+    # The mission the question is about: the answer joins its record.
+    mission_id: str | None = None
     # JSON carries money as a number or a string; floats arrive from
     # JSON literals, whose shortest repr round-trips the literal the
     # model wrote, so float -> str -> Decimal is exact here. The mandate
@@ -161,7 +163,7 @@ class EscalationSpec(BaseModel):
             raise ValueError("must not be blank")
         return value
 
-    @field_validator("project", "human_action_hint")
+    @field_validator("project", "human_action_hint", "mission_id")
     @classmethod
     def _optional_nonblank(cls, value: str | None) -> str | None:
         if value is not None and not value.strip():
@@ -301,6 +303,8 @@ class CEOValidationContext:
     mission_objectives: Mapping[str, Sequence[Mapping[str, Any]]] = field(
         default_factory=dict)
     missions_unknown: bool = False
+    #: Missions the review was woken to judge with nothing in flight.
+    judged_idle_missions: Collection[str] = frozenset()
 
     def reading_known(self, eje_id: str, kpi_id: str) -> bool:
         reading = self.kpi_readings.get(f"{eje_id}:{kpi_id}")
@@ -506,6 +510,11 @@ def _validate_escalation(
                 f"{DUPLICATE_ESCALATION_PREFIX} {wanted[0]} already open: "
                 f"{str(action.summary).strip()[:160]}"
             ]
+    mission_id = str(spec.mission_id or "").strip()
+    if mission_id and not ctx.missions_unknown \
+            and mission_id not in ctx.missions:
+        errors.append(f"{label}: mission_id {mission_id} is not an "
+                      "active mission")
     return errors
 
 
@@ -557,8 +566,9 @@ def validate_ceo_decision(
 ) -> list[str]:
     """Deterministic anti-bloat validation. Returns errors (pure, sync).
 
-    ``keep_going``/``do_nothing`` always validate (they persist nothing
-    but the review record). A pedido validates project, the mandate
+    ``keep_going``/``do_nothing`` validate (they persist nothing but the
+    review record) unless the review was woken to judge a mission with
+    nothing in flight (TASK-2026-00594). A pedido validates project, the mandate
     link (a measured KPI or a written justificacion), and duplicates
     against open tickets and active objectives; form limits apply where
     the form materializes (objective admission, ticket dispatch).
@@ -576,4 +586,14 @@ def validate_ceo_decision(
     if decision.action == CEOAction.CLOSE_MISSION:
         assert decision.mission is not None  # Shape-guarded.
         return _validate_mission_close(decision.mission, ctx)
+    if ctx.judged_idle_missions:
+        stuck = ", ".join(sorted(ctx.judged_idle_missions))
+        return [
+            f"{decision.action.value}: mission {stuck} has nothing in "
+            "flight and this review was woken to judge it, so it would "
+            "stay stuck. Continue it (crear_pedido with mission_id), close "
+            "it (close_mission) if its acceptance is met, or escalate with "
+            "mission_id exactly what only the Owner can still decide, "
+            "never what its notes already decided"
+        ]
     return []
