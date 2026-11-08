@@ -21,8 +21,9 @@ language: en
 > **DEV-only execution tiers:** `tier_s | tier_a | tier_b | tier_c`.
 >
 > **Split policy (TASK-2026-00201):** this file is the core,
-> always in the prompt; per-agent detail (today: DEV ROUTING in
-> `openceo-core/objectives/routing_policy.d/dev.md`) is read on demand.
+> always in the prompt; per-agent detail (DEV ROUTING in
+> `openceo-core/objectives/routing_policy.d/dev.md`, RESEARCH ROUTING in
+> `openceo-core/objectives/routing_policy.d/research.md`) is read on demand.
 >
 > **Implementation caution:** references here to existing OpenCEO modules, fields, schedulers, or runtime behavior are design contracts or hypotheses until verified against current code. Do not invent missing components merely because this policy names a logical responsibility.
 
@@ -521,12 +522,15 @@ Not validated deterministically at this point (prompt and policy only): that an 
 ## Per-agent detail is read on demand, not pasted here
 
 §18–§35 (DEV ROUTING: tier semantics, oracles, routing, failures)
-live in the dev detail file, not in this core. Before assigning work
-to an agent, read its detail file at the path given in the
-AGENT POLICY DETAIL section of this prompt; for
-`target_agent == dev`, reading it is MANDATORY to choose the tier.
-(In this repository that file is
-`openceo-core/objectives/routing_policy.d/dev.md`.)
+live in the dev detail file, not in this core. §45–§49 (RESEARCH
+ROUTING: trigger, quick default, deep selection, brief and return)
+live in the research detail file (ticket #618); read it before
+assigning research work. Before assigning work to an agent, read
+its detail file at the path given in the AGENT POLICY DETAIL
+section of this prompt; for `target_agent == dev`, reading it is
+MANDATORY to choose the tier. (In this repository those files are
+`openceo-core/objectives/routing_policy.d/dev.md` and
+`openceo-core/objectives/routing_policy.d/research.md`.)
 
 
 ## 36. Objective completion is not direct

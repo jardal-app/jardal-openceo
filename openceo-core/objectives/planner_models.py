@@ -703,9 +703,10 @@ def policy_detail_files(
     """Per-agent detail files next to the core policy, sorted by agent.
 
     For a ``<stem>.md`` core the details live in ``<stem>.d/*.md``
-    (shipped: ``routing_policy.d/dev.md`` next to
-    ``routing_policy.md``); the agent name is the file stem. A core
-    without a ``.d`` dir simply has no details.
+    (shipped: ``routing_policy.d/dev.md`` and
+    ``routing_policy.d/research.md`` next to ``routing_policy.md``);
+    the agent name is the file stem. A core without a ``.d`` dir
+    simply has no details.
     """
     core = policy_file(policy_path)
     folder = core.parent / (core.stem + ".d")

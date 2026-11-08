@@ -48,7 +48,43 @@ flags quedan encendidas.
 Cuándo este research merece su propia línea en vez de tickets sueltos, ver
 `Línea dedicada de investigación` (criterio del ticket #592; aquí no se
 duplica). Fuera de alcance en este tramo: Serper, Firecrawl, deep con
-presupuesto, enrutado del planner, intake externo y perfil free-research.
+presupuesto, intake externo y perfil free-research. El enrutado del
+planner se cubre en `Enrutado del planner` (ticket #618).
+
+## Enrutado del planner
+
+Toda pregunta de internet, librerías o tecnologías se enruta a
+`research` con la skill `investigar` (ticket #618): la pregunta y la
+decisión que desbloquea viajan en el ticket. Lo que el repo responde
+por sí solo (causa raíz, arquitectura, compatibilidad) sigue siendo
+un ticket DEV `tier_a`. La regla normativa vive en
+`openceo-core/objectives/routing_policy.d/research.md` (RESEARCH
+ROUTING §§45–§49), detalle on-demand del core que el planner lee
+antes de asignar trabajo de research; el core la cita en la nota de
+split y en `Per-agent detail`.
+
+Quick live por defecto: el puente de ticket, la tool de submit y la
+receta `investigar` usan `quick` salvo que el ticket nombre `deep`;
+`jardal-openceo` es quick-only en este tramo
+(`allowed_modes: [quick]`, `paid_budget_usd: "0.00"`), así que un
+submit deep falla cerrado (`forbidden`), nunca degrada a quick en
+silencio. La selección deep se define con criterios explícitos (§47:
+brecha de cobertura desde un brief quick previo, verificación
+independiente, decisión que desbloquea gasto/frontera/migración y
+presupuesto pagado positivo) y se verifica con servicio simulado;
+la ejecución deep live pertenece al tramo deep.
+
+La corrida admite una investigación bajo el consumidor del ticket
+(`openceo_research_submit`), la sondea (`openceo_research_get`),
+escribe el brief solo desde la evidencia devuelta, lo adjunta
+privado al ticket solicitante (`openceo_attach_ticket_file`) y
+termina `hecho` nombrando el adjunto; el resultado vuelve al
+planner, nunca continúa solo a DEV. Verificado con
+`tests/test_planner_research_routing_618.py` (detalle servido y
+firme, quick por defecto, deep denegado live sobre el yaml real,
+ciclo con planner simulado): sin modelos vivos ni red. El intake
+externo es ticket hermano, fuera de aquí; el scheduler sigue
+apagado.
 
 ## Línea dedicada de investigación
 

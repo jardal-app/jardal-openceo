@@ -251,21 +251,25 @@ class ShippedPolicyTests(unittest.TestCase):
         self.assertEqual(composed.count("# DEV ROUTING"), 1)
         self.assertNotIn("# DEV ROUTING", planner_mod.load_policy_core())
 
-    def test_check_covers_core_and_dev(self) -> None:
+    def test_check_covers_core_and_details(self) -> None:
+        # Ticket #618: research joins the shipped detail set next to dev.
         status = planner_mod.check_policy()
         self.assertTrue(status.ok, status.problem)
         core = planner_mod.policy_file(None)
         self.assertEqual(status.path, str(core))
         self.assertEqual(tuple(status.files),
                          (str(core),
-                          str(core.parent / "routing_policy.d" / "dev.md")))
+                          str(core.parent / "routing_policy.d" / "dev.md"),
+                          str(core.parent / "routing_policy.d"
+                              / "research.md")))
         self.assertEqual(status.sha,
                          planner_mod.policy_fingerprint(
                              planner_mod.load_policy_text()))
 
     def test_shipped_detail_files_exist_and_are_readable(self) -> None:
+        # Ticket #618: research joins the shipped detail set next to dev.
         found = planner_mod.policy_detail_files()
-        self.assertEqual([name for name, _ in found], ["dev"])
+        self.assertEqual([name for name, _ in found], ["dev", "research"])
         for _name, path in found:
             with self.subTest(path=str(path)):
                 self.assertTrue(path.is_file())
