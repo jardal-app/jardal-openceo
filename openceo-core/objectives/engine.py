@@ -5074,11 +5074,9 @@ async def _finish_objective(
     if env.ceo_wake is not None:
         reason = f"Objective {objective_id} closed: {closure}."
         if mission_id:
-            reason += (
-                f" It served mission {mission_id}: judge the mission "
-                "acceptance and emit its next objective pedido, or "
-                "close the mission."
-            )
+            from objectives import missions as missions_mod
+
+            reason += " " + missions_mod.served_mission_reason(mission_id)
         try:
             env.ceo_wake(reason)
         except Exception:  # noqa: BLE001, S110

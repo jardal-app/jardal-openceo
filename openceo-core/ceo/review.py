@@ -1001,6 +1001,70 @@ async def _run_no_mandate_review(
     return {**outcome, "review_id": review_id}
 
 
+#: Objective states that leave a mission with nothing in flight.
+_FINISHED_OBJECTIVE_STATUSES = frozenset({"closed", "cancelled"})
+
+
+async def _ask_owner_about_idle_missions(
+    env: CEOEnv, signals: CEOSignals, reasons: Sequence[str],
+) -> list[str]:
+    """Ask the Owner about a judged mission the review left idle.
+
+    An objective close wakes the CEO to continue or close its mission; a
+    review that does neither leaves it with no active objective and nobody
+    told (MIS-47F6240D, TASK-2026-00581). The Owner gets the pending
+    roadmap of its last tramo, once per idle episode (recorded on the
+    mission). Fail-soft: the review record stands either way.
+    """
+    from objectives import missions as missions_mod
+
+    if env.missions is None or signals.missions_unknown:
+        return []
+    digests = {str(item.get("mission_id") or ""): item
+               for item in signals.missions}
+    asked: list[str] = []
+    for mission_id in missions_mod.served_missions(reasons):
+        digest = digests.get(mission_id)
+        children = [item for item in (digest or {}).get("objectives") or []
+                    if isinstance(item, Mapping)]
+        if not children or any(
+                str(item.get("status") or "")
+                not in _FINISHED_OBJECTIVE_STATUSES for item in children):
+            continue
+        handoff = (digest or {}).get("last_closed") or {}
+        last_id = str(handoff.get("objective_id") or "")
+        mission = await env.missions.get_mission(mission_id) or {}
+        previous = mission.get("idle_question")
+        if isinstance(previous, Mapping) \
+                and previous.get("objective_id") == last_id:
+            continue
+        pending = [str(item) for item in handoff.get("roadmap_remaining") or []]
+        hint = (f"La mision {mission_id} no tiene objetivo activo y el CEO no "
+                "la continuo ni la cerro. Decide si sigue (y con que), si se "
+                "cierra o si espera.")
+        if pending:
+            hint += " Pendiente de su ultimo tramo: " + "; ".join(pending)
+        action = OwnerAction(
+            kind="mission_idle",
+            summary=f"Mision {mission_id} sin objetivo activo",
+            project=str(mission.get("project") or "") or None,
+            strategic_replan=True,
+            human_action_hint=_short(hint, 1500),
+        )
+        decision = requires_owner(action, env.mandate)
+        if not decision.escalate:
+            continue
+        created = await env.escalate(
+            action=action, decision=decision,
+            source_id=f"mission-idle:{mission_id}:{last_id}")
+        await env.missions.patch_mission(mission_id, {"idle_question": {
+            "objective_id": last_id,
+            "task_id": str((created or {}).get("task_id") or ""),
+        }})
+        asked.append(mission_id)
+    return asked
+
+
 async def _act_on_decision(
     env: CEOEnv, decision: CEODecision, *, review_id: str, kind: str,
 ) -> dict[str, Any]:
@@ -1282,6 +1346,18 @@ async def run_review(
                 "ok": False, "action": "error",
                 "reason": f"{decision.action.value} failed: {exc}",
             }
+    if outcome.get("action") in {
+            CEOAction.KEEP_GOING.value, CEOAction.DO_NOTHING.value,
+            "rejected"}:
+        try:
+            asked = await _ask_owner_about_idle_missions(
+                env, signals, clean_reasons)
+        except Exception:  # noqa: BLE001 - the review record stands
+            logger.warning("CEO: idle-mission question failed",
+                           exc_info=True)
+            asked = []
+        if asked:
+            outcome = {**outcome, "idle_missions_asked": asked}
     record = {
         "review_id": review_id,
         "at": moment.isoformat().replace("+00:00", "Z"),
