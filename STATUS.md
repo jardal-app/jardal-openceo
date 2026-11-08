@@ -2,6 +2,12 @@
 
 Resumen operativo corto del estado real del repo.
 
+## 2026-11-08 — Tier S: una regla con sus propios tests por ticket (TASK-2026-00578)
+
+- Orden del Owner: «no bajaremos el tier s a high si no dejaria de ser tier s, pero si quieres puedes mejorar el prompt o las condiciones para escoger tier s». El pipeline, el esfuerzo y la ausencia de cupos de Tier S no cambian.
+- **Evidencia (12 Tier S desde el 20-oct):** los 7 completados son críticos y en 5 el desafío independiente corrigió algo. Los otros 5 se convirtieron sin entregar: 540 y 541 traían varias reglas a la vez, y 600 era la migración RLS separada de sus tests (601/602), porque §19 contaba "tests" entre los consumidores. Rehecho junto (603), cerró en un ciclo de 68 min.
+- **Política (§19, §27, kernel §42 y prompt del planner):** la regla viaja con los tests que la fijan, nunca en tickets hermanos. Un ticket S define una regla y cabe en un ciclo; las reglas agrupadas se descomponen antes, una por hijo. Desplegado en `52e46df` (policy sha `48cda812c993`).
+
 ## 2026-11-07 — El planner planifica desde el registro de negocio (TASK-2026-00571)
 
 - Orden del Owner: «corrige» el bug de OBJ-8E2257EF (el planner re-creó el pegado ERP que el Owner cerró en 00551 como 00554 y 00566, y el smoke de 00552 como #613), «con un enfoque proactivo ágil no determinista estático según las reglas».
