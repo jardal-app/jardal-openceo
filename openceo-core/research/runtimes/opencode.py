@@ -273,6 +273,7 @@ def write_worker_config(
     broker_url: str,
     broker_bearer: str = "",
     agent: str = "investigator",
+    provider_config: dict[str, Any] | None = None,
 ) -> Path:
     """Escribe la configuracion **cerrada** del worker dentro de su XDG_CONFIG_HOME.
 
@@ -298,6 +299,8 @@ def write_worker_config(
         deadline_seconds=deadline_seconds,
         agents=[agent],
     )
+    if provider_config:
+        config["providers"] = provider_config
     problems = assert_worker_config_is_closed(config)
     if problems:
         raise RuntimeConfigurationError(
@@ -513,6 +516,19 @@ class OpenCodeRuntime:
             )
 
         broker_url = self._effective_broker_url(backend)
+        provider_env = {}
+        if request.provider != "opencode":
+            from model_routing.external import ExternalError, credential_env_for
+            from model_routing.secrets import SecretsError, load_router_secrets
+
+            try:
+                name = credential_env_for(request.provider)
+                value = getattr(load_router_secrets(), name)
+                if not value or set(request.provider_config) != {request.provider}:
+                    raise RuntimeConfigurationError("Free provider credential/config unavailable")
+                provider_env[name] = value
+            except (ExternalError, SecretsError, AttributeError) as exc:
+                raise RuntimeConfigurationError("Free provider credential unavailable") from exc
         paths = ensure_worker_paths(self._state_dir, request.research_id)
         workspace = Path(request.workspace) if request.workspace else paths["workspace"]
         workspace.mkdir(parents=True, exist_ok=True)
@@ -527,6 +543,7 @@ class OpenCodeRuntime:
             broker_url=broker_url,
             broker_bearer=self._broker_bearer,
             agent=request.agent,
+            provider_config=request.provider_config,
         )
 
         session_id = request.session_id or await self._sessions.resolve(request)
@@ -544,6 +561,7 @@ class OpenCodeRuntime:
             broker_url=broker_url,
             tool_credential=request.tool_credential or None,
         )
+        env.update(provider_env)
         egress = self._egress_policy(backend, broker_url)
         plan = backend.plan(
             argv=argv,
@@ -574,21 +592,20 @@ class OpenCodeRuntime:
             stdout, stderr, truncated = await self._drain(
                 process, request.timeout_seconds, request.max_output_bytes
             )
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, RuntimeTimeout) as exc:
             await self._terminate(process)
             self._running.pop(request.research_id, None)
+            if isinstance(exc, RuntimeTimeout):
+                raise
             raise RuntimeTimeout(
                 f"El job {request.research_id} supero {request.timeout_seconds}s"
             ) from None
+        except asyncio.CancelledError:
+            await self._terminate(process)
+            raise
         finally:
             self._running.pop(request.research_id, None)
 
-        if truncated:
-            await self._terminate(process)
-            raise RuntimeOutputTooLarge(
-                "La salida del runtime supero el techo configurado",
-                raw=stdout[:4000].decode("utf-8", "replace"),
-            )
         if request.research_id in self._cancelled:
             self._cancelled.discard(request.research_id)
             raise RuntimeCancelled(f"Job {request.research_id} cancelado")
@@ -601,6 +618,14 @@ class OpenCodeRuntime:
         # El CLI reporta los fallos por stdout (evento `type: error`) y deja stderr
         # vacio: se extrae aqui para que el error no quede sin explicacion.
         reported_error = extract_jsonl_error(events)
+        outcome = RuntimeOutcome(text=text, session_id=parsed_session or session_id,
+                                 events=events, exit_code=int(exit_code), stderr=stderr_text[:4000])
+        if truncated:
+            await self._terminate(process)
+            raise RuntimeOutputTooLarge(
+                "La salida del runtime supero el techo configurado",
+                raw=stdout[:4000].decode("utf-8", "replace"), outcome=outcome,
+            )
         if exit_code != 0:
             detail = f": {reported_error}" if reported_error else ""
             raise RuntimeExecutionError(
@@ -608,6 +633,7 @@ class OpenCodeRuntime:
                 exit_code=int(exit_code),
                 stderr=stderr_text[:4000],
                 runtime_error=reported_error,
+                outcome=outcome,
             )
 
         if not text:
@@ -620,6 +646,7 @@ class OpenCodeRuntime:
                 reason,
                 malformed_lines=malformed,
                 raw=stdout[:2000].decode("utf-8", "replace"),
+                outcome=outcome,
             )
 
         session_id = parsed_session or session_id
@@ -644,8 +671,9 @@ class OpenCodeRuntime:
     async def _drain(
         self, process: Any, timeout_seconds: int, max_output_bytes: int
     ) -> tuple[bytes, bytes, bool]:
-        async def _read(stream: Any) -> tuple[bytes, bool]:
-            buffer = bytearray()
+        stdout_buffer, stderr_buffer = bytearray(), bytearray()
+
+        async def _read(stream: Any, buffer: bytearray) -> tuple[bytes, bool]:
             truncated = False
             while True:
                 chunk = await stream.read(65536)
@@ -660,7 +688,7 @@ class OpenCodeRuntime:
 
         async def _collect() -> tuple[bytes, bool, bytes]:
             stdout_result, stderr_result = await asyncio.gather(
-                _read(process.stdout), _read(process.stderr)
+                _read(process.stdout, stdout_buffer), _read(process.stderr, stderr_buffer)
             )
             # La espera del proceso va **dentro** del deadline. Si quedara fuera, un
             # proceso que cierra su stdout pero sigue vivo (p. ej. el servidor
@@ -668,9 +696,13 @@ class OpenCodeRuntime:
             await process.wait()
             return stdout_result[0], stdout_result[1], stderr_result[0]
 
-        stdout, truncated, stderr = await asyncio.wait_for(
-            _collect(), timeout=timeout_seconds
-        )
+        try:
+            stdout, truncated, stderr = await asyncio.wait_for(_collect(), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            events, text, session_id, malformed = parse_jsonl_events(stdout_buffer.decode("utf-8", "replace"))
+            raise RuntimeTimeout("OpenCode deadline exhausted", outcome=RuntimeOutcome(
+                text=text, session_id=session_id, events=events, malformed_lines=malformed,
+                timed_out=True)) from None
         return stdout, stderr, truncated
 
     async def _terminate(self, process: Any) -> None:

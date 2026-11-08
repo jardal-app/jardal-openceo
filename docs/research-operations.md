@@ -49,9 +49,27 @@ flags quedan encendidas.
 
 Cuándo este research merece su propia línea en vez de tickets sueltos, ver
 `Línea dedicada de investigación` (criterio del ticket #592; aquí no se
-duplica). El perfil free-research se activa en su propio ticket. El enrutado del planner se cubre en
+duplica). El perfil free-research se describe en `Perfil gratuito del servicio`. El enrutado del planner se cubre en
 `Enrutado del planner` (ticket #618) y el intake externo en
 `Intake externo` (ticket #619).
+
+## Perfil gratuito del servicio
+
+Quick consume `free-research` en dos turnos acotados (analisis de evidencia y
+sintesis), con afinidad, ranking congelado y checkpoint por turno. Cada intento
+consume un paso del mismo presupuesto. Los fallbacks respetan herramientas,
+contexto, privacidad, gratuidad y disponibilidad; los proveedores externos ya
+soportados reciben solo su credencial `FREE_ROUTER_*` seleccionada. Researcher y
+verifier de deep mantienen su adapter pagado y presupuesto independiente.
+
+Decision de degradacion: ranking o catalogo ausente, invalido o caducado,
+router deshabilitado o ninguna ruta compatible dejan el job `blocked` con
+`failure_reason`; nunca se usa la lista estatica del helper legacy de sintesis.
+Tras recuperar elegibilidad, `POST /api/research/jobs/{research_id}/resume`
+(mismo owner, permiso `run_research`) reencola el mismo job y despierta el
+despachador. Conserva fase, evidencia, pasos restantes y checkpoint, sin repetir
+descubrimiento ni lectura. No hay reintento periodico. Un conflicto de resultados
+de herramientas requiere reconciliacion antes de reanudar (HTTP 409).
 
 ## Enrutado del planner
 

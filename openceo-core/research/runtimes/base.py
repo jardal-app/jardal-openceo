@@ -14,6 +14,10 @@ from typing import Any, Protocol
 class ResearchRuntimeError(RuntimeError):
     """Fallo del runtime del investigador."""
 
+    def __init__(self, message: str, *, outcome: RuntimeOutcome | None = None) -> None:
+        super().__init__(message)
+        self.outcome = outcome
+
 
 class RuntimeUnavailable(ResearchRuntimeError):
     """El motor no esta disponible (binario ausente, version distinta, sin ruta)."""
@@ -58,8 +62,9 @@ class RuntimeExecutionError(ResearchRuntimeError):
         exit_code: int,
         stderr: str = "",
         runtime_error: str = "",
+        outcome: RuntimeOutcome | None = None,
     ) -> None:
-        super().__init__(message)
+        super().__init__(message, outcome=outcome)
         self.exit_code = exit_code
         self.stderr = stderr
         # Motivo que el CLI reporto por stdout (evento `type: error`): con v2.0.20 el
@@ -74,8 +79,9 @@ class RuntimeMalformedOutput(ResearchRuntimeError):
     producir una salida inservible.
     """
 
-    def __init__(self, message: str, *, malformed_lines: int = 0, raw: str = "") -> None:
-        super().__init__(message)
+    def __init__(self, message: str, *, malformed_lines: int = 0, raw: str = "",
+                 outcome: RuntimeOutcome | None = None) -> None:
+        super().__init__(message, outcome=outcome)
         self.malformed_lines = malformed_lines
         self.raw = raw
 
@@ -101,6 +107,8 @@ class RuntimeRequest:
     # herramienta. No es una clave de proveedor: es una capability ligada a este job
     # (proyecto, owner y research_id), con operaciones explicitas y vencimiento.
     tool_credential: str = ""
+    provider: str = "opencode"
+    provider_config: dict[str, Any] = field(default_factory=dict)
 
     @property
     def session_scope(self) -> tuple[str, str, str]:

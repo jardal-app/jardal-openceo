@@ -28,6 +28,7 @@ session blocks resumably.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -38,7 +39,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Container, Literal, Mapping, Protocol
+from typing import Any, Awaitable, Callable, Container, Generator, Literal, Mapping, Protocol
 from uuid import uuid4
 
 from model_routing import serve_evidence as router_serve_evidence
@@ -693,6 +694,16 @@ class ResearchSession:
         record_checkpoint(self._checkpoints, checkpoint)
         return checkpoint
 
+    def checkpoint_failure(self, attempt: ProviderTurn) -> ResearchCheckpoint:
+        """Retain effects and partial text even when the runtime cannot retry."""
+        if attempt.text:
+            self._partial_text = attempt.text
+        try:
+            self._reconcile_tools(attempt)
+        finally:
+            checkpoint = self._save(turn=self._turn, partial_text=self._partial_text)
+        return checkpoint
+
     @classmethod
     def resume(
         cls,
@@ -857,12 +868,67 @@ class ResearchSession:
         :class:`SessionBlocked` with the state saved when no
         compatible model remains or a tool conflict fails safe.
         """
+        driver = self._drive_turn(
+            prompt, queries_and_sources=queries_and_sources, validated=validated,
+            pending=pending, decisions=decisions, artifacts=artifacts)
+        value = None
+        error = None
+        while True:
+            try:
+                request = driver.throw(error) if error else driver.send(value)
+            except StopIteration as done:
+                return done.value
+            value, error = None, None
+            try:
+                if isinstance(request, float):
+                    self._sleeper(request)
+                else:
+                    value = invoke(request)
+            except Exception as exc:  # noqa: BLE001 - driver owns failure policy
+                error = exc
+
+    async def run_turn_async(
+        self, prompt: str, invoke: Callable[[TurnRequest], Awaitable[ProviderTurn]],
+        **deltas: Any,
+    ) -> TurnOutcome:
+        """Use the same retry/checkpoint driver with an asynchronous runtime."""
+        driver = self._drive_turn(prompt, **deltas)
+        value = None
+        error = None
+        try:
+            while True:
+                try:
+                    request = driver.throw(error) if error else driver.send(value)
+                except StopIteration as done:
+                    return done.value
+                value, error = None, None
+                try:
+                    if isinstance(request, float):
+                        await asyncio.sleep(request)
+                    else:
+                        value = await invoke(request)
+                except Exception as exc:  # noqa: BLE001 - driver owns failure policy
+                    error = exc
+        finally:
+            driver.close()
+
+    def _drive_turn(
+        self, prompt: str, *,
+        queries_and_sources: list[tuple[str, str]] | None = None,
+        validated: list[str] | None = None,
+        pending: list[str] | None = None,
+        decisions: list[str] | None = None,
+        artifacts: list[str] | None = None,
+    ) -> Generator[TurnRequest | float, ProviderTurn | None, TurnOutcome]:
         if self._closed:
             raise ResearchRoutingError("the session is closed")
         if not (prompt or "").strip():
             raise ResearchRoutingError("a turn needs a prompt")
         pending_goal = list(pending or [])
-        attempt_prompt = prompt
+        if pending is not None:
+            self._pending = list(pending)
+        self._apply_deltas(queries_and_sources, validated, pending_goal, decisions, artifacts)
+        attempt_prompt = self._rebuild_prompt(prompt)
         resumed = False
         rotations = 0
         same_used = 0
@@ -884,21 +950,23 @@ class ResearchSession:
                 "no eligible research model for this session",
                 checkpoint_path=checkpoint_path(self._checkpoints, self._research_id))
         if self._effective is None:
-            return self._run_static_turn(
-                prompt, invoke, queries_and_sources=queries_and_sources,
+            return (yield from self._run_static_turn(
+                prompt, queries_and_sources=queries_and_sources,
                 validated=validated, pending=pending_goal, decisions=decisions,
-                artifacts=artifacts)
+                artifacts=artifacts))
         candidate = self._effective
         tried_deployments = {candidate.deployment_id}
         tried_canonicals = {candidate.canonical_model_id}
         while True:
+            self._save_with_goal(pending_goal)
             try:
-                attempt = invoke(TurnRequest(
+                attempt = yield TurnRequest(
                     prompt=attempt_prompt, model=candidate.deployment_id,
                     resume=resumed,
                     applied_tools=tuple(self._ledger.values()),
-                    partial_text=self._partial_text))
+                    partial_text=self._partial_text)
             except SessionBlocked:
+                self._save_with_goal(pending_goal)
                 raise
             except Exception as exc:  # noqa: BLE001
                 attempt = ProviderTurn(
@@ -937,17 +1005,18 @@ class ResearchSession:
                     self._partial_text):
                 self._partial_text = failure.text
             classified = self._classify(failure)
+            self._save_with_goal(pending_goal)
             action = _retry_action(
                 classified.error_class, same_used=same_used,
                 rotations_used=rotations)
             if action == "retry_same":
-                self._backoff(same_used + rotations)
+                yield float(_RETRY_BUDGET.delay(same_used + rotations))
                 same_used += 1
                 resumed = True
                 attempt_prompt = self._rebuild_prompt(prompt)
                 continue
             if action == "rotate":
-                self._backoff(same_used + rotations)
+                yield float(_RETRY_BUDGET.delay(same_used + rotations))
                 rotations += 1
                 resumed = True
                 self._record_rotation(candidate, classified, failure.error_text)
@@ -981,6 +1050,11 @@ class ResearchSession:
                 attempt_prompt = self._rebuild_prompt(prompt)
                 continue
             checkpoint = self._save_with_goal(pending_goal)
+            if self._store is not None:
+                record_provider_error(
+                    self._store, provider=candidate.provider,
+                    deployment_id=candidate.deployment_id, model=candidate.deployment_id,
+                    classified=classified, run_id=self._run_id, excerpt=failure.error_text)
             if classified.error_class in (
                     RESEARCH_ROTATE_CLASSES | RESEARCH_REBUILD_CLASSES):
                 code = BLOCKED_NO_ELIGIBLE_MODEL
@@ -996,25 +1070,24 @@ class ResearchSession:
     def _run_static_turn(
         self,
         prompt: str,
-        invoke: TurnInvoke,
         *,
         queries_and_sources: list[tuple[str, str]] | None,
         validated: list[str] | None,
         pending: list[str],
         decisions: list[str] | None,
         artifacts: list[str] | None,
-    ) -> TurnOutcome:
+    ) -> Generator[TurnRequest | float, ProviderTurn | None, TurnOutcome]:
         """Single-model turn: rebuild once, then block resumably."""
         same_used = 0
         resumed = False
         attempt_prompt = prompt
         while True:
             try:
-                attempt = invoke(TurnRequest(
+                attempt = yield TurnRequest(
                     prompt=attempt_prompt, model=self._static_model,
                     resume=resumed,
                     applied_tools=tuple(self._ledger.values()),
-                    partial_text=self._partial_text))
+                    partial_text=self._partial_text)
             except Exception as exc:  # noqa: BLE001
                 attempt = ProviderTurn(
                     text="", complete=False, error_text=str(exc),
@@ -1056,7 +1129,7 @@ class ResearchSession:
             else:
                 action = "blocked"
             if action == "retry_same":
-                self._backoff(same_used)
+                yield float(_RETRY_BUDGET.delay(same_used))
                 same_used += 1
                 resumed = True
                 attempt_prompt = self._rebuild_prompt(prompt)
@@ -1117,9 +1190,6 @@ class ResearchSession:
         if classified.error_class == "unclassified" and partial:
             return classify_response("stream_cut")
         return classified
-
-    def _backoff(self, hops_used: int) -> None:
-        self._sleeper(_RETRY_BUDGET.delay(hops_used))
 
     def _record_rotation(
         self, candidate: Candidate, classified: ClassifiedError, excerpt: str,

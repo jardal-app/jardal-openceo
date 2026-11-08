@@ -98,6 +98,7 @@ class ResearchMode(str, Enum):
 class ResearchJobStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
+    BLOCKED = "blocked"
     COMPLETED = "completed"
     PARTIAL = "partial"
     FAILED = "failed"
@@ -125,8 +126,10 @@ ALLOWED_TRANSITIONS: dict[ResearchJobStatus, frozenset[ResearchJobStatus]] = {
             ResearchJobStatus.PARTIAL,
             ResearchJobStatus.FAILED,
             ResearchJobStatus.CANCELLED,
+            ResearchJobStatus.BLOCKED,
         }
     ),
+    ResearchJobStatus.BLOCKED: frozenset({ResearchJobStatus.QUEUED, ResearchJobStatus.CANCELLED}),
     ResearchJobStatus.COMPLETED: frozenset({ResearchJobStatus.COMPLETED}),
     ResearchJobStatus.PARTIAL: frozenset({ResearchJobStatus.PARTIAL}),
     ResearchJobStatus.FAILED: frozenset({ResearchJobStatus.FAILED}),

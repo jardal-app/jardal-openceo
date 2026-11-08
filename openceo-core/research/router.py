@@ -246,6 +246,29 @@ def build_research_router(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job no encontrado")
         return public_job_payload(cancelled) or {}
 
+    @router.post("/jobs/{research_id}/resume", status_code=status.HTTP_202_ACCEPTED)
+    async def resume_job(
+        research_id: str, request: Request,
+        user: Any = Depends(require_permissions(RESEARCH_RUN)),
+    ) -> dict[str, Any]:
+        service = _service_or_503(request, get_service)
+        principal = principal_from_user(user)
+        _authorized_or_404(principal, await service.status(research_id))
+        try:
+            document = await service.resume(research_id)
+        except ResearchServiceError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        if document and document.get("status") == ResearchJobStatus.QUEUED.value and on_admitted is not None:
+            import asyncio
+
+            try:
+                scheduled = on_admitted(research_id)
+                if scheduled is not None:
+                    asyncio.ensure_future(scheduled)
+            except Exception:  # noqa: BLE001 - admission persists independently of dispatch
+                logger.warning("No se pudo despertar al despachador", exc_info=True)
+        return public_job_payload(document) or {}
+
     # ------------------------------------------------------------ suscripciones
     @router.get("/events")
     async def list_events(request: Request, project_key: str, after: int = Query(0, ge=0),

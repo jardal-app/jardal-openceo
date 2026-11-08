@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
+from model_routing.research_wiring import SessionBlocked
 from research.acquisition.base import AcquisitionError
 from research.contracts import (
     TERMINAL_STATUSES,
@@ -368,25 +369,45 @@ class ResearchService:
         )
         limits = job.get("effective_limits") or {}
         budget = StepBudget(
-            steps=int(limits.get("steps", 8)),
+            steps=int(job.get("free_research", {}).get("steps_left", limits.get("steps", 8))),
             seconds=int(limits.get("seconds", 120)),
             clock=self._clock,
         )
         evidence_rows: dict[str, dict[str, Any]] = {}
         coverage: list[ResearchCoverageGap] = []
-        searches = 0
+        searches = int(job.get("free_research", {}).get("search_requests", 0))
 
         try:
             async with asyncio.timeout(budget.remaining_seconds):
-                candidates, searches = await self._discover(job, scope, budget, limits, coverage)
-                await self._read_pages(job, scope, budget, limits, candidates, evidence_rows, coverage)
+                if job.get("free_research"):
+                    evidence_rows.update(job["free_research"].get("evidence", {}))
+                    coverage.extend(ResearchCoverageGap(**gap) for gap in job.get("coverage_gaps", []))
+                else:
+                    candidates, searches = await self._discover(job, scope, budget, limits, coverage)
+                    await self._read_pages(job, scope, budget, limits, candidates, evidence_rows, coverage)
                 if job.get("mode") == "deep":
                     from research.deep import DeepResearch
                     result = await DeepResearch(self, self._deps.deep_model).synthesize(job, budget, evidence_rows, coverage)
                     if result is None and evidence_rows:
                         result = self._parse_report(job, '{"summary":"Deep research incompleto","claims":[]}', evidence_rows, coverage)
                 else:
-                    result = await self._synthesize(job, scope, budget, evidence_rows, coverage)
+                    from research.free_profile import FreeResearch
+                    result = await FreeResearch(self, job, scope, budget, evidence_rows, coverage).synthesize()
+        except SessionBlocked as exc:
+            logger.warning("Research job %s blocked (%s)", research_id, exc.code)
+            await self._release_capabilities(research_id, reason="research bloqueado")
+            current = await self._deps.repo.get_research_job(research_id)
+            if current and ResearchJobStatus(current["status"]) in TERMINAL_STATUSES:
+                return current
+            return await self._deps.repo.transition_research_job(
+                research_id, ResearchJobStatus.BLOCKED,
+                updates={"failure_reason": f"{exc.code}: {exc}",
+                         "evidence_ids": sorted(evidence_rows),
+                         "coverage_gaps": [gap.model_dump(mode="json") for gap in coverage],
+                         "free_research": {**job["free_research"], "search_requests": searches},
+                         "provider_status": job.get("provider_status", {}),
+                         "lease_expires_at": None},
+            ) or await self._deps.repo.get_research_job(research_id)
         except TimeoutError:
             coverage.append(ResearchCoverageGap(source="service", reason=CoverageReason.BUDGET_EXHAUSTED, detail="Deadline global agotado"))
             result = self._parse_report(job, '{"summary":"Investigacion incompleta por deadline","claims":[]}', evidence_rows, coverage) if evidence_rows else None
@@ -925,6 +946,16 @@ class ResearchService:
         return delivered
 
     # ------------------------------------------------------------ cancelacion
+
+    async def resume(self, research_id: str) -> dict[str, Any] | None:
+        """Requeue a blocked free-profile job without replaying acquisition."""
+        current = await self._deps.repo.get_research_job(research_id)
+        if current is None or current.get("status") != ResearchJobStatus.BLOCKED.value:
+            return current
+        if current.get("free_research", {}).get("blocked_code") == "BLOCKED_TOOL_CONFLICT":
+            raise ResearchServiceError("Tool outcome must be reconciled before resuming")
+        return await self._deps.repo.transition_research_job(
+            research_id, ResearchJobStatus.QUEUED, updates={"failure_reason": None})
 
     async def cancel(self, research_id: str) -> dict[str, Any] | None:
         """Cancela por CAS. Si ya es terminal, devuelve el estado real."""
