@@ -16,7 +16,7 @@ from model_routing.secrets import SecretsError, load_router_secrets
 from research.contracts import CoverageReason, ResearchCoverageGap
 from research.runtimes.base import (
     RuntimeCancelled, RuntimeConfigurationError, RuntimeOutputTooLarge,
-    RuntimeFirstResponseTimeout, RuntimeRequest, RuntimeTimeout, RuntimeUnavailable,
+    RuntimeExecutionError, RuntimeFirstResponseTimeout, RuntimeRequest, RuntimeTimeout, RuntimeUnavailable,
 )
 
 logger = logging.getLogger(__name__)
@@ -173,7 +173,11 @@ class FreeResearch:
                 error_text = reported_error or "timeout"
             if isinstance(exc, RuntimeFirstResponseTimeout):
                 error_text = reported_error or "provider.no-response"
+            error_excerpt = ""
+            if isinstance(exc, RuntimeExecutionError) and exc.stderr.strip():
+                error_excerpt = wiring.sanitize_excerpt(f"{error_text}; stderr: {exc.stderr}")
             return replace(attempt, complete=False, error_text=error_text,
+                           error_excerpt=error_excerpt,
                            failure_stage="partial_text" if attempt.text else "after_tool" if attempt.executed_tools else "before_response")
         finally:
             await self.service._deps.slots.release_call()

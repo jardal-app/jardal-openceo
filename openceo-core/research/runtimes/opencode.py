@@ -395,7 +395,7 @@ class OpenCodeRuntime:
         self._spawn = spawn or _default_spawn
         self._sessions = sessions or SessionRegistry()
         self._version_probe = version_probe
-        self._state_dir = Path(state_dir or getattr(settings, "RESEARCH_STATE_DIR", "/tmp/research"))
+        self._state_dir = Path(state_dir or getattr(settings, "RESEARCH_STATE_DIR", "/tmp/research")).resolve()
         self._base_env = dict(base_env if base_env is not None else os.environ)
         self._broker_url = broker_url
         self._broker_bearer = broker_bearer
@@ -531,7 +531,7 @@ class OpenCodeRuntime:
             except (ExternalError, SecretsError, AttributeError) as exc:
                 raise RuntimeConfigurationError("Free provider credential unavailable") from exc
         paths = ensure_worker_paths(self._state_dir, request.research_id)
-        workspace = Path(request.workspace) if request.workspace else paths["workspace"]
+        workspace = Path(request.workspace).resolve() if request.workspace else paths["workspace"]
         workspace.mkdir(parents=True, exist_ok=True)
 
         # La configuracion del worker se materializa **antes** de lanzar el CLI: sin

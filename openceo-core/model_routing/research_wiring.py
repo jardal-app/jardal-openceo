@@ -576,6 +576,7 @@ class ProviderTurn:
     attempt; their results arrive in ``tool_results`` as
     ``(tool id, result summary)`` pairs. A complete turn without the
     result of a claimed tool is inconsistent, never a success (T13).
+    ``error_excerpt`` adds diagnostic evidence without changing classification.
     """
 
     text: str
@@ -584,6 +585,7 @@ class ProviderTurn:
     tool_results: tuple[tuple[str, str], ...] = ()
     error_text: str = ""
     failure_stage: FailureStage = "before_response"
+    error_excerpt: str = ""
 
 
 class TurnInvoke(Protocol):
@@ -1052,7 +1054,9 @@ class ResearchSession:
                 record_provider_error(
                     self._store, provider=candidate.provider,
                     deployment_id=candidate.deployment_id, model=candidate.deployment_id,
-                    classified=classified, run_id=self._run_id, excerpt=failure.error_text)
+                    classified=classified, run_id=self._run_id,
+                    excerpt=(failure.error_excerpt or failure.error_text)
+                    if classified.error_class == "unclassified" else failure.error_text)
             if classified.error_class in (
                     RESEARCH_ROTATE_CLASSES | RESEARCH_REBUILD_CLASSES):
                 code = BLOCKED_NO_ELIGIBLE_MODEL

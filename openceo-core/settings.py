@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -448,6 +449,14 @@ class Settings(BaseSettings):
     # investigacion, para que una suscripcion habladora no consuma el saldo comun.
     RESEARCH_DISCOVERY_MIN_INTERVAL_SECONDS: int = 21600
     RESEARCH_DISCOVERY_DAILY_SEARCH_CAP: int = 2
+
+    @field_validator(
+        "RESEARCH_STATE_DIR", "RESEARCH_EVIDENCE_DIR", "RESEARCH_WORKER_DIR",
+        "RESEARCH_WORKSPACE_DIR", "RESEARCH_SOCIAL_SESSION_DIR",
+    )
+    @classmethod
+    def _resolve_research_directory(cls, value: str) -> str:
+        return str(Path(value).resolve()) if value else value
 
 
 @lru_cache(maxsize=1)
