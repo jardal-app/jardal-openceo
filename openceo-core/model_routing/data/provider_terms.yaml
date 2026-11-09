@@ -16,8 +16,8 @@ terms:
     paid_addons: [image, audio, web_search, internal_reasoning, request_fee]
     source: https://openrouter.ai/settings/keys
     source_note: ":free serves without purchase (base daily quota; 1000/day after USD 10 credit). Free quota read live from GET /api/v1/key; :free calls must not move credit usage (usage-unchanged guard)."
-    verified_at: "2026-11-01"
-    basis: "Agent re-verified 2026-11-01 (TASK-2026-00427): models API lists 452, 17 zero-price, 14 with :free; GET /api/v1/key free_limit=1000 free_remaining=1000. Human countersign pending."
+    verified_at: "2026-11-09"
+    basis: "Agent re-verified 2026-11-09 (#657): models API lists 461, 16 zero-price, 12 with :free and no nonzero extras; GET /api/v1/key free_limit=1000 free_remaining=1000. Human countersign pending."
   - provider: opencode
     free_tier: true
     requires_payment_method: false
@@ -27,9 +27,9 @@ terms:
     confidentiality_allowed: [public]
     paid_addons: []
     source: https://opencode.ai/v2/docs/console/models/
-    source_note: "Pay-as-you-go pricing table per 1M tokens transcribed 2026-11-01; Free in every price column counts as zero. No machine pricing API exists. Auth rule from /v2/docs/console/api/inference/: paid models require the header, free chat models serve without it. Free set is 10 models, all 'limited time'; exo-free, longcat-2.5-preview-free and mimo-v2.5-free no longer listed."
-    verified_at: "2026-11-01"
-    basis: "Agent re-verified 2026-11-01 (TASK-2026-00427): 78 models listed live; docs pricing table shows 10 Free rows (Jev 1.13 at $0.042 input excluded). Human countersign pending."
+    source_note: "Pay-as-you-go pricing table per 1M tokens transcribed 2026-11-09; Free in every price column counts as zero. No machine pricing API exists. Auth rule from /v2/docs/console/api/inference/: paid models require the header, free chat models serve without it. Free set is 13 models, all 'limited time'; added vs 2026-11-01: crouton-alpha-free, iceman-free, inkling-2-small-free; jev-1.13-free and nemotron-3-ultra-free still Free in docs but absent from the live list."
+    verified_at: "2026-11-09"
+    basis: "Agent re-verified 2026-11-09 (#657): 81 models listed live; docs pricing table shows 13 Free rows (Jev 1.13 at $0.042 input excluded). Human countersign pending."
   - provider: groq
     free_tier: true
     requires_payment_method: false
@@ -39,9 +39,9 @@ terms:
     confidentiality_allowed: [public]
     paid_addons: []
     source: https://console.groq.com/keys
-    source_note: "Free-tier account premise (.env.free-router.local.example: cuenta gratuita, distinct from the voice key); key validity verified live 2026-11-01. Card presence on the account is not API-verifiable; probes use minimal tokens."
-    verified_at: "2026-11-01"
-    basis: "Agent re-verified 2026-11-01 (TASK-2026-00427): models list 200 with 12 models, key valid. Rate-limited free tier without card; over-quota fails, never bills. Human countersign pending."
+    source_note: "Free-tier account premise (.env.free-router.local.example: cuenta gratuita, distinct from the voice key); key validity verified live 2026-11-09. Card presence on the account is not API-verifiable; probes use minimal tokens."
+    verified_at: "2026-11-09"
+    basis: "Agent re-verified 2026-11-09 (#657): models list 200 with 12 models, key valid. Rate-limited free tier without card; over-quota fails, never bills. Human countersign pending."
   - provider: gemini
     free_tier: true
     requires_payment_method: false
@@ -52,8 +52,8 @@ terms:
     paid_addons: [grounding, web_search]
     source: https://aistudio.google.com/apikey
     source_note: "Gemini API (AI Studio) free tier, not Vertex. The free tier uses content to improve products, so data_policy is trains and only public confidentiality is allowed. Paid add-ons exist and probes never enable them."
-    verified_at: "2026-11-01"
-    basis: "Agent re-verified 2026-11-01 (TASK-2026-00427): models list 200 with 50 models, AI Studio key valid on the free endpoint. Human countersign pending."
+    verified_at: "2026-11-09"
+    basis: "Agent re-verified 2026-11-09 (#657): models list 200 with 50 models, AI Studio key valid on the free endpoint. Human countersign pending."
   - provider: nvidia
     free_tier: true
     requires_payment_method: false
@@ -63,19 +63,22 @@ terms:
     confidentiality_allowed: [public]
     paid_addons: []
     source: https://build.nvidia.com
-    source_note: "Build API trial without card; the trial forbids confidential data. Trial-expiry versus recurring access is not API-verifiable; re-verify at refresh. Key validity verified live 2026-11-01."
-    verified_at: "2026-11-01"
-    basis: "Agent re-verified 2026-11-01 (TASK-2026-00427): models list 200 with 85 models, key valid. Rate-limited trial API; over-quota fails, never bills. Human countersign pending."
+    source_note: "Build API trial without card; the trial forbids confidential data. Trial-expiry versus recurring access is not API-verifiable; re-verify at refresh. Key validity verified live 2026-11-09."
+    verified_at: "2026-11-09"
+    basis: "Agent re-verified 2026-11-09 (#657): models list 200 with 84 models, key valid. Rate-limited trial API; over-quota fails, never bills. Human countersign pending."
 opencode_free_models:
   source: https://opencode.ai/v2/docs/console/models/
-  verified_at: "2026-11-01"
-  basis: "Docs pricing table transcribed 2026-11-01 (TASK-2026-00427): 10 Free rows; a model is offered only when it is both listed live and Free here. Suffixes never decide: big-pickle is free without -free. Dropped vs 2026-10-23: exo-free, longcat-2.5-preview-free, mimo-v2.5-free."
+  verified_at: "2026-11-09"
+  basis: "Docs pricing table transcribed 2026-11-09 (#657): 13 Free rows; a model is offered only when it is both listed live and Free here. Suffixes never decide: big-pickle is free without -free. Added vs 2026-11-01: crouton-alpha-free, iceman-free, inkling-2-small-free; jev-1.13-free and nemotron-3-ultra-free still Free in docs but absent from the live list (81)."
   model_ids:
     - beam-free
     - big-pickle
+    - crouton-alpha-free
     - deepseek-v4.1-flash-free
     - flint-40b-free
     - glm-5.3-flash-free
+    - iceman-free
+    - inkling-2-small-free
     - jev-1.13-free
     - mimo-v2.6-flash-free
     - nemotron-3-ultra-free

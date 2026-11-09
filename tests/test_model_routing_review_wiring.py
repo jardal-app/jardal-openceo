@@ -2234,3 +2234,156 @@ class CatalogFallbackTests(unittest.TestCase):
                 finally:
                     if assembly.routing is not None:
                         assembly.routing.close()
+
+
+def _terms_doc(verified_at):
+    from model_routing import terms as router_terms
+    terms = [
+        router_terms.ProviderTerms(
+            provider=provider, free_tier=True,
+            requires_payment_method=False, one_time_credit_only=False,
+            data_policy="unknown", retention="unknown",
+            confidentiality_allowed=["public"],
+            source="https://example.test/console",
+            verified_at=verified_at, basis="synthetic #657 record")
+        for provider in ("openrouter", "opencode", "nvidia", "groq",
+                         "gemini")
+    ]
+    free_list = router_terms.OpenCodeFreeList(
+        source="https://example.test/models", verified_at=verified_at,
+        basis="synthetic", model_ids=["alpha-free", "beta-free"])
+    return router_terms.TermsFile(terms=terms,
+                                  opencode_free_models=free_list)
+
+
+def _parsed_657_catalog(verified_at):
+    """Two group A + two group B entries through the real parse chain."""
+    from model_routing import sources as router_sources
+    from model_routing.models import CatalogDocument
+    from model_routing.refresh import apply_catalog_verdicts
+    terms = _terms_doc(verified_at)
+    oc_raw = {"data": [
+        {"id": model_id, "object": "model",
+         "capabilities": {"tools": {"supported": True}},
+         "limit": {"context": 131072}}
+        for model_id in ("alpha-free", "beta-free")
+    ]}
+    or_raw = {"data": [
+        {"id": f"acme/{name}:free",
+         "pricing": {"prompt": "0", "completion": "0"},
+         "context_length": 131072,
+         "supported_parameters": ["tools"]}
+        for name in ("gamma", "delta")
+    ]}
+    key_payload = {"data": {
+        "usage": 10.0,
+        "free_model_daily_requests": {
+            "limit": 1000, "used": 12, "remaining": 988},
+    }}
+    entries = router_sources.parse_opencode_models(
+        oc_raw, terms.opencode_free_models, terms)
+    entries += router_sources.parse_openrouter_models(
+        or_raw, key_payload, terms)
+    # Family resolution is a later stage; pin distinct families directly.
+    fams = [("alpha", "org/alpha"), ("beta", "org/beta"),
+            ("gamma", "acme/gamma"), ("delta", "acme/delta")]
+    entries = [
+        entry.model_copy(update={"family_id": family,
+                                 "canonical_model_id": canonical})
+        for entry, (family, canonical) in zip(entries, fams)
+    ]
+    return apply_catalog_verdicts(CatalogDocument(entries=entries))
+
+
+def _write_657_catalog(base, verified_at):
+    target = base / "cfg" / "free-router"
+    target.mkdir(parents=True, exist_ok=True)
+    path = target / "catalog.json"
+    path.write_text(
+        _parsed_657_catalog(verified_at).model_dump_json(indent=2),
+        encoding="utf-8")
+    return path
+
+
+class ExpiredTermsRoundBlockedTests(unittest.TestCase):
+    """Expired free terms park the round; fresh terms feed it (#657)."""
+
+    def _stale_day(self):
+        return (datetime.now(timezone.utc).date()
+                - timedelta(days=8)).isoformat()
+
+    def _today(self):
+        return datetime.now(timezone.utc).date().isoformat()
+
+    def test_stale_terms_block_round_without_free_reviewers(self):
+        from model_routing.models import RouterPolicy, usability
+        from model_routing.publish import load_catalog_doc
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with patch.dict(os.environ,
+                            {"XDG_CONFIG_HOME": str(base / "cfg"),
+                             "XDG_STATE_HOME": str(base / "st")}):
+                (base / "cfg").mkdir()
+                (base / "st").mkdir()
+                path = _write_657_catalog(base, self._stale_day())
+                catalog = load_catalog_doc(path)
+                policy = RouterPolicy()
+                for entry in catalog.entries:
+                    deployment = entry.deployments[0]
+                    self.assertTrue(
+                        deployment.requires_payment_method)
+                    self.assertEqual(
+                        list(deployment.approved_confidentiality), [])
+                    self.assertEqual(
+                        usability(deployment, policy), "paywalled")
+                    if deployment.provider == "opencode":
+                        self.assertFalse(deployment.healthy)
+                    else:
+                        # Zero list prices still read as offered, but the
+                        # paywall gate above keeps the route unusable.
+                        self.assertTrue(deployment.healthy)
+                self.assertEqual(
+                    wiring.catalog_fallback_profile(catalog).order, [])
+                with self.assertRaises(wiring.RoundBlocked) as raised:
+                    wiring.assemble_review_pool(
+                        _static_pool(), review_cfg={},
+                        run_id="run-t657", round="1",
+                        builder_family="muse",
+                        receipts_dir=base / "receipts",
+                        router_secrets={
+                            "FREE_ROUTER_OPENROUTER_API_KEY":
+                            "TEST-ONLY-FAKE"},
+                        auto_instance=False)
+                self.assertIn("no free reviewers", str(raised.exception))
+
+    def test_fresh_terms_assemble_free_pair(self):
+        from model_routing.publish import load_catalog_doc
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with patch.dict(os.environ,
+                            {"XDG_CONFIG_HOME": str(base / "cfg"),
+                             "XDG_STATE_HOME": str(base / "st")}):
+                (base / "cfg").mkdir()
+                (base / "st").mkdir()
+                path = _write_657_catalog(base, self._today())
+                profile = wiring.catalog_fallback_profile(
+                    load_catalog_doc(path))
+                self.assertEqual(len(profile.order), 4)
+                self.assertGreaterEqual(
+                    len({item.family_id for item in profile.order}), 2)
+                assembly = wiring.assemble_review_pool(
+                    _static_pool(), review_cfg={}, run_id="run-t657",
+                    round="1", builder_family="muse",
+                    receipts_dir=base / "receipts",
+                    router_secrets={"FREE_ROUTER_OPENROUTER_API_KEY":
+                                    "TEST-ONLY-FAKE"},
+                    auto_instance=False)
+                try:
+                    self.assertIsNotNone(assembly.routing)
+                    labels = [entry["label"] for entry in assembly.raw_pool]
+                    self.assertIn("free-review-1", labels)
+                    self.assertIn("free-review-2", labels)
+                    self.assertEqual(len(assembly.prefer_families), 2)
+                finally:
+                    if assembly.routing is not None:
+                        assembly.routing.close()
