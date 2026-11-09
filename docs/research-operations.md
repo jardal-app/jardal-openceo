@@ -68,10 +68,31 @@ soportados reciben solo su credencial `FREE_ROUTER_*` seleccionada. Deep usa el
 mismo perfil gratuito por defecto (#662), con grupo nativo A primero y orden
 del perfil dentro de cada grupo; quick conserva su orden vigente.
 
+Tras agotar la sesion gratuita (`BLOCKED_NO_ELIGIBLE_MODEL`), #693 permite
+un unico intento musej por fase quick o deep, sin adelantar ni modificar los
+reintentos, rotaciones o cooldowns. `RESEARCH_MUSEJ_FALLBACK_ENABLED=true`
+por defecto; `false` lo desactiva. Usa `MUSE_CLI_PATH` y el modelo explicito
+`muse-spark-1.3-contributor`, con prompt por argv. No activa DeepSeek ni
+grounding pagado: proveedor `musej`, `cost_tier=own`, cero `micro_usd`, sin
+reservas pagadas. Los intentos consumen el presupuesto y slots del job y
+quedan en `free_research.model_usage` y en el ledger `research_usage` (operacion
+idempotente por job/fase, cargo cero); el limite por fase persiste al reanudar.
+Si falla, el job queda `blocked` con motivo y checkpoint; no hay otro intento.
+
+Musej reutiliza el spawn, deadline, cancelacion y frontera bwrap del worker:
+home/config propios, solo MCP del broker, sin repo ni vault del host. Monta
+solo los ejecutables/metadata del launcher y su archivo de autenticacion en
+solo lectura (`MUSE_AUTH_PATH`, o `XDG_CONFIG_HOME/muse/auth.json` del host).
+Sin autenticacion o bwrap no ejecuta. No hereda configuracion personal;
+las herramientas nativas, workflows y subagentes quedan desactivados.
+La validacion del builder usa dobles, nunca el proveedor vivo; el simulacro
+real de agotamiento corresponde al Owner en otra sesion tras integrar.
+
 Decision de degradacion: ranking o catalogo ausente, invalido o caducado,
 router deshabilitado (`RESEARCH_FREE_ROUTER_ENABLED`, defecto `false` en
-`settings.py:407`) o ninguna ruta compatible dejan el job `blocked` con
+`settings.py:407`) o perfil sin rutas compatibles dejan el job `blocked` con
 `failure_reason`; nunca se usa la lista estatica del helper legacy de sintesis.
+El agotamiento de disponibilidad usa el backstop musej descrito arriba.
 Vigente significa ranking con perfil free-research generado dentro de
 `RESEARCH_FREE_ROUTER_SNAPSHOT_MAX_AGE_HOURS` (30 h por defecto).
 Tras recuperar elegibilidad, `POST /api/research/jobs/{research_id}/resume`
@@ -344,10 +365,11 @@ Los créditos nativos siguen siendo otra unidad y no compran presupuesto USD.
 
 `GET /api/research/jobs/{id}` expone `provider_status` por job, sin secretos:
 `configured` indica prerrequisitos de entorno completos; `mounted`, adapter
-y ledger presentes para proveedores pagados, runtime para `deep-free`;
+y ledger presentes para proveedores pagados, runtime para `deep-free` y `musej`;
 `deep` sigue identificando DeepSeek opt-in. `verified: null`, ninguna llamada correcta
 observada en ese job. Pasa a `true` tras búsqueda/extracción correcta o ambas
 fases researcher/verifier; no certifica facturación, calidad ni producción.
+El tier `musej` pasa a `verified: true` tras un turno correcto de backstop.
 La validación #641 usa servicio, HTTP y cuotas simulados sin red ni LLM vivo
 (`tests/test_research_deep_live_641.py`). El servidor ya trae gasto 2.00 y
 techo deep 2.00 (`.env:169`, `.env:217`); la verificación con proveedores

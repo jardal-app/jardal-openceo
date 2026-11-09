@@ -21,7 +21,7 @@ from research.contracts import (CoverageReason, ResearchCoverageGap, ResearchJob
                                 ResearchJobStatus, ResearchUsage, VerificationVerdict)
 from research.deep_model import DeepModelError, PhaseOutcome
 from research.evidence import EvidenceBlobMissing, EvidenceError, EvidenceScope, normalize_content
-from research.free_profile import FreeResearch
+from research.free_profile import FreeResearch, MUSEJ_MODEL
 
 
 FREE_DEEP_PHASE_SECONDS = {"researcher-1": 90, "researcher-2": 90, "verifier": 120,
@@ -130,8 +130,8 @@ class FreeDeepModel(FreeResearch):
         while self.state["format_attempts"].get(phase, 0) < limit:
             if self.state["format_attempts"].get(phase, 0):
                 payload["format_error"] = f"Previous output failed the {key} JSON schema. Re-evaluate and return only the schema."
-            outcome = await self.session.run_turn_async(
-                json.dumps(payload, ensure_ascii=False), self._invoke, pending=[phase], decisions=[phase],
+            outcome = await self._run_turn(
+                json.dumps(payload, ensure_ascii=False), pending=[phase], decisions=[phase],
                 queries_and_sources=[(eid, row["url"]) for eid, row in self.evidence.items()],
                 validated=list(self.evidence), artifacts=[job["research_id"]])
             self.state["format_attempts"][phase] = self.state["format_attempts"].get(phase, 0) + 1
@@ -145,12 +145,17 @@ class FreeDeepModel(FreeResearch):
         wiring.record_checkpoint(wiring.checkpoints_dir(), replace(outcome.checkpoint, pending=()))
         await self._persist()
         return PhaseOutcome(outcome.text, estimated_micro_usd=0,
-                            usage={"route": self.name, "model": outcome.model_effective})
+                            usage={"route": self.name, "model": outcome.model_effective,
+                                   **self.state["model_usage"][-1]})
 
     async def _invoke(self, turn):
         before = self.budget.steps_left
         try:
-            return await super()._invoke(turn)
+            attempt = await super()._invoke(turn)
+            key = "verdicts" if self.state["phase"].startswith("verifier") else "claims"
+            if turn.model == MUSEJ_MODEL and attempt.complete and _free_phase_payload(attempt.text, key) is None:
+                return replace(attempt, text="", complete=False, error_text="malformed musej phase output")
+            return attempt
         finally:
             self.state["deep_model_calls"] = self.state.get("deep_model_calls", 0) + before - self.budget.steps_left
             await self._persist()

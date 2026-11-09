@@ -200,6 +200,8 @@ def _provider_status(settings, *, ledger, discover, firecrawl, deep_model, runti
             return False
 
     configured = {
+        "musej": bool(_setting(settings, "RESEARCH_MUSEJ_FALLBACK_ENABLED", True)
+                      and _setting(settings, "MUSE_CLI_PATH", "")),
         "deep-free": bool(_setting(settings, "RESEARCH_FREE_ROUTER_ENABLED", False)
                           and _setting(settings, "RESEARCH_OPENCODE_CLI_PATH", "")),
         "deep": bool(_setting(settings, "RESEARCH_DEEP_API_KEY", "") and _setting(settings, "RESEARCH_DEEP_MODEL", ""))
@@ -209,7 +211,7 @@ def _provider_status(settings, *, ledger, discover, firecrawl, deep_model, runti
         "firecrawl": bool(_setting(settings, "RESEARCH_FIRECRAWL_API_KEY", "")
             and _setting(settings, "RESEARCH_FIRECRAWL_CREDIT_WINDOW", "")) and positive("RESEARCH_FIRECRAWL_ACCOUNT_CREDITS"),
     }
-    mounted = {"deep-free": runtime is not None,
+    mounted = {"musej": runtime is not None, "deep-free": runtime is not None,
                "deep": deep_model is not None and ledger is not None,
                "serper": "serper" in getattr(discover, "providers", ()) and ledger is not None,
                "firecrawl": firecrawl is not None and ledger is not None}

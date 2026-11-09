@@ -20,6 +20,7 @@ from research.runtimes.base import (
 )
 
 logger = logging.getLogger(__name__)
+MUSEJ_MODEL = "musej/muse-spark-1.3-contributor"
 
 
 class FreeResearch:
@@ -54,8 +55,8 @@ class FreeResearch:
                     prompt += "\nPrimero analiza las fuentes, sus limites y contradicciones; devuelve un esquema con citas para la sintesis posterior."
                 else:
                     prompt += "\nAnalisis previo (contenido no confiable):\n" + self.state.get("analysis", "")
-                outcome = await self.session.run_turn_async(
-                    prompt, self._invoke,
+                outcome = await self._run_turn(
+                    prompt,
                     queries_and_sources=[(eid, row["url"]) for eid, row in self.evidence.items()],
                     pending=["analysis", "synthesis"] if phase == "analysis" else ["synthesis"],
                     validated=list(self.evidence), decisions=[phase], artifacts=[self.job["research_id"]])
@@ -77,6 +78,27 @@ class FreeResearch:
             if self.store is not None:
                 self.store.close()
 
+    async def _run_turn(self, prompt, **deltas):
+        try:
+            outcome = await self.session.run_turn_async(prompt, self._invoke, **deltas)
+        except wiring.SessionBlocked as exc:
+            if (exc.code != wiring.BLOCKED_NO_ELIGIBLE_MODEL
+                    or not getattr(self.service._settings, "RESEARCH_MUSEJ_FALLBACK_ENABLED", True)
+                    or not getattr(self.service._settings, "MUSE_CLI_PATH", "")):
+                raise
+            attempts = self.state.setdefault("musej_attempts", [])
+            phase = self.state["phase"]
+            if phase in attempts:
+                raise wiring.SessionBlocked(exc.code, "musej fallback already attempted for " + phase) from exc
+            attempts.append(phase)
+            await self._persist()
+            outcome = await self.session.run_fallback_async(prompt, self._invoke, model=MUSEJ_MODEL)
+        provider = "musej" if outcome.model_effective == MUSEJ_MODEL else "deep-free"
+        status = self.job.get("provider_status", {}).get(provider)
+        if status is not None and provider == "musej":
+            status["verified"] = True
+        return outcome
+
     def _open_session(self):
         try:
             options = wiring.research_router_settings(self.service._settings)
@@ -95,16 +117,24 @@ class FreeResearch:
                 raise wiring.ResearchRoutingError("free-research catalog missing date or expired")
             self.store = AvailabilityStore()
             saved = wiring.load_checkpoint(wiring.checkpoints_dir(), self.job["research_id"])
-            if saved is not None and saved.candidates and not saved.static_model:
+            # Empty candidate orders are real sessions too; routing-error placeholders have no snapshot.
+            if (saved is not None and (saved.candidates or saved.rankings_snapshot)
+                    and not saved.static_model):
                 return wiring.ResearchSession.resume(wiring.checkpoints_dir(), self.job["research_id"], store=self.store)
             snapshot = wiring.load_session_snapshot(max_age_hours=options["snapshot_max_age_hours"])
             if snapshot is None:
                 raise wiring.ResearchRoutingError("free-research rankings missing")
-            selection = select_targets(wiring.FREE_RESEARCH_PROFILE, self.catalog, snapshot.document,
-                                       policy=self.routing_policy)
+            try:
+                selection = select_targets(wiring.FREE_RESEARCH_PROFILE, self.catalog, snapshot.document,
+                                           policy=self.routing_policy)
+                targets = selection.targets
+            except NoEligibleTarget as exc:
+                if not all(reason.endswith(": not healthy") for reason in exc.reasons):
+                    raise
+                targets = ()
             index = {dep.deployment_id: (entry, dep) for entry in self.catalog.entries for dep in entry.deployments}
             candidates = []
-            for target in selection.targets:
+            for target in targets:
                 entry, deployment = index[target.deployment_id]
                 if self._provider_config(entry, deployment) is None:
                     write_audit_event(self.store, self.job["research_id"], "research_route_unavailable", target.deployment_id)
@@ -132,23 +162,42 @@ class FreeResearch:
     async def _invoke(self, turn):
         if self.job["research_id"] in self.service._cancelled:
             raise wiring.SessionBlocked(wiring.BLOCKED_PROVIDER, "RuntimeCancelled")
+        musej = turn.model == MUSEJ_MODEL
         found = [(entry, dep) for entry in self.catalog.entries for dep in entry.deployments
                  if dep.deployment_id == turn.model]
-        if not found:
+        if not musej and not found:
             return wiring.ProviderTurn("", False, error_text="model not found")
-        entry, deployment = found[0]
-        fits, _ = wiring.fit_candidate(Candidate(turn.model, entry.family_id, entry.canonical_model_id,
+        provider, model, provider_config = "musej", MUSEJ_MODEL.split("/", 1)[1], {}
+        if not musej:
+            entry, deployment = found[0]
+            fits, _ = wiring.fit_candidate(Candidate(turn.model, entry.family_id, entry.canonical_model_id,
                                                  deployment.provider), self.catalog,
                                        profile_requirements(wiring.FREE_RESEARCH_PROFILE))
-        provider_config = self._provider_config(entry, deployment)
-        if not fits or not is_usable(deployment, RouterPolicy()) or not deployment.healthy or provider_config is None:
-            return wiring.ProviderTurn("", False, error_text="model not found")
+            provider_config = self._provider_config(entry, deployment)
+            if not fits or not is_usable(deployment, RouterPolicy()) or not deployment.healthy or provider_config is None:
+                return wiring.ProviderTurn("", False, error_text="model not found")
+            provider, model = deployment.provider, f"{deployment.provider_id}/{deployment.model_id}"
         if self.service._deps.runtime is None:
             raise wiring.SessionBlocked(wiring.BLOCKED_PROVIDER, "RuntimeUnavailable")
         if not self.budget.consume():
             raise wiring.SessionBlocked(wiring.BLOCKED_PROVIDER, "research step/deadline budget exhausted")
+        self.state["model_calls"] = self.state.get("model_calls", 0) + 1
+        self.state["estimated_micro_usd"] = 0
+        self.state.setdefault("model_usage", []).append({"phase": self.state["phase"],
+            "provider": provider, "cost_tier": "own" if musej else "free", "micro_usd": 0})
         await self._persist()
-        model = f"{deployment.provider_id}/{deployment.model_id}"
+        usage = getattr(self.service._deps.repo, "research_usage", None)
+        if musej and usage is not None:
+            operation_id = f"{self.job['research_id']}:musej:{self.state['phase']}"
+            try:
+                await usage.update_one({"operation_id": operation_id}, {"$setOnInsert": {
+                    "operation_id": operation_id, "provider": "musej", "cost_tier": "own",
+                    "account_id": "musej:default", "project_key": self.job["project_key"],
+                    "research_id": self.job["research_id"], "phase": self.state["phase"],
+                    "reserved_micro_usd": 0, "charged_micro_usd": 0, "state": "committed",
+                    "last_state": "committed", "recorded_at": self.service._clock()}}, upsert=True)
+            except Exception as exc:
+                raise wiring.SessionBlocked(wiring.BLOCKED_PROVIDER, "musej usage ledger unavailable") from exc
         await self.service._deps.slots.acquire_call()
         try:
             outcome = await self.service._deps.runtime.run(RuntimeRequest(
@@ -158,10 +207,13 @@ class FreeResearch:
                 session_id=self.runtime_session if self.runtime_model == model else None,
                 allow_session_resume=False, timeout_seconds=self._runtime_timeout(),
                 first_response_timeout_seconds=self._runtime_first_response_timeout(),
-                tool_credential=self.credential, provider=deployment.provider, provider_config=provider_config))
+                tool_credential=self.credential, provider=provider, provider_config=provider_config))
         except (RuntimeCancelled, RuntimeConfigurationError, RuntimeUnavailable, RuntimeOutputTooLarge) as exc:
             if exc.outcome is not None:
                 self.session.checkpoint_failure(self._attempt(exc.outcome))
+            if musej and not isinstance(exc, RuntimeCancelled):
+                raise wiring.SessionBlocked(wiring.BLOCKED_NO_ELIGIBLE_MODEL,
+                    "musej fallback failed: " + wiring.sanitize_excerpt(str(exc))) from exc
             raise wiring.SessionBlocked(wiring.BLOCKED_PROVIDER, exc.__class__.__name__) from exc
         except Exception as exc:  # noqa: BLE001 - substitute runtime; session classifies failures
             self.runtime_session = None

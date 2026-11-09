@@ -917,6 +917,25 @@ class ResearchSession:
         finally:
             driver.close()
 
+    async def run_fallback_async(
+        self, prompt: str, invoke: Callable[[TurnRequest], Awaitable[ProviderTurn]], *, model: str,
+    ) -> TurnOutcome:
+        """Run one exhaustion backstop attempt with the session's effect ledger."""
+        self._release()
+        self._effective = None
+        attempt = await invoke(TurnRequest(
+            prompt=self._rebuild_prompt(prompt), model=model, resume=True,
+            applied_tools=tuple(self._ledger.values()), partial_text=self._partial_text))
+        self.checkpoint_failure(attempt)
+        if not attempt.complete or not attempt.text.strip():
+            raise SessionBlocked(BLOCKED_NO_ELIGIBLE_MODEL,
+                "musej fallback failed: " + sanitize_excerpt(attempt.error_excerpt or attempt.error_text or "empty response"),
+                checkpoint_path=checkpoint_path(self._checkpoints, self._research_id))
+        self._turn += 1
+        self._partial_text = ""
+        checkpoint = self._save(turn=self._turn, partial_text="")
+        return TurnOutcome(attempt.text, self._turn, model, model, True, 0, checkpoint)
+
     def _drive_turn(
         self, prompt: str, *,
         queries_and_sources: list[tuple[str, str]] | None = None,

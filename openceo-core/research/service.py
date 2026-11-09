@@ -881,12 +881,14 @@ class ResearchService:
         if "deep_execution" in job:
             updates["deep_execution"] = job["deep_execution"]
         if "provider_status" in job:
-            phases = {row["phase"] for row in job.get("deep_execution", {}).get("phase_usage", [])}
+            phases = {row["phase"] for row in job.get("deep_execution", {}).get("phase_usage", [])
+                      if (row.get("usage") or {}).get("provider") != "musej"}
             provider = "deep" if job.get("deep_paid_opt_in") is True else "deep-free"
             if provider in job["provider_status"] and "researcher-1" in phases and "verifier" in phases:
                 job["provider_status"][provider]["verified"] = True
             updates["provider_status"] = job["provider_status"]
         if result is not None:
+            model_usage = job.get("deep_execution") or job.get("free_research", {})
             if coverage is not None:
                 result.coverage_gaps = list(coverage)
             # El estado del informe debe coincidir con el del job: un `partial` no
@@ -895,8 +897,8 @@ class ResearchService:
             result.usage = ResearchUsage(
                 search_requests=searched,
                 pages_read=len(evidence_rows or {}),
-                model_calls=(job.get("deep_execution") or {}).get("model_calls", result.usage.model_calls),
-                estimated_micro_usd=(job.get("deep_execution") or {}).get("estimated_micro_usd", result.usage.estimated_micro_usd),
+                model_calls=model_usage.get("model_calls", result.usage.model_calls),
+                estimated_micro_usd=model_usage.get("estimated_micro_usd", result.usage.estimated_micro_usd),
                 reconciled_micro_usd=result.usage.reconciled_micro_usd,
                 uncertain=(job.get("deep_execution") or {}).get("uncertain", result.usage.uncertain),
             )

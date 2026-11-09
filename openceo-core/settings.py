@@ -407,6 +407,7 @@ class Settings(BaseSettings):
     # free-research valido activa el ranking, sin snapshot usa el estatico.
     RESEARCH_FREE_ROUTER_ENABLED: bool = False
     RESEARCH_FREE_ROUTER_SNAPSHOT_MAX_AGE_HOURS: float = 30.0
+    RESEARCH_MUSEJ_FALLBACK_ENABLED: bool = True
 
     # Fachada MCP de research. Nace **apagada**: montarla expone un endpoint nuevo cuyo
     # control de acceso son las credenciales de consumidor (no el Bearer compartido de

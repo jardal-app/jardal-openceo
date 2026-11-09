@@ -202,6 +202,14 @@ def parse_jsonl_events(raw: str) -> tuple[list[dict[str, Any]], str, str | None,
         if not isinstance(event, dict):
             malformed += 1
             continue
+        if str(event.get("payload_type", "")).startswith("run.terminal."):
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                malformed += 1
+                continue
+            event = ({"type": "text", "part": {"text": payload.get("text", "")}}
+                     if payload.get("terminal") == "completed" else
+                     {"type": "error", "error": str(payload.get("error") or payload.get("terminal") or "musej failed")})
         events.append(event)
         if session_id is None:
             for key in ("sessionID", "session_id", "sessionId"):
@@ -420,14 +428,14 @@ class OpenCodeRuntime:
             return Path(path).exists()
         return shutil.which(path) is not None
 
-    def _engine_paths(self) -> list[Path]:
+    def _engine_paths(self, cli_path: str | None = None) -> list[Path]:
         """Rutas que hay que montar en solo lectura para que el motor arranque.
 
         El binario de OpenCode no vive en `/usr/bin`: en este host esta en
         `~/.opencode/bin/opencode`. Se resuelve el symlink a su ruta real porque bwrap
         monta el destino, no el enlace.
         """
-        path = self.cli_path
+        path = cli_path or self.cli_path
         if not path:
             return []
         resolved = shutil.which(path) if os.path.sep not in path else path
@@ -499,12 +507,54 @@ class OpenCodeRuntime:
 
     # ---------------------------------------------------------------------- run
 
+    def _musej_worker(self, request, paths, broker_url, env):
+        from research.worker.profiles import BrokerEndpoint
+
+        cli = str(getattr(self._settings, "MUSE_CLI_PATH", ""))
+        engines = self._engine_paths(cli)
+        if not engines:
+            raise RuntimeUnavailable("musej executable unavailable")
+        directory = engines[0].parent
+        for name in ("muse", ".muse-version", ".muse-release-info.json"):
+            path = directory / name
+            if path.is_file():
+                engines.append(path.resolve())
+        version_file = directory / ".muse-version"
+        if version_file.is_file():
+            version = version_file.read_text().strip()
+            if not re.fullmatch(r"[0-9.]+-R[0-9.]+", version):
+                raise RuntimeConfigurationError("Invalid musej installed version")
+            engines.append(directory / f"muse-bin-{version}")
+        home = Path(self._base_env.get("HOME", str(Path.home())))
+        config = Path(self._base_env.get("XDG_CONFIG_HOME", str(home / ".config")))
+        auth = Path(self._base_env.get("MUSE_AUTH_PATH", str(config / "muse" / "auth.json"))).resolve()
+        if not auth.is_file():
+            raise RuntimeConfigurationError("musej subscription auth unavailable")
+        engines.append(auth)
+        env.update(MUSE_NO_AUTO_UPDATE="1", MUSE_AUTH_PATH=str(auth))
+        endpoint = BrokerEndpoint(url=broker_url, bearer=self._broker_bearer)
+        settings = {"run": {"workflow_trigger_mode": "off", "subagent_delegation_mode": "off", "toolset": []},
+                    "mcpServers": {"research-broker": {"url": broker_url, "headers": endpoint.headers()}}}
+        target = paths["config"] / "muse" / "settings.json"
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        auth_target = target.with_name("auth.json")
+        if not auth_target.exists():
+            auth_target.unlink(missing_ok=True)
+            auth_target.symlink_to(auth)
+        target.write_text(json.dumps(settings), encoding="utf-8")
+        target.chmod(0o600)
+        argv = [cli, "exec", "--model", request.model, "--json", "--disable-shell", "--disable-write",
+                "--disable-web-tools", "--disable-reminders", "--disable-request-user-input",
+                "--no-foreign-personal-context", "--no-session-log", request.prompt]
+        return argv, engines
+
     async def run(self, request: RuntimeRequest) -> RuntimeOutcome:
-        if not self.cli_available():
+        musej = request.provider == "musej"
+        if not musej and not self.cli_available():
             raise RuntimeUnavailable(
                 f"CLI de OpenCode no disponible en {self.cli_path!r}"
             )
-        status = await self.pinned_version_status()
+        status = PinnedVersion("", None, False) if musej else await self.pinned_version_status()
         if status.detected is not None and not status.verified:
             raise RuntimeVersionMismatch(
                 f"OpenCode {status.detected} != {status.pinned}: {status.note}"
@@ -515,10 +565,12 @@ class OpenCodeRuntime:
                 "No hay backend de aislamiento (bwrap/unshare/podman/docker). "
                 "--standalone y un cwd propio no son un sandbox: se niega a ejecutar."
             )
+        if musej and backend.name != "bwrap":
+            raise IsolationUnavailable("musej research fallback requires bwrap")
 
         broker_url = self._effective_broker_url(backend)
         provider_env = {}
-        if request.provider != "opencode":
+        if request.provider not in {"opencode", "musej"}:
             from model_routing.external import ExternalError, credential_env_for
             from model_routing.secrets import SecretsError, load_router_secrets
 
@@ -547,14 +599,6 @@ class OpenCodeRuntime:
             provider_config=request.provider_config,
         )
 
-        session_id = request.session_id or await self._sessions.resolve(request)
-        argv = build_run_command(
-            cli_path=self.cli_path,
-            model=request.model,
-            agent=request.agent,
-            prompt=request.prompt,
-            session_id=session_id,
-        )
         env = sanitized_worker_env(
             self._base_env,
             worker_home=paths["home"],
@@ -563,6 +607,14 @@ class OpenCodeRuntime:
             tool_credential=request.tool_credential or None,
         )
         env.update(provider_env)
+        engine_paths = self._engine_paths()
+        if musej:
+            session_id = None
+            argv, engine_paths = self._musej_worker(request, paths, broker_url, env)
+        else:
+            session_id = request.session_id or await self._sessions.resolve(request)
+            argv = build_run_command(cli_path=self.cli_path, model=request.model,
+                                     agent=request.agent, prompt=request.prompt, session_id=session_id)
         egress = self._egress_policy(backend, broker_url)
         plan = backend.plan(
             argv=argv,
@@ -575,7 +627,7 @@ class OpenCodeRuntime:
             # El CLI vive fuera de las rutas del sistema (p. ej.
             # `~/.opencode/bin/opencode`). Sin montarlo en solo lectura el worker no
             # arranca; montarlo concede el **ejecutable**, no el home que lo contiene.
-            extra_read_only=self._engine_paths(),
+            extra_read_only=engine_paths,
         )
         if not plan.filesystem_isolated:
             # Un backend que no monta nada (p. ej. `unshare` sin bind mounts) deja el
@@ -631,7 +683,7 @@ class OpenCodeRuntime:
         if exit_code != 0:
             detail = f": {reported_error}" if reported_error else ""
             raise RuntimeExecutionError(
-                f"OpenCode termino con codigo {exit_code}{detail}",
+                f"{'musej' if musej else 'OpenCode'} termino con codigo {exit_code}{detail}",
                 exit_code=int(exit_code),
                 stderr=stderr_text[:4000],
                 runtime_error=reported_error,
