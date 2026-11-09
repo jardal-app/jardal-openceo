@@ -162,7 +162,7 @@ CHECKPOINT_SCHEMA_VERSION = 1
 #: and the driver is the only retry authority of the session.
 RESEARCH_ROTATE_CLASSES = frozenset({
     "rate_limited", "daily_quota", "auth", "billing",
-    "not_found", "tools_unsupported", "context_exceeded", "bad_response",
+    "not_found", "model_unavailable", "tools_unsupported", "context_exceeded", "bad_response",
 })
 
 #: Classes retrying on the same model first (SPEC §9.2 bounded
@@ -517,18 +517,21 @@ def load_checkpoint(checkpoints: Path, research_id: str) -> ResearchCheckpoint |
 
 
 def _classify_text(text: str, *, responded: bool = False) -> ClassifiedError:
-    """Free-form failure mapped to §9.2 with explicit status winning.
+    """Free-form failure mapped to §9.2; unavailable routes rotate at once.
 
     The CLI reports ``status=NNN`` (synthesis) and prose may carry a
     bare code; a bare 429 cools the deployment down instead of
     retrying it. Other bare codes follow the marks/transient path.
     """
+    classified = classify_text(text or "", responded=responded)
+    if classified.error_class == "model_unavailable":
+        return classified
     status = re.search(r"status=(\d{3})", text or "")
     if status is not None:
         return classify_http(int(status.group(1)), detail=text or "")
     if re.search(r"\b429\b", text or ""):
         return classify_http(429, detail=text or "")
-    return classify_text(text or "", responded=responded)
+    return classified
 
 
 def _retry_action(
@@ -956,7 +959,6 @@ class ResearchSession:
                 artifacts=artifacts))
         candidate = self._effective
         tried_deployments = {candidate.deployment_id}
-        tried_canonicals = {candidate.canonical_model_id}
         while True:
             self._save_with_goal(pending_goal)
             try:
@@ -1016,16 +1018,14 @@ class ResearchSession:
                 attempt_prompt = self._rebuild_prompt(prompt)
                 continue
             if action == "rotate":
+                self._record_rotation(candidate, classified, failure.error_text)
                 yield float(_RETRY_BUDGET.delay(same_used + rotations))
                 rotations += 1
                 resumed = True
-                self._record_rotation(candidate, classified, failure.error_text)
                 self._release()
                 tried_deployments.add(candidate.deployment_id)
-                tried_canonicals.add(candidate.canonical_model_id)
                 skip = Exclusions(
-                    deployments=frozenset(tried_deployments),
-                    canonicals=frozenset(tried_canonicals))
+                    deployments=frozenset(tried_deployments))
                 while True:
                     try:
                         candidate = self._next_candidate(skip)
@@ -1041,10 +1041,8 @@ class ResearchSession:
                         self._reserve(candidate)
                     except ReservationConflict:
                         tried_deployments.add(candidate.deployment_id)
-                        tried_canonicals.add(candidate.canonical_model_id)
                         skip = Exclusions(
-                            deployments=frozenset(tried_deployments),
-                            canonicals=frozenset(tried_canonicals))
+                            deployments=frozenset(tried_deployments))
                         continue
                     break
                 attempt_prompt = self._rebuild_prompt(prompt)
@@ -2018,13 +2016,15 @@ class ManagedResearchSession(ResearchSession):
 
 def _managed_error_text(event: Mapping[str, Any]) -> str:
     raw = event.get("error") if isinstance(event.get("error"), dict) else {}
+    data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
     detail = event.get("message") if isinstance(event.get("message"), str) else ""
     detail = detail or (raw.get("message")
                         if isinstance(raw.get("message"), str) else "")
-    status = raw.get("status")
+    detail = detail or (data.get("message") if isinstance(data.get("message"), str) else "")
+    status = raw.get("status", data.get("statusCode"))
     code = f"status={status}" if isinstance(status, int) else ""
     text = " ".join(part for part in
-                    (str(raw.get("type") or ""), detail, code) if part)
+                    (str(raw.get("type") or raw.get("name") or ""), detail, code) if part)
     return sanitize_excerpt(text) or "managed run reported an error"
 
 

@@ -27,6 +27,7 @@ from research.free_profile import FreeResearch
 FREE_DEEP_PHASE_SECONDS = {"researcher-1": 90, "researcher-2": 90, "verifier": 120,
                            "correction": 60, "verifier-final": 120}
 FREE_DEEP_SECONDS = 30 + sum(FREE_DEEP_PHASE_SECONDS.values())
+FREE_DEEP_FIRST_RESPONSE_SECONDS = 15
 
 
 class _VerifierVerdict(BaseModel):
@@ -159,6 +160,9 @@ class FreeDeepModel(FreeResearch):
         if self.state["phase"].startswith("verifier"):
             remaining = min(remaining, 90)
         return max(1, int(remaining))
+
+    def _runtime_first_response_timeout(self):
+        return min(FREE_DEEP_FIRST_RESPONSE_SECONDS, self._runtime_timeout())
 
     def _attempt(self, outcome):
         if wiring._managed_cost(outcome.events):

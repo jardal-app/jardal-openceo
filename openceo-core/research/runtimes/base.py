@@ -40,6 +40,10 @@ class RuntimeTimeout(ResearchRuntimeError):
     """El deadline vencio y el arbol de procesos fue cancelado."""
 
 
+class RuntimeFirstResponseTimeout(RuntimeTimeout):
+    """El worker no produjo texto ni actividad de asistente a tiempo."""
+
+
 class RuntimeCancelled(ResearchRuntimeError):
     """La ejecucion fue cancelada explicitamente."""
 
@@ -109,6 +113,7 @@ class RuntimeRequest:
     tool_credential: str = ""
     provider: str = "opencode"
     provider_config: dict[str, Any] = field(default_factory=dict)
+    first_response_timeout_seconds: float | None = None
 
     @property
     def session_scope(self) -> tuple[str, str, str]:

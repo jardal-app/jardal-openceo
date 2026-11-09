@@ -43,6 +43,7 @@ ErrorClass = Literal[
     "route_not_authorized",
     "billing",
     "not_found",
+    "model_unavailable",
     "tools_unsupported",
     "context_exceeded",
     "stream_cut",
@@ -165,6 +166,12 @@ _NOT_FOUND_MARKS = (
     "not a valid model",
 )
 
+_MODEL_UNAVAILABLE_MARKS = (
+    "provider.no-route", "provider.no-response", "model-unavailable",
+    "model_unavailable", "model unavailable", "model is unavailable",
+    "no route for model",
+)
+
 _TOOLS_MARKS = (
     "tools not supported", "tool not supported", "does not support tools",
     "function calling", "function_calling", "invalid tool", "tool_choice",
@@ -200,6 +207,8 @@ def classify_text(text: str, *, responded: bool = False) -> ClassifiedError:
 
     lowered = (text or "").lower()
     excerpt = sanitize_excerpt(text)
+    if any(mark in lowered for mark in _MODEL_UNAVAILABLE_MARKS):
+        return ClassifiedError("model_unavailable", "cooldown_deployment", True, None, excerpt)
     if any(mark in lowered for mark in _DAILY_QUOTA_MARKS):
         return ClassifiedError("daily_quota", "disable_provider", False, None, excerpt)
     if any(mark in lowered for mark in _BILLING_MARKS):

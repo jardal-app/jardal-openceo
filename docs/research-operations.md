@@ -383,9 +383,24 @@ un deadline efectivo menor. El probe gratuito solicita esos 510 s y registra los
 límites y cupos en su manifest. La ruta pagada conserva sus límites y los 120 s
 del probe; no se amplía su autorización ni se añaden reintentos pagados.
 
-`native_first` ordena las rutas nativas antes de las externas al abrir una sesión;
-la disponibilidad puede descartarlas y una reanudación conserva el orden y modelo
-del checkpoint. El proveedor servido por sí solo no demuestra un fallo de política.
+Cada intento Deep gratuito tiene además 15 s para la primera actividad del
+asistente (texto, razonamiento o herramienta); eventos de arranque no cuentan.
+Después conserva el cupo de fase. El runtime lee errores JSONL mientras el worker
+sigue vivo y cancela su grupo sin esperar el cupo. `provider.no-route`,
+model-unavailable y ausencia de primera respuesta enfrían solo el deployment
+(60 s iniciales, progresivos hasta 3600 s) y rotan en la misma fase, sin reintento
+en ese deployment. Se mantienen dos rotaciones máximas por turno, el presupuesto
+compartido y la insuficiencia de los claims que no completan verificación.
+
+Deep solicita explícitamente `native_first`; Quick usa `best_global`.
+Deep ordena primero todas las rutas nativas presentes en el ranking que pasan
+los filtros de catálogo, coste $0, herramientas/contexto y configuración del
+proveedor, incluso backups de modelos con un externo mejor posicionado.
+La disponibilidad puede descartarlas. Rotar excluye deployments intentados,
+permitiendo otro deployment del mismo modelo: no aporta independencia adicional.
+La reanudación conserva el orden y la afinidad del checkpoint, incluido un externo
+ya servido aunque se recuperen nativos. El proveedor servido por sí solo no
+demuestra un fallo de política.
 
 La muestra de aceptación pública requiere una sesión Owner de validación separada:
 

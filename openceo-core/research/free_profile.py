@@ -16,7 +16,7 @@ from model_routing.secrets import SecretsError, load_router_secrets
 from research.contracts import CoverageReason, ResearchCoverageGap
 from research.runtimes.base import (
     RuntimeCancelled, RuntimeConfigurationError, RuntimeOutputTooLarge,
-    RuntimeRequest, RuntimeTimeout, RuntimeUnavailable,
+    RuntimeFirstResponseTimeout, RuntimeRequest, RuntimeTimeout, RuntimeUnavailable,
 )
 
 logger = logging.getLogger(__name__)
@@ -157,6 +157,7 @@ class FreeResearch:
                 workspace=self.service._workspace_for(self.job), model=model,
                 session_id=self.runtime_session if self.runtime_model == model else None,
                 allow_session_resume=False, timeout_seconds=self._runtime_timeout(),
+                first_response_timeout_seconds=self._runtime_first_response_timeout(),
                 tool_credential=self.credential, provider=deployment.provider, provider_config=provider_config))
         except (RuntimeCancelled, RuntimeConfigurationError, RuntimeUnavailable, RuntimeOutputTooLarge) as exc:
             if exc.outcome is not None:
@@ -166,8 +167,13 @@ class FreeResearch:
             self.runtime_session = None
             outcome = getattr(exc, "outcome", None)
             attempt = self._attempt(outcome) if outcome is not None else wiring.ProviderTurn("", False)
-            return replace(attempt, complete=False,
-                           error_text="timeout" if isinstance(exc, RuntimeTimeout) else getattr(exc, "runtime_error", "") or str(exc),
+            reported_error = attempt.error_text if outcome and any(e.get("type") == "error" for e in outcome.events) else ""
+            error_text = getattr(exc, "runtime_error", "") or reported_error or str(exc)
+            if isinstance(exc, RuntimeTimeout):
+                error_text = reported_error or "timeout"
+            if isinstance(exc, RuntimeFirstResponseTimeout):
+                error_text = reported_error or "provider.no-response"
+            return replace(attempt, complete=False, error_text=error_text,
                            failure_stage="partial_text" if attempt.text else "after_tool" if attempt.executed_tools else "before_response")
         finally:
             await self.service._deps.slots.release_call()
@@ -189,13 +195,18 @@ class FreeResearch:
     def _runtime_timeout(self):
         return max(1, int(self.budget.remaining_seconds))
 
+    def _runtime_first_response_timeout(self):
+        return None
+
     def _attempt(self, outcome):
         events = list(outcome.events)
         if not any(e.get("type") == "text" for e in events):
             events.append({"type": "text", "part": {"text": outcome.text}})
         attempt = wiring.parse_managed_events(events)
         if outcome.timed_out or outcome.exit_code:
-            return replace(attempt, complete=False, error_text="timeout" if outcome.timed_out else "runtime failed",
+            error_text = attempt.error_text if any(e.get("type") == "error" for e in events) else ""
+            return replace(attempt, complete=False,
+                           error_text=error_text or ("timeout" if outcome.timed_out else "runtime failed"),
                            failure_stage="partial_text" if attempt.text else "before_response")
         if not attempt.text and not any(e.get("type") == "error" for e in events):
             return replace(attempt, complete=True)

@@ -767,6 +767,40 @@ class FallbackTests(unittest.TestCase):
             finally:
                 routing.close()
 
+    def test_model_unavailable_cools_deployment_and_rotates_only_failed_slot(self):
+        for text in ("provider.no-route status=503", "provider.no-response",
+                     "model-unavailable"):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as tmp:
+                routing = self._routing(Path(tmp))
+                try:
+                    sibling = routing.states["free-review-2"].effective
+                    nxt = wiring.plan_fallback(
+                        routing, "free-review-1", outcome_kind="slot_error",
+                        text=text)
+                    self.assertIsNotNone(nxt)
+                    self.assertEqual(nxt.deployment_id, "opencode/model-c-free")
+                    state = routing.states["free-review-1"]
+                    self.assertEqual(state.effective, nxt)
+                    self.assertEqual(state.fallback_count, 1)
+                    self.assertEqual(
+                        routing.states["free-review-2"].effective, sibling)
+                    held = {item.slot: item.deployment_id for item in
+                            routing.store.reservations("run-f", "1")}
+                    self.assertEqual(held, {
+                        "free-review-1": nxt.deployment_id,
+                        "free-review-2": sibling.deployment_id,
+                    })
+                    rows = routing.store.errors_since(0.0)
+                    self.assertEqual(len(rows), 1)
+                    self.assertEqual(rows[0].error_class, "model_unavailable")
+                    self.assertIsNotNone(
+                        routing.store.cooldown_for("opencode/model-a-free"))
+                    self.assertIsNone(routing.store.provider_blocked("opencode"))
+                    self.assertIsNone(
+                        routing.store.route_disabled("opencode/model-a-free"))
+                finally:
+                    routing.close()
+
     def test_unclassified_slot_error_rotates(self):
         self.assertEqual(
             classify_text("weird output without marks").error_class,

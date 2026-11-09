@@ -40,6 +40,7 @@ from research.runtimes.base import (
     RuntimeCancelled,
     RuntimeConfigurationError,
     RuntimeExecutionError,
+    RuntimeFirstResponseTimeout,
     RuntimeMalformedOutput,
     RuntimeOutcome,
     RuntimeOutputTooLarge,
@@ -590,7 +591,8 @@ class OpenCodeRuntime:
         self._running[request.research_id] = process
         try:
             stdout, stderr, truncated = await self._drain(
-                process, request.timeout_seconds, request.max_output_bytes
+                process, request.timeout_seconds, request.max_output_bytes,
+                first_response_timeout_seconds=request.first_response_timeout_seconds,
             )
         except (asyncio.TimeoutError, RuntimeTimeout) as exc:
             await self._terminate(process)
@@ -669,12 +671,19 @@ class OpenCodeRuntime:
         )
 
     async def _drain(
-        self, process: Any, timeout_seconds: int, max_output_bytes: int
+        self, process: Any, timeout_seconds: int, max_output_bytes: int,
+        *, first_response_timeout_seconds: float | None = None,
     ) -> tuple[bytes, bytes, bool]:
         stdout_buffer, stderr_buffer = bytearray(), bytearray()
 
-        async def _read(stream: Any, buffer: bytearray) -> tuple[bytes, bool]:
+        def partial_outcome() -> RuntimeOutcome:
+            events, text, session_id, malformed = parse_jsonl_events(stdout_buffer.decode("utf-8", "replace"))
+            return RuntimeOutcome(text=text, session_id=session_id, events=events,
+                                  malformed_lines=malformed, timed_out=True)
+
+        async def _read(stream: Any, buffer: bytearray, *, observe: bool = False) -> tuple[bytes, bool]:
             truncated = False
+            pending = bytearray()
             while True:
                 chunk = await stream.read(65536)
                 if not chunk:
@@ -684,11 +693,27 @@ class OpenCodeRuntime:
                     truncated = True
                     break
                 buffer.extend(chunk)
+                if observe:
+                    pending.extend(chunk)
+                    lines = pending.split(b"\n")
+                    pending = bytearray(lines.pop())
+                    events, _, _, _ = parse_jsonl_events(b"\n".join(lines).decode("utf-8", "replace"))
+                    tail_events, _, _, _ = parse_jsonl_events(pending.decode("utf-8", "replace"))
+                    if tail_events:
+                        events.extend(tail_events)
+                        pending.clear()
+                    if any((event.get("type") in JSONL_TEXT_EVENT_TYPES | {"reasoning"} and _extract_text(event).strip())
+                           or (event.get("type") == "tool_use" and isinstance(event.get("part"), dict)
+                               and event["part"].get("id") and event["part"].get("tool")) for event in events):
+                        first_response.reschedule(None)
+                    if extract_jsonl_error(events):
+                        await self._terminate(process)
+                        break
             return bytes(buffer), truncated
 
         async def _collect() -> tuple[bytes, bool, bytes]:
             stdout_result, stderr_result = await asyncio.gather(
-                _read(process.stdout, stdout_buffer), _read(process.stderr, stderr_buffer)
+                _read(process.stdout, stdout_buffer, observe=True), _read(process.stderr, stderr_buffer)
             )
             # La espera del proceso va **dentro** del deadline. Si quedara fuera, un
             # proceso que cierra su stdout pero sigue vivo (p. ej. el servidor
@@ -697,12 +722,15 @@ class OpenCodeRuntime:
             return stdout_result[0], stdout_result[1], stderr_result[0]
 
         try:
-            stdout, truncated, stderr = await asyncio.wait_for(_collect(), timeout=timeout_seconds)
+            async with asyncio.timeout(timeout_seconds):
+                try:
+                    async with asyncio.timeout(first_response_timeout_seconds) as first_response:
+                        stdout, truncated, stderr = await _collect()
+                except TimeoutError:
+                    raise RuntimeFirstResponseTimeout(
+                        "OpenCode first response deadline exhausted", outcome=partial_outcome()) from None
         except asyncio.TimeoutError:
-            events, text, session_id, malformed = parse_jsonl_events(stdout_buffer.decode("utf-8", "replace"))
-            raise RuntimeTimeout("OpenCode deadline exhausted", outcome=RuntimeOutcome(
-                text=text, session_id=session_id, events=events, malformed_lines=malformed,
-                timed_out=True)) from None
+            raise RuntimeTimeout("OpenCode deadline exhausted", outcome=partial_outcome()) from None
         return stdout, stderr, truncated
 
     async def _terminate(self, process: Any) -> None:

@@ -153,7 +153,7 @@ UNVERIFIED_FAMILIES = frozenset({"", "unknown", "unknown-family", "anonymous"})
 
 ROTATE_CLASSES = frozenset({
     "rate_limited", "daily_quota", "server_error", "auth", "billing",
-    "not_found", "tools_unsupported", "context_exceeded", "stream_cut", "forbidden",
+    "not_found", "model_unavailable", "tools_unsupported", "context_exceeded", "stream_cut", "forbidden",
 })
 
 
