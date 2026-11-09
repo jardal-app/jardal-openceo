@@ -4388,7 +4388,10 @@ def _closer_no_verdict_detail(
 #: Waiting reasons the boot resume reconsiders (TASK-2026-00396):
 #: loop-guard stalls whose wedge may have cleared. Other parks stay
 #: parked at boot: erp_error/data_gaps need their trigger, and
-#: capability_gap resumes on child close (TASK-2026-00430).
+#: capability_gap resumes on child close (TASK-2026-00430). An exhausted
+#: blocked park re-checks once per boot (ticket #654): its free-text Owner
+#: wait has no deterministic wedge check, so it replans below instead of
+#: joining this set.
 _BOOT_RESUMABLE_PARKS = frozenset({"stalled"})
 
 
@@ -4432,7 +4435,20 @@ def boot_resume_decision(
                           f"{'; '.join(gaps[:5])}"}
     if status == "waiting":
         reason = str(objective.get("waiting_reason") or "")
-        if reason.partition(":")[0] not in _BOOT_RESUMABLE_PARKS:
+        prefix = reason.partition(":")[0].strip()
+        if prefix not in _BOOT_RESUMABLE_PARKS:
+            recovery = objective.get("recovery")
+            if prefix == "blocked" and isinstance(recovery, Mapping) \
+                    and recovery.get("exhausted") is True:
+                # Ticket #654: an exhausted blocked park has no trigger
+                # left (retries spent, closes need children it may not
+                # have): it re-checks once per boot, because the restart
+                # may be the awaited Owner event. Budgets survive, so a
+                # re-park lands exhausted-quiet again.
+                return {"action": "replan",
+                        "reason": "exhausted blocked park re-checks once "
+                                "per boot: the restart may be the awaited "
+                                "Owner event"}
             return {"action": "leave", "reason": "park needs its trigger"}
         verdict = verify_delivery(objective, children)
         gaps = list(verdict["open_gaps"]) + list(verdict["data_gaps"])

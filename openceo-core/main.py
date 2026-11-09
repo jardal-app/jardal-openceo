@@ -1388,6 +1388,21 @@ async def get_objective(
     return doc
 
 
+@app.post("/api/objectives/{objective_id}/plan")
+async def plan_objective(
+    objective_id: str,
+    current_user: UserDocument = Depends(get_current_user),
+) -> dict:
+    """Run one planning cycle now on any objective (ticket #654).
+
+    The concrete Owner/CEO signal for an exhausted blocked park: after the
+    awaited human action (prod flags, ERP closes) the poke re-drives the
+    objective, which otherwise waits quietly for no trigger of its own.
+    """
+    del current_user
+    return await task_service.plan_objective(objective_id)
+
+
 @app.post("/api/missions")
 async def create_mission(
     payload: MissionCreateRequest,

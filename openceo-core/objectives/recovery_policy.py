@@ -39,7 +39,9 @@ __all__ = [
 
 #: Park reasons whose wedge can plausibly clear without a human. A
 #: ``pending_plan`` spend hold never enters here: only the Owner answer
-#: releases it.
+#: releases it. ``blocked`` stays recoverable for retries only: once its
+#: budget is spent it waits for the Owner signal instead of opening a dev
+#: ticket, since the park already names the human action (ticket #654).
 RECOVERABLE_REASONS = frozenset({
     "capability_gap", "blocked", "data_gaps", "erp_error", "config",
     "planner_error", "no_quorum", "closer_no_verdict", "stalled",
@@ -47,8 +49,10 @@ RECOVERABLE_REASONS = frozenset({
 
 DEFAULT_RECOVERY: dict[str, Any] = {
     "enabled": True,
-    # Two automatic retries before a recovery ticket is opened: enough to
-    # clear a transient/credential wedge, bounded against planner loops.
+    # Two automatic retries before a recovery ticket is opened (system
+    # wedges; an exhausted blocked park waits for the Owner signal
+    # instead, ticket #654): enough to clear a transient/credential
+    # wedge, bounded against planner loops.
     "max_attempts": 2,
     # Minutes after the park for attempt 1 and 2 (the last value repeats
     # if the list is shorter than the budget).
@@ -328,6 +332,13 @@ def recovery_decision(
         if int(recovery.get("ticket_round") or 0) >= int(cfg["max_tickets"]):
             return {"action": "none",
                     "reason": "recovery ticket budget spent"}
+        if reason == "blocked":
+            # Ticket #654: a blocked park already names the exact Owner
+            # action; a dev ticket cannot advance a human wait, so the
+            # park rests for the Owner signal (restart or manual replan)
+            # instead of spending a diagnosis round.
+            return {"action": "none",
+                    "reason": "blocked parks wait for the Owner signal"}
         return {"action": "ticket", "reason": reason}
     if active_children > 0:
         return {"action": "none", "reason": "children still active"}

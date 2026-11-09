@@ -564,8 +564,12 @@ class ObjectiveService:
 
         Used when promotion (or any external producer) leaves work the
         planner must consider — e.g. a tierless linked child awaiting
-        its contract. Returns the engine result, or ok False when the
-        objective cannot be planned.
+        its contract — and by the Owner/CEO replan poke (ticket #654).
+        A waiting objective resumes first: planning on it would strand
+        its continued children, whose closes never replan an
+        unexhausted blocked park. Returns the engine result, or ok False
+        when the objective cannot be planned. Spend-held, deploy-parked
+        and terminal objectives are refused without mutating.
         """
         if self._repo is None:
             return {"ok": False, "reason": "no-store"}
@@ -575,8 +579,33 @@ class ObjectiveService:
         project = str(objective.get("project") or "")
         if not project or not self._config.has_project(project):
             return {"ok": False, "reason": "unknown-project"}
-        return await engine_mod.plan_objective(
-            self.env_for(project), objective_id)
+        status = str(objective.get("status") or "")
+        if status in {"closed", "cancelled"}:
+            # A closed objective is never resurrected: planning would
+            # spend a run and then park or ticket dead business work.
+            return {"ok": False, "reason": "objective-terminal"}
+        pending = objective.get("pending_plan")
+        if isinstance(pending, Mapping) and pending:
+            # The spend hold owns its trigger (apply_spend_approval):
+            # resuming first would wipe the park the engine then refuses
+            # to plan, and deschedule its recovery.
+            return {"ok": False, "reason": "spend_approval_pending"}
+        if status == "waiting" and recovery_mod.park_reason(objective) \
+                == recovery_mod.DEPLOY_REASON:
+            # TASK-2026-00483: a deploy park replans only on the live fix
+            # after the restart; poking now would plan on pre-fix code and
+            # the re-park would drop the deploy record.
+            return {"ok": False, "reason": "recovery_deploy_pending"}
+        env = self.env_for(project)
+        if status == "waiting":
+            await self._repo.patch_objective(objective_id, {
+                "status": "active", "waiting_reason": None})
+            if env.notify is not None:
+                await env.notify(
+                    engine_mod._notify_ref(objective),
+                    f"Objective {objective_id} resumed by a manual replan "
+                    "after its Owner wait.")
+        return await engine_mod.plan_objective(env, objective_id)
 
     async def boot_resume_objectives(
         self, limit: int = 100,
