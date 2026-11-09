@@ -283,7 +283,8 @@ def test_configuration_failures_block_without_arbitrary_rotation(setup, failure)
 
 
 def test_tool_without_result_blocks_before_replay(setup):
-    missing = fail(503, events=[{"type": "tool_use", "part": {"id": "call-unknown", "tool": "research_read"}}])
+    missing = fail(503, events=[{"type": "tool_use", "part": {"id": "call-unknown", "tool": "research_read",
+                               "state": {"status": "completed"}}}])
     service, _, runtime, _ = setup([missing])
     result = asyncio.run(service.run_once())
     assert result["status"] == "blocked" and "BLOCKED_TOOL_CONFLICT" in result["failure_reason"]

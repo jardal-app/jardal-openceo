@@ -572,8 +572,8 @@ class TurnRequest:
 class ProviderTurn:
     """One provider attempt: usable text, or a classified failure.
 
-    ``executed_tools`` lists the tools the provider ran during THIS
-    attempt; their results arrive in ``tool_results`` as
+    ``executed_tools`` lists completed tools during THIS attempt;
+    their results arrive in ``tool_results`` as
     ``(tool id, result summary)`` pairs. A complete turn without the
     result of a claimed tool is inconsistent, never a success (T13).
     ``error_excerpt`` adds diagnostic evidence without changing classification.
@@ -2036,14 +2036,15 @@ def parse_managed_events(events: list[Mapping[str, Any]]) -> ProviderTurn:
     """``opencode run --format json`` events as one turn attempt.
 
     Tolerant to unknown shapes (skipped, never fatal); strict about
-    meaning: tools claimed without a completed result, or text cut
-    mid-stream, come back as failures so the ledger never duplicates
-    an external effect (§11.8).
+    meaning: only completed tools enter the ledger (§11.8).
+    Non-completed tools add diagnostics without failing the attempt;
+    provider errors still fail the turn and preserve partial text.
     """
     texts: list[str] = []
     calls: list[ToolCall] = []
     results: list[tuple[str, str]] = []
     errors: list[str] = []
+    tool_diagnostics: list[str] = []
     for event in events:
         if not isinstance(event, Mapping):
             continue
@@ -2059,11 +2060,19 @@ def parse_managed_events(events: list[Mapping[str, Any]]) -> ProviderTurn:
             if (not isinstance(call_id, str) or not call_id
                     or not isinstance(name, str) or not name):
                 continue
-            calls.append(ToolCall(id=call_id, name=name))
             state = part.get("state")
             output = state.get("output") if isinstance(state, Mapping) else None
             status = state.get("status") if isinstance(state, Mapping) else None
-            if status == "completed" and output is not None:
+            if status != "completed":
+                detail = state.get("error") if isinstance(state, Mapping) else None
+                if detail is not None and not isinstance(detail, str):
+                    detail = json.dumps(detail, sort_keys=True, default=str)
+                tool_diagnostics.append(sanitize_excerpt(
+                    f"tool {name} ({call_id}) status={status or 'unknown'}"
+                    + (f": {detail}" if detail else "")))
+                continue
+            calls.append(ToolCall(id=call_id, name=name))
+            if output is not None:
                 if isinstance(output, str):
                     results.append((call_id, output))
                 else:
@@ -2072,7 +2081,7 @@ def parse_managed_events(events: list[Mapping[str, Any]]) -> ProviderTurn:
         elif kind == "error":
             errors.append(_managed_error_text(event))
     if errors:
-        body = "; ".join(errors)
+        body = "; ".join(errors + tool_diagnostics)
         if "".join(texts).strip():
             return ProviderTurn(
                 text="".join(texts), complete=False,
@@ -2086,11 +2095,11 @@ def parse_managed_events(events: list[Mapping[str, Any]]) -> ProviderTurn:
         return ProviderTurn(
             text="", complete=False, executed_tools=tuple(calls),
             tool_results=tuple(results),
-            error_text="managed run carried no text",
+            error_text="; ".join(["managed run carried no text", *tool_diagnostics]),
             failure_stage="before_response")
     return ProviderTurn(
         text="".join(texts), complete=True, executed_tools=tuple(calls),
-        tool_results=tuple(results))
+        tool_results=tuple(results), error_text="; ".join(tool_diagnostics))
 
 
 def _managed_cost(events: list[Mapping[str, Any]]) -> float:

@@ -18,6 +18,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "openceo-core"))
 
 from model_routing import research_wiring as wiring  # noqa: E402
@@ -799,3 +801,116 @@ def test_parse_managed_events_keeps_partial_failures_partial(tmp_path):
     assert turn.failure_stage == "partial_text"
     assert turn.text == "valid prefix"
     assert "status=503" in turn.error_text
+
+
+def test_parse_managed_events_reconciles_completed_effects_after_failed_probes(tmp_path):
+    probes = [
+        ("webfetch", "egress blocked"),
+        ("skill", "skills disabled"),
+        ("question", "non-interactive worker"),
+        ("research_read", "unknown tool"),
+    ]
+    events = [
+        {"type": "tool_use", "part": {"id": f"probe_{name}", "tool": name,
+         "state": {"status": "error", "error": error}}}
+        for name, error in probes
+    ]
+    events += [
+        _tool_event("read_1", "research-broker_research_read", "source one"),
+        _tool_event("read_2", "research-broker_research_read", {"text": "source two"}),
+        _text_event("The sources establish a fact."),
+    ]
+    attempt = wiring.parse_managed_events(events)
+    assert attempt.complete is True
+    for name, error in probes:
+        assert name in attempt.error_text
+        assert error in attempt.error_text
+    assert attempt.executed_tools == (
+        wiring.ToolCall(id="read_1", name="research-broker_research_read"),
+        wiring.ToolCall(id="read_2", name="research-broker_research_read"),
+    )
+    assert attempt.tool_results == (("read_1", "source one"), ("read_2", '{"text": "source two"}'))
+    session = wiring.ResearchSession(
+        research_id="mixed-tools", checkpoints=tmp_path, static_model="opencode/test-free")
+    try:
+        outcome = session.run_turn("Read the sources", lambda _request: attempt)
+        assert outcome.turn == 1
+        assert outcome.rotations == 0 and outcome.resumed is False
+        assert set(session.ledger) == {"read_1", "read_2"}
+        saved = wiring.load_checkpoint(tmp_path, "mixed-tools")
+        assert saved.applied_tools == tuple(session.ledger.values())
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("state", [
+    {"status": "error", "error": {"message": "probe rejected"}},
+    {"status": "running", "output": "uncommitted output"},
+    {"status": "pending"},
+    {},
+    None,
+])
+def test_parse_managed_events_keeps_incomplete_tools_in_diagnostics(state):
+    attempt = wiring.parse_managed_events([
+        {"type": "tool_use", "part": {"id": "probe", "tool": "webfetch", "state": state}},
+        _text_event("An answer without that probe."),
+    ])
+    assert attempt.complete is True
+    assert attempt.executed_tools == attempt.tool_results == ()
+    assert "webfetch" in attempt.error_text
+    assert (state.get("status", "unknown") if state else "unknown") in attempt.error_text
+    if state and state.get("error"):
+        assert "probe rejected" in attempt.error_text
+
+
+@pytest.mark.parametrize("with_text", [False, True])
+def test_failed_probe_diagnostics_preserve_provider_failures(with_text):
+    attempt = wiring.parse_managed_events([
+        {"type": "tool_use", "part": {"id": "probe", "tool": "webfetch",
+         "state": {"status": "error", "error": "egress blocked"}}},
+        *([_text_event("valid prefix")] if with_text else []),
+        {"type": "error", "error": {"message": "stream cut", "status": 503}},
+    ])
+    assert attempt.complete is False
+    assert attempt.executed_tools == attempt.tool_results == ()
+    assert attempt.failure_stage == ("partial_text" if with_text else "before_response")
+    assert "status=503" in attempt.error_text
+    assert "webfetch" in attempt.error_text and "egress blocked" in attempt.error_text
+
+
+def test_failed_probe_without_text_still_requires_a_response():
+    attempt = wiring.parse_managed_events([
+        {"type": "tool_use", "part": {"id": "probe", "tool": "skill",
+         "state": {"status": "error", "error": "skills disabled"}}},
+    ])
+    assert attempt.complete is False
+    assert attempt.failure_stage == "before_response"
+    assert "no text" in attempt.error_text and "skills disabled" in attempt.error_text
+
+
+def test_failed_probe_diagnostics_redact_credentials_and_bound_error_detail():
+    attempt = wiring.parse_managed_events([
+        {"type": "tool_use", "part": {"id": "probe", "tool": "webfetch",
+         "state": {"status": "error", "error": "Bearer syntheticProbeSecret " + "detail " * 100}}},
+        _text_event("An answer without that probe."),
+    ])
+    assert attempt.complete is True
+    assert "webfetch" in attempt.error_text
+    assert "syntheticProbeSecret" not in attempt.error_text
+    assert len(attempt.error_text) <= 300
+
+
+def test_completed_tool_without_result_still_blocks_reconciliation(tmp_path):
+    attempt = wiring.parse_managed_events([
+        _tool_event("read_1", "research-broker_research_read", None),
+        _text_event("Trust me."),
+    ])
+    session = wiring.ResearchSession(
+        research_id="missing-result", checkpoints=tmp_path, static_model="opencode/test-free")
+    try:
+        with pytest.raises(wiring.SessionBlocked) as blocked:
+            session.run_turn("Read the source", lambda _request: attempt)
+        assert blocked.value.code == wiring.BLOCKED_TOOL_CONFLICT
+        assert session.ledger == {}
+    finally:
+        session.close()

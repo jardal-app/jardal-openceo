@@ -209,7 +209,8 @@ def test_free_jobs_share_two_call_slots_and_release_them(free_setup):
 
 
 def test_free_deep_tool_conflict_blocks_resume_and_reported_cost_is_uncertain(free_setup):
-    tool = {"type": "tool_use", "part": {"id": "unconfirmed-tool", "tool": "research_read"}}
+    tool = {"type": "tool_use", "part": {"id": "unconfirmed-tool", "tool": "research_read",
+            "state": {"status": "completed"}}}
     service, repo, runtime, _ = build(free_setup, [fail(503, events=[tool])])
     blocked = asyncio.run(service.run_once())
     assert blocked["status"] == "blocked" and "BLOCKED_TOOL_CONFLICT" in blocked["failure_reason"]

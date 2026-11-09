@@ -1,7 +1,7 @@
 """Perfiles y configuracion del worker OpenCode V2 (TASK-2026-00063).
 
 El worker **no hereda** la configuracion global del host. Esta funcion construye su
-configuracion completa: agentes, permisos deny por defecto y el unico servidor MCP
+configuracion completa: agentes, policies deny por defecto y el unico servidor MCP
 autorizado, el broker de adquisicion con alcance por job.
 
 Decisiones que importan
@@ -61,6 +61,8 @@ DENIED_ACTIONS = (
     "webfetch",
     "websearch",
     "skill",
+    "question",
+    "opencode_list_mcp_resources",
     "subagent",
 )
 
@@ -93,6 +95,9 @@ DENIED_BUILTIN_TOOLS = (
     "notebook",
     "skill",
     "plugin",
+    "question",
+    "opencode_list_mcp_resources",
+    "opencode_read_mcp_resource",
 )
 
 WORKER_AGENTS = ("investigator", "researcher", "verifier")
@@ -151,23 +156,18 @@ def broker_server_config(*, endpoint: BrokerEndpoint, deadline_seconds: float) -
 
 
 def worker_policies(*, server_name: str = BROKER_SERVER_NAME) -> list[dict[str, str]]:
-    """Frontera real del worker: deny por defecto en la capa de **policies**.
+    """Frontera de ejecucion: deny por defecto en la capa de policies.
 
     OpenCode V2 separa dos capas (<https://opencode.ai/v2/docs/policies>):
 
-    * ``agents.<n>.permissions`` — reglas por agente con efecto ``allow``/``deny``/``ask``.
+    * ``agents.<n>.permissions`` — reglas por agente, anadidas a los permisos nativos.
     * ``experimental.policies`` — declaraciones **binarias, nunca preguntan**, que solo
       pueden **endurecer** lo que permisos y proveedores ya permiten; no las levanta una
       regla de agente ni una aprobacion guardada.
 
-    La frontera va aqui, y no en ``permissions``, por una razon **medida** contra el CLI
-    real v2.0.20: la capa libre del proveedor ``opencode`` responde
-    ``provider.auth 403 "OpenCode's free tier can only be used from within OpenCode"``
-    cuando el agente tiene **cualquier** regla ``deny`` — se reprodujo con cinco modelos
-    libres y cinco variantes de perfil (solo ``*``, solo ``shell``, solo ``read``, sin
-    ``*``...). Con la frontera en policies, el mismo modelo libre ejecuta el circuito y
-    **no** puede ejecutar shell. Quien lea esto y mueva el deny a ``permissions``
-    devuelve el circuito a cero.
+    El deny pertenece a esta capa: con cualquier deny en permissions de agente,
+    v2.0.20 devolvia provider.auth 403 en el proveedor gratuito. La captura real y
+    su procedencia estan en ``tests/fixtures/README.md``.
 
     Orden: primero el deny global y despues las excepciones (gana la ultima que coincide);
     las tools se autorizan por **nombre normalizado**, desnudo y ``<servidor>_<tool>``.
@@ -186,14 +186,16 @@ def worker_policies(*, server_name: str = BROKER_SERVER_NAME) -> list[dict[str, 
 
 
 def worker_permissions(*, server_name: str = BROKER_SERVER_NAME) -> list[dict[str, str]]:
-    """Permisos del agente: **solo** el allow global.
+    """Solo reglas allow para las tools MCP del broker, con su nombre cualificado.
 
-    No es un descuido: al no haber ninguna regla ``deny`` en esta capa, el proveedor
-    libre no corta la sesion. La seguridad efectiva la impone ``worker_policies``, que
-    endurece cualquier allow de aqui. Un ``deny`` aqui **no** es defensa en profundidad:
-    es el fallo que deja al worker sin modelo (ver ``worker_policies``).
+    OpenCode V2 anade estas reglas al perfil nativo, que permite tools por defecto.
+    La frontera efectiva la impone ``worker_policies``; un deny aqui reintroduce
+    el 403 medido del proveedor gratuito (ver ``tests/fixtures/README.md``).
     """
-    return [{"action": "*", "resource": "*", "effect": "allow"}]
+    return [
+        {"action": f"{server_name}_{tool}", "resource": "*", "effect": "allow"}
+        for tool in RESEARCH_TOOLS
+    ]
 
 
 def agent_profiles(*, model: str, server_name: str = BROKER_SERVER_NAME) -> dict[str, Any]:
@@ -245,7 +247,7 @@ def build_worker_config(
     config: dict[str, Any] = {
         "agents": selected,
         # La frontera del worker. `policies` es binaria, no pregunta y solo endurece;
-        # `agents.*.permissions` queda en allow a proposito (ver `worker_policies`).
+        # `agents.*.permissions` no lleva deny por compatibilidad con el proveedor.
         "experimental": {"policies": worker_policies(server_name=endpoint.server_name)},
         # El buscador integrado no implementa nuestra politica de coste y permisos:
         # la adquisicion pasa por el broker.
@@ -259,12 +261,7 @@ def build_worker_config(
 
 
 def _permission_problems(agent_name: str, permissions: Any) -> list[str]:
-    """Comprueba los permisos del agente: lista V2 y **sin** reglas deny.
-
-    Una regla ``deny`` aqui no endurece nada que la policy no endurezca ya, y en cambio
-    hace que la capa libre del proveedor corte la sesion con 403. Se rechaza de forma
-    explicita para que nadie la reintroduzca creyendo que suma defensa.
-    """
+    """Reglas allow del broker; ningun deny de agente compatible con la capa libre."""
     problems: list[str] = []
     if isinstance(permissions, dict):
         # Defecto real con v2.0.20: el CLI no avisa del esquema, descarta el agente y
@@ -277,6 +274,8 @@ def _permission_problems(agent_name: str, permissions: Any) -> list[str]:
     if not isinstance(permissions, list) or not permissions:
         problems.append(f"{agent_name}: permissions debe ser una lista de reglas no vacia")
         return problems
+    expected = {f"{BROKER_SERVER_NAME}_{tool}" for tool in RESEARCH_TOOLS}
+    allowed: set[str] = set()
     for index, rule in enumerate(permissions):
         if not isinstance(rule, dict):
             problems.append(f"{agent_name}: cada regla debe ser un objeto")
@@ -284,11 +283,22 @@ def _permission_problems(agent_name: str, permissions: Any) -> list[str]:
         effect = rule.get("effect")
         if effect not in ("allow", "ask", "deny"):
             problems.append(f"{agent_name}: efecto invalido en la regla {index}: {effect!r}")
+        action = rule.get("action")
         if effect == "deny":
             problems.append(
                 f"{agent_name}: un deny en permissions deja al worker sin modelo "
                 "(403 de la capa libre); la frontera va en experimental.policies"
             )
+        if effect == "ask":
+            problems.append(f"{agent_name}: el worker no admite permisos interactivos")
+        if not isinstance(action, str) or action not in expected:
+            problems.append(f"{agent_name}: accion fuera del broker: {action!r}")
+        elif effect == "allow" and rule.get("resource") == "*":
+            allowed.add(action)
+        if rule.get("resource") != "*":
+            problems.append(f"{agent_name}: recurso invalido en la regla {index}")
+    for action in sorted(expected - allowed):
+        problems.append(f"{agent_name}: falta autorizar {action}")
     return problems
 
 

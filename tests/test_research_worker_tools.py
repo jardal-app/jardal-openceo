@@ -12,6 +12,7 @@ from __future__ import annotations
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -149,11 +150,6 @@ class ProfileTests(unittest.TestCase):
         )
 
     def test_the_boundary_is_a_policy_denied_by_default(self) -> None:
-        """La frontera va en V2 `experimental.policies`: binaria y solo endurece.
-
-        Medido contra el CLI real: con el deny en `agents.*.permissions` la capa libre
-        del proveedor responde 403 y el worker se queda sin modelo. El deny va aqui.
-        """
         policies = worker_policies()
         self.assertIsInstance(policies, list)
         self.assertEqual(
@@ -178,18 +174,68 @@ class ProfileTests(unittest.TestCase):
                     policies.index(rule),
                 )
 
-    def test_the_agent_permissions_never_deny(self) -> None:
-        """Regresion del 403: un deny en la capa de agente deja al worker sin modelo."""
-        permissions = worker_permissions()
-        self.assertEqual(permissions, [{"action": "*", "resource": "*", "effect": "allow"}])
+    def test_the_agent_permissions_only_allow_qualified_broker_tools(self) -> None:
+        permissions = self.config["agents"]["investigator"]["permissions"]
+        self.assertTrue(all(rule["effect"] == "allow" for rule in permissions))
+        allowed = {rule["action"] for rule in permissions if rule["effect"] == "allow"}
+        self.assertEqual(allowed, {f"{BROKER_SERVER_NAME}_{tool}" for tool in RESEARCH_TOOLS})
 
-    def test_the_verifier_reports_a_deny_in_the_agent_permissions(self) -> None:
+    def test_policies_restrict_the_inherited_native_permissions(self) -> None:
+        permissions = self.config["agents"]["investigator"]["permissions"]
+        allowed = {*RESEARCH_TOOLS, *(f"{BROKER_SERVER_NAME}_{tool}" for tool in RESEARCH_TOOLS)}
+        inherited = [{"action": "*", "resource": "*", "effect": "allow"}, *permissions]
+        policies = self.config["experimental"]["policies"]
+        for tool in (*DENIED_BUILTIN_TOOLS, "future_native_tool", *allowed):
+            with self.subTest(tool=tool):
+                permission = next(
+                    rule["effect"] for rule in reversed(inherited) if fnmatchcase(tool, rule["action"])
+                )
+                policy = next(
+                    rule["effect"] for rule in reversed(policies)
+                    if rule["action"] == "permission" and fnmatchcase(f"{tool}:*", rule["resource"])
+                )
+                self.assertEqual(permission, "allow")
+                self.assertEqual(policy, "allow" if tool in allowed else "deny")
+
+    def test_the_agent_permissions_follow_the_broker_server_name(self) -> None:
+        permissions = worker_permissions(server_name="custom-broker")
+        self.assertEqual(
+            {rule["action"] for rule in permissions if rule["effect"] == "allow"},
+            {f"custom-broker_{tool}" for tool in RESEARCH_TOOLS},
+        )
+
+    def test_the_verifier_rejects_permissions_outside_the_broker(self) -> None:
+        for action in ("*", "webfetch", "skill", "question", "opencode_list_mcp_resources", "research_read"):
+            with self.subTest(action=action):
+                tampered = build_worker_config(model="m", endpoint=self.endpoint, deadline_seconds=60)
+                tampered["agents"]["investigator"]["permissions"].append(
+                    {"action": action, "resource": "*", "effect": "allow"})
+                self.assertTrue(assert_worker_config_is_closed(tampered))
+
+    def test_the_verifier_requires_all_broker_operations(self) -> None:
         tampered = build_worker_config(model="m", endpoint=self.endpoint, deadline_seconds=60)
-        tampered["agents"]["investigator"]["permissions"] = [
-            {"action": "*", "resource": "*", "effect": "deny"}
-        ]
+        tampered["agents"]["investigator"]["permissions"].pop()
         problems = assert_worker_config_is_closed(tampered)
-        self.assertTrue(any("sin modelo" in p for p in problems), problems)
+        self.assertTrue(any("falta autorizar" in p for p in problems), problems)
+
+    def test_the_verifier_rejects_any_agent_deny_for_free_provider_compatibility(self) -> None:
+        for agent in ("investigator", "researcher", "verifier"):
+            for action in ("*", "read", "shell", f"{BROKER_SERVER_NAME}_research_read"):
+                with self.subTest(agent=agent, action=action):
+                    tampered = build_worker_config(
+                        model="m", endpoint=self.endpoint, deadline_seconds=60, agents=(agent,)
+                    )
+                    tampered["agents"][agent]["permissions"].insert(
+                        0, {"action": action, "resource": "*", "effect": "deny"}
+                    )
+                    problems = assert_worker_config_is_closed(tampered)
+                    self.assertTrue(any("403" in p for p in problems), problems)
+
+    def test_the_verifier_rejects_interactive_agent_permissions(self) -> None:
+        tampered = build_worker_config(model="m", endpoint=self.endpoint, deadline_seconds=60)
+        tampered["agents"]["investigator"]["permissions"][0]["effect"] = "ask"
+        problems = assert_worker_config_is_closed(tampered)
+        self.assertTrue(any("interactivos" in p for p in problems), problems)
 
     def test_the_agent_is_a_primary_v2_agent(self) -> None:
         profile = self.config["agents"]["investigator"]
