@@ -37,7 +37,7 @@ from research.watch import normalize_source, source_ref
 from research.workflows import ResearchScheduleRuntime
 from settings import Settings
 
-FEED = "https://github.com/Jardal/jardal-openceo/releases.atom"
+FEED = "https://github.com/jardal-app/jardal-openceo/releases.atom"
 CFG = {"research": {"enabled": True, "allowed_modes": ["quick"], "classification_ceiling": "public",
        "paid_budget_usd": "0.00",
        "adapters": {"brave": True, "serper": False, "firecrawl": False, "grounding": False}}}
@@ -57,7 +57,7 @@ class DemoBSpecTests(unittest.TestCase):
         # La identidad normalizada es estable: la misma fuente escrita con
         # puerto por defecto y fragmento colapsa a la misma referencia.
         twin = normalize_source(
-            {"type": "rss", "url": "https://github.com:443/Jardal/jardal-openceo/releases.atom#noctua"})
+            {"type": "rss", "url": "https://github.com:443/jardal-app/jardal-openceo/releases.atom#noctua"})
         self.assertEqual(source_ref(twin), source_ref(demo_b_source()))
 
     def test_bounds_fit_the_default_server_and_demo_policy(self):

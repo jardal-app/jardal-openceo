@@ -1,6 +1,7 @@
 """Demo B: suscripcion acotada al feed autorizado (ticket #643).
 
-El feed autorizado es unico (Owner 2026-11-06) y este modulo es su fuente
+El feed autorizado es unico (Owner 2026-11-06, correccion 2026-11-09T12:49
+que sustituye la URL) y este modulo es su fuente
 canonica: los tests de verificacion y el runbook productivo
 (``docs/research-operations.md``, seccion Demo B) construyen la misma
 suscripcion desde aqui, en vez de repetir la URL y los topes en cada sitio.
@@ -31,9 +32,10 @@ __all__ = [
     "demo_b_subscription_request",
 ]
 
-# Feed autorizado unico de Demo B (Owner 2026-11-06). Solo publico: una URL con
-# credenciales o esquema no https se rechaza al normalizar.
-DEMO_B_FEED_URL = "https://github.com/Jardal/jardal-openceo/releases.atom"
+# Feed autorizado unico de Demo B (Owner 2026-11-06, correccion 2026-11-09T12:49
+# que sustituye la URL muerta Jardal/ por jardal-app/). Solo publico: una URL
+# con credenciales o esquema no https se rechaza al normalizar.
+DEMO_B_FEED_URL = "https://github.com/jardal-app/jardal-openceo/releases.atom"
 DEMO_B_PROJECT_KEY = "jardal-openceo"
 DEMO_B_PURPOSE = "demo-b"
 DEMO_B_QUESTION = "Que releases nuevos publico jardal-openceo?"

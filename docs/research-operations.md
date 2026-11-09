@@ -260,8 +260,9 @@ la fuente de la prueba recurrente debe ser una URL pública.
 ## Demo B
 
 Demo B despliega la recurrencia sobre el feed autorizado único
-`https://github.com/Jardal/jardal-openceo/releases.atom` (Owner 2026-11-06,
-ticket #643) y deja el scheduler recurrente listo para quedar encendido, con
+`https://github.com/jardal-app/jardal-openceo/releases.atom` (Owner 2026-11-06,
+corrección 2026-11-09T12:49 que sustituye la URL muerta `Jardal/`, ticket #643)
+y deja el scheduler recurrente listo para quedar encendido, con
 `RESEARCH_ENABLED=true` y `RESEARCH_SCHEDULER_ENABLED=true` permanentes tras la
 demo y suscripciones/schedules activos verificables. La spec acotada vive en
 `openceo-core/research/demo_b.py`: fuente RSS exacta, intervalo horario,
@@ -273,7 +274,7 @@ indefinidamente, sin sondeos.
 Sonda del feed autorizado (solo lectura, sin Mongo, modelo ni flags):
 
 ```bash
-./.venv/bin/python scripts/research_watch_probe.py --url https://github.com/Jardal/jardal-openceo/releases.atom
+./.venv/bin/python scripts/research_watch_probe.py --url https://github.com/jardal-app/jardal-openceo/releases.atom
 ```
 
 Registro 2026-11-08: `ok: false`, `Respuesta HTTP 404` (`source_unavailable`,
