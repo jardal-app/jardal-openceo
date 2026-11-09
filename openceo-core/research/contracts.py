@@ -296,6 +296,7 @@ class ResearchJobRequest(_StrictModel):
     project_key: str
     purpose: str
     mode: ResearchMode = ResearchMode.QUICK
+    deep_paid_opt_in: bool = Field(default=False, strict=True)
     question: str
     seed_urls: list[str] = Field(default_factory=list)
     freshness: ResearchFreshness = Field(default_factory=ResearchFreshness)
@@ -330,6 +331,8 @@ class ResearchJobRequest(_StrictModel):
         distintos son un conflicto, no una deduplicacion.
         """
         payload = self.model_dump(mode="json", exclude={"owner_id", "idempotency_key"})
+        if not self.deep_paid_opt_in:
+            payload.pop("deep_paid_opt_in")
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

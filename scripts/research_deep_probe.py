@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Ten real public-source reports, using the existing approved research ceiling.
+"""Ten public-source reports on the free deep route by default.
 
 No production activation or recurring jobs. Jobs/evidence live in a dedicated probe
-database/directory, but model reservations share the production account ledger.
+database/directory; opt-in paid cases share the production account ledger.
 Review every material claim in the saved results against its persisted excerpt;
 schema checks and a model verifier do not establish real quality on their own.
 """
@@ -40,39 +40,50 @@ def question(kind, subject, role):
 
 
 async def main(args):
-    if not args.use_approved_budget:
-        raise SystemExit("Explicit --use-approved-budget is required")
+    if args.paid_deepseek and (not args.use_approved_budget or not args.case):
+        raise SystemExit("Paid DeepSeek requires --use-approved-budget and explicit --case selections")
     from settings import get_settings
     from db.mongo import MongoRepository
-    from research.budget import ResearchBudgetLedger
+    from research.budget import ResearchBudgetLedger, ResearchPolicyLedger
     from research.contracts import ResearchJobRequest
     from research.deep_model import BudgetedDeepModel
     from research.policies import Principal
     from research.wiring import build_research_service
+    from research.broker_mount import broker_url_for
+    from research.money import parse_optional_micro
     root = Path(args.output).absolute()
     root.mkdir(mode=0o700, parents=True, exist_ok=False)
     settings = get_settings()
-    if not settings.RESEARCH_DEEP_API_KEY or settings.RESEARCH_DEEP_ACCOUNT_CEILING_USD in {"", "0", "0.00"}:
+    if args.paid_deepseek and (not settings.RESEARCH_DEEP_API_KEY or settings.RESEARCH_DEEP_ACCOUNT_CEILING_USD in {"", "0", "0.00"}):
         raise SystemExit("Deep key and account ceiling must be configured in the official .env")
-    account_repo = MongoRepository(settings)
-    await account_repo.connect()
+    account_repo = None
     isolated = settings.model_copy(update={"MONGODB_DATABASE": "openceo_test_research_deep_pilot",
         "RESEARCH_ENABLED": True, "RESEARCH_SCHEDULER_ENABLED": False,
         "RESEARCH_EVIDENCE_DIR": str(root / "evidence"), "RESEARCH_BROKER_ENABLED": False,
-        "RESEARCH_MCP_ENABLED": False, "RESEARCH_OPENCODE_CLI_PATH": ""})
+        "RESEARCH_BROKER_URL": settings.RESEARCH_BROKER_URL or broker_url_for(settings, settings.RESEARCH_BROKER_PATH),
+        "RESEARCH_STATE_DIR": str(root / "runtime"), "RESEARCH_WORKSPACE_DIR": str(root / "workspaces"),
+        "RESEARCH_MCP_ENABLED": False})
     repo = MongoRepository(isolated)
     await repo.connect()
     service, resources = build_research_service(isolated, repo)
-    ledger = ResearchBudgetLedger(accounts=account_repo.research_budget_accounts, usage=account_repo.research_usage)
-    service._deps.ledger = ledger
-    service._deps.deep_model = BudgetedDeepModel(isolated, ledger)
+    if args.paid_deepseek:
+        account_repo = MongoRepository(settings)
+        await account_repo.connect()
+        ledger = ResearchPolicyLedger(ResearchBudgetLedger(accounts=account_repo.research_budget_accounts,
+            usage=account_repo.research_usage), repo, parse_optional_micro(settings.RESEARCH_PAID_SPEND_USD) or 0,
+            parse_optional_micro(settings.RESEARCH_DEEP_ACCOUNT_CEILING_USD) or 0)
+        service._deps.ledger = ledger
+        service._deps.deep_model = BudgetedDeepModel(isolated, ledger)
     await service._deps.events.initialize()
     principal = Principal(user_id="research-acceptance", permissions=frozenset({"run_research", "read_research"}),
                           allowed_projects=frozenset({"jardal-openceo"}))
     cfg = {"research": {"enabled": True, "allowed_modes": ["deep"], "classification_ceiling": "public",
         "paid_budget_usd": settings.RESEARCH_PAID_SPEND_USD, "adapters": {},
         "limits": {"deep": {"search_requests": 0, "pages": 1, "steps": 10, "seconds": 120}}}}
-    manifest = {"model": settings.RESEARCH_DEEP_MODEL, "route": "deepseek-http", "version": None,
+    manifest = {"model": settings.RESEARCH_DEEP_MODEL if args.paid_deepseek else None,
+        "profile": None if args.paid_deepseek else "free-research",
+        "route": "deepseek-http" if args.paid_deepseek else "free-router+opencode",
+        "version": None, "version_pin": None if args.paid_deepseek else settings.RESEARCH_OPENCODE_VERSION_PIN,
         "rubric": "All material claims reviewed against persisted exact excerpts; no invented/foreign citations; contradictions retained; partial when insufficient; dates and attribution explicit.",
         "reconciled_micro_usd": None, "cases": []}
     try:
@@ -80,6 +91,7 @@ async def main(args):
             if args.case and case_id not in args.case:
                 continue
             request = ResearchJobRequest(project_key="jardal-openceo", purpose="acceptance-d", mode="deep",
+                deep_paid_opt_in=args.paid_deepseek,
                 question=question(kind, subject, role), seed_urls=[url],
                 limits={"search_requests": 0, "pages": 1, "steps": 10, "seconds": 120})
             job = await service.submit(request, principal=principal, project_cfg=cfg)
@@ -97,12 +109,14 @@ async def main(args):
     finally:
         await resources.aclose()
         await repo.close()
-        await account_repo.close()
+        if account_repo is not None:
+            await account_repo.close()
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--use-approved-budget", action="store_true")
+    p.add_argument("--paid-deepseek", action="store_true", help="Owner-named cases only; never an automatic fallback")
     p.add_argument("--output", required=True)
     p.add_argument("--case", choices=[c[0] for c in CASES], action="append", help="Repeat only a case affected by a measured defect")
     raise SystemExit(asyncio.run(main(p.parse_args())))

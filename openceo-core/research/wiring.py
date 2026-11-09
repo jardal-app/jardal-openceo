@@ -189,7 +189,7 @@ def _build_firecrawl(settings, ledger, repo):
     return FirecrawlClient(settings=settings, ledger=ledger, credit_budget=budget, max_attempts=1)
 
 
-def _provider_status(settings, *, ledger, discover, firecrawl, deep_model):
+def _provider_status(settings, *, ledger, discover, firecrawl, deep_model, runtime=None):
     from decimal import Decimal, InvalidOperation
 
     def positive(name):
@@ -200,6 +200,8 @@ def _provider_status(settings, *, ledger, discover, firecrawl, deep_model):
             return False
 
     configured = {
+        "deep-free": bool(_setting(settings, "RESEARCH_FREE_ROUTER_ENABLED", False)
+                          and _setting(settings, "RESEARCH_OPENCODE_CLI_PATH", "")),
         "deep": bool(_setting(settings, "RESEARCH_DEEP_API_KEY", "") and _setting(settings, "RESEARCH_DEEP_MODEL", ""))
             and all(positive(name) for name in ("RESEARCH_DEEP_INPUT_USD_PER_MILLION",
                 "RESEARCH_DEEP_OUTPUT_USD_PER_MILLION", "RESEARCH_DEEP_ACCOUNT_CEILING_USD", "RESEARCH_PAID_SPEND_USD")),
@@ -207,7 +209,8 @@ def _provider_status(settings, *, ledger, discover, firecrawl, deep_model):
         "firecrawl": bool(_setting(settings, "RESEARCH_FIRECRAWL_API_KEY", "")
             and _setting(settings, "RESEARCH_FIRECRAWL_CREDIT_WINDOW", "")) and positive("RESEARCH_FIRECRAWL_ACCOUNT_CREDITS"),
     }
-    mounted = {"deep": deep_model is not None and ledger is not None,
+    mounted = {"deep-free": runtime is not None,
+               "deep": deep_model is not None and ledger is not None,
                "serper": "serper" in getattr(discover, "providers", ()) and ledger is not None,
                "firecrawl": firecrawl is not None and ledger is not None}
     return {name: {"configured": ready, "mounted": mounted[name], "verified": None}
@@ -428,7 +431,7 @@ def build_research_service(
     from research.deep_model import BudgetedDeepModel
     deps.deep_model = BudgetedDeepModel(settings, ledger)
     deps.provider_status = _provider_status(settings, ledger=ledger, discover=discover,
-                                          firecrawl=firecrawl, deep_model=deps.deep_model)
+                                          firecrawl=firecrawl, deep_model=deps.deep_model, runtime=runtime)
     from research.events import ResearchEvents
     event_db = getattr(repo, "db", None)
     if event_db is not None:

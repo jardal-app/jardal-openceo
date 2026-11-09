@@ -38,6 +38,8 @@ class BudgetedDeepModel:
         self.active: dict[str, set[asyncio.Task]] = {}
 
     async def run_phase(self, *, job, phase, prompt, seconds):
+        if job.get("deep_paid_opt_in") is not True:
+            raise DeepModelError("paid_opt_in_required")
         s = self.settings
         key, model = s.RESEARCH_DEEP_API_KEY, s.RESEARCH_DEEP_MODEL
         rates = (s.RESEARCH_DEEP_INPUT_USD_PER_MILLION, s.RESEARCH_DEEP_OUTPUT_USD_PER_MILLION)

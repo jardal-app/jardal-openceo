@@ -64,8 +64,9 @@ Quick consume `free-research` en dos turnos acotados (analisis de evidencia y
 sintesis), con afinidad, ranking congelado y checkpoint por turno. Cada intento
 consume un paso del mismo presupuesto. Los fallbacks respetan herramientas,
 contexto, privacidad, gratuidad y disponibilidad; los proveedores externos ya
-soportados reciben solo su credencial `FREE_ROUTER_*` seleccionada. Researcher y
-verifier de deep mantienen su adapter pagado y presupuesto independiente.
+soportados reciben solo su credencial `FREE_ROUTER_*` seleccionada. Deep usa el
+mismo perfil gratuito por defecto (#662), con grupo nativo A primero y orden
+del perfil dentro de cada grupo; quick conserva su orden vigente.
 
 Decision de degradacion: ranking o catalogo ausente, invalido o caducado,
 router deshabilitado (`RESEARCH_FREE_ROUTER_ENABLED`, defecto `false` en
@@ -93,11 +94,12 @@ split y en `Per-agent detail`.
 
 Quick live por defecto: el puente de ticket, la tool de submit y la
 receta `investigar` usan `quick` salvo que el ticket nombre `deep`.
-Deep exige presupuesto efectivo positivo y falla cerrado (`forbidden`)
-con presupuesto cero, sin degradar a quick. La selección deep se define con criterios explícitos (§47:
+Deep gratuito admite presupuesto pagado cero. Solo `deep_paid_opt_in: true`
+exige presupuesto efectivo positivo y falla cerrado (`forbidden`) con cero.
+La selección deep se define con criterios explícitos (§47:
 brecha de cobertura desde un brief quick previo, verificación
 independiente, decisión que desbloquea gasto/frontera/migración y
-presupuesto pagado positivo); la admisión es en vivo bajo la política
+presupuesto pagado positivo cuando se solicita DeepSeek); la admisión sigue la política
 efectiva (#641) y el contrato se verifica con servicio simulado.
 
 La corrida admite una investigación bajo el consumidor del ticket
@@ -307,13 +309,26 @@ Runbook productivo (Owner, ya autorizado; sin editar `.env` en el repo):
 
 ## Deep
 
-Deep usa fases HTTP controladas por el servicio, sin llamadas auxiliares de CLI.
+Deep ejecuta researcher/verifier mediante `free-router` + OpenCode por defecto,
+con coste marginal de modelo $0 y sin reservas DeepSeek. Usa los ajustes existentes
+`RESEARCH_FREE_ROUTER_ENABLED`, `RESEARCH_FREE_ROUTER_SNAPSHOT_MAX_AGE_HOURS` y
+`RESEARCH_OPENCODE_*`, el broker montado y el aislamiento obligatorio del runtime.
+Cada fase abre contexto nuevo, conserva afinidad de modelo y guarda resultados,
+evidencia, pasos y checkpoints para reanudar sin repetir fases terminadas ni efectos
+de herramientas. Ruta gratuita no disponible deja `blocked` con `failure_reason`;
+nunca activa un modelo estático ni DeepSeek. El runtime actual no soporta `musej`
+con esa frontera: no se añade una ejecución CLI sin aislamiento equivalente.
+
+Solo para casos nombrados por el Owner, una petición HTTP/job con
+`deep_paid_opt_in: true` selecciona DeepSeek HTTP. La bandera es estrictamente
+booleana, se persiste y distingue la identidad idempotente; su ausencia, incluso
+en jobs antiguos, selecciona gratuito. No cambia los límites ni autoriza crédito.
 Requiere `RESEARCH_DEEP_API_KEY`, `RESEARCH_DEEP_MODEL`, precios máximos de entrada y
 salida por millón de tokens y `RESEARCH_DEEP_ACCOUNT_CEILING_USD`. La clave es una
 configuración explícita; puede referenciar `${DEEPSEEK_API_KEY}` en el `.env`.
 Sin ruta privada compatible, solo se admiten fases públicas.
 
-También se exige presupuesto efectivo positivo: mínimo entre
+Solo esta selección pagada exige presupuesto efectivo positivo: mínimo entre
 `RESEARCH_PAID_SPEND_USD` y `research.paid_budget_usd` del proyecto. Se reserva antes
 del HTTP contra la cuenta compartida y el job; un fallo ambiguo conserva la
 reserva. No hay topups ni reintentos del modelo. Las tarifas estiman un máximo;
@@ -328,7 +343,8 @@ Los créditos nativos siguen siendo otra unidad y no compran presupuesto USD.
 
 `GET /api/research/jobs/{id}` expone `provider_status` por job, sin secretos:
 `configured` indica prerrequisitos de entorno completos; `mounted`, adapter
-y ledger presentes en ese proceso; `verified: null`, ninguna llamada correcta
+y ledger presentes para proveedores pagados, runtime para `deep-free`;
+`deep` sigue identificando DeepSeek opt-in. `verified: null`, ninguna llamada correcta
 observada en ese job. Pasa a `true` tras búsqueda/extracción correcta o ambas
 fases researcher/verifier; no certifica facturación, calidad ni producción.
 La validación #641 usa servicio, HTTP y cuotas simulados sin red ni LLM vivo
@@ -347,11 +363,17 @@ soporte insuficiente producen `partial`.
 La muestra de aceptación pública requiere una sesión Owner de validación separada:
 
 ```bash
-./.venv/bin/python scripts/research_deep_probe.py --use-approved-budget --output /tmp/research-pilot-NUEVO
+./.venv/bin/python scripts/research_deep_probe.py --output /tmp/research-pilot-NUEVO
 ```
 
-Los diez casos usan Mongo y evidencia separados; las reservas del modelo usan
-la cuenta real compartida. Revisar todos los claims contra los blobs guardados,
+Los diez casos gratuitos usan Mongo, workspaces y evidencia separados; necesitan
+el catálogo/ranking vigente, CLI aislado y el broker existente accesible para su
+catálogo de herramientas (las fases no emiten capabilities de adquisición).
+El antiguo `--use-approved-budget` sigue siendo compatible y no selecciona pago.
+Solo `--paid-deepseek --use-approved-budget --case ID` selecciona casos pagados;
+sus reservas usan la cuenta real compartida bajo la misma política y ledger.
+Este re-run vivo corresponde al Owner después del merge, en sesión separada;
+los tests del builder usan únicamente dobles. Revisar claims contra blobs guardados,
 registrar denominadores y separar estimación de reconciliación. Las pruebas con
 fixtures comprueban contratos, no calidad real.
 

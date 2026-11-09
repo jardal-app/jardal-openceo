@@ -118,7 +118,7 @@ class ModelLedgerTests(unittest.IsolatedAsyncioTestCase):
         self.settings = SimpleNamespace(RESEARCH_DEEP_API_KEY="SECRET_CANARY", RESEARCH_DEEP_MODEL="explicit",
             RESEARCH_DEEP_INPUT_USD_PER_MILLION="0.10", RESEARCH_DEEP_OUTPUT_USD_PER_MILLION="0.20",
             RESEARCH_DEEP_ACCOUNT_CEILING_USD="0.010000")
-        self.job = {**support.job_doc(), "paid_budget_micro_usd": 5000}
+        self.job = {**support.job_doc(), "paid_budget_micro_usd": 5000, "deep_paid_opt_in": True}
     async def asyncTearDown(self):
         await self.repo.db.client.drop_database("openceo_test_deep_ledger")
         await self.repo.close()

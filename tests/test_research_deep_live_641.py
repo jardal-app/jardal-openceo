@@ -60,7 +60,7 @@ def config():
 
 def request(**changes):
     return ResearchJobRequest(**{"project_key": PROJECT, "purpose": "brief", "mode": "deep",
-                                "question": "Revenue?", **changes})
+                                "question": "Revenue?", "deep_paid_opt_in": True, **changes})
 
 
 class MemoryLedger:
@@ -151,7 +151,7 @@ async def test_zero_budget_denies_deep_before_persistence(side):
     with pytest.raises(ResearchPolicyError):
         await service.submit(request(), principal=PRINCIPAL, project_cfg=cfg)
     assert not repo.jobs
-    await service.submit(request(mode="quick"), principal=PRINCIPAL, project_cfg=cfg)
+    await service.submit(request(mode="quick", deep_paid_opt_in=False), principal=PRINCIPAL, project_cfg=cfg)
 
 
 @pytest.mark.anyio

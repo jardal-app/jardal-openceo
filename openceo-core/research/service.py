@@ -280,7 +280,11 @@ class ResearchService:
             project_cfg=project_cfg,
             settings=self._settings,
         )
-        if request.mode.value == "deep" and not policy.paid_budget_available():
+        if request.deep_paid_opt_in and request.mode.value != "deep":
+            raise ResearchPolicyError("deep_paid_opt_in solo se admite para deep")
+        if request.mode.value == "deep" and policy.classification.value != "public":
+            raise ResearchPolicyError("Deep solo admite clasificacion public")
+        if request.deep_paid_opt_in and not policy.paid_budget_available():
             raise ResearchPolicyError("Deep requiere presupuesto pagado efectivo positivo")
         limits = policy.limits
         if effective_limits is not None:
@@ -292,6 +296,7 @@ class ResearchService:
             "owner_id": policy.owner_id,
             "purpose": request.purpose,
             "mode": request.mode.value,
+            "deep_paid_opt_in": request.deep_paid_opt_in,
             "question": request.question,
             "request_fingerprint": request.fingerprint(),
             "idempotency_key": request.idempotency_key,
@@ -386,8 +391,10 @@ class ResearchService:
                     candidates, searches = await self._discover(job, scope, budget, limits, coverage)
                     await self._read_pages(job, scope, budget, limits, candidates, evidence_rows, coverage)
                 if job.get("mode") == "deep":
-                    from research.deep import DeepResearch
-                    result = await DeepResearch(self, self._deps.deep_model).synthesize(job, budget, evidence_rows, coverage)
+                    from research.deep import DeepResearch, FreeDeepModel
+                    model = (self._deps.deep_model if job.get("deep_paid_opt_in") is True else
+                             FreeDeepModel(self, job, scope, budget, evidence_rows, coverage))
+                    result = await DeepResearch(self, model).synthesize(job, budget, evidence_rows, coverage)
                     if result is None and evidence_rows:
                         result = self._parse_report(job, '{"summary":"Deep research incompleto","claims":[]}', evidence_rows, coverage)
                 else:
@@ -405,6 +412,7 @@ class ResearchService:
                          "evidence_ids": sorted(evidence_rows),
                          "coverage_gaps": [gap.model_dump(mode="json") for gap in coverage],
                          "free_research": {**job["free_research"], "search_requests": searches},
+                         "deep_execution": job.get("deep_execution", {}),
                          "provider_status": job.get("provider_status", {}),
                          "lease_expires_at": None},
             ) or await self._deps.repo.get_research_job(research_id)
@@ -877,8 +885,9 @@ class ResearchService:
             updates["deep_execution"] = job["deep_execution"]
         if "provider_status" in job:
             phases = {row["phase"] for row in job.get("deep_execution", {}).get("phase_usage", [])}
-            if "deep" in job["provider_status"] and "researcher-1" in phases and "verifier" in phases:
-                job["provider_status"]["deep"]["verified"] = True
+            provider = "deep" if job.get("deep_paid_opt_in") is True else "deep-free"
+            if provider in job["provider_status"] and "researcher-1" in phases and "verifier" in phases:
+                job["provider_status"][provider]["verified"] = True
             updates["provider_status"] = job["provider_status"]
         if result is not None:
             if coverage is not None:

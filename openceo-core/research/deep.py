@@ -9,14 +9,84 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from dataclasses import replace
+from datetime import timezone
 
+from model_routing import research_wiring as wiring
+from model_routing.models import RouterPolicy
 from research.contracts import (CoverageReason, ResearchCoverageGap, ResearchJobResult,
                                 ResearchJobStatus, ResearchUsage, VerificationVerdict)
-from research.deep_model import DeepModelError
+from research.deep_model import DeepModelError, PhaseOutcome
+from research.free_profile import FreeResearch
 
 
 def claim_digest(claim):
     return hashlib.sha256(json.dumps(claim, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+class FreeDeepModel(FreeResearch):
+    controlled_calls = True
+    manages_budget = True
+    name = "free-research"
+
+    def __init__(self, *args):
+        super().__init__(*args, plan=["researcher-1", "researcher-2", "verifier", "correction", "verifier-final"],
+                         routing_policy=RouterPolicy(selection_policy="native_first"))
+        self.state.setdefault("deep_phases", {})
+
+    async def run_phase(self, *, job, phase, prompt, seconds):
+        try:
+            return await self._phase(job, phase, prompt)
+        except wiring.SessionBlocked as exc:
+            self.state["blocked_code"] = exc.code
+            await self._persist()
+            raise
+
+    async def _phase(self, job, phase, prompt):
+        if any(row.get("expires_at") and row["expires_at"].replace(
+                tzinfo=row["expires_at"].tzinfo or timezone.utc) <= self.service._clock()
+               for row in self.evidence.values()):
+            raise wiring.SessionBlocked(wiring.BLOCKED_PROVIDER, "retained evidence expired; a new research job is required")
+        digest = hashlib.sha256(prompt.encode()).hexdigest()
+        saved = self.state["deep_phases"].get(phase)
+        if saved and saved["digest"] == digest:
+            return PhaseOutcome(saved["text"], estimated_micro_usd=0, usage={"route": self.name, "cached": True})
+        if self.state["phase"] != phase:
+            self.runtime_session = self.runtime_model = None
+        self.state["phase"] = phase
+        if self.session is None:
+            self.session = self._open_session()
+        # Deep phases use only the supplied evidence; tools remain service-owned.
+        self.credential = ""
+        outcome = await self.session.run_turn_async(
+            prompt, self._invoke, pending=[phase], decisions=[phase],
+            queries_and_sources=[(eid, row["url"]) for eid, row in self.evidence.items()],
+            validated=list(self.evidence), artifacts=[job["research_id"]])
+        self.state["deep_phases"][phase] = {"digest": digest, "text": outcome.text}
+        wiring.record_checkpoint(wiring.checkpoints_dir(), replace(outcome.checkpoint, pending=()))
+        await self._persist()
+        return PhaseOutcome(outcome.text, estimated_micro_usd=0,
+                            usage={"route": self.name, "model": outcome.model_effective})
+
+    async def _invoke(self, turn):
+        before = self.budget.steps_left
+        try:
+            return await super()._invoke(turn)
+        finally:
+            self.state["deep_model_calls"] = self.state.get("deep_model_calls", 0) + before - self.budget.steps_left
+            await self._persist()
+
+    def _attempt(self, outcome):
+        if wiring._managed_cost(outcome.events):
+            self.state["billing_uncertain"] = True
+            raise wiring.SessionBlocked(wiring.BLOCKED_PROVIDER, "nonzero cost on free deep route")
+        return super()._attempt(outcome)
+
+    def close(self):
+        if self.session is not None:
+            self.session.close()
+        if self.store is not None:
+            self.store.close()
 
 
 class DeepResearch:
@@ -38,19 +108,21 @@ class DeepResearch:
         async def call(phase, payload):
             if job["research_id"] in self.service._cancelled:
                 raise DeepModelError("cancelled")
-            if not budget.consume():
+            managed = getattr(self.model, "manages_budget", False)
+            if not managed and not budget.consume():
                 raise DeepModelError("budget_exhausted")
             async with __import__("asyncio").timeout(budget.remaining_seconds):
-                await self.service._deps.slots.acquire_call()
+                if not managed:
+                    await self.service._deps.slots.acquire_call()
                 try:
                     phases.append(phase)  # includes failed/ambiguous attempts
                     began = time.monotonic()
                     outcome = await self.model.run_phase(job=job, phase=phase,
                         prompt=json.dumps(payload, ensure_ascii=False, default=str), seconds=budget.remaining_seconds)
                 finally:
-                    await self.service._deps.slots.release_call()
+                    if not managed:
+                        await self.service._deps.slots.release_call()
             estimates.append(outcome.estimated_micro_usd)
-            outputs.append({"phase": phase, "usage": outcome.usage, "latency_seconds": time.monotonic() - began})
             from research.service import extract_report_payload
             try:
                 result = json.loads(outcome.text)
@@ -60,6 +132,7 @@ class DeepResearch:
                 result = None
             if result is None:
                 raise DeepModelError("malformed_output")
+            outputs.append({"phase": phase, "usage": outcome.usage, "latency_seconds": time.monotonic() - began})
             return result
 
         # Exact copies are one source; consumers see duplicate/independence caveats.
@@ -155,7 +228,13 @@ class DeepResearch:
             return None
         finally:
             calls = job.get("deep_http_attempts", 0) if getattr(self.model, "measures_calls", False) else len(phases)
+            if getattr(self.model, "manages_budget", False):
+                calls = job["free_research"].get("deep_model_calls", 0)
+                self.model.close()
             job["deep_execution"] = {"phases": phases, "model_calls": calls, "auxiliary_calls": 0,
                                      "phase_usage": outputs, "verification_history": history,
                                      "uncertain": len(estimates) != len(phases) or any((o["usage"] or {}).get("billing_uncertain") for o in outputs),
                                      "estimated_micro_usd": sum(estimates) if estimates and len(estimates) == len(phases) and all(x is not None for x in estimates) else None}
+            if getattr(self.model, "manages_budget", False):
+                uncertain = bool(job["free_research"].get("billing_uncertain"))
+                job["deep_execution"].update(estimated_micro_usd=None if uncertain else 0, uncertain=uncertain)

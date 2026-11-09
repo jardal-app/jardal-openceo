@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class FreeResearch:
-    def __init__(self, service, job, scope, budget, evidence, coverage):
+    def __init__(self, service, job, scope, budget, evidence, coverage, *, plan=None, routing_policy=None):
         self.service, self.job, self.scope, self.budget = service, job, scope, budget
         self.evidence, self.coverage = evidence, coverage
         self.state = job.setdefault("free_research", {"phase": "analysis"})
@@ -31,6 +31,8 @@ class FreeResearch:
         self.store = None
         self.runtime_session = self.state.get("runtime_session")
         self.runtime_model = self.state.get("runtime_model")
+        self.plan = plan or ["analysis", "synthesis"]
+        self.routing_policy = routing_policy
 
     async def synthesize(self):
         if not self.evidence:
@@ -98,7 +100,8 @@ class FreeResearch:
             snapshot = wiring.load_session_snapshot(max_age_hours=options["snapshot_max_age_hours"])
             if snapshot is None:
                 raise wiring.ResearchRoutingError("free-research rankings missing")
-            selection = select_targets(wiring.FREE_RESEARCH_PROFILE, self.catalog, snapshot.document)
+            selection = select_targets(wiring.FREE_RESEARCH_PROFILE, self.catalog, snapshot.document,
+                                       policy=self.routing_policy)
             index = {dep.deployment_id: (entry, dep) for entry in self.catalog.entries for dep in entry.deployments}
             candidates = []
             for target in selection.targets:
@@ -110,13 +113,13 @@ class FreeResearch:
                                             deployment.provider, target.quality))
             return wiring.ResearchSession(
                 research_id=self.job["research_id"], candidates=candidates, store=self.store,
-                objective=self.job["question"], plan=["analysis", "synthesis"],
+                objective=self.job["question"], plan=self.plan,
                 rankings_snapshot=snapshot.file_sha256)
         except (OSError, ValueError, wiring.ResearchRoutingError, NoEligibleTarget) as exc:
             if not wiring.checkpoint_path(wiring.checkpoints_dir(), self.job["research_id"]).exists():
                 wiring.record_checkpoint(wiring.checkpoints_dir(), wiring.ResearchCheckpoint(
                     research_id=self.job["research_id"], session_id=self.job["research_id"], turn=0,
-                    objective=self.job["question"], plan=("analysis", "synthesis"),
+                    objective=self.job["question"], plan=tuple(self.plan),
                     queries_and_sources=tuple((eid, row["url"]) for eid, row in self.evidence.items()),
                     pending=(self.state["phase"],)))
             reason = str(exc).replace(str(wiring.rankings_path()), "rankings").replace(
