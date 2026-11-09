@@ -191,36 +191,26 @@ class ResearchDependencies:
     slots: JobSlots = field(default_factory=JobSlots)
 
 
-def extract_report_payload(text: str) -> dict[str, Any] | None:
-    """Extrae el objeto JSON del informe aunque el modelo lo envuelva en prosa.
-
-    Los modelos libres suelen escribir una frase antes del JSON o meterlo en un bloque de
-    codigo. Exigir `json.loads(texto_completo)` convertia esa prosa en un `failed` sin
-    sintesis, cuando el informe **si** venia. No se inventa nada: se buscan objetos
-    balanceados y se prefiere el que tiene `claims` o `summary`; si no hay ninguno, no hay
-    informe y el job sigue fallando con su causa.
-    """
+def extract_report_payload(text: str, *, required_key: str | None = None) -> dict[str, Any] | None:
+    """Extrae JSON envuelto en prosa; exige el array indicado para fases deep."""
     raw = (text or "").strip()
     if not raw:
         return None
     candidates: list[dict[str, Any]] = []
+    decoder = json.JSONDecoder()
     for start, char in enumerate(raw):
         if char != "{":
             continue
-        depth = 0
-        for end in range(start, len(raw)):
-            if raw[end] == "{":
-                depth += 1
-            elif raw[end] == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        payload = json.loads(raw[start : end + 1])
-                    except (ValueError, TypeError):
-                        break
-                    if isinstance(payload, dict):
-                        candidates.append(payload)
-                    break
+        try:
+            payload, _ = decoder.raw_decode(raw, start)
+        except ValueError:
+            continue
+        if isinstance(payload, dict):
+            if required_key is not None:
+                if isinstance(payload.get(required_key), list):
+                    return payload
+            else:
+                candidates.append(payload)
     if not candidates:
         return None
     for payload in candidates:
@@ -373,9 +363,13 @@ class ResearchService:
             classification=Classification(job.get("classification") or "public"),
         )
         limits = job.get("effective_limits") or {}
+        seconds = int(limits.get("seconds", 120))
+        if job.get("mode") == "deep" and job.get("deep_paid_opt_in") is not True:
+            from research.deep import FREE_DEEP_SECONDS
+            seconds = min(seconds, FREE_DEEP_SECONDS)
         budget = StepBudget(
             steps=int(job.get("free_research", {}).get("steps_left", limits.get("steps", 8))),
-            seconds=int(limits.get("seconds", 120)),
+            seconds=seconds,
             clock=self._clock,
         )
         evidence_rows: dict[str, dict[str, Any]] = {}
@@ -392,8 +386,11 @@ class ResearchService:
                     await self._read_pages(job, scope, budget, limits, candidates, evidence_rows, coverage)
                 if job.get("mode") == "deep":
                     from research.deep import DeepResearch, FreeDeepModel
-                    model = (self._deps.deep_model if job.get("deep_paid_opt_in") is True else
-                             FreeDeepModel(self, job, scope, budget, evidence_rows, coverage))
+                    if job.get("deep_paid_opt_in") is True:
+                        model = self._deps.deep_model
+                    else:
+                        model = FreeDeepModel(self, job, scope, budget, evidence_rows, coverage)
+                        await model.load_evidence()
                     result = await DeepResearch(self, model).synthesize(job, budget, evidence_rows, coverage)
                     if result is None and evidence_rows:
                         result = self._parse_report(job, '{"summary":"Deep research incompleto","claims":[]}', evidence_rows, coverage)

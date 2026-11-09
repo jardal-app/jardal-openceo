@@ -156,7 +156,7 @@ class FreeResearch:
                 owner_id=self.job["owner_id"], prompt=turn.prompt,
                 workspace=self.service._workspace_for(self.job), model=model,
                 session_id=self.runtime_session if self.runtime_model == model else None,
-                allow_session_resume=False, timeout_seconds=max(1, int(self.budget.remaining_seconds)),
+                allow_session_resume=False, timeout_seconds=self._runtime_timeout(),
                 tool_credential=self.credential, provider=deployment.provider, provider_config=provider_config))
         except (RuntimeCancelled, RuntimeConfigurationError, RuntimeUnavailable, RuntimeOutputTooLarge) as exc:
             if exc.outcome is not None:
@@ -185,6 +185,9 @@ class FreeResearch:
             if extract_report_payload(attempt.text) is None:
                 return replace(attempt, text="", complete=False, error_text="empty response without usable text")
         return attempt
+
+    def _runtime_timeout(self):
+        return max(1, int(self.budget.remaining_seconds))
 
     def _attempt(self, outcome):
         events = list(outcome.events)

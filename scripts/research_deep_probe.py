@@ -39,6 +39,12 @@ def question(kind, subject, role):
     return subject + " Responde con hasta tres afirmaciones, inferencias distinguidas y extractos exactos; declara los límites de estas fuentes."
 
 
+def _probe_limits(paid_deepseek):
+    from research.deep import FREE_DEEP_SECONDS
+    return {"search_requests": 0, "pages": 1, "steps": 10,
+            "seconds": 120 if paid_deepseek else FREE_DEEP_SECONDS}
+
+
 async def main(args):
     if args.paid_deepseek and (not args.use_approved_budget or not args.case):
         raise SystemExit("Paid DeepSeek requires --use-approved-budget and explicit --case selections")
@@ -47,6 +53,7 @@ async def main(args):
     from research.budget import ResearchBudgetLedger, ResearchPolicyLedger
     from research.contracts import ResearchJobRequest
     from research.deep_model import BudgetedDeepModel
+    from research.deep import FREE_DEEP_PHASE_SECONDS
     from research.policies import Principal
     from research.wiring import build_research_service
     from research.broker_mount import broker_url_for
@@ -77,14 +84,16 @@ async def main(args):
     await service._deps.events.initialize()
     principal = Principal(user_id="research-acceptance", permissions=frozenset({"run_research", "read_research"}),
                           allowed_projects=frozenset({"jardal-openceo"}))
+    limits = _probe_limits(args.paid_deepseek)
     cfg = {"research": {"enabled": True, "allowed_modes": ["deep"], "classification_ceiling": "public",
         "paid_budget_usd": settings.RESEARCH_PAID_SPEND_USD, "adapters": {},
-        "limits": {"deep": {"search_requests": 0, "pages": 1, "steps": 10, "seconds": 120}}}}
+        "limits": {"deep": limits}}}
     manifest = {"model": settings.RESEARCH_DEEP_MODEL if args.paid_deepseek else None,
         "profile": None if args.paid_deepseek else "free-research",
         "route": "deepseek-http" if args.paid_deepseek else "free-router+opencode",
         "version": None, "version_pin": None if args.paid_deepseek else settings.RESEARCH_OPENCODE_VERSION_PIN,
         "rubric": "All material claims reviewed against persisted exact excerpts; no invented/foreign citations; contradictions retained; partial when insufficient; dates and attribution explicit.",
+        "limits": limits, "phase_caps_seconds": None if args.paid_deepseek else FREE_DEEP_PHASE_SECONDS,
         "reconciled_micro_usd": None, "cases": []}
     try:
         for case_id, kind, subject, role, url in CASES:
@@ -93,7 +102,7 @@ async def main(args):
             request = ResearchJobRequest(project_key="jardal-openceo", purpose="acceptance-d", mode="deep",
                 deep_paid_opt_in=args.paid_deepseek,
                 question=question(kind, subject, role), seed_urls=[url],
-                limits={"search_requests": 0, "pages": 1, "steps": 10, "seconds": 120})
+                limits=limits)
             job = await service.submit(request, principal=principal, project_cfg=cfg)
             # Probe database only: this never claims jobs belonging to production.
             began = time.monotonic()

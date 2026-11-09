@@ -360,6 +360,32 @@ deben pertenecer a la evidencia adquirida. Un veredicto del modelo es una opini�
 con soporte comprobable; no prueba independencia ni certeza. Contradicciones o
 soporte insuficiente producen `partial`.
 
+Deep gratuito exige un objeto JSON con el array de la fase (`claims` o
+`verdicts`); solo tolera envolturas de texto alrededor de ese JSON. Una respuesta
+verifier en prosa recibe como máximo un reintento de formato, con contexto nuevo,
+dentro del mismo cupo de tiempo y pasos. Nunca se convierten etiquetas en prosa en
+veredictos. Si sigue malformada, los claims quedan sin verificar y el job `partial`.
+Los extractos deben ser subcadenas contiguas exactas del texto normalizado que
+persiste el almacén para una fuente citada; las fases reciben ese mismo texto.
+La ruta gratuita relee los blobs con scope de proyecto/owner antes de las fases;
+un blob inaccesible deja el job bloqueado y se comprueba otra vez al reanudar.
+Se rechazan fragmentos unidos, incluso si el verifier los aprueba.
+Se retiran del resultado también cuando falla una fase posterior; la corrección
+puede sustituirlos por citas separadas y se verifica de nuevo.
+
+La ruta gratuita limita researcher-1/2 a 90 s cada uno, verifier/final a 120 s
+cada uno (incluido su reintento de formato) y correction a 60 s. Cada intento
+runtime de verifier recibe como máximo 90 s. Todo cuenta también la espera de
+slot, recuperación del router y persistencia. El job gratuito tiene un máximo de
+510 s: suma de cupos (480 s) más 30 s de margen para adquisición; siempre prevalece
+un deadline efectivo menor. El probe gratuito solicita esos 510 s y registra los
+límites y cupos en su manifest. La ruta pagada conserva sus límites y los 120 s
+del probe; no se amplía su autorización ni se añaden reintentos pagados.
+
+`native_first` ordena las rutas nativas antes de las externas al abrir una sesión;
+la disponibilidad puede descartarlas y una reanudación conserva el orden y modelo
+del checkpoint. El proveedor servido por sí solo no demuestra un fallo de política.
+
 La muestra de aceptación pública requiere una sesión Owner de validación separada:
 
 ```bash
