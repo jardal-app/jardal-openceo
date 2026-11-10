@@ -23,7 +23,8 @@ opcional para extracción. `grounding` sigue apagado, `read_provider: http`
 y `allowed_account_refs: []`. `paid_budget_usd: "2.00"` iguala el techo
 de servidor autorizado; el ceiling deep existente sigue en 2.00. La política
 efectiva toma el mínimo servidor/proyecto: el YAML no activa flags ni eleva
-ningún techo del entorno. Los límites quick son 3 búsquedas/5 páginas/8 pasos/120 s;
+ningún techo del entorno. Los límites quick son 3 búsquedas/5 páginas/8 pasos/300 s
+(#694: techo 300 para el turno de razonamiento Demo B);
 deep, 15/25/30/900, siempre recortados por servidor y petición.
 
 El servicio está encendido en producción (`openceo-core/.env:142`

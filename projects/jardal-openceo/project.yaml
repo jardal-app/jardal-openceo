@@ -103,7 +103,9 @@ research:
   read_provider: http
   paid_budget_usd: "2.00"
   limits:
-    quick: { search_requests: 3, pages: 5, steps: 8, seconds: 120 }
+    # quick.seconds 300 (#694): el minimo servidor/proyecto debe dejar pasar el
+    # techo RESEARCH_QUICK_MAX_SECONDS=300 del turno de razonamiento Demo B.
+    quick: { search_requests: 3, pages: 5, steps: 8, seconds: 300 }
     deep: { search_requests: 15, pages: 25, steps: 30, seconds: 900 }
   allowed_account_refs: []
 

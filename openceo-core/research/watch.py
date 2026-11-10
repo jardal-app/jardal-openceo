@@ -775,6 +775,8 @@ class WatchEngine:
         # reconcilia el mismo job; un spec editado abre un lote distinto.
         batch = digest(schedule_fingerprint(schedule), *sorted(keys), size=32)
         urls = [row["url"] for row in pending if row.get("url")]
+        # Sin limites explicitos (#694): request.limits None resuelve al techo
+        # quick del servidor y el proyecto recorta por su propio minimo (300).
         admitted = await admit_job(
             self._service, execution, {"question": question, "seed_urls": urls},
             idempotency_key=f"{prefix}:{sid}:{batch}",
