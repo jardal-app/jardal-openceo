@@ -2607,6 +2607,54 @@ async def _mission_guide_section(
     return "\n".join(lines)
 
 
+#: Separator between a research executor contract and the request.
+_PEDIDO_ORIGINAL_REQUEST_MARKER = "\n\nORIGINAL REQUEST:\n"
+
+#: Suffix the pedido decision appends for a §9 research call (642).
+_PEDIDO_RESEARCH_DECISION_MARKER = "\n\nRESEARCH DECISION (§9):"
+
+
+def _pedido_original_request(description: str) -> str:
+    """The user request underneath prior research-executor rewrites.
+
+    A research decision rewrites the live description as
+    ``<executor contract>\\n\\nORIGINAL REQUEST:\\n<request>``; a
+    re-decision builds on ``<request>``, never nests the prior
+    contract. The last marker wins, so an already-nested backlog
+    heals to the true request.
+    """
+    idx = description.rfind(_PEDIDO_ORIGINAL_REQUEST_MARKER)
+    if idx == -1:
+        return description
+    return description[idx + len(_PEDIDO_ORIGINAL_REQUEST_MARKER):]
+
+
+def _strip_research_decision_blocks(description: str) -> str:
+    """Remove prior §9 decision blocks the engine appended.
+
+    The pedido decision appends one ``RESEARCH DECISION (§9)`` line
+    for non-research tickets; a re-decision replaces it instead of
+    accumulating a new line every time (755). Each block runs to the
+    next blank line or the end, so user text after a blank line is
+    preserved; the loop collapses a backlog of duplicates.
+    """
+    text = description
+    marker = _PEDIDO_RESEARCH_DECISION_MARKER
+    while True:
+        idx = text.rfind(marker)
+        if idx == -1:
+            break
+        tail = text[idx + len(marker):]
+        blank = tail.find("\n\n")
+        if blank == -1:
+            text = text[:idx]
+            continue
+        remainder = tail[blank + 2:]
+        head = text[:idx]
+        text = remainder if not head else head + "\n\n" + remainder
+    return text
+
+
 async def _plan_pedido_inner(
     env: ObjectiveEnv,
     ticket: Mapping[str, Any],
@@ -2745,12 +2793,24 @@ async def _plan_pedido_inner(
         "params": params,
     }
     if planned.target_agent == "research":
+        original = _strip_research_decision_blocks(
+            _pedido_original_request(str(ticket.get("description") or "")))
         updates["description"] = (_planned_description(planned)
-                                  + "\n\nORIGINAL REQUEST:\n"
-                                  + str(ticket.get("description") or ""))
-    elif planned.research is not None:
-        updates["description"] = (str(ticket.get("description") or "")
-            + f"\n\nRESEARCH DECISION (§9): {planned.research.reason}")
+                                  + _PEDIDO_ORIGINAL_REQUEST_MARKER
+                                  + original)
+    else:
+        base = _strip_research_decision_blocks(
+            _pedido_original_request(str(ticket.get("description") or "")))
+        if planned.research is not None:
+            updates["description"] = (
+                base + f"{_PEDIDO_RESEARCH_DECISION_MARKER} "
+                f"{planned.research.reason}")
+        elif base != str(ticket.get("description") or ""):
+            # A re-decision that omits research clears the stale §9
+            # block (755/F1): params already drops it, so the live
+            # description (and its ERP mirror) must not keep it. The
+            # guard skips a redundant ERP write when already clean.
+            updates["description"] = base
     if planned.coding_tool is not None:
         updates["coding_tool"] = planned.coding_tool.value
     elif ticket.get("coding_tool"):
