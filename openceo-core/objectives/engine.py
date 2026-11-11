@@ -100,11 +100,15 @@ class ObjectiveErp(Protocol):
 
     async def get_attachment(self, attachment: str) -> dict[str, Any]: ...
 
-    async def update_description(self, target: str, description: str) -> None: ...
+    async def update_description(self, target: str, description: str) -> None:
+        """Target is the business mirror TASK name, never the task_id."""
+        ...
 
     async def attach_research_briefs(
         self, target: str, briefs: Sequence[Mapping[str, Any]],
-    ) -> None: ...
+    ) -> None:
+        """Target is the business mirror TASK name, never the task_id."""
+        ...
 
     async def retire(self, identifier: str, reason: str) -> dict[str, Any]:
         """Cancel a child in the business and its execution mirror."""
@@ -2753,7 +2757,12 @@ async def _plan_pedido_inner(
                     "material_failure", "review_reason"):
             params.pop(key, None)
     if "description" in updates and env.erp is not None:
-        await env.erp.update_description(task_id, updates["description"])
+        name = str(_ticket_mirror(ticket).get("name") or "")
+        if not name:
+            raise ObjectiveErpError(
+                "cannot save the research decision text: "
+                f"{task_id} has no business mirror")
+        await env.erp.update_description(name, updates["description"])
     await env.patch_task(task_id, updates)
     spend = spend_mod.check_plan_spend(
         costs=spend_mod.collect_plan_costs(result),
@@ -3366,7 +3375,12 @@ async def _apply_contract_completions(
             continue  # already contracted: idempotent re-drive
         if planned.research and planned.research.brief_ids:
             assert env.erp is not None
-            await env.erp.attach_research_briefs(task_id, [
+            name = str(_ticket_mirror(current).get("name") or "")
+            if not name:
+                raise ObjectiveErpError(
+                    "cannot attach research briefs: "
+                    f"{task_id} has no business mirror")
+            await env.erp.attach_research_briefs(name, [
                 (research_briefs or {})[key] for key in planned.research.brief_ids])
         params = dict(current.get("params") or {})
         params.update(_planned_params(planned))
@@ -3378,7 +3392,12 @@ async def _apply_contract_completions(
         if planned.research is not None or planned.target_agent == "research":
             updates["description"] = _planned_description(planned)
             if env.erp is not None:
-                await env.erp.update_description(task_id, updates["description"])
+                name = str(_ticket_mirror(current).get("name") or "")
+                if not name:
+                    raise ObjectiveErpError(
+                        "cannot save the research decision text: "
+                        f"{task_id} has no business mirror")
+                await env.erp.update_description(name, updates["description"])
         if planned.coding_tool is not None:
             updates["coding_tool"] = planned.coding_tool.value
         if planned.review is not None:
@@ -3585,7 +3604,12 @@ async def _create_planned_tickets(
         if brief_ids:
             assert env.erp is not None
             try:
-                await env.erp.attach_research_briefs(task_id, [
+                name = str(_ticket_mirror(row).get("name") or "")
+                if not name:
+                    raise ObjectiveErpError(
+                        "cannot attach research briefs: "
+                        f"{task_id} has no business mirror")
+                await env.erp.attach_research_briefs(name, [
                     (research_briefs or {})[ref] for ref in brief_ids])
             except Exception:
                 await env.patch_task(task_id, {"status": "waiting",

@@ -97,6 +97,10 @@ class ResearchFirstTests(unittest.IsolatedAsyncioTestCase):
         async def create(payload: dict[str, Any]) -> dict[str, Any]:
             row = dict(copy.deepcopy(payload), task_id=f"child-{len(created) + 1}",
                        status="queued")
+            params = dict(row.get("params") or {})
+            params["_mirrors"] = {
+                "erpnext": {"name": f"TASK-{row['task_id']}".upper()}}
+            row["params"] = params
             created.append(copy.deepcopy(row))
             tasks[row["task_id"]] = row
             files.events.append("create:" + row["agent_hint"])
@@ -166,10 +170,11 @@ class ResearchFirstTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["agent_hint"] for item in created], ["research", "dev"])
         self.assertIn(decision["reason"], created[-1]["description"])
         self.assertFalse(created[-1]["autorun"])
-        copied = files.files["copy-child-2"]
+        copied = files.files["copy-TASK-CHILD-2"]
         self.assertTrue(copied["private"])
+        self.assertEqual(copied["attached_to"], "TASK-CHILD-2")
         self.assertEqual(copied["content_text"], files.files["brief-642"]["content_text"])
-        self.assertLess(files.events.index("read:copy-child-2"),
+        self.assertLess(files.events.index("read:copy-TASK-CHILD-2"),
                         files.events.index("release:child-2"))
         self.assertTrue(env.tasks.tasks["child-2"]["autorun"])
         self.assertEqual(len(service.jobs), 1)
@@ -182,7 +187,8 @@ class ResearchFirstTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await engine.plan_objective(env, "OBJ-642"))["ok"])
         self.assertEqual([item["agent_hint"] for item in created], ["dev"])
         self.assertEqual(files.files, {})
-        pedido = dict(task_id="loose", title="Safe retries", project="jardal-openceo", params={})
+        pedido = dict(task_id="loose", title="Safe retries", project="jardal-openceo",
+                        params={"_mirrors": {"erpnext": {"name": "TASK-LOOSE"}}})
         env.tasks.tasks["loose"] = pedido
         out = await engine.plan_pedido(env, pedido)
         self.assertEqual(out["action"], "decided")
@@ -252,22 +258,25 @@ class ResearchFirstTests(unittest.IsolatedAsyncioTestCase):
             research=decision, completes_task_id="stub")))
         await self._objective(env)
         self._completed_brief(env, files)
-        env.tasks.tasks["stub"] = dict(task_id="stub", objective_id="OBJ-642", params={},
-                                      status="waiting", waiting_reason="routing_missing: tier")
+        env.tasks.tasks["stub"] = dict(
+            task_id="stub", objective_id="OBJ-642",
+            params={"_mirrors": {"erpnext": {"name": "TASK-STUB"}}},
+            status="waiting", waiting_reason="routing_missing: tier")
         out = await engine.plan_objective(env, "OBJ-642")
         self.assertTrue(out["ok"], out)
         self.assertEqual(created, [])
-        self.assertTrue(files.files["copy-stub"]["private"])
+        self.assertTrue(files.files["copy-TASK-STUB"]["private"])
         self.assertEqual(env.tasks.tasks["stub"]["coding_tool"], "tier_s")
         self.assertIn(decision["reason"], env.tasks.tasks["stub"]["description"])
-        self.assertIn(decision["reason"], files.descriptions["stub"])
+        self.assertIn(decision["reason"], files.descriptions["TASK-STUB"])
 
     async def test_deep_selection_reaches_simulated_service_without_downgrade(self) -> None:
         parsed = PlannedTicket.model_validate(_research(research_mode="deep", deep_criteria=dict(
             coverage_gap="Prior quick brief lacks retries", independent_verification="Conflicting docs",
             decision_stakes="Duplicate charges", paid_budget_usd="1.00")))
         env, _, _, files = self._env(_plan(parsed.model_dump(mode="json")))
-        ticket = dict(task_id="loose", project="jardal-openceo", description="Verify provider contract")
+        ticket = dict(task_id="loose", project="jardal-openceo", description="Verify provider contract",
+                      params={"_mirrors": {"erpnext": {"name": "TASK-LOOSE"}}})
         original_description = ticket["description"]
         env.tasks.tasks["loose"] = ticket
         decision = await engine.plan_pedido(env, ticket)
@@ -277,13 +286,22 @@ class ResearchFirstTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(key, patched["description"])
         self.assertIn(original_description, patched["description"])
         self.assertEqual(patched["params"]["research_mode"], "deep")
-        self.assertEqual(files.descriptions["loose"], patched["description"])
+        self.assertEqual(files.descriptions["TASK-LOOSE"], patched["description"])
         bridge, _, service, _ = _bridge()
         out = await bridge.submit(ticket="TASK-RESEARCH", project="jardal-openceo",
                                   purpose=parsed.why_now, question=parsed.goal,
                                   mode=parsed.research_mode)
         self.assertTrue(out["ok"], out)
         self.assertEqual(service.jobs[out["research_id"]]["mode"], "deep")
+
+    async def test_pedido_without_business_mirror_fails_closed(self) -> None:
+        env, _, _, files = self._env(_plan(_research()))
+        ticket = dict(task_id="loose", project="jardal-openceo",
+                      description="Verify provider contract")
+        env.tasks.tasks["loose"] = ticket
+        with self.assertRaises(engine.ObjectiveErpError):
+            await engine.plan_pedido(env, ticket)
+        self.assertEqual(files.descriptions, {})
 
     async def test_only_private_briefs_from_completed_research_in_same_objective_qualify(self) -> None:
         decision = dict(needed=True, reason="Use the brief", brief_ids=["brief-642"])
