@@ -307,6 +307,13 @@ Registro 2026-11-09 (ticket #674): `ok: true` con 1 item; el repo
 `demo-b-feed-1`. Precondición del runbook cumplida: el tick productivo lee
 releases públicamente legibles.
 
+Registro 2026-11-11: `ok: true` con 7 items (semillas `demo-b-feed-1..7`).
+Demo B productiva activa desde 2026-11-09 15:55:44Z: ticks horarios con
+`not_modified` y 0 llamadas sin cambios, 2 jobs quick admitidos con cambios a
+gasto 0 (síntesis partial por defecto de tope, TASK-2026-00703),
+identidad/vencimiento/cursor supervivientes a 3+ reinicios. La suscripción
+queda activa para que suscripciones y schedules sigan verificables.
+
 Verificación pre-flip (`tests/test_research_demo_b_643.py`, servicio simulado
 sobre Mongo real con tiempo virtual, modelo Mock intacto, sin red ni LLM vivo):
 spec exacta y topes (`demo_b_bounds_problems`), gate de ambas flags, dos
@@ -340,8 +347,11 @@ con coste marginal de modelo $0 y sin reservas DeepSeek. Usa los ajustes existen
 Cada fase abre contexto nuevo, conserva afinidad de modelo y guarda resultados,
 evidencia, pasos y checkpoints para reanudar sin repetir fases terminadas ni efectos
 de herramientas. Ruta gratuita no disponible deja `blocked` con `failure_reason`;
-nunca activa un modelo estático ni DeepSeek. El runtime actual no soporta `musej`
-con esa frontera: no se añade una ejecución CLI sin aislamiento equivalente.
+nunca activa un modelo estático ni DeepSeek. Ante agotamiento
+(`BLOCKED_NO_ELIGIBLE_MODEL`), #693 admite un único intento musej por fase con
+la misma frontera bwrap del worker (ver `Perfil gratuito del servicio`);
+disparo verificado en vivo 2026-11-11, pendiente fix del launcher
+(TASK-2026-00702).
 
 Solo para casos nombrados por el Owner, una petición HTTP/job con
 `deep_paid_opt_in: true` selecciona DeepSeek HTTP. La bandera es estrictamente
