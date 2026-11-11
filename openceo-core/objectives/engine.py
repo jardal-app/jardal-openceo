@@ -2890,9 +2890,12 @@ async def _record_and_apply_plan(
         })
         return await _objective_park(
             env, objective, "capability_gap", result.state_summary[:300])
+    needs_briefs = any(
+        item.research and item.research.brief_ids for item in result.tickets) \
+        or _pending_brief_attaches(objective)
     briefs = await _research_briefs(
-        env, await env.tasks.list_by_objective(objective_id)) if any(
-        item.research and item.research.brief_ids for item in result.tickets) else {}
+        env, await env.tasks.list_by_objective(objective_id)) \
+        if needs_briefs else {}
     completed = await _apply_contract_completions(env, objective_id, result, briefs)
     created = await _create_planned_tickets(
         env, objective, result, return_from, run_tag=run_tag, research_briefs=briefs)
@@ -3540,6 +3543,116 @@ async def create_playbook_update_questions(
     return await _park_owner_questions(env, [spec])
 
 
+#: Waiting reason while a planned ticket holds for its research briefs
+#: (OBJ-0D2EB295 F4): the attach failed and a later plan application
+#: retries it on the same ticket via ``BRIEF_ATTACH_PENDING_FIELD``.
+BRIEF_ATTACH_WAITING_REASON = "research brief attachment failed; execution held"
+
+#: Objective field with the brief attaches a failed plan application
+#: left pending: a list of ``task_id``/``key``/``brief_ids``/``run_tag``/
+#: ``held_at`` entries. The next application heals them before creating
+#: anything; new creates mint a fresh ``run_tag`` (only an explicit tag
+#: reuses keys), so a reused ``local_ref`` cannot collide with a held
+#: ticket (754 F1). The recorded tag traces the failed run.
+BRIEF_ATTACH_PENDING_FIELD = "brief_attach_pending"
+
+
+def _pending_brief_attaches(
+    objective: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Pending brief attaches a failed apply left behind (F4, defensive)."""
+    raw = objective.get(BRIEF_ATTACH_PENDING_FIELD)
+    if not isinstance(raw, list):
+        return []
+    pending: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, Mapping):
+            continue
+        brief_ids = entry.get("brief_ids")
+        if not entry.get("task_id") or not isinstance(brief_ids, list) \
+                or not all(isinstance(ref, str) for ref in brief_ids):
+            continue
+        pending.append({
+            "task_id": str(entry.get("task_id")),
+            "key": str(entry.get("key") or ""),
+            "brief_ids": [str(ref) for ref in brief_ids],
+            "run_tag": str(entry.get("run_tag") or ""),
+            "held_at": str(entry.get("held_at") or ""),
+        })
+    return pending
+
+
+async def _heal_pending_brief_attaches(
+    env: ObjectiveEnv,
+    pending: Sequence[Mapping[str, Any]],
+    research_briefs: Mapping[str, Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Retry brief attaches a failed apply left pending (F4).
+
+    Fail-soft: an entry that cannot heal stays pending for the next
+    cycle with a warning and never blocks the new plan (F3 convention).
+    Entries whose ticket is gone, terminal, or no longer held for its
+    briefs are reconciled away. Returns the entries still pending.
+    """
+    remaining: list[dict[str, Any]] = []
+    for entry in pending:
+        task_id = str(entry.get("task_id") or "")
+        brief_ids = [str(ref) for ref in (entry.get("brief_ids") or [])]
+        try:
+            current = await env.tasks.get_task(task_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("brief-attach retry: %s unreadable; keeping the hold",
+                           task_id)
+            remaining.append(dict(entry))
+            continue
+        if current is None:
+            logger.warning("brief-attach retry: %s gone; dropping the hold",
+                           task_id)
+            continue
+        if str(current.get("status") or "") in TERMINAL_TICKET_STATUS:
+            continue  # closed meanwhile: nothing left to attach to
+        if str(current.get("status") or "") != "waiting" \
+                or str(current.get("waiting_reason") or "") \
+                != BRIEF_ATTACH_WAITING_REASON:
+            continue  # released or re-parked elsewhere: reconciled away
+        missing = [ref for ref in brief_ids
+                   if ref not in (research_briefs or {})]
+        if missing:
+            logger.warning("brief-attach retry: %s still missing %s; keeping the hold",
+                           task_id, ",".join(missing))
+            remaining.append(dict(entry))
+            continue
+        if env.erp is None:
+            logger.warning("brief-attach retry: %s has no ERP binding; keeping the hold",
+                           task_id)
+            remaining.append(dict(entry))
+            continue
+        name = str(_ticket_mirror(current).get("name") or "")
+        if not name:
+            logger.warning("brief-attach retry: %s still has no business mirror; "
+                           "keeping the hold", task_id)
+            remaining.append(dict(entry))
+            continue
+        try:
+            await env.erp.attach_research_briefs(
+                name, [(research_briefs or {})[ref] for ref in brief_ids])
+            autorun = bool(env.objectives_cfg.get("child_autorun", True))
+            await env.patch_task(task_id, {
+                "status": "queued",
+                "waiting_reason": None,
+                "resume_at": None,
+                "autorun": autorun,
+            })
+            if autorun and env.dispatcher_wake is not None:
+                env.dispatcher_wake()
+        except Exception:  # noqa: BLE001
+            logger.warning("brief-attach retry: %s failed again; keeping the hold",
+                           task_id, exc_info=True)
+            remaining.append(dict(entry))
+            continue
+    return remaining
+
+
 async def _create_planned_tickets(
     env: ObjectiveEnv,
     objective: Mapping[str, Any],
@@ -3555,6 +3668,11 @@ async def _create_planned_tickets(
     with the returned ticket id (TASK-2026-00202 single-return limit).
     A spend-approved plan reuses its held ``run_tag`` (TASK-2026-00207)
     so a retried apply hits the same idempotency keys.
+    Brief attaches are validated before anything is created, and a
+    failed attach records its ``run_tag`` for traceable resume
+    (OBJ-0D2EB295 F4): the next application heals the held tickets
+    first; new creates mint a fresh tag unless explicitly passed, so a
+    reused ``local_ref`` cannot collide with a held ticket (754 F1).
     """
     tickets = [item for item in result.tickets
                if not item.completes_task_id]
@@ -3578,7 +3696,39 @@ async def _create_planned_tickets(
     by_key = {ticket.local_ref: ticket for ticket in tickets}
     created: list[dict[str, Any]] = []
     key_to_task: dict[str, str] = {}
+    objective_id = str(objective.get("objective_id") or "")
+    pending = _pending_brief_attaches(objective)
+    if pending:
+        # Reconcile first (F4): a failed apply left held tickets behind;
+        # retry their attaches on the same tickets before creating anything.
+        remaining = await _heal_pending_brief_attaches(
+            env, pending, research_briefs)
+        if remaining != pending:
+            await env.objectives.patch_objective(
+                objective_id, {BRIEF_ATTACH_PENDING_FIELD: remaining or None})
+        pending = remaining
+    # Fresh tag for new plans (754 F1): the recorded tag traces the
+    # failed run but never seeds new creates. Reusing it would collide
+    # source_id obj:<id>:<key>:<tag> when the planner reuses a local_ref
+    # for different work (titles differ by validation, keys may repeat),
+    # and the idempotent hit would silently drop the new ticket. Only an
+    # explicit tag (spend re-apply of the same stored plan) reuses keys.
     run_tag = run_tag or uuid.uuid4().hex[:8]
+    copies: dict[str, list[Mapping[str, Any]]] = {}
+    for planned_key in order:
+        planned = by_key[planned_key]
+        planned_briefs = planned.research.brief_ids if planned.research else []
+        missing = [ref for ref in planned_briefs
+                   if ref not in (research_briefs or {})]
+        if missing:
+            # Fail before creating anything (F4): the briefs were present
+            # at validation and vanished before the apply, so the next
+            # cycle retries the whole plan instead of resuming a half one.
+            raise ObjectiveErpError(
+                "cannot attach research briefs: "
+                f"{','.join(missing)} unavailable for {planned_key}")
+        copies[planned_key] = [(research_briefs or {})[ref]
+                               for ref in planned_briefs]
     group = str(objective.get("erp_group_ref") or "").strip()
     # The objective's own shell completes only after its children: a child
     # waiting on it would never run (TASK-2026-00492).
@@ -3632,11 +3782,20 @@ async def _create_planned_tickets(
                     raise ObjectiveErpError(
                         "cannot attach research briefs: "
                         f"{task_id} has no business mirror")
-                await env.erp.attach_research_briefs(name, [
-                    (research_briefs or {})[ref] for ref in brief_ids])
+                await env.erp.attach_research_briefs(name, copies[key])
             except Exception:
                 await env.patch_task(task_id, {"status": "waiting",
-                    "waiting_reason": "research brief attachment failed; execution held"})
+                    "waiting_reason": BRIEF_ATTACH_WAITING_REASON})
+                # Record the run_tag for traceable resume (F4): the next
+                # application heals this ticket first; new creates mint a
+                # fresh tag so they cannot collide with this hold (754 F1).
+                held = [entry for entry in pending
+                        if entry.get("task_id") != task_id]
+                held.append({"task_id": task_id, "key": key,
+                             "brief_ids": list(brief_ids), "run_tag": run_tag,
+                             "held_at": _utcnow_iso()})
+                await env.objectives.patch_objective(
+                    objective_id, {BRIEF_ATTACH_PENDING_FIELD: held})
                 raise
             await env.patch_task(task_id, {"autorun": autorun})
             if autorun and env.dispatcher_wake is not None:
