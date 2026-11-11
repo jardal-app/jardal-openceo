@@ -1255,6 +1255,11 @@ def _is_research(ticket: Mapping[str, Any]) -> bool:
 async def _research_briefs(
     env: ObjectiveEnv, tickets: Sequence[Mapping[str, Any]],
 ) -> dict[str, dict[str, Any]]:
+    """Private briefs of completed research, keyed by attachment id.
+
+    Fail-soft (OBJ-0D2EB295): one unreadable ERP thread or attachment
+    is skipped with a warning, never aborts the planning cycle.
+    """
     briefs: dict[str, dict[str, Any]] = {}
     if env.erp is None:
         return briefs
@@ -1264,15 +1269,33 @@ async def _research_briefs(
         source = str(_ticket_mirror(ticket).get("name") or "")
         if not source:
             continue
-        thread = await env.erp.thread_of(source)
-        for entry in thread.get("attachments") or []:
-            if not entry.get("private"):
+        try:
+            thread = await env.erp.thread_of(source)
+        except Exception:  # noqa: BLE001 - briefs enrich, never block planning
+            logger.warning("research thread unreadable for %s", source,
+                           exc_info=True)
+            continue
+        entries = thread.get("attachments") if isinstance(thread, Mapping) \
+            else None
+        for entry in entries or []:
+            if not isinstance(entry, Mapping) or not entry.get("private"):
                 continue
-            record = await env.erp.get_attachment(str(entry["id"]))
-            brief = record.get("attachment") or {}
+            try:
+                record = await env.erp.get_attachment(str(entry.get("id")))
+            except Exception:  # noqa: BLE001 - skip unreadable brief, keep planning
+                logger.warning("research attachment unreadable for %s", source,
+                               exc_info=True)
+                continue
+            brief = (record.get("attachment") if isinstance(record, Mapping)
+                     else None) or {}
+            if not isinstance(brief, Mapping):
+                continue
+            key = str(brief.get("id") or "")
+            if not key:
+                continue
             if brief.get("private") and brief.get("attached_to") == source \
                     and str(brief.get("content_text") or "").strip():
-                briefs[str(brief["id"])] = brief
+                briefs[key] = brief
     return briefs
 
 
