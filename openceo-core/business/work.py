@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
-import base64
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
@@ -370,9 +370,17 @@ class JardalERPWork:
         return {"ok": True, **result}
 
     def _attachment_view(self, row: dict[str, Any]) -> dict[str, Any]:
-        return {**row, "file_name": row["fileName"], "size": row["fileSize"], "private": row["isPrivate"],
+        view = {**row, "file_name": row["fileName"], "size": row["fileSize"], "private": row["isPrivate"],
                 "content_hash": row["sha256Hash"], "attached_to": row["taskId"],
                 "download_url": self._settings.JARDAL_ERP_URL.rstrip("/") + row.get("downloadUrl", f"/api/v1/attachments/{row['id']}/content")}
+        if "content_text" not in view:
+            raw = view.get("content_base64")
+            if isinstance(raw, str) and raw:
+                try:
+                    view["content_text"] = base64.b64decode(raw, validate=True).decode("utf-8")
+                except ValueError:  # noqa: S110 - fail soft: sin texto, sin vista de texto
+                    pass
+        return view
 
     async def attach_file(
         self, identifier: str, *, source_path: str | None = None, content_base64: str | None = None,

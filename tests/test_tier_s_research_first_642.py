@@ -1,13 +1,21 @@
-"""Conditional research-first planning with simulated services; no network/models."""
+"""Conditional research-first planning with simulated services; no network/models.
+
+Attachment fakes carry the production ERP row shape (``content_base64``,
+no pre-synthesized ``content_text``) and every fake read routes through
+the real ``JardalERPWork._attachment_view`` (763), so this suite covers
+the production brief-discovery path instead of hiding it.
+"""
 
 from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -18,12 +26,35 @@ sys.path.insert(0, str(ROOT / "openceo-core"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 from mcp_identity import McpDenied, TicketGrant, TokenKind, box_for_agent  # noqa: E402
+from business.work import JardalERPWork  # noqa: E402
 from catalog import load_catalog  # noqa: E402
 from objectives import engine as engine  # noqa: E402
 from objectives.planner_models import PlannedTicket, PlannerResult, validate_planner_result  # noqa: E402
 from objectives.service import ObjectiveErpAdapter  # noqa: E402
 from test_research_agent_222 import _bridge  # noqa: E402
 from test_single_planner_204 import _RecordedPlanner  # noqa: E402
+
+
+_VIEW_WORK = JardalERPWork(
+    SimpleNamespace(JARDAL_ERP_URL="https://erp.example.test"), client=MagicMock())
+
+
+def _production_view(row: dict[str, Any]) -> dict[str, Any]:
+    """Production read path: the real adapter view over a stored ERP row."""
+    return _VIEW_WORK._attachment_view(copy.deepcopy(row))
+
+
+def _production_row(key: str, target: str, text: str, *, file_name: str = "brief.md",
+                    private: bool = True) -> dict[str, Any]:
+    """Production-shaped ERP row: ``content_base64``, never ``content_text``."""
+    content = text.encode("utf-8")
+    return dict(id=key, fileName=file_name, fileSize=len(content), isPrivate=private,
+                sha256Hash=hashlib.sha256(content).hexdigest(), taskId=target, version=1,
+                content_base64=base64.b64encode(content).decode("ascii"))
+
+
+def _stored_text(row: dict[str, Any]) -> str:
+    return base64.b64decode(row["content_base64"]).decode("utf-8")
 
 
 def _research(**extra: Any) -> dict[str, Any]:
@@ -64,23 +95,25 @@ class _Files:
         return {"ok": True}
 
     async def thread_of(self, source: str, **_: Any) -> dict[str, Any]:
-        return {"attachments": [copy.deepcopy(item) for item in self.files.values()
-                                if item["attached_to"] == source]}
+        return {"attachments": [_production_view(item) for item in self.files.values()
+                                if item["taskId"] == source]}
 
     async def get_attachment(self, key: str, **_: Any) -> dict[str, Any]:
         self.events.append("read:" + key)
-        return {"ok": True, "attachment": copy.deepcopy(self.files[key])}
+        return {"ok": True, "attachment": _production_view(self.files[key])}
 
     async def attach_file(self, target: str, **kwargs: Any) -> dict[str, Any]:
         self.events.append("copy:" + target)
         if self.fail_copy:
             raise RuntimeError("simulated storage failure")
         key = "copy-" + target
-        item = dict(id=key, file_name=kwargs["file_name"], private=kwargs["private"],
-                    attached_to=target, content_text=base64.b64decode(
-                        kwargs["content_base64"]).decode("utf-8"))
+        content = base64.b64decode(kwargs["content_base64"])
+        item = dict(id=key, fileName=kwargs["file_name"], fileSize=len(content),
+                    isPrivate=kwargs["private"],
+                    sha256Hash=hashlib.sha256(content).hexdigest(),
+                    taskId=target, version=1, content_base64=kwargs["content_base64"])
         self.files[key] = item
-        return {"ok": True, "attachment": copy.deepcopy(item),
+        return {"ok": True, "attachment": _production_view(item),
                 "ticket": {"name": target}}
 
 
@@ -132,9 +165,9 @@ class ResearchFirstTests(unittest.IsolatedAsyncioTestCase):
             task_id=task_id, objective_id="OBJ-642", status="completed",
             title="Verify provider", agent_hint="research",
             params={"_mirrors": {"erpnext": {"name": "TASK-RESEARCH"}}})
-        files.files["brief-642"] = dict(
-            id="brief-642", attached_to="TASK-RESEARCH", private=True,
-            file_name="brief.md", content_text="Verified: retries need the same idempotency key.")
+        files.files["brief-642"] = _production_row(
+            "brief-642", "TASK-RESEARCH",
+            "Verified: retries need the same idempotency key.")
 
     async def test_research_finishes_then_planner_decides_then_private_copy_before_release(self) -> None:
         decision = {"needed": True, "reason": "Reuse the idempotency key per the brief",
@@ -166,14 +199,14 @@ class ResearchFirstTests(unittest.IsolatedAsyncioTestCase):
         staged = list((env.repo / ".openceo/objectives/OBJ-642/research").glob("*.md"))
         self.assertEqual(len(staged), 1)
         self.assertIn(str(staged[0]), planner.prompts[-1])
-        self.assertEqual(staged[0].read_text(), files.files["brief-642"]["content_text"])
+        self.assertEqual(staged[0].read_text(), _stored_text(files.files["brief-642"]))
         self.assertEqual([item["agent_hint"] for item in created], ["research", "dev"])
         self.assertIn(decision["reason"], created[-1]["description"])
         self.assertFalse(created[-1]["autorun"])
         copied = files.files["copy-TASK-CHILD-2"]
-        self.assertTrue(copied["private"])
-        self.assertEqual(copied["attached_to"], "TASK-CHILD-2")
-        self.assertEqual(copied["content_text"], files.files["brief-642"]["content_text"])
+        self.assertTrue(copied["isPrivate"])
+        self.assertEqual(copied["taskId"], "TASK-CHILD-2")
+        self.assertEqual(_stored_text(copied), _stored_text(files.files["brief-642"]))
         self.assertLess(files.events.index("read:copy-TASK-CHILD-2"),
                         files.events.index("release:child-2"))
         self.assertTrue(env.tasks.tasks["child-2"]["autorun"])
@@ -265,7 +298,7 @@ class ResearchFirstTests(unittest.IsolatedAsyncioTestCase):
         out = await engine.plan_objective(env, "OBJ-642")
         self.assertTrue(out["ok"], out)
         self.assertEqual(created, [])
-        self.assertTrue(files.files["copy-TASK-STUB"]["private"])
+        self.assertTrue(files.files["copy-TASK-STUB"]["isPrivate"])
         self.assertEqual(env.tasks.tasks["stub"]["coding_tool"], "tier_s")
         self.assertIn(decision["reason"], env.tasks.tasks["stub"]["description"])
         self.assertIn(decision["reason"], files.descriptions["TASK-STUB"])
@@ -311,13 +344,13 @@ class ResearchFirstTests(unittest.IsolatedAsyncioTestCase):
                 await self._objective(env)
                 self._completed_brief(env, files)
                 if variation == "public":
-                    files.files["brief-642"]["private"] = False
+                    files.files["brief-642"]["isPrivate"] = False
                 elif variation == "unfinished":
                     env.tasks.tasks["research"]["status"] = "queued"
                 elif variation == "other_objective":
                     env.tasks.tasks["research"]["objective_id"] = "OBJ-OTHER"
                 elif variation == "wrong_source":
-                    files.files["brief-642"]["attached_to"] = "TASK-OTHER"
+                    files.files["brief-642"]["taskId"] = "TASK-OTHER"
                 else:
                     env.tasks.tasks["research"]["agent_hint"] = "dev"
                 out = await engine.plan_objective(env, "OBJ-642")
