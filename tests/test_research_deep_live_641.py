@@ -171,6 +171,25 @@ async def test_shared_paid_reservation_survives_commit_and_another_instance():
 
 
 @pytest.mark.anyio
+async def test_serper_inner_refusal_releases_the_paid_leg():
+    repo, ledger = _FakeRepo(), MemoryLedger()
+    job = await admitted(repo)
+    await ledger.reserve(provider="serper", operation_id="other", project_key=PROJECT,
+        research_id="other-job", amount_micro_usd=100_000, ceiling_micro_usd=100_000)
+    policy = ResearchPolicyLedger(ledger, repo, 2_000_000, 2_000_000)
+    kw = dict(provider="serper", amount_micro_usd=1000, operation_id="search", project_key=PROJECT,
+              research_id=job["research_id"], ceiling_micro_usd=100_000)
+    decision = await policy.reserve(**kw)
+    assert not decision.accepted
+    assert ("deepseek-research", "paid:search") not in ledger.rows
+    assert ("serper", "search") not in ledger.rows
+    deep = await policy.reserve(provider="deepseek-research", amount_micro_usd=2_000_000,
+        operation_id="researcher", project_key=PROJECT, research_id=job["research_id"],
+        ceiling_micro_usd=2_000_000)
+    assert deep.accepted
+
+
+@pytest.mark.anyio
 async def test_existing_account_spend_is_not_reset_and_effective_budget_is_enforced():
     repo, ledger = _FakeRepo(), MemoryLedger()
     job = await admitted(repo)

@@ -717,10 +717,23 @@ class ResearchPolicyLedger:
             "project_limit_micro_usd": ceiling, "job_limit_micro_usd": ceiling})
         if not paid.accepted or paid.reused:
             return ReserveDecision(False, reason="paid_budget_exhausted")
-        # There is no invoice reconciliation here. Retain the maximum across phases,
-        # jobs and providers; crashes between reservations can only reduce capacity.
+        if provider == "deepseek-research":
+            # There is no invoice reconciliation here. Retain the maximum across phases,
+            # jobs and providers; crashes between reservations can only reduce capacity.
+            await self.ledger.mark_uncertain(paid.reservation)
+            return paid
+        try:
+            inner = await self.ledger.reserve(**kwargs)
+        except BudgetError:
+            # Inner refusal by exception: no I/O will happen, so free the paid leg
+            # via the underlying ledger (self.release would keep it uncertain).
+            await self.ledger.release(paid.reservation)
+            raise
+        if not inner.accepted:
+            await self.ledger.release(paid.reservation)
+            return inner
         await self.ledger.mark_uncertain(paid.reservation)
-        return paid if provider == "deepseek-research" else await self.ledger.reserve(**kwargs)
+        return inner
 
     async def commit(self, reservation: Reservation, **kwargs: Any) -> Settlement:
         if reservation.operation_id.startswith("paid:"):
