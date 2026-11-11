@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -61,6 +62,12 @@ __all__ = [
 #: Pinned Muse build for role runs. Upgrading is deliberate: update the
 #: pin, run the echo smoke test, then restart the service.
 MUSE_PINNED_VERSION = "1.4.14-R7309.1"
+
+#: Tolerant drift (Owner 2026-11-11): production waits out an update in
+#: flight, then adopts a stable new build loudly; smoke still gates the pin.
+_VERSION_PROBE_ATTEMPTS = 3
+_VERSION_PROBE_WAIT_S = 5
+_ADOPTED_VERSIONS: set[str] = set()
 
 #: Home-relative settings path the fence overlays per role run.
 SETTINGS_OVERLAY_RELPATH = ".config/muse/settings.json"
@@ -139,8 +146,15 @@ def resolve_muse_bin() -> str:
     return found
 
 
-def check_pinned_version(muse_bin: str | None = None) -> str:
-    """Refuse when the Muse build drifted from the pin (no silent skew)."""
+def _drift_refused(output: str) -> RoleProfileError:
+    """Refusal for an unadoptable build (message kept stable)."""
+    return RoleProfileError(
+        f"muse version drift (want {MUSE_PINNED_VERSION}, got "
+        f"{output[:120]!r}): update the pin and run the smoke test")
+
+
+def _probe_version_output(muse_bin: str | None) -> tuple[int, str]:
+    """One ``muse --version`` probe; raises only when the probe fails."""
     binary = muse_bin or resolve_muse_bin()
     env = {**os.environ, "MUSE_NO_AUTO_UPDATE": "1"}
     try:
@@ -150,12 +164,53 @@ def check_pinned_version(muse_bin: str | None = None) -> str:
             timeout=60, env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RoleProfileError(f"muse --version failed: {exc}") from exc
-    output = (proc.stdout or "").strip()
-    if proc.returncode != 0 or MUSE_PINNED_VERSION not in output:
-        raise RoleProfileError(
-            f"muse version drift (want {MUSE_PINNED_VERSION}, got "
-            f"{output[:120]!r}): update the pin and run the smoke test")
-    return output
+    return proc.returncode, (proc.stdout or "").strip()
+
+
+def check_pinned_version(muse_bin: str | None = None,
+                         *,
+                         adopt_drift: bool = False) -> str:
+    """Usable Muse build or raise; tolerant mode adopts a stable drift.
+
+    Strict (default) refuses any drift, so the smoke test still forces
+    deliberate pin upgrades. With ``adopt_drift`` (production role runs),
+    a mismatch is re-probed with waits — a self-update in flight settles
+    — and a stable new build is adopted with one loud warning instead
+    of refusing; persistent probe failures or an unstable output refuse.
+    """
+    if not adopt_drift:
+        returncode, output = _probe_version_output(muse_bin)
+        if returncode != 0 or MUSE_PINNED_VERSION not in output:
+            raise _drift_refused(output)
+        return output
+    seen: list[str] = []
+    last_error = _drift_refused("")
+    for attempt in range(_VERSION_PROBE_ATTEMPTS):
+        if attempt:
+            time.sleep(_VERSION_PROBE_WAIT_S)
+        try:
+            returncode, output = _probe_version_output(muse_bin)
+        except RoleProfileError as exc:
+            last_error = exc
+            continue
+        if returncode == 0 and MUSE_PINNED_VERSION in output:
+            return output
+        if returncode == 0 and output in _ADOPTED_VERSIONS:
+            return output
+        if returncode == 0:
+            seen.append(output)
+        else:
+            last_error = _drift_refused(output)
+    if seen and all(item == seen[0] for item in seen):
+        _ADOPTED_VERSIONS.add(seen[0])
+        logger.warning(
+            "muse version adopted without pin update (want %s, got %r): "
+            "update MUSE_PINNED_VERSION and run the smoke test",
+            MUSE_PINNED_VERSION, seen[0][:120])
+        return seen[0]
+    if seen:
+        raise _drift_refused(seen[-1])
+    raise last_error
 
 
 def enumerate_skills(
@@ -333,7 +388,9 @@ def settings_overlay_bytes(
     muse_bin: str | None = None,
 ) -> bytes:
     """Render + serialize the settings overlay for one role run."""
-    check_pinned_version(muse_bin)
+    # Tolerant here (Owner 2026-11-11): the binary self-updates, so a
+    # stable drift is adopted loudly instead of parking the run.
+    check_pinned_version(muse_bin, adopt_drift=True)
     global_settings = load_global_settings(home)
     skills_off = enumerate_skills(workspace, muse_bin=muse_bin)
     activation = render_activation(

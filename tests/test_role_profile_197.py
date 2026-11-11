@@ -33,6 +33,7 @@ from catalog import (  # noqa: E402
     load_role_profile,
 )
 from orchestration import agent_sandbox, live as live_mod  # noqa: E402
+from orchestration import role_muse as role_muse_mod  # noqa: E402
 from orchestration.live import ProcessExecutor  # noqa: E402
 from orchestration.role_muse import (  # noqa: E402
     MUSE_PINNED_VERSION,
@@ -198,6 +199,91 @@ class RoleProfileLoaderTests(unittest.TestCase):
                 self.assertTrue(target.is_file(),
                                 f"{profile.output_schema} must exist")
                 self.assertTrue((REPO / profile.rules).is_file())
+
+
+class PinnedVersionTolerantTests(unittest.TestCase):
+    """Tolerant drift handling for self-updating binaries (TASK-2026-00701)."""
+
+    def setUp(self) -> None:
+        role_muse_mod._ADOPTED_VERSIONS.clear()
+
+    def _pin_proc(self):
+        return MagicMock(
+            returncode=0,
+            stdout=f"Muse Code 1.4.14 ({MUSE_PINNED_VERSION})\n")
+
+    def _drift_proc(self, tag="9.9.9-AAAA.1"):
+        return MagicMock(returncode=0,
+                         stdout=f"Muse Code 9.9.9 ({tag})\n")
+
+    def test_tolerant_transient_drift_then_pin(self) -> None:
+        with patch("orchestration.role_muse.subprocess.run",
+                   side_effect=[self._drift_proc(),
+                                self._pin_proc()]) as runner, \
+                patch("orchestration.role_muse.time.sleep") as sleeper:
+            out = check_pinned_version("/bin/muse", adopt_drift=True)
+        self.assertIn(MUSE_PINNED_VERSION, out)
+        self.assertEqual(runner.call_count, 2)
+        sleeper.assert_called_once()
+        self.assertEqual(role_muse_mod._ADOPTED_VERSIONS, set())
+
+    def test_tolerant_stable_drift_adopted_once(self) -> None:
+        drift = "Muse Code 9.9.9 (9.9.9-AAAA.1)"
+        proc = MagicMock(returncode=0, stdout=drift + "\n")
+        with patch("orchestration.role_muse.subprocess.run",
+                   return_value=proc) as runner, \
+                patch("orchestration.role_muse.time.sleep") as sleeper:
+            with self.assertLogs("orchestration.role_muse",
+                                 level="WARNING") as logs:
+                out = check_pinned_version("/bin/muse", adopt_drift=True)
+        self.assertEqual(out, drift)
+        self.assertIn(drift, role_muse_mod._ADOPTED_VERSIONS)
+        self.assertGreaterEqual(runner.call_count, 2)
+        self.assertGreaterEqual(sleeper.call_count, 1)
+        self.assertIn("adopt", "\n".join(logs.output).lower())
+        with patch("orchestration.role_muse.subprocess.run",
+                   return_value=proc) as runner2, \
+                patch("orchestration.role_muse.time.sleep") as sleeper2:
+            out2 = check_pinned_version("/bin/muse", adopt_drift=True)
+        self.assertEqual(out2, drift)
+        self.assertEqual(runner2.call_count, 1)
+        sleeper2.assert_not_called()
+
+    def test_tolerant_persistent_failure_raises(self) -> None:
+        with patch("orchestration.role_muse.subprocess.run",
+                   side_effect=OSError("boom")), \
+                patch("orchestration.role_muse.time.sleep"):
+            with self.assertRaisesRegex(RoleProfileError,
+                                        "muse --version failed"):
+                check_pinned_version("/bin/muse", adopt_drift=True)
+        bad = MagicMock(returncode=1, stdout="garbage\n")
+        with patch("orchestration.role_muse.subprocess.run",
+                   return_value=bad), \
+                patch("orchestration.role_muse.time.sleep"):
+            with self.assertRaisesRegex(RoleProfileError, "drift"):
+                check_pinned_version("/bin/muse", adopt_drift=True)
+
+    def test_tolerant_unstable_output_raises(self) -> None:
+        procs = [self._drift_proc("9.9.9-AAAA.1"),
+                 self._drift_proc("9.9.9-BBBB.2"),
+                 self._drift_proc("9.9.9-CCCC.3")]
+        with patch("orchestration.role_muse.subprocess.run",
+                   side_effect=procs), \
+                patch("orchestration.role_muse.time.sleep"):
+            with self.assertRaisesRegex(RoleProfileError, "drift"):
+                check_pinned_version("/bin/muse", adopt_drift=True)
+
+    def test_strict_ignores_adoption(self) -> None:
+        proc = self._drift_proc()
+        with patch("orchestration.role_muse.subprocess.run",
+                   return_value=proc), \
+                patch("orchestration.role_muse.time.sleep"):
+            check_pinned_version("/bin/muse", adopt_drift=True)
+        with patch("orchestration.role_muse.subprocess.run",
+                   return_value=proc) as runner:
+            with self.assertRaisesRegex(RoleProfileError, "drift"):
+                check_pinned_version("/bin/muse")
+        self.assertEqual(runner.call_count, 1)
 
 
 class TranslatorTests(unittest.TestCase):
