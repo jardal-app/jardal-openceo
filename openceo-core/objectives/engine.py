@@ -3865,6 +3865,12 @@ async def _create_planned_tickets(
                              "held_at": _utcnow_iso()})
                 await env.objectives.patch_objective(
                     objective_id, {BRIEF_ATTACH_PENDING_FIELD: held})
+                # 762: the held child waits while the objective stays
+                # active. No wake here: the recovery lane only sees
+                # waiting objectives, so it could never schedule this
+                # active one. Boot and the heartbeat orphan pass replan
+                # pending holds despite the open delivery gap (delayed
+                # retry, not immediate).
                 raise
             await env.patch_task(task_id, {"autorun": autorun})
             if autorun and env.dispatcher_wake is not None:
@@ -4451,14 +4457,21 @@ def _brake_active_children(
     Failed tickets are settled history (never slots), like terminal
     ones, and doomed work (``doomed_ids``) never runs: counting either
     wedges planning once history fills the cap. Unknown blockers and
-    cycles stay in flight (fail-closed).
+    cycles stay in flight (fail-closed). Brief-held tickets (762) wait
+    for the planner to heal them, never for the dispatcher to run
+    them: counting one as in flight wedges the admission brake and the
+    recovery ``children still active`` guard on work only planning
+    can move.
     """
     doomed = doomed_ids(tickets)
     return [item for item in tickets
             if str(item.get("status")) not in TERMINAL_TICKET_STATUS
             and str(item.get("status")) != FAILED_HISTORY_STATUS
             and str(item.get("status")) != "converted"
-            and str(item.get("task_id") or "") not in doomed]
+            and str(item.get("task_id") or "") not in doomed
+            and not (str(item.get("status") or "") == "waiting"
+                     and str(item.get("waiting_reason") or "")
+                     == BRIEF_ATTACH_WAITING_REASON)]
 
 
 def verify_delivery(
@@ -4695,6 +4708,13 @@ def boot_resume_decision(
         verdict = verify_delivery(objective, children)
         gaps = list(verdict["open_gaps"]) + list(verdict["data_gaps"])
         if gaps:
+            if _pending_brief_attaches(objective):
+                # 762: the held child waits for the planner to heal it,
+                # but its open gap would leave this active objective
+                # forever (no close can retrigger planning). Replan so
+                # the next application heals the hold first.
+                return {"action": "replan",
+                        "reason": "pending brief attaches need healing"}
             return {"action": "leave",
                     "reason": "active with open work"}
         return {"action": "resume_fresh",
@@ -4776,10 +4796,14 @@ async def resume_orphaned_one(
 
     Runtime twin of the boot resume, driven by the mechanic heartbeat:
     the same deterministic call finds an ``active`` objective with no open
-    work and no data gap, which no close will ever re-trigger. An
-    objective with a plan in flight or activity after ``idle_before`` is
-    left alone, and the final-review budget is kept: only a boot starts a
-    fresh episode.
+    work and no data gap, which no close will ever re-trigger, or an
+    active objective with pending brief attaches (762) whose held child
+    waits for planning to heal it. An objective with a plan in flight is
+    left alone, as is one with activity after ``idle_before`` — except a
+    pending hold (762), whose patch just bumped ``updated_at``: the hold
+    itself is the reason to replan, so the first heartbeat after it acts
+    instead of waiting out the idle gate. The final-review budget is
+    kept: only a boot starts a fresh episode.
     """
     objective = await env.objectives.get_objective(objective_id)
     if objective is None or str(objective.get("status") or "") != "active":
@@ -4788,18 +4812,23 @@ async def resume_orphaned_one(
     if flight is not None and not flight.task.done():
         return {"ok": True, "action": "leave", "reason": "plan in flight"}
     touched = recovery_mod.parse_due(objective.get("updated_at"))
-    if touched is not None and touched > idle_before:
+    if touched is not None and touched > idle_before \
+            and not _pending_brief_attaches(objective):
         return {"ok": True, "action": "leave", "reason": "recent activity"}
     call = boot_resume_decision(
         objective, await env.tasks.list_by_objective(objective_id))
-    if call.get("action") != "resume_fresh":
+    if call.get("action") not in ("resume_fresh", "replan"):
         return {"ok": True, "action": "leave",
                 "reason": str(call.get("reason") or "")}
     if env.notify is not None:
-        await env.notify(
-            _notify_ref(objective),
-            f"Objective {objective_id} replanned by the heartbeat: nothing "
-            "in flight and no event pending (orphaned cycle).")
+        if call.get("action") == "replan":
+            note = (f"Objective {objective_id} replanned by the heartbeat: "
+                    f"{call.get('reason')}.")
+        else:
+            note = (f"Objective {objective_id} replanned by the heartbeat: "
+                    "nothing in flight and no event pending "
+                    "(orphaned cycle).")
+        await env.notify(_notify_ref(objective), note)
     plan = await plan_objective(env, objective_id)
     return {"ok": True, "action": "replan", "plan": plan}
 
