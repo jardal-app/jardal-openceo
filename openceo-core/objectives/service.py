@@ -110,7 +110,7 @@ class ObjectiveErpAdapter:
             attachment = result["attachment"]
             if not attachment.get("private"):
                 await self._adapter.update_attachment(
-                    attachment["id"], ticket=target, private=True)
+                    attachment["id"], target, private=True)
             verified = await self.get_attachment(attachment["id"])
             stored = verified.get("attachment") or {}
             if not verified.get("ok") or not stored.get("private") or (
