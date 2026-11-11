@@ -3460,6 +3460,15 @@ async def _apply_contract_completions(
         if current.get("coding_tool"):
             continue  # already contracted: idempotent re-drive
         if planned.research and planned.research.brief_ids:
+            missing = [key for key in planned.research.brief_ids
+                       if key not in (research_briefs or {})]
+            if missing:
+                # Mirror the creates-path guard (761): a brief present at
+                # validation can vanish before the apply; raise the typed
+                # ERP error naming the unavailable briefs, never bare KeyError.
+                raise ObjectiveErpError(
+                    "cannot attach research briefs: "
+                    f"{','.join(missing)} unavailable for {task_id}")
             assert env.erp is not None
             name = str(_ticket_mirror(current).get("name") or "")
             if not name:
