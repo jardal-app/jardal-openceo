@@ -300,11 +300,12 @@ Sonda del feed autorizado (solo lectura, sin Mongo, modelo ni flags):
 ```
 
 Registro 2026-11-08: `ok: false`, `Respuesta HTTP 404` (`source_unavailable`,
-0 items). El repo no responde en público (ni `Jardal` ni `jardal-app` devuelven
-la página ni el Atom; el remoto git apunta a `jardal-app/jardal-openceo`): sin
-releases públicamente legibles, el tick productivo degrada con causa y conserva
-el cursor en vez de admitir trabajo. Precondición del runbook: repetir la sonda
-y ver `ok: true` con items.
+0 items) contra la URL errónea `Jardal/jardal-openceo` (ese repo no existe).
+
+Registro 2026-11-09 (ticket #674): `ok: true` con 1 item; el repo
+`jardal-app/jardal-openceo` es público y trae la release semilla
+`demo-b-feed-1`. Precondición del runbook cumplida: el tick productivo lee
+releases públicamente legibles.
 
 Verificación pre-flip (`tests/test_research_demo_b_643.py`, servicio simulado
 sobre Mongo real con tiempo virtual, modelo Mock intacto, sin red ni LLM vivo):
