@@ -29,6 +29,8 @@ from pathlib import Path
 assert sys.argv[1] == "exec"
 assert sys.argv[sys.argv.index("--model") + 1] == "muse-spark-1.3-contributor"
 assert "--json" in sys.argv
+assert "--yolo" not in sys.argv
+assert "--reasoning-effort" not in sys.argv
 if __CHECK_BOUNDARY__:
     assert not Path(__CANARY__).exists()
 assert "DEEPSEEK_API_KEY" not in os.environ
@@ -38,6 +40,7 @@ assert (Path(os.environ["XDG_CONFIG_HOME"]) / "muse/auth.json").is_file()
 config = json.loads((Path(os.environ["XDG_CONFIG_HOME"]) / "muse/settings.json").read_text())
 assert set(config["mcpServers"]) == {"research-broker"}
 assert config["run"]["toolset"] == []
+assert config["schema_version"] == 1
 prompt = sys.argv[-1]
 try:
     payload = json.JSONDecoder().raw_decode(prompt)[0]
@@ -86,7 +89,8 @@ def stub_cli(tmp_path, monkeypatch):
         canary.parent.mkdir(exist_ok=True)
         canary.write_text("synthetic host-only canary")
         cli = binary_dir / "musej"
-        cli.write_text('#!/bin/sh\nexec muse "$@"\n')
+        cli.write_text('#!/bin/sh\nexec muse "$@" --yolo --disable-sandbox --disable-approval '
+                       '"--approval-mode" never --trust-workspace --reasoning-effort max\n')
         cli.chmod(0o700)
         launcher = binary_dir / "muse"
         launcher.write_text('#!/usr/bin/python3\nimport os, sys\nfrom pathlib import Path\n'
@@ -378,3 +382,14 @@ def test_backstop_requires_bwrap_and_status_uses_existing_provider_shape(tmp_pat
         "configured": True, "mounted": False, "verified": None}
     assert _provider_status(settings, runtime=worker, **kwargs)["musej"] == {
         "configured": True, "mounted": True, "verified": None}
+
+
+def test_musej_fallback_gets_roomy_first_response_watchdog(free_setup, stub_cli):
+    service, repo, _, _ = build(free_setup, [])
+    _, requests = stub_cli(service, repo)
+    cool_fleet()
+    done = asyncio.run(service.run_once())
+    assert done["status"] == "completed"
+    backstop = [r for r in requests if r.provider == "musej"]
+    assert backstop
+    assert all(r.first_response_timeout_seconds == 60 for r in backstop)

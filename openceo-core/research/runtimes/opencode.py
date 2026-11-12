@@ -86,6 +86,10 @@ JSONL_ERROR_EVENT_TYPE = "error"
 # Ruta relativa de la configuracion del worker dentro de su XDG_CONFIG_HOME.
 WORKER_CONFIG_RELPATH = Path("opencode") / "opencode.json"
 
+# Esquema del settings.json que el launcher escribe para musej. musej 1.4.15
+# rechaza el archivo sin este campo (verificado en vivo, TASK-2026-00702).
+MUSEJ_SETTINGS_SCHEMA_VERSION = 1
+
 
 
 async def probe_cli_version(cli_path: str, *, timeout: float = 20.0) -> str | None:
@@ -519,6 +523,11 @@ class OpenCodeRuntime:
             path = directory / name
             if path.is_file():
                 engines.append(path.resolve())
+        # Binario `muse` plano, nunca el envoltorio interactivo: este anade
+        # `--reasoning-effort max`, cuyo pensar silencioso supera el watchdog de
+        # primera respuesta y mata turnos sanos (verificado en vivo, TASK-2026-00702).
+        raw = directory / "muse"
+        argv0 = str(raw) if raw.is_file() else cli
         version_file = directory / ".muse-version"
         if version_file.is_file():
             version = version_file.read_text().strip()
@@ -533,7 +542,8 @@ class OpenCodeRuntime:
         engines.append(auth)
         env.update(MUSE_NO_AUTO_UPDATE="1", MUSE_AUTH_PATH=str(auth))
         endpoint = BrokerEndpoint(url=broker_url, bearer=self._broker_bearer)
-        settings = {"run": {"workflow_trigger_mode": "off", "subagent_delegation_mode": "off", "toolset": []},
+        settings = {"schema_version": MUSEJ_SETTINGS_SCHEMA_VERSION,
+                    "run": {"workflow_trigger_mode": "off", "subagent_delegation_mode": "off", "toolset": []},
                     "mcpServers": {"research-broker": {"url": broker_url, "headers": endpoint.headers()}}}
         target = paths["config"] / "muse" / "settings.json"
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -543,9 +553,10 @@ class OpenCodeRuntime:
             auth_target.symlink_to(auth)
         target.write_text(json.dumps(settings), encoding="utf-8")
         target.chmod(0o600)
-        argv = [cli, "exec", "--model", request.model, "--json", "--disable-shell", "--disable-write",
+        argv = [argv0, "exec", "--model", request.model, "--json", "--disable-shell", "--disable-write",
                 "--disable-web-tools", "--disable-reminders", "--disable-request-user-input",
-                "--no-foreign-personal-context", "--no-session-log", request.prompt]
+                "--no-foreign-personal-context", "--no-session-log",
+                "--disable-sandbox", "--approval-mode", "never", request.prompt]
         return argv, engines
 
     async def run(self, request: RuntimeRequest) -> RuntimeOutcome:

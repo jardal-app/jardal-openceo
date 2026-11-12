@@ -21,6 +21,9 @@ from research.runtimes.base import (
 
 logger = logging.getLogger(__name__)
 MUSEJ_MODEL = "musej/muse-spark-1.3-contributor"
+# Watchdog de primera respuesta para turnos musej: un turno sano tarda ~30 s
+# (verificado en vivo); el watchdog deep de 15 s lo mataria (TASK-2026-00702).
+MUSEJ_FIRST_RESPONSE_TIMEOUT_SECONDS = 60
 
 
 class FreeResearch:
@@ -199,6 +202,9 @@ class FreeResearch:
             except Exception as exc:
                 raise wiring.SessionBlocked(wiring.BLOCKED_PROVIDER, "musej usage ledger unavailable") from exc
         await self.service._deps.slots.acquire_call()
+        first_response = self._runtime_first_response_timeout()
+        if musej and first_response is not None:
+            first_response = max(first_response, MUSEJ_FIRST_RESPONSE_TIMEOUT_SECONDS)
         try:
             outcome = await self.service._deps.runtime.run(RuntimeRequest(
                 research_id=self.job["research_id"], project_key=self.job["project_key"],
@@ -206,7 +212,7 @@ class FreeResearch:
                 workspace=self.service._workspace_for(self.job), model=model,
                 session_id=self.runtime_session if self.runtime_model == model else None,
                 allow_session_resume=False, timeout_seconds=self._runtime_timeout(),
-                first_response_timeout_seconds=self._runtime_first_response_timeout(),
+                first_response_timeout_seconds=first_response,
                 tool_credential=self.credential, provider=provider, provider_config=provider_config))
         except (RuntimeCancelled, RuntimeConfigurationError, RuntimeUnavailable, RuntimeOutputTooLarge) as exc:
             if exc.outcome is not None:
