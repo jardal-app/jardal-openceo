@@ -40,8 +40,10 @@ _ROLE_LINES = {
         "Independent reviewers will challenge the plan, so make every "
         "decision explicit and checkable against the repo.\n"
         "Length follows the ticket, never a target: the plan must leave the "
-        "builder no design decision of its own. Cite inputs by path and "
-        "section instead of copying them, and do not restate the ticket."
+        "builder no engineering decision of its own; an interface's visual "
+        "composition stays with the builder, who renders it. Cite inputs by "
+        "path and section instead of copying them, and do not restate the "
+        "ticket."
     ),
     "objective_planner": (
         "ROLE CONTRACT: objective planner (one-shot, read-only).\n"

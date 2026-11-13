@@ -13,7 +13,9 @@ with work in the tree gets one more turn to confirm or retract.
 The engineering standard (TASK-2026-00492) is the quality bar every builder
 receives, for any stack: standard maintained libraries instead of
 hand-written substitutes, conventional names, and the result verified the
-way its user meets it.
+way its user meets it. Interfaces also carry a product-design bar
+(TASK-2026-00734): the design document sets identity, not a ceiling, and a
+flat sibling screen is debt, never the convention to copy.
 
 Stdlib plus the scratch constant only: the simple tiers and the Tier S
 cycle both import it, and the Tier S package imports its own cycle on load.
@@ -46,9 +48,9 @@ ENGINEERING_STANDARD = (
     "con el gestor de paquetes y la política de versiones del repo. No "
     "escribas un sustituto casero. Si una regla del proyecto o del ticket "
     "prohíbe una dependencia concreta, respétala y dilo en el HANDOFF.",
-    "- Las convenciones del repo deciden estilo y herramientas, pero no "
-    "obligan a perpetuar una base por debajo de este estándar. Si a la "
-    "parte que tocas le falta un cimiento que el objetivo necesita "
+    "- Las convenciones del repo deciden estilo de código y herramientas, "
+    "pero no obligan a perpetuar una base por debajo de este estándar. "
+    "Si a la parte que tocas le falta un cimiento que el objetivo necesita "
     "(router, hoja de estilos, migraciones, manejo de errores...), "
     "constrúyelo con la herramienta estándar dentro del alcance, o "
     "anótalo en «Discovered work» si excede el ticket.",
@@ -57,13 +59,27 @@ ENGINEERING_STANDARD = (
     "prefijos de marca o de proyecto salvo que el repo ya use ese "
     "esquema. Una marca en el ticket describe el producto, no una "
     "convención de nombres.",
+    "- Una interfaz se diseña, no se transcribe: compón cada pantalla como "
+    "la firmaría un diseñador de producto senior para un producto "
+    "comercial. El documento de diseño del repo (p. ej. DESIGN.md) fija "
+    "identidad y accesibilidad, no un techo: dentro de él, la composición "
+    "es tuya. Parte de los componentes y plantillas del sistema de diseño "
+    "(y de su documentación para agentes, si la trae): jerarquía clara "
+    "(título, acción principal, datos clave), datos tabulares en tablas o "
+    "listas, grupos en tarjetas o paneles, estados de carga, vacío y error "
+    "cuidados, y color, iconos y movimiento de sus tokens para comunicar "
+    "estado y dar vida. Nunca maquetes con <br> ni con líneas «Etiqueta: "
+    "valor», y no copies el patrón de una vista existente por debajo de "
+    "este listón: es deuda, no convención.",
     "- Verifica el resultado tal como lo encontrará su usuario, no solo "
     "con tests. Una interfaz se abre en un navegador real (si tienes uno, "
     "p. ej. agent-browser) a anchos representativos y en cada tema: sin "
-    "maquetación rota, desbordes ni scroll innecesario, y con navegación, "
-    "Atrás y formularios funcionando. Una API o un CLI se ejecutan con una "
-    "petición real. Una migración se aplica y se revierte en una base "
-    "efímera. Anota en evidencia qué comprobaste y con qué.",
+    "maquetación rota, desbordes ni scroll innecesario, con navegación, "
+    "Atrás y formularios funcionando, y con acabado de producto comercial; "
+    "si al verla no lo tiene, mejórala antes de entregar. Una API o un CLI "
+    "se ejecutan con una petición real. Una migración se aplica y se "
+    "revierte en una base efímera. Anota en evidencia qué comprobaste y "
+    "con qué.",
     "- Los tests prueban comportamiento; no fijan detalles de "
     "implementación como hex, textos literales o estructura interna.",
 )

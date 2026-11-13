@@ -2,6 +2,15 @@
 
 Resumen operativo corto del estado real del repo.
 
+## 2026-11-13 — Listón de diseño de producto para toda interfaz (TASK-2026-00734)
+
+- Órdenes del Owner: «para corregir el diseño y las futuras sesiones lo hagan automaticamente un diseño profesional final [...] aplica la solucion para todo mi openceo en general? [...] procede» y «no quiero loop visual en reviewers eso gasta demasiados tokens».
+- **Causa (jardal-erp):** #491 creó vistas de líneas «Etiqueta: valor» unidas con `<br>` (RowMeta) y #499–#503 las copiaron al día siguiente como convención: 14 archivos, 52 `<br>` y la `Table`/`Card`/`EmptyState` propias sin uso. El estándar del builder solo pedía que la interfaz no estuviera rota; «las convenciones deciden estilo» más «cumple cada regla exactamente» volvieron plantilla la primera vista plana; el planner Tier S decidía la composición sin renderizarla y §44 aceptaba paridad sobre pantallas planas.
+- **Fix en el motor (todo proyecto con interfaz):** `ENGINEERING_STANDARD` lleva un listón de diseño de producto: diseñador senior de producto comercial, el documento de diseño es suelo y no techo, se parte de componentes, plantillas y docs para agentes del sistema de diseño, nada de `<br>` ni «Etiqueta: valor», y una vista plana es deuda, no convención. Las convenciones rigen el estilo de código y la comprobación de navegador del builder juzga también el acabado, en una sola pasada. El planner Tier S deja la composición visual al builder; §44 y la guía ENGINEERING QUALITY prohíben contratar el marcado actual, el patrón de una vista hermana o una paridad por debajo del listón. Los reviewers no cambian: solo código, sin loop visual.
+- **Skill externa descartada:** ui-ux-pro-max genera su propio sistema de diseño (choca con DESIGN.md), suma ~120 reglas, solo la leen algunos CLI del roster y mete código de terceros en builders sin sandbox. La vía correcta son las docs para agentes del propio sistema de diseño, versionadas en el repo del proyecto (Astryx: `npx @astryxdesign/cli init --features agents`).
+- **Proyecto jardal-erp:** DESIGN.md gana «Intención de diseño», la fila «Composición» en la aceptación y el init de agentes de Astryx; AGENTS.md cambia «Cambia solo lo necesario» por entrega completa dentro del alcance y retira las líneas obsoletas del repo documental. Commit en TASK-2026-00493.
+- **Verificación:** 9 tests propios con 5/5 mutaciones detectadas; checks obligatorios y suites de prompts vecinas en verde. Los 2 fallos de `test_planner_research_routing_618` (`allowed_modes` quick+deep en el proyecto vivo) son idénticos en `main` limpio.
+
 ## 2026-11-08 — La palabra del Owner llega a quien juzga una misión (TASK-2026-00594)
 
 - Órdenes del Owner: «si fue un bug corrige» y «corrige todo y que no falle con la orden de flujo antideterminista para evitar fixes por cada camino debe ser dinamico no determinista».

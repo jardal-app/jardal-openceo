@@ -3071,6 +3071,11 @@ class TierSCycle:
             "maintained libraries over hand-written substitutes, and never "
             "decide 'no new dependencies' unless the ticket or a project "
             "rule forbids that dependency (cite it).\n"
+            "For an interface, plan behavior, data, states and the "
+            "design-system components that carry them; leave the visual "
+            "composition to the builder, who renders it at commercial "
+            "product quality, and never plan copying an existing screen's "
+            "markup.\n"
             "Decide open questions yourself and record them in DECISIONS; only "
             "use [OWNER] when the ticket explicitly marks a decision so."
         )

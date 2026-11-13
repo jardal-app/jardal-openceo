@@ -842,6 +842,17 @@ spend never lowers this bar; it removes waste around it.
   sizes and themes, an API answers real requests, a migration applies
   and rolls back. Tests verify behavior; they never pin implementation
   details (hex values, literal copy, internal structure).
+- Interfaces carry a product-design bar (Owner order, 2026-11-13,
+  TASK-2026-00734): a screen a ticket builds or rebuilds is composed the
+  way a senior product designer ships a commercial product, with the
+  project's design system and design document, which set identity and
+  accessibility as a floor, never a ceiling: clear hierarchy, data in
+  the design system's tables, lists and panels, cared-for loading,
+  empty and error states, and the document's color, icon and motion
+  tokens. Never contract keeping a screen's current markup, copying a
+  sibling screen's pattern or a parity-only port of a screen below that
+  bar. The builder owns the visual composition and judges its own
+  render once; reviewers stay on code (no visual review loop).
 - Inputs exist on the base: a document or version the Objective names
   (for example "the updated design document") must be committed on the
   integration branch; check it with git, since builders never see
