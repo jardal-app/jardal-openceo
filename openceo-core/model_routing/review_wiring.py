@@ -10,8 +10,9 @@ carries an extended receipt (§11.7).
 
 Free slots are dynamic-only (TASK-2026-00428): the pair comes from
 the frozen ``free-review`` ranking, else from a degraded order built
-over the live catalog, else the round blocks loud (``RoundBlocked``)
-instead of serving a stale hand-curated list. Paid OpenCode entries
+over the live catalog, else the round degrades to the static
+non-free pool (``routing`` None, reviewers still run) instead of
+serving a stale hand-curated list or blocking. Paid OpenCode entries
 (``cascade_only``) are not free slots and always survive the merge.
 Non-free slots (dsh, claudep, gemini, muse-review) never change.
 
@@ -1297,12 +1298,13 @@ def assemble_review_pool(
     a pair: free static entries give way to ``free-review-1/2`` while
     paid OpenCode entries survive. Without a usable snapshot the pair
     comes from a degraded order over the live catalog; with no free
-    route anywhere the round blocks loud (``RoundBlocked``) instead
-    of serving a stale list. Round 2 takes ``r1`` and the configured
-    §11.3 policy; only ``four_distinct`` without a four-family plan
-    raises. With a catalog next to the rankings the pair comes from
-    the native_first list (group A then group B); without one the
-    legacy ranking order still serves.
+    candidate anywhere the round degrades to the static non-free pool
+    (``routing`` None, like the reservation-conflict path) instead of
+    serving a stale list or blocking. Round 2 takes ``r1`` and the
+    configured §11.3 policy; only ``four_distinct`` without a
+    four-family plan raises. With a catalog next to the rankings the
+    pair comes from the native_first list (group A then group B);
+    without one the legacy ranking order still serves.
     """
     settings = free_router_settings(review_cfg)
     static = _marked_static(raw_pool)
@@ -1354,10 +1356,11 @@ def assemble_review_pool(
             store, run_id, "review_pair_unavailable",
             f"rankings: {snapshot_error or 'no pair'}; "
             f"catalog: {catalog_error or 'no pair'}"[:200])
+        logger.warning(
+            "free-router no free candidates, non-free pool: rankings: %s; catalog: %s",
+            snapshot_error or "no pair", catalog_error or "no pair")
         store.close()
-        raise RoundBlocked(
-            f"no free reviewers (rankings: {snapshot_error or 'no pair'}; "
-            f"catalog: {catalog_error or 'no pair'})")
+        return Assembly(raw_pool=_drop_free_opencode(static), routing=None)
     try:
         if r1 is None:
             first_pick, second_pick = pick_pair(

@@ -514,16 +514,30 @@ class AssemblyTests(unittest.TestCase):
                 for keep in ("dsh", "claudep", "gemini", "muse-review"):
                     self.assertIn(keep, labels)
 
-    def test_missing_snapshot_and_catalog_blocks_loud(self):
+    def test_missing_snapshot_and_catalog_degrades_to_static(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(base / "cfg"),
                                          "XDG_STATE_HOME": str(base / "st")}):
                 (base / "cfg").mkdir()
                 (base / "st").mkdir()
-                with self.assertRaises(wiring.RoundBlocked) as raised:
-                    self._assemble(base, _static_pool())
-                self.assertIn("no free reviewers", str(raised.exception))
+                assembly = self._assemble(base, _static_pool())
+                self.assertIsNone(assembly.routing)
+                labels = [entry["label"] for entry in assembly.raw_pool]
+                self.assertNotIn("mimo", labels)
+                self.assertNotIn("nemotron", labels)
+                self.assertNotIn("free-review-1", labels)
+                for keep in ("dsh", "claudep", "gemini", "muse-review"):
+                    self.assertIn(keep, labels)
+                probe = AvailabilityStore(
+                    base / "st" / "free-router" / "availability.sqlite")
+                try:
+                    audit = probe.audit_since("run-t04", 0.0)
+                finally:
+                    probe.close()
+                self.assertTrue(
+                    any(event == "review_pair_unavailable"
+                        for _, event, _ in audit))
 
     def test_no_pair_blocks_loud_with_audit(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1499,7 +1513,7 @@ class SimpleRoundTests(unittest.IsolatedAsyncioTestCase):
                             if item["slot"] != "gemini"}
                 self.assertEqual(families, {"alpha", "beta"})
 
-    async def test_no_snapshot_or_catalog_parks_loud(self):
+    async def test_no_snapshot_or_catalog_degrades_to_static(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             with patch.dict(os.environ,
@@ -1509,9 +1523,13 @@ class SimpleRoundTests(unittest.IsolatedAsyncioTestCase):
                 (base / "st").mkdir()
                 reviewers = _SequencedReviewers()
                 output, _, _ = await self._run(_static_pool(), reviewers)
-                self.assertEqual(output.status.name, "WAITING")
-                self.assertIn("no free reviewers", output.waiting_reason)
-                self.assertEqual(reviewers.calls, [])
+                from state import TaskStatus
+                self.assertEqual(output.status, TaskStatus.COMPLETED)
+                self.assertTrue(reviewers.calls)
+                self.assertFalse(
+                    [call for call in reviewers.calls
+                     if "free-review" in call])
+                self.assertIn("review:gemini", reviewers.calls)
 
     async def test_switch_off_serves_nonfree_waves(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2279,7 +2297,7 @@ def _terms_doc(verified_at):
             data_policy="unknown", retention="unknown",
             confidentiality_allowed=["public"],
             source="https://example.test/console",
-            verified_at=verified_at, basis="synthetic #657 record")
+            verified_at=verified_at, basis="synthetic record")
         for provider in ("openrouter", "opencode", "nvidia", "groq",
                          "gemini")
     ]
@@ -2290,7 +2308,7 @@ def _terms_doc(verified_at):
                                   opencode_free_models=free_list)
 
 
-def _parsed_657_catalog(verified_at):
+def _parsed_terms_catalog(verified_at):
     """Two group A + two group B entries through the real parse chain."""
     from model_routing import sources as router_sources
     from model_routing.models import CatalogDocument
@@ -2329,18 +2347,18 @@ def _parsed_657_catalog(verified_at):
     return apply_catalog_verdicts(CatalogDocument(entries=entries))
 
 
-def _write_657_catalog(base, verified_at):
+def _write_terms_catalog(base, verified_at):
     target = base / "cfg" / "free-router"
     target.mkdir(parents=True, exist_ok=True)
     path = target / "catalog.json"
     path.write_text(
-        _parsed_657_catalog(verified_at).model_dump_json(indent=2),
+        _parsed_terms_catalog(verified_at).model_dump_json(indent=2),
         encoding="utf-8")
     return path
 
 
-class ExpiredTermsRoundBlockedTests(unittest.TestCase):
-    """Expired free terms park the round; fresh terms feed it (#657)."""
+class ExpiredTermsReviewTests(unittest.TestCase):
+    """Expired free terms degrade the round; fresh terms feed it."""
 
     def _stale_day(self):
         return (datetime.now(timezone.utc).date()
@@ -2349,7 +2367,7 @@ class ExpiredTermsRoundBlockedTests(unittest.TestCase):
     def _today(self):
         return datetime.now(timezone.utc).date().isoformat()
 
-    def test_stale_terms_block_round_without_free_reviewers(self):
+    def test_stale_terms_degrade_round_without_free_reviewers(self):
         from model_routing.models import RouterPolicy, usability
         from model_routing.publish import load_catalog_doc
         with tempfile.TemporaryDirectory() as tmp:
@@ -2359,7 +2377,7 @@ class ExpiredTermsRoundBlockedTests(unittest.TestCase):
                              "XDG_STATE_HOME": str(base / "st")}):
                 (base / "cfg").mkdir()
                 (base / "st").mkdir()
-                path = _write_657_catalog(base, self._stale_day())
+                path = _write_terms_catalog(base, self._stale_day())
                 catalog = load_catalog_doc(path)
                 policy = RouterPolicy()
                 for entry in catalog.entries:
@@ -2378,17 +2396,21 @@ class ExpiredTermsRoundBlockedTests(unittest.TestCase):
                         self.assertTrue(deployment.healthy)
                 self.assertEqual(
                     wiring.catalog_fallback_profile(catalog).order, [])
-                with self.assertRaises(wiring.RoundBlocked) as raised:
-                    wiring.assemble_review_pool(
-                        _static_pool(), review_cfg={},
-                        run_id="run-t657", round="1",
-                        builder_family="muse",
-                        receipts_dir=base / "receipts",
-                        router_secrets={
-                            "FREE_ROUTER_OPENROUTER_API_KEY":
-                            "TEST-ONLY-FAKE"},
-                        auto_instance=False)
-                self.assertIn("no free reviewers", str(raised.exception))
+                assembly = wiring.assemble_review_pool(
+                    _static_pool(), review_cfg={},
+                    run_id="run-terms", round="1",
+                    builder_family="muse",
+                    receipts_dir=base / "receipts",
+                    router_secrets={
+                        "FREE_ROUTER_OPENROUTER_API_KEY":
+                        "TEST-ONLY-FAKE"},
+                    auto_instance=False)
+                self.assertIsNone(assembly.routing)
+                labels = [entry["label"] for entry in assembly.raw_pool]
+                self.assertNotIn("free-review-1", labels)
+                self.assertNotIn("mimo", labels)
+                for keep in ("dsh", "gemini", "muse-review"):
+                    self.assertIn(keep, labels)
 
     def test_fresh_terms_assemble_free_pair(self):
         from model_routing.publish import load_catalog_doc
@@ -2399,14 +2421,14 @@ class ExpiredTermsRoundBlockedTests(unittest.TestCase):
                              "XDG_STATE_HOME": str(base / "st")}):
                 (base / "cfg").mkdir()
                 (base / "st").mkdir()
-                path = _write_657_catalog(base, self._today())
+                path = _write_terms_catalog(base, self._today())
                 profile = wiring.catalog_fallback_profile(
                     load_catalog_doc(path))
                 self.assertEqual(len(profile.order), 4)
                 self.assertGreaterEqual(
                     len({item.family_id for item in profile.order}), 2)
                 assembly = wiring.assemble_review_pool(
-                    _static_pool(), review_cfg={}, run_id="run-t657",
+                    _static_pool(), review_cfg={}, run_id="run-terms",
                     round="1", builder_family="muse",
                     receipts_dir=base / "receipts",
                     router_secrets={"FREE_ROUTER_OPENROUTER_API_KEY":

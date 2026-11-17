@@ -6,14 +6,16 @@ verdicts, then publish the catalog and the rankings.
 Cron A (24 h): fetch Artificial Analysis plus the LMArena snapshot,
 rebuild quality, attach it to the catalog, then publish both.
 Both run under a flock guard and append to updater.log; a failed
-refresh leaves the previous snapshots byte-identical (T12).
+refresh leaves the previous snapshots byte-identical (T12). A build
+with zero usable free routes never overwrites a usable catalog:
+the last good content keeps serving flagged stale with an alert.
 """
 
 from __future__ import annotations
 
 import fcntl
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -84,6 +86,7 @@ class RefreshReport:
     stale_reason: str | None
     fetched: tuple[str, ...]
     failed: tuple[str, ...]
+    kept_last_good: bool = False
 
 
 @dataclass(frozen=True)
@@ -264,6 +267,12 @@ def _carry_benchmarks(
     return unified.model_copy(update={"entries": entries})
 
 
+def _usable_count(document: CatalogDocument, policy: RouterPolicy) -> int:
+    """Usable free routes under the catalog price gate."""
+    return sum(1 for entry in document.entries for route in entry.deployments
+               if is_usable(route, policy))
+
+
 def update_providers(
     config_dir: Path,
     *,
@@ -297,11 +306,26 @@ def update_providers(
     unified = router_ranking.unify_canonical(familied, aliases)
     scored = _carry_benchmarks(previous, unified)
     decided = apply_catalog_verdicts(scored)
+    kept_last_good = False
+    fresh_usable = _usable_count(decided, active)
+    previous_usable = _usable_count(previous, active) if previous is not None else 0
+    if fresh_usable == 0 and previous_usable > 0:
+        # Publication invariant: a build with zero usable free routes
+        # (expired manual terms gate every live source, or every route
+        # failed the price gate) must never overwrite a usable catalog.
+        # Keep serving the last good content flagged stale; run_update
+        # emits the alert from the report flag below.
+        kept = (f"fresh build publishes zero usable free routes; kept last good "
+                f"catalog ({previous_usable} usable)")
+        reason = f"{kept} ({reason})" if reason else kept
+        assert previous is not None
+        decided = previous
+        stale, kept_last_good = True, True
     try:
         record = publish_catalog(decided, config_dir, stale=stale, stale_reason=reason)
     except PublishError as exc:
         raise RefreshError(f"catalog publication failed: {exc}") from exc
-    return _republish_rankings(
+    report = _republish_rankings(
         config_dir, record, active, benchmark_sources=None,
         aa_index_version=None, lmarena_target=None,
         generator="model_routing.refresh",
@@ -310,6 +334,9 @@ def update_providers(
         failed=tuple(f"{name}: {failed[name]}" for name in sorted(failed)),
         stale=stale, stale_reason=reason,
     )
+    if kept_last_good:
+        report = replace(report, kept_last_good=True)
+    return report
 
 
 def _republish_rankings(
@@ -557,6 +584,10 @@ def run_update(
             if report.failed:
                 detail += f"; failed: {'; '.join(report.failed)}"
             _alert_when_no_free_models(config_dir, state_dir)
+            if report.kept_last_good:
+                router_alerts.emit_alert(
+                    state_dir, "refresh_failed", f"update --{kind}",
+                    report.stale_reason or "kept last good catalog")
             return _log_outcome(log_path, kind, True, detail)
         finally:
             fcntl.flock(guard.fileno(), fcntl.LOCK_UN)
@@ -576,9 +607,7 @@ def _alert_when_no_free_models(config: Path, state_dir: Path) -> None:
     except PublishError:
         return
     active = _load_policy(Path(config) / "policy.yaml")
-    usable = sum(1 for entry in catalog.entries for route in entry.deployments
-                 if is_usable(route, active))
-    if usable == 0:
+    if _usable_count(catalog, active) == 0:
         router_alerts.emit_alert(
             state_dir, "no_free_models", "update",
             f"{catalog_file.name} publishes {len(catalog.entries)} entries"

@@ -152,6 +152,19 @@ def _fresh_terms():
     return router_terms.TermsFile(terms=terms, opencode_free_models=free_list)
 
 
+def _stale_terms():
+    old = (_now().date() - timedelta(days=8)).isoformat()
+    terms = [_record(provider, verified_at=old)
+            for provider in router_sources.PROVIDERS]
+    free_list = router_terms.OpenCodeFreeList(
+        source="https://example.test/models",
+        verified_at=old,
+        basis="synthetic",
+        model_ids=["alpha-free", "beta-free"],
+    )
+    return router_terms.TermsFile(terms=terms, opencode_free_models=free_list)
+
+
 def _secrets():
     return RouterSecrets(
         FREE_ROUTER_OPENROUTER_API_KEY="or-synthetic",
@@ -967,6 +980,101 @@ def test_update_providers_all_failed_keeps_previous_byte_identical(isolated_home
     assert code == 1
     assert "previous snapshot kept" in detail
     assert "FAIL" in (state / "updater.log").read_text(encoding="utf-8")
+
+
+def test_update_providers_empty_build_keeps_last_good_catalog(isolated_home, tmp_path):
+    from model_routing import alerts as router_alerts
+    from model_routing.models import is_usable
+    from model_routing.review_wiring import catalog_fallback_profile
+
+    config, state = _provider_config(tmp_path)
+    previous = _catalog(_entry("example/alpha"), _entry("example/beta"))
+    publish_catalog(previous, config)
+    before_entries = json.dumps(
+        [entry.model_dump(mode="json") for entry in previous.entries],
+        sort_keys=True)
+    get = _routed_get(_provider_routes(
+        [_or_model("example/alpha:free")], groq_ids=["alpha-groq"]))
+    seen: dict = {}
+
+    def _update():
+        seen["report"] = router_refresh.update_providers(
+            config, get=get, secrets=_secrets(), terms=_stale_terms(),
+            aliases=_tiny_aliases(), providers=["openrouter", "groq"])
+        return seen["report"]
+
+    code, detail = router_refresh.run_update(
+        "providers", config, state, update=_update)
+    assert code == 0
+    assert "STALE" in detail
+    assert seen["report"].kept_last_good is True
+    catalog = load_catalog_doc(config / "catalog.json")
+    assert catalog.stale is True
+    assert "zero usable" in (catalog.stale_reason or "")
+    assert "kept last good" in (catalog.stale_reason or "")
+    after_entries = json.dumps(
+        [entry.model_dump(mode="json") for entry in catalog.entries],
+        sort_keys=True)
+    assert after_entries == before_entries
+    policy = RouterPolicy()
+    assert sum(1 for entry in catalog.entries for route in entry.deployments
+               if is_usable(route, policy)) == 2
+    assert catalog_fallback_profile(catalog, policy).order != []
+    rankings = router_ranking.load_rankings(config / "rankings.json")
+    assert rankings.profiles["free-review"].order != []
+    failures = router_alerts.list_alerts(state, kind="refresh_failed")
+    assert len(failures) == 1
+    assert "kept last good" in failures[0].detail
+    assert router_alerts.list_alerts(state, kind="no_free_models") == []
+
+
+def test_update_providers_fresh_terms_publish_usable_free_order(isolated_home, tmp_path):
+    from model_routing.models import is_usable
+    from model_routing.review_wiring import catalog_fallback_profile
+
+    config, _state = _provider_config(tmp_path)
+    get = _routed_get(_provider_routes(
+        [_or_model("example/alpha:free"), _or_model("example/beta:free")],
+        groq_ids=["alpha-groq", "gamma-groq"]))
+    report = router_refresh.update_providers(
+        config, get=get, secrets=_secrets(), terms=_fresh_terms(),
+        aliases=_tiny_aliases(), providers=["openrouter", "groq"])
+    assert report.stale is False
+    assert report.kept_last_good is False
+    catalog = load_catalog_doc(config / "catalog.json")
+    policy = RouterPolicy()
+    assert sum(1 for entry in catalog.entries for route in entry.deployments
+               if is_usable(route, policy)) > 0
+    assert catalog_fallback_profile(catalog, policy).order != []
+    rankings = router_ranking.load_rankings(config / "rankings.json")
+    assert rankings.profiles["free-review"].order != []
+
+
+def test_update_providers_empty_build_without_previous_publishes_empty(isolated_home, tmp_path):
+    from model_routing import alerts as router_alerts
+    from model_routing.models import is_usable
+
+    config, state = _provider_config(tmp_path)
+    get = _routed_get(_provider_routes(
+        [_or_model("example/alpha:free")], groq_ids=["alpha-groq"]))
+
+    def _update():
+        return router_refresh.update_providers(
+            config, get=get, secrets=_secrets(), terms=_stale_terms(),
+            aliases=_tiny_aliases(), providers=["openrouter", "groq"])
+
+    code, _detail = router_refresh.run_update(
+        "providers", config, state, update=_update)
+    assert code == 0
+    catalog = load_catalog_doc(config / "catalog.json")
+    assert catalog.stale is False
+    policy = RouterPolicy()
+    assert sum(1 for entry in catalog.entries for route in entry.deployments
+               if is_usable(route, policy)) == 0
+    rankings = router_ranking.load_rankings(config / "rankings.json")
+    assert rankings.profiles["free-review"].order == []
+    assert len(router_alerts.list_alerts(state, kind="no_free_models")) == 1
+    assert router_alerts.list_alerts(state, kind="refresh_failed") == []
 
 
 # Benchmark refresh
