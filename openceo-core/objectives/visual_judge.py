@@ -56,8 +56,9 @@ __all__ = [
     "subprocess_run",
 ]
 
-#: agy headless image intake is UNVERIFIED (D3): gemini verdicts refuse
-#: until an Owner-authorized live probe proves a tool-free image path.
+#: agy headless image intake is REFUTED (D3): the Owner-authorized live
+#: probe of 2026-11-22 answered NO_IMAGE_VISIBLE in one turn with tools
+#: forbidden, so gemini verdicts refuse and muse-review stays primary.
 AGY_IMAGE_VERIFIED = False
 
 #: Isolated judge model (the muse-review slot model).
