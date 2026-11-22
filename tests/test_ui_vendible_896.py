@@ -475,6 +475,129 @@ class RunVerdictTests(unittest.IsolatedAsyncioTestCase):
                 "/dashboard", ["a.png"], "prompt", "/tmp",
                 run_cli=fake_cli)
 
+    async def test_salt_rotates_first_gemini_account(self) -> None:
+        seen: list[str] = []
+
+        async def fake_cli(argv, cwd, timeout):
+            seen.append(argv[0])
+            return (0, '{"approved": true, "defects": []}', {})
+
+        for salt, first in ((0, "agyd"), (1, "agyj"), (2, "agy2"),
+                            (3, "agyd")):
+            seen.clear()
+            record = await judge_mod.run_verdict(
+                "/dashboard", ["a.png"], "prompt", "/tmp",
+                salt=salt, run_cli=fake_cli)
+            self.assertEqual(f"gemini:{first}", record["provider"])
+            self.assertEqual([first], seen)
+
+    async def test_malformed_output_falls_to_next_provider(self) -> None:
+        seen: list[str] = []
+
+        async def fake_cli(argv, cwd, timeout):
+            seen.append(argv[0])
+            if len(seen) == 1:
+                return (0, "not json", {})
+            return (0, '{"approved": true, "defects": []}', {})
+
+        record = await judge_mod.run_verdict(
+            "/dashboard", ["a.png"], "prompt", "/tmp",
+            run_cli=fake_cli)
+        self.assertEqual("gemini:agyj", record["provider"])
+        self.assertEqual(["agyd", "agyj"], seen)
+
+
+class JudgeFenceTests(unittest.TestCase):
+    """Fenced judge runs resolve provider CLIs (#952).
+
+    Contract of the plan (no live models, no bwrap exec): the judge cage
+    resolves bare provider CLIs to absolute binaries over a host env
+    carrying PATH/HOME, exactly like every other fenced agent run. The
+    pre-fix shape (``base={}``, bare ``argv[0]``) fails these tests: no
+    PATH/HOME in the fenced env and no absolute binary for bwrap execvp.
+    """
+
+    def _fake_bin(self, root: Path, name: str) -> Path:
+        target = root / name
+        target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        target.chmod(0o755)
+        return target
+
+    def _plan(self, argv: list[str], ws: Path, home: Path,
+              path: str):
+        from orchestration import agent_sandbox
+
+        with patch.object(agent_sandbox.BubblewrapBackend,
+                          "available", True):
+            try:
+                return judge_mod.judge_isolation_plan(
+                    argv, ws,
+                    base={"PATH": path, "HOME": str(home)},
+                    home=home)
+            finally:
+                agent_sandbox.cleanup_sandbox_scratch(ws)
+
+    def _tail(self, plan) -> list[str]:
+        sep = max(index for index, token in enumerate(plan.argv)
+                  if token == "--")
+        return list(plan.argv[sep + 1:])
+
+    def test_bare_cli_resolves_to_absolute_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bindir = root / "bin"
+            bindir.mkdir()
+            agyd = self._fake_bin(bindir, "agyd")
+            muse = self._fake_bin(bindir, "muse")
+            home = root / "home"
+            home.mkdir()
+            ws = root / "ws"
+            ws.mkdir()
+            for name, expected in (("agyd", agyd), ("muse", muse)):
+                plan = self._plan([name, "--print", "prompt"], ws,
+                                  home, str(bindir))
+                self.assertEqual(str(expected), self._tail(plan)[0])
+
+    def test_unresolvable_cli_keeps_bare_form(self) -> None:
+        self.assertEqual(
+            ["nope", "--print", "p"],
+            judge_mod._resolve_judge_argv(  # noqa: SLF001
+                ["nope", "--print", "p"], "/nonexistent"))
+
+    def test_fenced_env_keeps_path_and_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bindir = root / "bin"
+            bindir.mkdir()
+            self._fake_bin(bindir, "agyj")
+            home = root / "home"
+            home.mkdir()
+            ws = root / "ws"
+            ws.mkdir()
+            plan = self._plan(["agyj", "--print", "prompt"], ws,
+                              home, str(bindir))
+            self.assertEqual(str(bindir), plan.env.get("PATH"))
+            self.assertEqual(str(home), plan.env.get("HOME"))
+
+    def test_cage_holds_only_captures_no_repo_no_mcp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bindir = root / "bin"
+            bindir.mkdir()
+            self._fake_bin(bindir, "muse")
+            home = root / "home"
+            home.mkdir()
+            ws = root / "captures"
+            ws.mkdir()
+            plan = self._plan(["muse", "exec", "prompt"], ws,
+                              home, str(bindir))
+            self.assertEqual(str(ws), plan.cwd)
+            text = " ".join(plan.argv)
+            self.assertIn(str(ws), text)
+            self.assertNotIn(str(REPO), text)
+            self.assertNotIn("mcp_config.json", text)
+            self.assertNotIn("mcpServers", text)
+
 
 def _solid_png(path: Path, width: int, height: int,
                rgb: tuple[int, int, int]) -> None:
