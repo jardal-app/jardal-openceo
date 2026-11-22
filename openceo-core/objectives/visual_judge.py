@@ -23,12 +23,24 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
+import shutil
 import struct
 import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping, Sequence
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Mapping,
+    Sequence,
+)
+
+if TYPE_CHECKING:
+    from research.runtimes.isolation import IsolationPlan
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +61,7 @@ __all__ = [
     "judge_capture_keys",
     "judge_capture_refs",
     "judge_capture_specs",
+    "judge_isolation_plan",
     "latest_verdicts",
     "load_rubrics",
     "parse_verdict",
@@ -346,16 +359,51 @@ def _gemini_account(salt: int) -> str:
     return GEMINI_ACCOUNTS[salt % len(GEMINI_ACCOUNTS)]
 
 
+def _resolve_judge_argv(argv: Sequence[str],
+                        path: str | None) -> list[str]:
+    """argv with a bare provider CLI resolved to its absolute binary.
+
+    Best effort: a name with no host hit keeps its bare form and the
+    fence fails loudly at exec, falling through to the next provider.
+    """
+    resolved = [str(token) for token in argv]
+    if not resolved:
+        return resolved
+    found = shutil.which(resolved[0], path=path)
+    if found:
+        resolved[0] = found
+    return resolved
+
+
+def judge_isolation_plan(argv: Sequence[str], workdir: str | Path,
+                         *,
+                         base: Mapping[str, str] | None = None,
+                         home: str | Path | None = None,
+                         ) -> IsolationPlan:
+    """Fenced plan for one judge CLI run (sibling agent pattern).
+
+    The same fence every agent run gets (:func:`plan_agent` over the
+    host env allowlist, so ``PATH``/``HOME`` survive and provider CLIs
+    resolve inside), with the judge cage kept: the captures dir is the
+    only workspace, no repo roots, no MCP overlays. ``base``/``home``
+    are seams for hermetic tests; production passes the host env.
+    """
+    from orchestration.agent_sandbox import plan_agent
+
+    env_base = os.environ if base is None else base
+    resolved = _resolve_judge_argv(argv, env_base.get("PATH"))
+    return plan_agent(
+        argv=resolved, workspace=str(workdir), base=env_base, overlay={},
+        config_args=[resolved[0]] if resolved else [],
+        home=Path(home) if home is not None else None)
+
+
 async def _default_run_cli(argv: Sequence[str], cwd: str | Path,
                            timeout_s: int,
                            ) -> tuple[int, str, Mapping[str, Any]]:
-    """Fenced one-shot CLI run (no repo, no badge, no tools)."""
-    from orchestration.agent_sandbox import plan_agent
-
+    """Fenced one-shot CLI run (no repo, no badge, no MCP)."""
     workdir = Path(cwd)
-    plan = plan_agent(argv=[str(token) for token in argv],
-                      workspace=str(workdir), base={}, overlay={},
-                      config_args=[str(argv[0])])
+    plan = judge_isolation_plan(argv, workdir)
     proc = await asyncio.create_subprocess_exec(
         *plan.argv, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT, cwd=plan.cwd, env=plan.env)

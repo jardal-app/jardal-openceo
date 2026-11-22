@@ -45,6 +45,10 @@ __all__ = [
 RECOVERABLE_REASONS = frozenset({
     "capability_gap", "blocked", "data_gaps", "erp_error", "config",
     "planner_error", "no_quorum", "closer_no_verdict", "stalled",
+    # Visual-judge wedges (TASK-2026-00896): busy browsers, out-of-quota
+    # providers and gate hiccups clear on their own like any verdict
+    # infra wedge; the judge step itself is idempotent across retries.
+    "visual_judge", "visual_baseline",
 })
 
 DEFAULT_RECOVERY: dict[str, Any] = {

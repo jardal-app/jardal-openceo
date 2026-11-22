@@ -770,6 +770,24 @@ class BudgetSpentVisualGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual("closed", stored["status"])
 
 
+class VisualParkRecoveryTests(unittest.TestCase):
+    def test_visual_parks_retry_on_their_own(self) -> None:
+        from objectives import recovery_policy as recovery_mod
+
+        for reason in ("visual_judge", "visual_baseline"):
+            patch = recovery_mod.recovery_park_patch(
+                {}, reason, "detail", None)
+            assert patch is not None
+            self.assertFalse(patch["recovery"]["exhausted"])
+            self.assertIsNotNone(patch["recovery"]["due_at"])
+        decision = recovery_mod.recovery_decision(
+            {"status": "waiting",
+             "waiting_reason": "visual_judge: busy",
+             "recovery": {"attempts": 0, "due_at": "2000-01-01T00:00:00+00:00"}},
+            0, None)
+        self.assertEqual("retry", decision["action"])
+
+
 class MissionVisualGateTests(unittest.IsolatedAsyncioTestCase):
     async def _mission_env(self):
         from objectives.missions import (
