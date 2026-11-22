@@ -420,26 +420,51 @@ class JudgeProvidersTests(unittest.TestCase):
                           "--reasoning-effort", "max",
                           "--image", "a.png", "--image", "b.png"], argv)
 
-    def test_agy_argv_refuses_until_verified(self) -> None:
-        self.assertFalse(judge_mod.AGY_IMAGE_VERIFIED)
+    def test_agy_argv_embeds_captures_and_flags_first(self) -> None:
+        self.assertTrue(judge_mod.AGY_IMAGE_VIA_TOOLS)
+        argv = judge_mod.judge_argv_agy("prompt", "agyj")
+        self.assertEqual("agyj", argv[0])
+        self.assertLess(argv.index("--print"), len(argv) - 1)
+        self.assertEqual("prompt", argv[-1])
         with self.assertRaises(ValueError):
-            judge_mod.judge_argv_agy("prompt", "agyd")
+            judge_mod.judge_argv_agy("prompt", "nope")
+        refs = judge_mod.judge_capture_refs(["a.png", "b.png"])
+        self.assertIn("@a.png (absolute path a.png)", refs)
 
 
 class RunVerdictTests(unittest.IsolatedAsyncioTestCase):
-    async def test_recorded_approval_wins(self) -> None:
+    async def test_recorded_approval_wins_on_first_account(self) -> None:
+        seen: list[str] = []
+
         async def fake_cli(argv, cwd, timeout):
-            self.assertIn("--image", argv)
+            seen.append(argv[0])
             return (0, '{"approved": true, "defects": []}',
                     {"tokens_in": 4000, "tokens_out": 120})
 
         record = await judge_mod.run_verdict(
             "/dashboard", ["a.png", "b.png"], "prompt", "/tmp",
             run_cli=fake_cli)
-        self.assertEqual("muse-review", record["provider"])
+        self.assertEqual("gemini:agyd", record["provider"])
         self.assertTrue(record["approved"])
         self.assertEqual(4000, record["tokens_in"])
         self.assertEqual(120, record["tokens_out"])
+        self.assertEqual(["agyd"], seen)
+
+    async def test_busy_account_falls_to_next_then_muse(self) -> None:
+        seen: list[str] = []
+
+        async def fake_cli(argv, cwd, timeout):
+            seen.append(argv[0])
+            if argv[0] in ("agyd", "agyj", "agy2"):
+                return (1, "busy", {})
+            self.assertIn("--image", argv)
+            return (0, '{"approved": true, "defects": []}', {})
+
+        record = await judge_mod.run_verdict(
+            "/dashboard", ["a.png"], "prompt", "/tmp",
+            run_cli=fake_cli)
+        self.assertEqual("muse-review", record["provider"])
+        self.assertEqual(["agyd", "agyj", "agy2", "muse"], seen)
 
     async def test_malformed_output_falls_through_to_error(self) -> None:
         async def fake_cli(argv, cwd, timeout):

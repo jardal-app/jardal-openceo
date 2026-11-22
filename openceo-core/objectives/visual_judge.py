@@ -7,12 +7,14 @@ most three defects. Never per ticket, never in a loop: a failed view
 earns exactly one correction round of fix tickets and a second verdict;
 a second failure closes with the verdict in the delivery record.
 
-Providers: muse-review first (``muse exec --image``, verified
-repeatable flag). The gemini panel link (agyd/agyj/agy2 rotation) stays
-wired but inactive: agy 1.5.9 advertises no headless image flag and the
-community ``@file``/prompt-path intake needs file tools, which the
-judge forbids (D4: no repo, no diff, no tools, no navigation). Flipping
-``AGY_IMAGE_VERIFIED`` requires an Owner-authorized live probe.
+Providers: gemini first (agyd/agyj/agy2 rotation, spreading the Owner's
+three quotas), muse-review as the fallback when agy is busy or out of
+quota. agy 1.5.9 has no headless image flag: it sees captures by opening
+them with its own file tools (Owner-authorized live probes, 2026-11-22:
+NO_IMAGE_VISIBLE with tools forbidden, correct description with tools
+allowed). The judge isolation is the fence — a scratch workspace holding
+only the captures, no repo mounts, no MCP — so fenced file reads cannot
+wander; ``muse exec --image`` stays the tool-free fallback.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from typing import Any, Awaitable, Callable, Mapping, Sequence
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "AGY_IMAGE_VERIFIED",
+    "AGY_IMAGE_VIA_TOOLS",
     "JUDGE_TIMEOUT_S",
     "MUSE_JUDGE_MODEL",
     "VISUAL_CHANGE_THRESHOLD",
@@ -45,6 +47,7 @@ __all__ = [
     "judge_argv_agy",
     "judge_argv_muse",
     "judge_capture_keys",
+    "judge_capture_refs",
     "judge_capture_specs",
     "latest_verdicts",
     "load_rubrics",
@@ -56,10 +59,12 @@ __all__ = [
     "subprocess_run",
 ]
 
-#: agy headless image intake is REFUTED (D3): the Owner-authorized live
-#: probe of 2026-11-22 answered NO_IMAGE_VISIBLE in one turn with tools
-#: forbidden, so gemini verdicts refuse and muse-review stays primary.
-AGY_IMAGE_VERIFIED = False
+#: agy headless image intake goes through its fenced file tools (D3):
+#: the Owner-authorized live probes of 2026-11-22 answered
+#: NO_IMAGE_VISIBLE with tools forbidden and described the capture
+#: correctly with tools allowed, so the gemini prompt embeds ``@file``
+#: references and the sandbox fence stays the isolation boundary.
+AGY_IMAGE_VIA_TOOLS = True
 
 #: Isolated judge model (the muse-review slot model).
 MUSE_JUDGE_MODEL = "muse-spark-1.3-contributor"
@@ -320,20 +325,21 @@ def judge_argv_muse(images: Sequence[str | Path],
 
 def judge_argv_agy(prompt: str, account: str = GEMINI_ACCOUNTS[0],
                    model: str = GEMINI_JUDGE_MODEL) -> list[str]:
-    """agy judge argv (UNVERIFIED image path; refuses until proven).
+    """agy judge argv (images via fenced file tools, Owner order 2026-11-22).
 
-    Community reports say prompt-embedded absolute paths let the model
-    read images with file tools — tools the judge forbids (D4). Until an
-    Owner-authorized live probe proves a tool-free intake, building this
-    argv raises instead of running a crippled judge.
+    Flags ride before ``--print`` (it eats the next token as the prompt).
+    Captures travel as ``@file`` + absolute paths, the exact form the
+    live probe proved; the sandbox fence holds only the captures.
     """
-    if not AGY_IMAGE_VERIFIED:
-        raise ValueError(
-            "agy image intake is unverified (D3): muse-review judges until "
-            "an Owner-authorized live probe proves a tool-free path")
     if account not in GEMINI_ACCOUNTS:
         raise ValueError(f"not a gemini panel account: {account!r}")
     return [account, "--model", model, "--print", prompt]
+
+
+def judge_capture_refs(images: Sequence[str | Path]) -> str:
+    """Capture references for the gemini prompt (proven probe form)."""
+    return "\n".join(f"@{image} (absolute path {image})"
+                     for image in images)
 
 
 def _gemini_account(salt: int) -> str:
@@ -374,7 +380,7 @@ async def run_verdict(
     prompt: str,
     workdir: str | Path,
     *,
-    providers: Sequence[str] = ("muse-review", "gemini"),
+    providers: Sequence[str] = ("gemini", "muse-review"),
     salt: int = 0,
     timeout_s: int = JUDGE_TIMEOUT_S,
     run_cli: Callable[[Sequence[str], str | Path, int],
@@ -383,51 +389,57 @@ async def run_verdict(
 ) -> dict[str, Any]:
     """One judged view: first working provider wins (no loop, no retry).
 
-    Returns the verdict record (view/provider/approved/defects/tokens).
-    Raises :class:`ValueError` when no provider judges (malformed
-    output counts as a provider failure and falls through once).
+    gemini rotates over the panel accounts from ``salt``: a busy or
+    out-of-quota account falls through to the next one, and only when all
+    three fail does muse-review judge. Returns the verdict record
+    (view/provider/approved/defects/tokens). Raises :class:`ValueError`
+    when no provider judges (malformed output counts as a failure and
+    falls through).
     """
     runner = run_cli or _default_run_cli
     failures: list[str] = []
-    for index, provider in enumerate(providers):
+    attempts: list[tuple[str, Sequence[str]]] = []
+    for provider in providers:
+        if provider == "muse-review":
+            attempts.append((provider, [*judge_argv_muse(images), prompt]))
+        elif provider == "gemini":
+            refs = judge_capture_refs(images)
+            for offset in range(len(GEMINI_ACCOUNTS)):
+                account = _gemini_account(salt + offset)
+                attempts.append((
+                    f"gemini:{account}",
+                    judge_argv_agy(
+                        f"{prompt}\n\nCapturas:\n{refs}", account)))
+        else:
+            failures.append(f"{provider}: unknown provider")
+    for label, argv in attempts:
         try:
-            if provider == "muse-review":
-                argv: Sequence[str] = [
-                    *judge_argv_muse(images), prompt]
-            elif provider == "gemini":
-                argv = judge_argv_agy(
-                    prompt + "\n\nCapturas:\n" + "\n".join(
-                        str(image) for image in images),
-                    _gemini_account(salt + index))
-            else:
-                failures.append(f"{provider}: unknown provider")
-                continue
             returncode, output, usage = await runner(
                 argv, workdir, timeout_s)
-            if returncode != 0:
-                failures.append(
-                    f"{provider}: exit {returncode}: {output[:200]}")
-                continue
-            try:
-                verdict = parse_verdict(output)
-            except ValueError as exc:
-                failures.append(f"{provider}: {exc}")
-                continue
-            tokens = usage if isinstance(usage, Mapping) else {}
-            return {
-                "view": view,
-                "provider": provider,
-                "approved": verdict.approved,
-                "defects": verdict.defects,
-                "tokens_in": tokens.get("tokens_in"),
-                "tokens_out": tokens.get("tokens_out"),
-                "at": datetime.now(timezone.utc).isoformat(),
-            }
         except ValueError as exc:
-            failures.append(f"{provider}: {exc}")
+            failures.append(f"{label}: {exc}")
             continue
+        if returncode != 0:
+            failures.append(
+                f"{label}: exit {returncode}: {output[:200]}")
+            continue
+        try:
+            verdict = parse_verdict(output)
+        except ValueError as exc:
+            failures.append(f"{label}: {exc}")
+            continue
+        tokens = usage if isinstance(usage, Mapping) else {}
+        return {
+            "view": view,
+            "provider": label,
+            "approved": verdict.approved,
+            "defects": verdict.defects,
+            "tokens_in": tokens.get("tokens_in"),
+            "tokens_out": tokens.get("tokens_out"),
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
     raise ValueError("no visual judge available: "
-                     + "; ".join(failures[:4]))
+                     + "; ".join(failures[:6]))
 
 
 def latest_verdicts(verdicts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
