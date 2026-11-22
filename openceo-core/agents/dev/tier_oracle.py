@@ -10,7 +10,10 @@ oracle fails, the gate fails and the ticket must not close on it.
 Only file-backed references are hash-protected. Semantic references that
 do not resolve to a repo file are recorded unresolved: the verification
 gate only covers protected references. ``builder_tests`` never qualifies
-(§35) and is never frozen.
+(§35) and is never frozen. A UI test asserting literal visible text
+never qualifies either (policy §44, TASK-2026-00896): it is demoted to
+evidence and the builder may rewrite it as a behavior test instead of
+being blocked by frozen copy.
 
 Running the oracle (``oracle_run_plan``): the executable types run through
 the project's ``dev.oracle_cmd`` template, a required post-build gate with
@@ -26,22 +29,26 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shlex
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 __all__ = [
     "EXECUTABLE_ORACLE_TYPES",
     "OracleRun",
     "QUALIFYING_ORACLE_TYPES",
+    "demoted_ui_refs",
     "freeze_oracle",
     "is_qualifying_oracle",
+    "is_ui_literal_test",
     "oracle_run_plan",
     "resolve_oracle_ref",
     "unresolved_oracle_refs",
     "validate_oracle_config",
+    "validate_ui_tests_config",
     "verify_oracle",
 ]
 
@@ -67,6 +74,22 @@ EXECUTABLE_ORACLE_TYPES = frozenset({
 
 #: Default timeout of the oracle gate (``dev.oracle_timeout_minutes``).
 DEFAULT_ORACLE_TIMEOUT_MINUTES = 10
+
+#: Literal visible-text assertions (testing-library/vitest/jest):
+#: any ByText query with a literal first argument, toHaveTextContent
+#: with a literal, toContain with a string literal. A regex, matcher or
+#: variable first argument is not literal and never matches. Role and
+#: accessible-name queries are the sanctioned rewrite target, so they
+#: never match either.
+_UI_LITERAL_PATTERNS = (
+    re.compile(r"\b\w*ByText\s*\(\s*[\"'`]"),
+    re.compile(r"\.toHaveTextContent\s*\(\s*[\"'`0-9+\-.]"),
+    re.compile(r"\.toContain\(\s*[\"'`]"),
+)
+
+#: Files above this size are never scanned for UI literals (they still
+#: freeze normally when they qualify).
+_UI_SCAN_MAX_BYTES = 1 << 20
 
 
 def _utcnow_iso() -> str:
@@ -120,11 +143,64 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _norm_ui_prefix(value: str) -> str:
+    cleaned = str(value or "").strip().lstrip("./").replace(os.sep, "/")
+    return cleaned.rstrip("/") + "/" if cleaned else ""
+
+
+def is_ui_literal_test(repo: Path, relpath: str,
+                       ui_test_paths: Sequence[str] | None) -> bool:
+    """True when a resolved ref is a UI test asserting literal text.
+
+    Both halves must hold: the path sits under a declared
+    ``dev.ui_tests`` prefix, and the file holds a literal visible-text
+    assertion. Unreadable and oversized files never match (they freeze
+    normally when they qualify).
+    """
+    prefixes = [_norm_ui_prefix(item) for item in (ui_test_paths or [])]
+    prefixes = [item for item in prefixes if item]
+    if not prefixes:
+        return False
+    normalized = str(relpath or "").replace(os.sep, "/").lstrip("/")
+    if not any(normalized == item.rstrip("/")
+               or normalized.startswith(item) for item in prefixes):
+        return False
+    target = repo / Path(normalized)
+    try:
+        if target.stat().st_size > _UI_SCAN_MAX_BYTES:
+            return False
+        text = target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    # Block comments never assert; line comments stay (a false positive
+    # only demotes, while a missed literal freezes copy and blocks UI).
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    return any(pattern.search(text) for pattern in _UI_LITERAL_PATTERNS)
+
+
+def demoted_ui_refs(frozen: Any) -> list[str]:
+    """Raw labels of refs demoted as UI literal-text oracles ([] = none).
+
+    Demoted refs stay unresolved (never hash-protected, never run as an
+    oracle) and are named by :func:`unresolved_oracle_refs` too; this
+    lists them for the evidence note telling the builder it may rewrite
+    them as behavior tests.
+    """
+    if not isinstance(frozen, Mapping) or not isinstance(
+            frozen.get("refs"), list):
+        return []
+    return [str(entry.get("ref") or "?")
+            for entry in frozen.get("refs") or []
+            if isinstance(entry, Mapping)
+            and entry.get("demoted") == "ui_literal"]
+
+
 def freeze_oracle(
     repo: Path,
     base_sha: str,
     oracle: Any,
     task_ref: str,
+    ui_test_paths: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     """Freeze the qualifying oracle before the build (orchestrator-side).
 
@@ -132,6 +208,10 @@ def freeze_oracle(
     oracle type, ticket) or None when there is no qualifying oracle to
     protect. Call once, on the pristine work branch, before the builder
     runs: worktree content then equals ``base_sha`` content.
+
+    UI literal-text refs demote to evidence (policy §44): they record
+    unresolved with ``demoted: ui_literal`` instead of a content hash,
+    so the builder may rewrite them as behavior tests.
     """
     if not is_qualifying_oracle(oracle):
         return None
@@ -142,6 +222,10 @@ def freeze_oracle(
         path = resolve_oracle_ref(repo, raw)
         if path is None:
             refs.append({"ref": raw, "resolved": False})
+            continue
+        if is_ui_literal_test(repo, path, ui_test_paths):
+            refs.append({"ref": raw, "path": path, "resolved": False,
+                         "demoted": "ui_literal"})
             continue
         try:
             digest = _sha256_file(repo / path)
@@ -243,6 +327,14 @@ def oracle_run_plan(
         if isinstance(entry, Mapping) and entry.get("resolved")
         and entry.get("ref")))
     if not refs:
+        demoted = demoted_ui_refs(frozen)
+        if demoted:
+            return None, (
+                "frozen oracle demoted to evidence (policy §44: UI tests "
+                "asserting literal visible text never qualify): "
+                + ", ".join(demoted[:5])
+                + ("…" if len(demoted) > 5 else "")
+                + "; the builder may rewrite them as behavior tests")
         return None, ("frozen oracle has no file-backed refs: "
                       "hash-protected only, nothing to execute")
     template = str((dev_cfg or {}).get("oracle_cmd") or "").strip()
@@ -272,6 +364,28 @@ def unresolved_oracle_refs(frozen: Any) -> list[str]:
         str(entry.get("ref") or "?")
         for entry in frozen.get("refs") or []
         if isinstance(entry, Mapping) and not entry.get("resolved")))
+
+
+def validate_ui_tests_config(dev_cfg: Mapping[str, Any] | None) -> list[str]:
+    """Human-readable errors for ``dev.ui_tests``, [] when valid/absent.
+
+    Repo-relative prefixes of the project's UI test dirs; a declared
+    oracle ref under one of them that asserts literal visible text
+    demotes to evidence instead of freezing (policy §44).
+    """
+    raw = (dev_cfg or {}).get("ui_tests")
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not raw:
+        return ["dev.ui_tests must be a non-empty list of paths"]
+    errors: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            errors.append("dev.ui_tests entries must be non-empty strings")
+        elif ".." in Path(entry.strip()).parts or Path(
+                entry.strip()).is_absolute():
+            errors.append(f"dev.ui_tests {entry!r} must stay inside the repo")
+    return errors
 
 
 def validate_oracle_config(dev_cfg: Mapping[str, Any] | None) -> list[str]:

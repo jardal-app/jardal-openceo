@@ -1395,7 +1395,7 @@ class TierSCycle:
         attempt = 0
         while True:
             results = await asyncio.to_thread(
-                gate_mod.run_gates, ctx.repo, ctx.gate_specs)
+                gate_mod.run_gates, ctx.repo, ctx.gate_specs, ctx.ref)
             self._record_gates(ctx, "build" if attempt == 0 else f"fix{attempt}",
                                results)
             failed = gate_mod.gates_failed(results)
@@ -1973,7 +1973,7 @@ class TierSCycle:
         # Fix gates: one correction round, then the ticket waits (§6.9 spirit).
         for attempt in range(2):
             results = await asyncio.to_thread(
-                gate_mod.run_gates, ctx.repo, ctx.gate_specs)
+                gate_mod.run_gates, ctx.repo, ctx.gate_specs, ctx.ref)
             self._record_gates(ctx, f"fix{round_no}" if attempt == 0
                                else f"fix{round_no}b", results)
             failed = gate_mod.gates_failed(results)
@@ -2348,7 +2348,7 @@ class TierSCycle:
                 "arbitrations": ctx.arbitrations, "metrics": ctx.metrics,
                 "updated_at": _utcnow_iso()})
             final = await asyncio.to_thread(
-                gate_mod.run_gates, ctx.repo, ctx.gate_specs)
+                gate_mod.run_gates, ctx.repo, ctx.gate_specs, ctx.ref)
             self._record_gates(ctx, "final", final)
             if gate_mod.gates_failed(final):
                 names = ", ".join(
@@ -3075,7 +3075,13 @@ class TierSCycle:
             "design-system components that carry them; leave the visual "
             "composition to the builder, who renders it at commercial "
             "product quality, and never plan copying an existing screen's "
-            "markup.\n"
+            "markup. The builder reads the pinned UI skills (unslop, "
+            "ui-ux-pro-max) and verifies through the project UI gate on "
+            "its own; never plan skill setup or a visual review loop: "
+            "code reviewers stay on code, and each changed view gets one "
+            "visual verdict at objective close with one correction round "
+            "(TASK-2026-00896, superseding TASK-2026-00734 on UI skills "
+            "and the visual verdict).\n"
             "Decide open questions yourself and record them in DECISIONS; only "
             "use [OWNER] when the ticket explicitly marks a decision so."
         )

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Puerta UI: ruta simulada</title>
+<style>
+  @font-face { font-family: "Fixture Sans"; src: url("/fixture-font.woff2") format("woff2"); font-display: swap; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Fixture Sans", sans-serif; color: #111111; background: #ffffff; }
+  .shell { display: flex; min-height: 100vh; }
+  nav.app-nav { width: 240px; flex: 0 0 240px; background: #f4f4f5; padding: 16px; }
+  nav.app-nav a { display: flex; align-items: center; gap: 8px; color: #333333; text-decoration: none; padding: 8px; }
+  main.app-content { flex: 1 1 auto; margin: 0 24px; max-width: 1200px; min-width: 0; padding: 24px 0; }
+  h1 { font-size: 28px; margin: 0 0 16px; }
+  p { margin: 0 0 12px; }
+  button { font: inherit; padding: 8px 16px; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <nav class="app-nav" aria-label="Principal">
+    <a href="/mock.html"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="currentColor"/></svg>Inicio</a>
+  </nav>
+  <main class="app-content">
+    <h1>Panel inicial</h1>
+    <p id="mock">Estado: pendiente</p>
+    <button type="button">Guardar</button>
+  </main>
+</div>
+<script>
+  fetch("/api/v1/ping").then(function (r) { return r.json(); }).then(
+    function (d) {
+      document.getElementById("mock").textContent = "Estado: " + d.status;
+    }).catch(function () {
+      document.getElementById("mock").textContent = "Estado: error";
+    });
+</script>
+</body>
+</html>

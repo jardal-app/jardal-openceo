@@ -228,6 +228,10 @@ class ObjectiveEnv:
     # unit envs and mission-less flows: mission linkage then degrades
     # to the ticket params the planner already sees.
     missions: Any | None = None
+    # Project QA block (``dev.qa``) for the visual judge (TASK-2026-00896):
+    # ``ui_gate`` configures the gate runs; absent means the project has
+    # no UI gate and the judge step skips.
+    project_qa: dict[str, Any] = field(default_factory=dict)
 
 
 class InMemoryObjectiveStore:
@@ -1083,6 +1087,18 @@ _QUALITY_GUIDE = (
     "  bar (§44): composed at commercial quality with the project's",
     "  design system; never contract keeping its current markup, copying",
     "  a sibling screen's pattern or a parity-only port below that bar.",
+    "- A UI test asserting literal visible copy never qualifies as a",
+    "  frozen oracle: it stays evidence, rewritten as behavior.",
+    "- The builder owns the visual composition and verifies it through",
+    "  the project UI gate; code reviewers stay on code (no visual",
+    "  review loop); one visual verdict per changed view at objective",
+    "  close, one correction round (00896 supersedes 00734 on skills",
+    "  and the visual verdict). UI skills ride every builder run; never",
+    "  contract installing them.",
+    "- Shell first: the first UI ticket owns the shared frame and",
+    "  passes the UI gate; renames ride their own codemod ticket, never",
+    "  inside a redesign budget; no view rebuild over a missing API;",
+    "  a UI project without a design doc proposes one first, once.",
     "- An input the goal names (e.g. an updated design doc) must exist",
     "  on the base branch; if it is missing or stale there, block and",
     "  ask instead of building on the old one.",
@@ -4634,6 +4650,9 @@ def _delivery_record(
         "dev_children": verdict["dev_children"],
         "outcome_kpi": None,
         "evidence": dict(evidence or {}),
+        "ui_verdicts": [dict(entry)
+                        for entry in (objective.get("ui_verdicts") or [])
+                        if isinstance(entry, Mapping)],
     }
 
 _CLOSURE_RE = re.compile(
@@ -4852,6 +4871,228 @@ async def _run_routed_reviewer(
         slot=slot, previous=previous)
 
 
+def _visual_fix_ticket(
+    env: ObjectiveEnv,
+    objective: Mapping[str, Any],
+    record: Mapping[str, Any],
+    captures_dir: str,
+) -> dict[str, Any]:
+    """Correction ticket for one failed visual verdict (D6, one round)."""
+    tiers = dict(env.fix_tiers or inbox_mod.FIX_TICKET_TIERS_DEFAULTS)
+    view = str(record.get("view") or "")
+    defects = [item for item in (record.get("defects") or [])
+               if isinstance(item, Mapping)]
+    first = str(defects[0].get("what") or "") if defects else "defectos"
+    lines = "\n".join(
+        f"- {item.get('where')}: {item.get('what')} "
+        f"(regla: {item.get('rule')})" for item in defects)
+    payload: dict[str, Any] = {
+        "priority": "medium",
+        "title": f"[visual-judge] {view}: {first[:80]}",
+        "description": (
+            f"Veredicto visual NO APROBADO (ronda {record.get('round')}) "
+            f"para la vista {view} "
+            f"(juez {record.get('provider')}).\n"
+            f"Defectos (dónde / qué / regla):\n{lines}\n"
+            f"Capturas de referencia: {captures_dir}/ (sede principal; "
+            f"pueden no verse en sandbox).\n"
+            "Reproduce con la puerta ui_gate del proyecto y corrige la "
+            "vista sin romper el resto."),
+        "acceptance": [
+            f"El juez visual aprueba la vista {view} en la siguiente "
+            "revisión final",
+            "puerta ui_gate en verde",
+        ],
+        "coding_tool": tiers.get("default", "tier_c"),
+        "agent_hint": "dev",
+        "params": {
+            "target_agent": "dev",
+            "work_type": "debugging",
+            "expected_artifacts": [view],
+        },
+        "objective_id": str(objective.get("objective_id")),
+        "origin": "visual_judge",
+        "project": str(objective.get("project") or ""),
+        "source": "spillover",
+        "source_id": f"visjudge:{objective.get('objective_id')}:"
+                     f"{view}:{record.get('round')}:"
+                     f"{uuid.uuid4().hex[:8]}",
+        "autorun": True,
+    }
+    group = str(objective.get("erp_group_ref") or "").strip()
+    if group:
+        payload["parent_task"] = group
+    return payload
+
+
+async def _visual_review_step(
+    env: ObjectiveEnv,
+    objective: Mapping[str, Any],
+    children: Sequence[Mapping[str, Any]],
+    verdict: Mapping[str, Any],
+    reviews: int,
+) -> dict[str, Any] | None:
+    """One visual verdict per changed view (D1–D6). None = nothing owed.
+
+    Runs ahead of the reviewer pool and the budget close, so no
+    objective with changed views closes by ``budget_spent`` without its
+    verdicts (D7). A failed round-1 view earns fix tickets and a trip
+    back to planning; a failed round-2 view closes with its verdict in
+    the delivery record.
+    """
+    from objectives import visual_judge as judge_mod
+    from qa import ui_gate as gate_mod
+
+    objective_id = str(objective.get("objective_id"))
+    if not verdict.get("dev_children"):
+        return None
+    qa = getattr(env, "project_qa", None) or {}
+    ui_gate = qa.get("ui_gate") if isinstance(qa, Mapping) else None
+    if not isinstance(ui_gate, Mapping):
+        return None
+    problems = gate_mod.validate_ui_gate_config({"qa": qa})
+    if problems:
+        return await _objective_park(
+            env, objective, "config",
+            f"dev.qa.ui_gate: {'; '.join(problems)[:250]}")
+    cfg = gate_mod.normalize_ui_gate_config(ui_gate)
+    cfg["project"] = str(objective.get("project") or "")
+    head = _integration_head(env, objective_id)
+    base_sha = str(objective.get("base_sha") or "")
+    if not base_sha:
+        return await _objective_park(
+            env, objective, "config",
+            "visual judge needs the objective base_sha")
+    scratch = objective_scratch(env.repo, objective_id)
+    baseline_dir = scratch / "ui-baseline"
+    final_dir = scratch / "ui-final"
+    baseline = dict(objective.get("ui_baseline") or {})
+    if not baseline.get("captures"):
+        attempts = int(objective.get("ui_baseline_attempts") or 0)
+        if attempts >= 3:
+            baseline = {"sha": base_sha, "captures": {},
+                        "unavailable": True}
+        else:
+            try:
+                await judge_mod.run_gate_worktree(
+                    env.repo, base_sha, "base", cfg, baseline_dir,
+                    f"{objective_id}-base")
+            except Exception as exc:  # noqa: BLE001
+                await env.objectives.patch_objective(objective_id, {
+                    "ui_baseline_attempts": attempts + 1})
+                return await _objective_park(
+                    env, objective, "visual_baseline",
+                    f"ui baseline gate failed: {exc}"[:300])
+            baseline = {"sha": base_sha, "captures": _hash_final_captures(
+                cfg, baseline_dir), "at": _utcnow_iso()}
+            await env.objectives.patch_objective(objective_id, {
+                "ui_baseline": baseline, "ui_baseline_attempts": 0})
+    try:
+        await judge_mod.run_gate_worktree(
+            env.repo, head, "head", cfg, final_dir,
+            f"{objective_id}-final")
+    except Exception as exc:  # noqa: BLE001
+        return await _objective_park(
+            env, objective, "visual_judge",
+            f"ui gate failed on head: {exc}"[:300])
+    changed = await asyncio.to_thread(
+        judge_mod.changed_views, cfg, baseline, final_dir,
+        baseline_dir if baseline.get("captures") else None)
+    verdicts = list(objective.get("ui_verdicts") or [])
+    pending = judge_mod.pending_views(changed, verdicts)
+    await env.objectives.patch_objective(
+        objective_id, {"ui_changed_views": changed})
+    if not pending:
+        return None
+    try:
+        rubrics = await asyncio.to_thread(judge_mod.load_rubrics)
+        summary = await asyncio.to_thread(
+            judge_mod.design_summary, env.repo)
+    except ValueError as exc:
+        return await _objective_park(
+            env, objective, "visual_judge",
+            f"judge rubric: {exc}"[:300])
+    fresh: list[dict[str, Any]] = []
+    for item in pending:
+        keys = judge_mod.judge_capture_keys(cfg, str(item["view"]))
+        images = [final_dir / f"{keys[0]}.png",
+                  final_dir / f"{keys[1]}.png"]
+        if not all(path.is_file() for path in images):
+            return await _objective_park(
+                env, objective, "visual_judge",
+                f"judge captures missing for {item['view']}")
+        prompt = judge_mod.build_judge_prompt(
+            str(item["view"]), rubrics, summary)
+        try:
+            record = await judge_mod.run_verdict(
+                str(item["view"]), images, prompt, final_dir,
+                salt=len(verdicts) + len(fresh))
+        except ValueError as exc:
+            return await _objective_park(
+                env, objective, "visual_judge",
+                f"judge failed for {item['view']}: {exc}"[:300])
+        record["round"] = item["round"]
+        record["captures"] = [judge_mod.sha256_file(path)
+                              for path in images]
+        fresh.append(record)
+    verdicts.extend(fresh)
+    await env.objectives.patch_objective(
+        objective_id, {"ui_verdicts": verdicts})
+    failed = [record for record in fresh
+              if record.get("approved") is False
+              and int(record.get("round", 0)) < 2]
+    if not failed:
+        if env.notify is not None:
+            approved = [record["view"] for record in fresh
+                        if record.get("approved") is True]
+            if approved:
+                await env.notify(
+                    _notify_ref(objective),
+                    f"Objective {objective_id} visual verdicts approved: "
+                    f"{', '.join(approved)}.")
+        return None
+    created: list[str] = []
+    for record in failed:
+        row = await env.create_ticket(_visual_fix_ticket(
+            env, objective, record, str(final_dir)))
+        task_id = str((row or {}).get("task_id") or "")
+        if task_id:
+            created.append(task_id)
+    await env.objectives.patch_objective(objective_id, {
+        "status": "active", "final_reviews": reviews + 1,
+        "tickets": [*(objective.get("tickets") or []), *created],
+    })
+    if env.notify is not None:
+        await env.notify(
+            _notify_ref(objective),
+            f"Objective {objective_id} back to planning on visual "
+            f"verdicts: {', '.join(str(record['view']) for record in failed)}.")
+    return await plan_objective(env, objective_id)
+
+
+def _hash_final_captures(cfg: Mapping[str, Any],
+                         out_dir: Path) -> dict[str, str]:
+    """sha per capture key of one gate run (baseline identity)."""
+    from objectives import visual_judge as judge_mod
+    from qa.ui_gate import slug_for_route
+
+    hashes: dict[str, str] = {}
+    for route in cfg.get("routes") or []:
+        for width in cfg.get("widths") or []:
+            for theme in cfg.get("themes") or []:
+                name = (f"{slug_for_route(str(route))}-{width}-{theme}.png")
+                path = out_dir / name
+                if not path.is_file():
+                    continue
+                try:
+                    hashes[judge_mod.capture_key(
+                        str(route), int(width), str(theme))] = (
+                            judge_mod.sha256_file(path))
+                except OSError:
+                    continue
+    return hashes
+
+
 async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, Any]:
     """Final review by domain + close (§9.7).
 
@@ -4941,6 +5182,10 @@ async def run_final_review(env: ObjectiveEnv, objective_id: str) -> dict[str, An
                       f"{verdict['work_children']} work children are "
                       "history (cancelled/failed)")
         return await _objective_park(env, objective, "data_gaps", detail)
+    visual = await _visual_review_step(
+        env, objective, children, verdict, reviews)
+    if visual is not None:
+        return visual
     if budget_spent and verdict["dev_children"]:
         return await _finish_objective(
             env, objective, {"verified": evidence["verified"]},
@@ -5510,6 +5755,27 @@ async def _finish_objective(
         except Exception:  # noqa: BLE001
             logger.warning("mission ledger failed for %s (close stands)",
                            mission_id)
+        from objectives import visual_judge as judge_mod
+
+        failed_views = judge_mod.final_failed_views(
+            objective.get("ui_verdicts") or [])
+        if failed_views and env.notify is not None:
+            try:
+                mission = await getattr(env, "missions").get_mission(
+                    mission_id)
+                shell = str((mission or {}).get(
+                    "conversion_source_task_id") or "")
+                if shell:
+                    await env.notify(
+                        shell,
+                        f"Objective {objective_id} closed with unresolved "
+                        f"failed visual verdicts: "
+                        f"{', '.join(failed_views)}. The delivery record "
+                        f"carries them; the mission cannot close as "
+                        f"acceptance-met until the Owner clears them.")
+            except Exception:  # noqa: BLE001
+                logger.warning("mission visual warning failed for %s "
+                               "(close stands)", mission_id)
     if env.ceo_wake is not None:
         reason = f"Objective {objective_id} closed: {closure}."
         if mission_id:

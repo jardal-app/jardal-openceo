@@ -53,6 +53,8 @@ from orchestration.role_agy import render_argv_extras as agy_argv_extras
 from orchestration.role_claude import render_argv_extras as claude_argv_extras
 from orchestration.role_codex import codex_mcp_env
 from orchestration.role_codex import render_argv_extras as codex_argv_extras
+from orchestration.role_skills import DEV_PROFILE as DEV_PROFILE_SKILLS
+from orchestration.role_skills import stage_role_skills
 from orchestration.review import ReviewerConfigError, with_resolved_command
 from orchestration.provider_recovery import (
     PROVIDER_RESUME_PROMPT,
@@ -350,6 +352,10 @@ class ProcessExecutor:
                     model=str(spec.get("model") or ""),
                     slot=str(spec.get("account") or spec.get("label")
                              or role))
+            if profile.name == DEV_PROFILE_SKILLS:
+                # Role skills land host-side before the fence (TASK-2026-00896):
+                # builders and the closer discover them in the workspace.
+                stage_role_skills(workdir, profile.name)
             try:
                 badge = await self._badge_provider.mint(role)
             except Exception as exc:  # noqa: BLE001

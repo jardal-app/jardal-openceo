@@ -842,6 +842,8 @@ spend never lowers this bar; it removes waste around it.
   sizes and themes, an API answers real requests, a migration applies
   and rolls back. Tests verify behavior; they never pin implementation
   details (hex values, literal copy, internal structure).
+- A UI test asserting literal visible copy never qualifies as a frozen
+  oracle (§24); it stays evidence, rewritten as behavior.
 - Interfaces carry a product-design bar (Owner order, 2026-11-13,
   TASK-2026-00734): a screen a ticket builds or rebuilds is composed the
   way a senior product designer ships a commercial product, with the
@@ -851,8 +853,18 @@ spend never lowers this bar; it removes waste around it.
   empty and error states, and the document's color, icon and motion
   tokens. Never contract keeping a screen's current markup, copying a
   sibling screen's pattern or a parity-only port of a screen below that
-  bar. The builder owns the visual composition and judges its own
-  render once; reviewers stay on code (no visual review loop).
+  bar. The builder owns the visual composition and verifies it through
+  the project UI gate; reviewers stay on code (no visual review loop);
+  each changed view gets one visual verdict at objective close, with
+  one correction round.
+- UI delivery (Owner order, 2026-11-22, TASK-2026-00896, superseding
+  TASK-2026-00734 on UI skills and the visual verdict): builders read
+  the pinned role skills first and verify through the UI gate, never
+  contracted as tickets; shell first (the first UI ticket owns the
+  shared frame and passes the gate); renames ride their own codemod
+  ticket, never inside a redesign budget; no view rebuild over a
+  missing API (out of the navigation until it exists); a UI project
+  without a design doc proposes one first, once.
 - Inputs exist on the base: a document or version the Objective names
   (for example "the updated design document") must be committed on the
   integration branch; check it with git, since builders never see

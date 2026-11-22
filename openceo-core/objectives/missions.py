@@ -680,6 +680,14 @@ def apply_acceptance_answer(
     }
 
 
+def _final_failed_ui_views(verdicts: Any) -> list[str]:
+    """Views whose latest visual verdict failed at round 2 (D7)."""
+    from objectives import visual_judge as judge_mod
+
+    return judge_mod.final_failed_views(
+        verdicts if isinstance(verdicts, list) else [])
+
+
 async def close_mission(
     env: MissionEnv,
     mission_id: str,
@@ -692,7 +700,8 @@ async def close_mission(
     cites every mission objective and its own delivery record. The
     shell completes through the standard patch (business push through
     the queue, never direct). Raises :class:`MissionRejected` without
-    the mission or outside active.
+    the mission or outside active, and with an unresolved failed
+    visual verdict on any objective (D7: the mission goes to the Owner).
     """
     mission = await env.missions.get_mission(mission_id)
     if mission is None:
@@ -703,6 +712,7 @@ async def close_mission(
             f"({mission.get('status')})")
     ledger = [dict(item) for item in mission.get("objectives") or []]
     evidence: list[dict[str, Any]] = []
+    visual_blocked: list[str] = []
     for item in ledger:
         objective_id = str(item.get("objective_id") or "")
         objective = await env.objectives.get_objective(objective_id)
@@ -715,6 +725,28 @@ async def close_mission(
             "status": str(objective.get("status") or ""),
             "delivery": objective.get("delivery"),
         })
+        delivery = (objective or {}).get("delivery") or {}
+        failed = _final_failed_ui_views(delivery.get("ui_verdicts") or [])
+        if failed:
+            visual_blocked.append(
+                f"{objective_id}: {', '.join(failed)}")
+    if visual_blocked:
+        # D7: a mission never closes as acceptance-met with an
+        # unresolved failed visual verdict; it goes to the Owner.
+        detail = "; ".join(visual_blocked)[:2000]
+        shell_ref = str(mission.get("conversion_source_task_id") or "")
+        if env.notify is not None:
+            await env.notify(
+                shell_ref or mission_id,
+                f"Mission {mission_id} cannot close: unresolved failed "
+                f"visual verdicts ({detail}). Owner decision required.")
+        await env.missions.patch_mission(mission_id, {
+            "visual_block": {"at": _utcnow_iso(env.now()),
+                             "detail": detail},
+        })
+        raise MissionRejected(
+            "unresolved failed visual verdicts: "
+            f"{detail} (Owner decision required)")
     closed_ids = [str(item.get("objective_id") or "") for item in ledger]
     await env.missions.patch_mission(mission_id, {
         "status": "closed",

@@ -15,7 +15,11 @@ receives, for any stack: standard maintained libraries instead of
 hand-written substitutes, conventional names, and the result verified the
 way its user meets it. Interfaces also carry a product-design bar
 (TASK-2026-00734): the design document sets identity, not a ceiling, and a
-flat sibling screen is debt, never the convention to copy.
+flat sibling screen is debt, never the convention to copy. UI work reads
+the two pinned role skills first and verifies through the project UI
+gate, which drives agent-browser with no model behind it (TASK-2026-00896,
+which supersedes TASK-2026-00734 on UI skills and the visual verdict;
+Owner order 2026-11-22: agent-browser only, no Playwright anywhere).
 
 Stdlib plus the scratch constant only: the simple tiers and the Tier S
 cycle both import it, and the Tier S package imports its own cycle on load.
@@ -71,12 +75,26 @@ ENGINEERING_STANDARD = (
     "estado y dar vida. Nunca maquetes con <br> ni con líneas «Etiqueta: "
     "valor», y no copies el patrón de una vista existente por debajo de "
     "este listón: es deuda, no convención.",
+    "- Si el ticket construye o cambia una interfaz, antes de componer "
+    "lee y aplica .codex/skills/unslop/SKILL.md y "
+    ".codex/skills/ui-ux-pro-max/SKILL.md del worktree. unslop en modo "
+    "directo: la dirección la fija el documento de diseño del repo, no "
+    "esperes confirmación (just do it, como admite la propia skill), sin "
+    "vídeo ni imágenes generadas. ui-ux-pro-max: si el repo tiene "
+    "documento de diseño, solo sus guías de UX y su checklist de "
+    "entrega; nunca generes otro sistema de diseño. Precedencia: "
+    "documento de diseño del repo > unslop > ui-ux-pro-max.",
     "- Verifica el resultado tal como lo encontrará su usuario, no solo "
-    "con tests. Una interfaz se abre en un navegador real (si tienes uno, "
-    "p. ej. agent-browser) a anchos representativos y en cada tema: sin "
-    "maquetación rota, desbordes ni scroll innecesario, con navegación, "
-    "Atrás y formularios funcionando, y con acabado de producto comercial; "
-    "si al verla no lo tiene, mejórala antes de entregar. Una API o un CLI "
+    "con tests. Una interfaz se verifica con la puerta de UI del "
+    "proyecto (gate ui_gate), que deja capturas y métricas. Si el "
+    "proyecto aún no declara esa puerta, abre la interfaz en un "
+    "navegador real con agent-browser, a anchos representativos y en "
+    "cada tema, con capturas puntuales y sin bucles: sin maquetación "
+    "rota, desbordes "
+    "ni scroll innecesario, con navegación, Atrás y formularios "
+    "funcionando, y con acabado de producto comercial; si al verla no "
+    "lo tiene, mejórala antes de entregar. Nunca uses Playwright: la "
+    "única herramienta de navegador es agent-browser. Una API o un CLI "
     "se ejecutan con una petición real. Una migración se aplica y se "
     "revierte en una base efímera. Anota en evidencia qué comprobaste y "
     "con qué.",

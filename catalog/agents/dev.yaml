@@ -10,7 +10,9 @@ boundary_tools:
   - openceo_add_ticket_comment
   - openceo_attach_ticket_file
 skills_dir: skills/dev
-skills: []
+skills:
+  - unslop
+  - ui-ux-pro-max
 inputs:
   - ticket with repository and acceptance criteria
 outputs:

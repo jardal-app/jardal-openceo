@@ -362,6 +362,18 @@ class ConfigLoader:
             f"{project}/project.yaml: {err}"
             for err in validate_oracle_config(dev)
         )
+        from agents.dev.tier_oracle import validate_ui_tests_config
+        errors.extend(
+            f"{project}/project.yaml: {err}"
+            for err in validate_ui_tests_config(dev)
+        )
+        # dev.qa.ui_gate: how the deterministic UI gate serves and judges
+        # the project's web UI (TASK-2026-00896). Optional per project.
+        from qa.ui_gate import validate_ui_gate_config
+        errors.extend(
+            f"{project}/project.yaml: {err}"
+            for err in validate_ui_gate_config(dev)
+        )
         from agents.dev.production_deploy import validate_deploy_config
         errors.extend(
             f"{project}/project.yaml: {err}"

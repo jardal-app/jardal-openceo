@@ -48,9 +48,39 @@ dev:
     - { name: lint, cmd: "bun run lint", timeout_minutes: 5, required: true }
     - { name: web_test, cmd: "pnpm --filter @jardal/web test", timeout_minutes: 5, required: true }
     - { name: web_build, cmd: "pnpm --filter @jardal/web build", timeout_minutes: 5, required: true }
+    # Deterministic UI gate over agent-browser, no model (TASK-2026-00896):
+    # runs after web_build so vite preview serves a fresh dist/.
+    # baseline_red: ignore until the C2 shell ticket lands (TASK-2026-00493):
+    # main is red today (shell margins, fonts) and the shell fix must be
+    # able to build on it; every ticket still runs the gate on its branch.
+    - { name: ui_gate, cmd: "/home/develop/development/Jardal/jardal-openceo/.venv/bin/python /home/develop/development/Jardal/jardal-openceo/openceo-core/qa/ui_gate.py --project jardal-erp --ticket {ticket}", timeout_minutes: 15, required: true, baseline_red: ignore }
   oracle_cmd: "bun test {refs}"
   oracle_timeout_minutes: 10
+  # UI test dirs (TASK-2026-00896, policy §44): a declared oracle ref under
+  # one of them that asserts literal visible text demotes to evidence.
+  ui_tests:
+    - "apps/web/test/"
+    - "apps/web/e2e/"
   qa:
-    playwright: skip
+    # v1 without a synthetic session (TASK-2026-00896): public pages can
+    # only prove fonts, leaks, axe and scroll. TASK-2026-00493 adds the
+    # session (routes + setup_eval reusing the e2e harness), the shell
+    # routes and the full check set.
+    ui_gate:
+      preview_cmd: "pnpm --filter @jardal/web preview --port {port} --strictPort --host 127.0.0.1"
+      url: "http://127.0.0.1:{port}"
+      routes: ["/overview", "/login", "/dashboard"]
+      widths: [1440, 390]
+      themes: [light, dark]
+      checks: [fonts, leaks, axe, scroll]
+      selectors: { content: ".jardal-app-content, main", nav: "nav.jardal-sidebar, nav, aside" }
+      min_margin: 24
+      min_margin_mobile: 16
+      max_width: 1600
+      fonts: ["Inter", "Material Symbols Outlined"]
+      # Throwaway-worktree commands for the visual judge only (baseline
+      # and head runs); ticket gate runs reuse the web_build output.
+      judge_install_cmd: "pnpm install --frozen-lockfile"
+      judge_build_cmd: "pnpm --filter @jardal/web build"
 
 notifications: []

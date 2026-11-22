@@ -377,6 +377,7 @@ class ObjectiveService:
             mandate=mandate,
             missions=(MongoMissionStore(repo) if repo is not None
                       else InMemoryMissionStore()),
+            project_qa=dict(dev_cfg.get("qa") or {}),
         )
 
     def mission_env_for(self, project: str) -> missions_mod.MissionEnv:

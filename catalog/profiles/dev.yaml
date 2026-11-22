@@ -20,4 +20,6 @@ rules: AGENTS.md
 skills:
   - create-skill
   - git
+  - unslop
+  - ui-ux-pro-max
 output_schema: openceo-core/objectives/agent_result.schema.json

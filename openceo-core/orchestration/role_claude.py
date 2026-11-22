@@ -63,7 +63,9 @@ def claude_no_auto_memory_env(extra: Mapping[str, str] | None = None) -> dict[st
 #: Engine file/shell tools pre-approved next to the box. The fence still
 #: decides WHERE the run may write and the badge which MCP tools answer;
 #: this list only keeps headless runs from blocking on approval prompts.
-CLAUDE_BUILTIN_TOOLS = ("Read", "Glob", "Grep", "Bash", "Edit", "Write")
+#: Skill lets the dev builder invoke its role skills (TASK-2026-00896).
+CLAUDE_BUILTIN_TOOLS = ("Read", "Glob", "Grep", "Bash", "Edit", "Write",
+                        "Skill")
 
 
 def render_system_prompt(profile: Any) -> str:

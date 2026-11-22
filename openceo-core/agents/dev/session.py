@@ -28,6 +28,7 @@ from .routing import (ROUTING_MISSING_REASON, TIER_C_CHAIN, RoutingDecision,
                       resolve_coding_tool, select_tier_c_link)
 from .production_deploy import normalize_deploy, run_production_step
 from .tier_oracle import (
+    demoted_ui_refs,
     freeze_oracle,
     oracle_run_plan,
     unresolved_oracle_refs,
@@ -80,6 +81,8 @@ from orchestration.role_muse import (
     render_card_argv,
     settings_overlay_bytes,
 )
+from orchestration.role_skills import DEV_PROFILE as DEV_PROFILE_SKILLS
+from orchestration.role_skills import stage_role_skills
 from objectives.engine import (
     InMemoryObjectiveStore,
     InMemoryTaskLister,
@@ -228,6 +231,9 @@ class _SimpleBranch:
     #: it was already red on the base branch, so it can neither accept nor
     #: reject this work (TASK-2026-00178). "" = it runs as a gate.
     oracle_baseline_red: str = ""
+    #: Oracle refs demoted as UI literal-text tests (policy §44,
+    #: TASK-2026-00896): evidence the builder may rewrite as behavior.
+    ui_demoted: tuple[str, ...] = ()
     #: The checkpoint was taken after the builder finished (TASK-2026-00481):
     #: a resume goes straight to gates/review instead of paying another build.
     build_done: bool = False
@@ -570,6 +576,18 @@ class DevSessionManager:
                 task["params"] = {key: value for key, value
                                   in task["params"].items()
                                   if key != "baseline_retries"}
+            if branch.ui_demoted:
+                # UI literal-text oracles demote to evidence (policy §44):
+                # the builder prompt carries the rewrite permission.
+                if not isinstance(task.get("params"), dict):
+                    task["params"] = {}
+                task["params"]["_ui_oracle_demoted"] = list(
+                    branch.ui_demoted)
+                output.steps.append(self._step(
+                    "oracle", "ok",
+                    "UI literal-text oracle refs demoted to evidence "
+                    f"({len(branch.ui_demoted)}): the builder may rewrite "
+                    "them as behavior tests"))
 
         if tool == CodingTool.TIER_C:
             await self._record_tier_c_event(task, "started")
@@ -930,7 +948,8 @@ class DevSessionManager:
         params = task.get("params") \
             if isinstance(task.get("params"), dict) else {}
         oracle_frozen = freeze_oracle(
-            repo, base_sha, (params or {}).get("oracle"), ref)
+            repo, base_sha, (params or {}).get("oracle"), ref,
+            (dev_cfg or {}).get("ui_tests"))
         # A preexisting oracle must be green on the base to judge the work.
         # Red there (an environment problem, or a test cited for the very
         # failure the ticket fixes) it only stays hash-protected: parking
@@ -951,7 +970,9 @@ class DevSessionManager:
         return _SimpleBranch(repo=repo, branch=branch, base=base,
                              base_sha=base_sha, ref=ref,
                              oracle_frozen=oracle_frozen,
-                             oracle_baseline_red=oracle_baseline_red)
+                             oracle_baseline_red=oracle_baseline_red,
+                             ui_demoted=tuple(
+                                 demoted_ui_refs(oracle_frozen)))
 
     def _drop_simple_branch(self, branch: _SimpleBranch) -> None:
         self._simple_git(branch.repo, "checkout", "-q", branch.base)
@@ -1215,7 +1236,8 @@ class DevSessionManager:
         retries = int(budgets.get("gate_retries", 2) or 0)
         attempt = 0
         while True:
-            results = await asyncio.to_thread(run_gates, repo, specs)
+            results = await asyncio.to_thread(
+                run_gates, repo, specs, branch.ref)
             failed = gates_failed(results)
             output.steps.append(self._step(
                 "gates", "ok" if not failed else "failed",
@@ -2982,6 +3004,7 @@ class DevSessionManager:
                                      None)
                              if self._task_service is not None else None),
             mandate=mandate,
+            project_qa=dict(dev_cfg.get("qa") or {}),
         )
 
     async def _internal_create_ticket(
@@ -3196,6 +3219,11 @@ class DevSessionManager:
                     error=detail,
                     executor_link=self._executor_link(executor),
                 )
+        if executor.role_profile == DEV_PROFILE_SKILLS:
+            # Role skills land host-side before the fence
+            # (TASK-2026-00896): the builder discovers them in the worktree.
+            stage_role_skills(executor.cwd or os.getcwd(),
+                              executor.role_profile)
         started = time.monotonic()
         run_env = {**(executor.env or {}), **extra_env} or None
         try:
@@ -3600,6 +3628,15 @@ class DevSessionManager:
                 project_prefix=knowledge_prefix)])
         dev_cfg = config.get("dev", {}) or {}
         gates, oracle_cmd = self._builder_gate_context(dev_cfg)
+        demoted = (task.get("params") or {}).get("_ui_oracle_demoted") or []
+        if isinstance(demoted, list) and demoted:
+            refs = ", ".join(str(item) for item in demoted[:8])
+            lines.extend(["", "ORÁCULOS UI DEGRADADOS A EVIDENCIA",
+                          f"Estos tests fijan texto visible literal y no "
+                          f"califican como oráculo congelado: {refs}. Puedes "
+                          f"reescribirlos para que prueben comportamiento "
+                          f"(rol, etiqueta accesible, clave i18n); no los "
+                          f"borres y no congeles su texto actual."])
         lines.extend(["", engineering_standard_prompt(),
                       "", builder_environment_prompt(
             gates, oracle_cmd,

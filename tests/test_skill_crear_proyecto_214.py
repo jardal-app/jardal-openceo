@@ -183,7 +183,8 @@ class PlannerSkillLiveTest(unittest.TestCase):
         block, mapping = _planner_skills()
         self.assertIn("crear-proyecto", block)
         self.assertEqual(["crear-proyecto"], mapping["operations"])
-        self.assertEqual([], mapping["dev"])
+        # TASK-2026-00896 added the two dev UI skills.
+        self.assertEqual(["ui-ux-pro-max", "unslop"], mapping["dev"])
 
     def test_suggested_skill_validated_live(self) -> None:
         _block, mapping = _planner_skills()

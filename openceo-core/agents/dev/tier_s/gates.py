@@ -4,10 +4,16 @@ Gates replace ``dev.qa`` and apply to every tier. The orchestrator runs them
 after the build, after each fix and at close — always before any reviewer.
 The agent is never the source of "tests pass": the ``Gates`` section of the
 handoff is written here, from these results.
+
+A gate command may carry the ``{ticket}`` placeholder (TASK-2026-00896):
+it expands to the sanitized ticket ref, so gates that leave per-ticket
+artifacts (the UI gate screenshots) know where to write. Baseline runs
+pass no ref and expand to ``baseline``.
 """
 
 from __future__ import annotations
 
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -17,6 +23,18 @@ from agents.dev.tier_s.models import GateResult, GateSpec
 
 #: Lines of trailing output kept per failed gate (design §11).
 OUTPUT_TAIL_LINES = 200
+
+#: Ticket refs stay shell-safe and dir-safe after this substitution.
+_TICKET_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
+
+#: ``{ticket}`` expansion for baseline runs, which carry no ticket.
+BASELINE_TICKET_REF = "baseline"
+
+
+def ticket_ref_for_gate(ticket_ref: str | None) -> str:
+    """Sanitized ``{ticket}`` expansion (``baseline`` when empty)."""
+    cleaned = _TICKET_SAFE.sub("", str(ticket_ref or "")).strip(".-")
+    return cleaned or BASELINE_TICKET_REF
 
 
 def load_gates(dev_cfg: Mapping[str, Any] | None) -> list[GateSpec]:
@@ -66,12 +84,14 @@ def _tail(text: str, lines: int = OUTPUT_TAIL_LINES) -> str:
     return "\n".join(rows[-lines:])
 
 
-def run_gate(repo: Path, spec: GateSpec) -> GateResult:
+def run_gate(repo: Path, spec: GateSpec,
+             ticket_ref: str | None = None) -> GateResult:
     """Run one gate in the executor's environment (cwd = repo worktree)."""
+    cmd = spec.cmd.replace("{ticket}", ticket_ref_for_gate(ticket_ref))
     started = time.monotonic()
     try:
         completed = subprocess.run(
-            spec.cmd,
+            cmd,
             cwd=repo,
             shell=True,
             stdout=subprocess.PIPE,
@@ -106,9 +126,10 @@ def run_gate(repo: Path, spec: GateSpec) -> GateResult:
     )
 
 
-def run_gates(repo: Path, gates: Sequence[GateSpec]) -> list[GateResult]:
+def run_gates(repo: Path, gates: Sequence[GateSpec],
+              ticket_ref: str | None = None) -> list[GateResult]:
     """Run every gate in order. No short-circuit: all results are telemetry."""
-    return [run_gate(repo, spec) for spec in gates]
+    return [run_gate(repo, spec, ticket_ref) for spec in gates]
 
 
 def gates_failed(results: Sequence[GateResult]) -> list[GateResult]:
