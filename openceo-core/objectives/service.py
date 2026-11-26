@@ -26,6 +26,7 @@ from objectives import missions as missions_mod
 from objectives import playbooks as playbooks_mod
 from objectives import recovery_deploy as deploy_mod
 from objectives import recovery_policy as recovery_mod
+from objectives import wedge_probes as probes_mod
 from objectives.delivery_verification import generic_agent_verifiers
 from objectives.money_guide import project_money_routing
 from objectives.missions import (
@@ -560,12 +561,14 @@ class ObjectiveService:
                     )
         return result
 
-    async def plan_objective(self, objective_id: str) -> dict[str, Any]:
+    async def plan_objective(self, objective_id: str, *,
+                             source: str = "manual") -> dict[str, Any]:
         """Run one planning cycle now (external triggers, TASK-2026-00174).
 
         Used when promotion (or any external producer) leaves work the
         planner must consider — e.g. a tierless linked child awaiting
-        its contract — and by the Owner/CEO replan poke (ticket #654).
+        its contract — by the Owner/CEO replan poke (ticket #654), and by
+        the automatic wedge re-check (TASK-2026-00951).
         A waiting objective resumes first: planning on it would strand
         its continued children, whose closes never replan an
         unexhausted blocked park. Returns the engine result, or ok False
@@ -604,7 +607,7 @@ class ObjectiveService:
             if env.notify is not None:
                 await env.notify(
                     engine_mod._notify_ref(objective),
-                    f"Objective {objective_id} resumed by a manual replan "
+                    f"Objective {objective_id} resumed by a {source} replan "
                     "after its Owner wait.")
         return await engine_mod.plan_objective(env, objective_id)
 
@@ -901,6 +904,69 @@ class ObjectiveService:
             logger.warning("recovery pacing failed for %s", objective_id,
                            exc_info=True)
 
+    async def _maybe_probe_auto_resume(
+        self, objective_id: str, objective: Mapping[str, Any],
+        reason: str, *, now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Resume an exhausted wedge the probe proves clear (TASK-2026-00951).
+
+        Only for the Owner-signal wait whose text classifies as a verdict
+        wedge: the agent-browser smoke runs off-loop, and a pass replans
+        through the #654 poke (budgets survive, so a re-park lands
+        exhausted-quiet and re-fires the park notify channels). Probe and
+        resume budgets bound the loop; anything else stays quiet.
+        """
+        idle: dict[str, Any] = {"resumed": False}
+        if self._repo is None:
+            return idle
+        if reason != "blocked parks wait for the Owner signal":
+            return idle
+        if str(objective.get("status") or "") != "waiting":
+            return idle
+        waiting = str(objective.get("waiting_reason") or "")
+        wedge = recovery_mod.classify_verdict_park(
+            objective, waiting.partition(":")[2].strip() or waiting,
+            list(objective.get("roadmap_remaining") or []))
+        if wedge is None:
+            return idle
+        moment = now if isinstance(now, datetime) else datetime.now(
+            timezone.utc)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        if not probes_mod.probe_allowed(objective, now=moment):
+            return {**idle, "reason": "probe-cooldown"}
+        probe = await asyncio.to_thread(probes_mod.probe_agent_browser)
+        if not probe.get("ok"):
+            await self._record_probe(objective_id, objective, ok=False,
+                                     resumed=False, now=moment)
+            return {**idle, "reason": str(probe.get("reason") or "")}
+        if not probes_mod.resume_allowed(objective, now=moment):
+            await self._record_probe(objective_id, objective, ok=True,
+                                     resumed=False, now=moment)
+            return {**idle, "reason": "auto-resume spent"}
+        await self._record_probe(objective_id, objective, ok=True,
+                                 resumed=True, now=moment)
+        logger.info("Objective %s wedge %s cleared by probe; replanning",
+                    objective_id, wedge)
+        plan = await self.plan_objective(
+            objective_id, source="automatic wedge re-check")
+        return {"resumed": bool(plan.get("ok")), "reason": "wedge cleared",
+                "result": plan}
+
+    async def _record_probe(self, objective_id: str,
+                            objective: Mapping[str, Any], *, ok: bool,
+                            resumed: bool, now: datetime) -> None:
+        """Persist the probe budget record; best-effort like pacing."""
+        if self._repo is None:
+            return
+        try:
+            await self._repo.patch_objective(objective_id, {
+                "auto_resume": probes_mod.record_probe(
+                    objective, ok=ok, resumed=resumed, now=now)})
+        except Exception:  # noqa: BLE001 - budget loss only repeats later
+            logger.warning("auto-resume record failed for %s", objective_id,
+                           exc_info=True)
+
     async def recover_waiting_objective(
         self, objective_id: str, *, now: datetime | None = None,
     ) -> dict[str, Any]:
@@ -949,6 +1015,12 @@ class ObjectiveService:
         action = str(decision.get("action") or "none")
         reason = str(decision.get("reason") or "")
         if action == "none":
+            probed = await self._maybe_probe_auto_resume(
+                objective_id, objective, reason, now=now)
+            if probed.get("resumed"):
+                return {**outcome, "ok": True, "action": "auto_resume",
+                        "reason": str(probed.get("reason") or ""),
+                        "result": probed.get("result") or {}}
             await self._pace_unactionable_recovery(
                 objective_id, objective, cfg, reason, now=now)
         if action == "deploy" and self._deploy_spawned:

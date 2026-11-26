@@ -575,6 +575,8 @@ The planner is not required to create a ticket on every invocation.
 
 Valid outcomes include active + tickets, blocked + no tickets, capability_gap + no tickets, and complete_candidate + no tickets.
 
+Judge/verdict infra never justifies blocked: plan the verdict ticket (TASK-2026-00951).
+
 Do not invent busywork.
 
 ## 38. High-risk domain actions

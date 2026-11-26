@@ -20,12 +20,13 @@ bounded wait, never on the code that parked it.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 __all__ = [
     "DEFAULT_RECOVERY",
     "DEPLOY_REASON",
     "RECOVERABLE_REASONS",
+    "classify_verdict_park",
     "deploy_park_patch",
     "deploy_retry_due",
     "park_reason",
@@ -159,6 +160,64 @@ def recovery_config(objectives_cfg: Mapping[str, Any] | None) -> dict[str, Any]:
 def park_reason(objective: Mapping[str, Any]) -> str:
     """Reason prefix of ``waiting_reason`` (``capability_gap: ...``)."""
     return str(objective.get("waiting_reason") or "").partition(":")[0].strip()
+
+
+#: Verdict-wedge markers (TASK-2026-00951): a park whose text names
+#: judge/verdict infra is engine-owned, never an Owner wait. Strong markers
+#: route alone; bare "verdict" needs infra context so a human design
+#: verdict ("waiting Owner verdict on the logo") stays blocked.
+_VERDICT_STRONG_MARKERS = (
+    "agent browser", "visual judge", "juez visual", "ui_verdicts",
+    "judge failed", "judge busy", "judge quota", "judge available",
+    "no judge", "judge providers", "judge captures", "baseline gate",
+    "ui baseline", "base captures", "sin verdict", "sin veredicto",
+)
+_VERDICT_WORDS = ("verdict", "veredicto")
+_VERDICT_INFRA_WORDS = (
+    "agent browser", "captures", "baseline", "gate", "fail", "missing",
+    "unavailable", "busy", "quota", "down", "error", "falta", "falla",
+    "falló",
+)
+#: Concrete human-channel actions: when the planner names one of these the
+#: park stays blocked even on verdict-adjacent text (ticket #654 wins).
+_HUMAN_OVERRIDE_MARKERS = (
+    "erp", "paste", "pegar", ".env", "spend", "playbook", "prod flag",
+    "prod .env", "owner approv", "needs approval", "aprobación del owner",
+    "human decision", "owner decision", "decisión", "needs a human",
+)
+_VISUAL_PARK_PREFIXES = ("visual_judge", "visual_baseline")
+
+
+def classify_verdict_park(
+    objective: Mapping[str, Any],
+    state_summary: str,
+    roadmap_remaining: Sequence[str] | None,
+) -> str | None:
+    """Visual prefix for a verdict-wedge park, else None (TASK-2026-00951).
+
+    Pure: the planner application (piece 1) and the exhausted-park probe
+    hook (piece 2) share it, so both agree on what a verdict wedge is. A
+    previous visual prefix sticks through vague planner text, so a
+    recovery re-check cannot downgrade engine-observed judge evidence to
+    an Owner wait; only a concrete human action overrides it.
+    """
+    lines = [str(state_summary or "")]
+    lines.extend(str(item or "") for item in (roadmap_remaining or []))
+    hay = " ".join(lines).lower().replace("-", " ")
+    if any(mark in hay for mark in _HUMAN_OVERRIDE_MARKERS):
+        return None
+    if any(mark in hay for mark in _VERDICT_STRONG_MARKERS):
+        wedge = True
+    else:
+        wedge = any(word in hay for word in _VERDICT_WORDS) \
+            and any(word in hay for word in _VERDICT_INFRA_WORDS)
+    if not wedge:
+        prev = park_reason(objective)
+        return prev if prev in _VISUAL_PARK_PREFIXES else None
+    baseline_only = ("baseline" in hay or "base captures" in hay) \
+        and "verdict" not in hay and "veredicto" not in hay \
+        and "visual judge" not in hay and "juez visual" not in hay
+    return "visual_baseline" if baseline_only else "visual_judge"
 
 
 def _backoff_minutes(cfg: Mapping[str, Any], attempts: int) -> int:

@@ -1591,8 +1591,12 @@ def _planner_prompt(
             "against the evidence above (closed children, objective notes,",
             "agent returns): if it is resolved, continue, or declare",
             "complete_candidate when the acceptance is met. If it still",
-            "needs a human, return blocked with the exact Owner action. Only",
-            "a failed approach changes (split, another agent or tier); never",
+            "needs a human, return blocked with the exact Owner action.",
+            "Judge/verdict infra (agent-browser, captures, visual verdicts)",
+            "is engine-owned: never return blocked for it, plan the",
+            "verdict ticket and let the executor report converge",
+            "evidence. Only a failed approach changes (split, another",
+            "agent or tier); never",
             "repeat a ticket unchanged and never hand an AI agent work its",
             "reach denies.",
             parked_md.strip(),
@@ -2957,8 +2961,14 @@ async def _record_and_apply_plan(
     if status == "complete_candidate":
         return await run_final_review(env, objective_id)
     if status == "blocked":
+        # TASK-2026-00951: a verdict wedge is engine-owned even when the
+        # planner words it as an Owner wait; route it to the visual prefix
+        # so it keeps retries + recovery ticket instead of stranding.
+        reason = recovery_mod.classify_verdict_park(
+            objective, result.state_summary,
+            list(result.roadmap_remaining)) or "blocked"
         return await _objective_park(
-            env, objective, "blocked", result.state_summary[:300])
+            env, objective, reason, result.state_summary[:300])
     if status == "capability_gap":
         await env.objectives.patch_objective(objective_id, {
             "capability_gap": {
