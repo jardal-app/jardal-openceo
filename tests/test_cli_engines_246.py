@@ -489,7 +489,7 @@ ATTEMPT_MODELS = {
     "muse-code": GENERIC_MUSE_MODEL,
     "claude-code": "opus",
     "opencode": "",
-    "codex-cli": "gpt-6.1-sol",
+    "codex-cli": "gpt-6.2-sol",
     "agy": "",
 }
 

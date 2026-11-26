@@ -80,7 +80,7 @@ class ValidateProjectTests(unittest.TestCase):
         roles = dev["tier_s"]["roles"]
         self.assertEqual(roles["planner"]["account"], "claudej")
         self.assertTrue(roles["planner"]["active"])
-        self.assertEqual(roles["plan-reviewer"]["model"], "gpt-6.1-sol")
+        self.assertEqual(roles["plan-reviewer"]["model"], "gpt-6.2-sol")
         # TASK-2026-00141: the review machinery moved out of dev.tier_s
         # into the shared global `review` block both engines read.
         for key in ("reviewers", "review", "inbox", "fix_ticket_tiers",
