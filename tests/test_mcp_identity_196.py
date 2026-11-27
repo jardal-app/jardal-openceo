@@ -625,18 +625,15 @@ class CatalogBoxConsistencyTests(unittest.TestCase):
 class MongoStoreTests(unittest.IsolatedAsyncioTestCase):
     async def _repo_db(self) -> Any:
         from db.mongo import MongoRepository  # noqa: PLC0415
-        from pymongo import MongoClient  # noqa: PLC0415
+        from mongo_support import MONGO_URL, mongo_available  # noqa: PLC0415
 
-        client = MongoClient("mongodb://localhost:27017",
-                             serverSelectionTimeoutMS=400)
-        try:
-            client.admin.command("ping")
-        finally:
-            client.close()
+        test_db = "openceo_test_mcp_identity"
+        if not mongo_available(test_db):
+            raise RuntimeError(f"no usable test Mongo for {test_db}")
         repo = MongoRepository(Settings(
             _env_file=None,  # type: ignore[call-arg]
-            MONGODB_URL="mongodb://localhost:27017",
-            MONGODB_DATABASE="openceo_test_mcp_identity"))
+            MONGODB_URL=MONGO_URL,
+            MONGODB_DATABASE=test_db))
         await repo.connect()
         return repo, repo.db
 

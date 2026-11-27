@@ -74,8 +74,9 @@ class TestPlanHostAgent:
                 argv=["/bin/true"], workspace=tmp_path,
                 base={**BASE_ENV, "OPENCEO_API_KEY": "secret"},
                 overlay={"X_RUN": "1"})
-        assert plan.argv[:6] == ["bwrap", "--die-with-parent",
-                                 "--new-session", "--dev-bind", "/", "/"]
+        assert plan.argv[:9] == ["bwrap", "--die-with-parent",
+                                 "--new-session", "--unshare-pid",
+                                 "--dev-bind", "/", "/", "--proc", "/proc"]
         assert plan.argv[-4:] == ["--chdir", str(tmp_path), "--", "/bin/true"]
         assert "OPENCEO_API_KEY" not in plan.env
         assert plan.env["X_RUN"] == "1"

@@ -2,6 +2,19 @@
 
 Resumen operativo corto del estado real del repo.
 
+## 2026-11-27 — Mongo con auth obligatoria y modo host sin Docker de producción ni secretos (TASK-2026-00985)
+
+- Orden del Owner, tras evaluar Docker Sandboxes (inviable aquí: el vServer no expone KVM): «si corrigelo y dejalo listo y pusheado y limpio y resetado todo revisa que no se bloquee el trabajo luego de tu reinicio».
+- **Causa:** `jardal-mongo` arrancaba sin `--auth` ni keyFile (el compose usaba `MONGODB_INITDB_*`, que la imagen no lee): las 32 bases se leían y escribían sin credenciales en 127.0.0.1:27017 y en `mongo.jardal.app:443`, y el fence comparte la red del host. El modo host (`--dev-bind / /`) daba al builder `openceo-core/.env`, `~/.ssh`, `gh`, los backups de Mongo, el /proc del host y el socket del Docker de producción (grupo docker = root).
+- **Fix:**
+  - jardal-mongo con `--keyFile` (commit local `2ead139`); mongo-express con la URL root correcta; usuario `openceo_test` (readWrite + dbAdmin solo en `openceo_test_*`) y `tests/mongo_support.py` (`OPENCEO_TEST_MONGODB_URL` o `.env.test` sin versionar; sin acceso, skip).
+  - `plan_host_agent`: PID namespace propio, raíz de código oculta salvo workspace y roots declarados, `.env*`/`.runtime` y credenciales del home vacíos, runtime dir/tmux/ssh-agent ocultos, socket de producción vacío y `DOCKER_HOST` al daemon rootless de agentes (usuario `openceo-docker`, `scripts/openceo-agent-docker.sh`).
+- **Verificación:**
+  - Antes del cambio, preflight de los consumidores (todos autentican con rw en su base) y backup restaurado en aislamiento. Después, sin credenciales se deniega en local y en público (code 13), sin fallos de auth, y apps, bots, core, mongo-express y backup funcionan.
+  - 9 tests nuevos con 6/6 mutaciones detectadas; checks obligatorios 71; motores `--version` y Testcontainers del ERP dentro del plan real.
+  - Los 14 fallos de research son idénticos en `main`; los 9 HTTP de `test_research_subscriptions` fallan por el `.env` vivo y pasan con él enmascarado.
+- **Hallazgos sin tocar:** los gates corren sin fence el código del builder, OpenCEO usa el usuario root de Mongo y Mongo sigue publicado por Traefik, ahora con auth (TASK-2026-00989).
+
 ## 2026-11-13 — Listón de diseño de producto para toda interfaz (TASK-2026-00734)
 
 - Órdenes del Owner: «para corregir el diseño y las futuras sesiones lo hagan automaticamente un diseño profesional final [...] aplica la solucion para todo mi openceo en general? [...] procede» y «no quiero loop visual en reviewers eso gasta demasiados tokens».

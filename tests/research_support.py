@@ -25,20 +25,13 @@ from research.contracts import (  # noqa: E402
 )
 from settings import Settings  # noqa: E402
 
-MONGO_URL = "mongodb://localhost:27017"
+from mongo_support import MONGO_URL, mongo_available as _db_usable  # noqa: E402
+
 TEST_DB = "openceo_test_research"
 
 
 def mongo_available(url: str = MONGO_URL) -> bool:
-    try:
-        from pymongo import MongoClient
-
-        client = MongoClient(url, serverSelectionTimeoutMS=400)
-        client.admin.command("ping")
-        client.close()
-        return True
-    except Exception:
-        return False
+    return _db_usable(TEST_DB, url)
 
 
 MONGO_AVAILABLE = mongo_available()
