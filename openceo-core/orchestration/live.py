@@ -490,7 +490,8 @@ class ProcessExecutor:
                                        read_roots=spec.get(
                                            "extra_read_roots") or (),
                                        write_roots=spec.get(
-                                           "extra_write_roots") or ())
+                                           "extra_write_roots") or (),
+                                       config_args=config_argv)
             elif hardened:
                 plan = plan_reviewer(
                     argv=full_argv, workspace=workdir, base=os.environ,

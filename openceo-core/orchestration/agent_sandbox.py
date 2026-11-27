@@ -983,13 +983,15 @@ def _empty_json(empty: Path) -> Path:
 def _host_secret_ops(
     workdir: Path, home: Path, empty: Path,
     read_roots: Sequence[str | Path], write_roots: Sequence[str | Path],
+    config_args: Sequence[str],
 ) -> list[list[str]]:
     """Hide what a host-mode builder must not read (TASK-2026-00985).
 
     Its code root goes behind a tmpfs with only the workspace (plus a
-    linked worktree's git dir) and the declared roots rebound; service
-    env files and ``.runtime`` dirs inside them read empty, like the
-    fence; the home credential stores go empty.
+    linked worktree's git dir), the declared roots and, read-only, the
+    repos its orchestrator-built argv points into (``--output-schema``,
+    role cards) rebound; service env files and ``.runtime`` dirs inside
+    them read empty, like the fence; the home credential stores go empty.
     """
     ops: list[list[str]] = []
     work_resolved = workdir.resolve()
@@ -998,6 +1000,7 @@ def _host_secret_ops(
     extras += [(_checked_extra_root(raw, home, "write"), True)
                for raw in write_roots]
     extras.sort(key=lambda item: len(item[0].parts))
+    config_roots: list[Path] = []
     code_root = _host_code_root(workdir, home)
     if code_root is not None and code_root.is_dir():
         ops.append(["--tmpfs", str(code_root)])
@@ -1005,10 +1008,14 @@ def _host_secret_ops(
         common = _git_common_dir(workdir)
         if common is not None and code_root in common.parents:
             ops.append(["--bind", str(common), str(common)])
+        for op in _config_path_roots(config_args, home, workdir):
+            if op[0] == "--ro-bind" and code_root in Path(op[1]).parents:
+                ops.append(op)
+                config_roots.append(Path(op[1]))
     for path, writable in extras:
         ops.append(["--bind" if writable else "--ro-bind",
                     str(path), str(path)])
-    for root in _prune_contained([work_resolved,
+    for root in _prune_contained([work_resolved, *config_roots,
                                   *(path for path, _ in extras)]):
         for path, is_dir in _iter_nested_secrets(root):
             ops.append(["--tmpfs", str(path)] if is_dir
@@ -1038,13 +1045,15 @@ def plan_host_agent(
     extra_ops: Sequence[Sequence[str]] = (),
     read_roots: Sequence[str | Path] = (),
     write_roots: Sequence[str | Path] = (),
+    config_args: Sequence[str] | None = None,
 ) -> IsolationPlan:
     """Host-confined run for ``dev.isolation: host`` builders.
 
     The builder uses the host toolchain, package caches and its real home
     (TASK-2026-00483) without seeing what it must not touch
     (TASK-2026-00985): its own PID namespace and /proc, no other checkout
-    (only its workspace and the declared roots stay under its code root), no
+    (only its workspace, the declared roots and the repos its
+    ``config_args`` point into stay under its code root), no
     service env files, credential stores or agent sockets, and Docker
     through the agents' rootless daemon (``DOCKER_HOST``) instead of the
     production socket. Role overlays shadow the global engine config,
@@ -1077,8 +1086,10 @@ def plan_host_agent(
     empty = scratch / "empty"
     command = ["bwrap", "--die-with-parent", "--new-session",
                "--unshare-pid", "--dev-bind", "/", "/", "--proc", "/proc"]
+    config = (list(config_args) if config_args is not None
+              else [str(argv[0])] if argv else [])
     for op in _host_secret_ops(workdir, host_home, empty, read_roots,
-                               write_roots):
+                               write_roots, config):
         command.extend(op)
     for op in _host_runtime_masks(empty, os.getuid()):
         command.extend(op)
