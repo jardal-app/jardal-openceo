@@ -486,7 +486,11 @@ class ProcessExecutor:
                 plan = plan_host_agent(argv=full_argv, workspace=workdir,
                                        base=os.environ, overlay=overlay,
                                        home_file_overlays=file_overlays,
-                                       extra_ops=trace_ops)
+                                       extra_ops=trace_ops,
+                                       read_roots=spec.get(
+                                           "extra_read_roots") or (),
+                                       write_roots=spec.get(
+                                           "extra_write_roots") or ())
             elif hardened:
                 plan = plan_reviewer(
                     argv=full_argv, workspace=workdir, base=os.environ,

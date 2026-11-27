@@ -24,23 +24,12 @@ from agents.dev.session import (  # noqa: E402
     DevSessionManager,
 )
 
-MONGO_URL = "mongodb://localhost:27017"
+from mongo_support import MONGO_URL, mongo_available  # noqa: E402
+
 TEST_DB = "openceo_test_repo_lock"
 
 
-def _mongo_available() -> bool:
-    try:
-        from pymongo import MongoClient
-
-        client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=400)
-        client.admin.command("ping")
-        client.close()
-        return True
-    except Exception:
-        return False
-
-
-@unittest.skipUnless(_mongo_available(), "MongoDB not available")
+@unittest.skipUnless(mongo_available(TEST_DB), "MongoDB not available")
 class RepoLockTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         settings = Settings(_env_file=None, MONGODB_URL=MONGO_URL, MONGODB_DATABASE=TEST_DB)

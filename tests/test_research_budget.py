@@ -29,23 +29,10 @@ from research.money import (  # noqa: E402
     parse_optional_micro,
 )
 
-MONGO_URL = "mongodb://localhost:27017"
+from mongo_support import MONGO_URL, mongo_available  # noqa: E402
+
 TEST_DB = "openceo_test_research_budget"
-
-
-def _mongo_available() -> bool:
-    try:
-        from pymongo import MongoClient
-
-        client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=400)
-        client.admin.command("ping")
-        client.close()
-        return True
-    except Exception:
-        return False
-
-
-MONGO_AVAILABLE = _mongo_available()
+MONGO_AVAILABLE = mongo_available(TEST_DB)
 
 
 class _ForbiddenAuthority:

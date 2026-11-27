@@ -16,8 +16,9 @@ opencode QA, live tmux panes) runs inside this fence:
   /tmp, the service ``.env``/``.runtime``).
 
 Builders of ``dev.isolation: host`` projects run host-confined instead
-(:func:`plan_host_agent`): the whole host visible, role overlays kept, no
-privilege gain.
+(:func:`plan_host_agent`): host toolchain, caches and home, role overlays
+kept, no privilege gain, and neither other checkouts, secrets, agent
+sockets nor the production Docker daemon (TASK-2026-00985).
 
 No backend, no run: :func:`plan_agent` raises :class:`IsolationUnavailable`
 when bwrap is missing instead of degrading silently.
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import shlex
 import shutil
 import subprocess
@@ -167,10 +169,11 @@ def project_isolation(dev_cfg: Mapping[str, Any] | None) -> str:
     """Execution fence for a project's builders: ``sandbox`` or ``host``.
 
     ``dev.isolation: host`` runs the builder host-confined
-    (:func:`plan_host_agent`: real home, toolchain, Docker and package
-    caches, with role overlays and no privilege gain). It is a deliberate
-    per-project choice for trusted repos on the host stack whose tests the
-    sandbox cannot run. Absent or malformed values keep the safe default.
+    (:func:`plan_host_agent`: real home, toolchain, package caches and the
+    agents' Docker daemon, with role overlays and no privilege gain). It
+    is a deliberate per-project choice for trusted repos on the host stack
+    whose tests the sandbox cannot run. Absent or malformed values keep
+    the safe default.
     """
     raw = str((dev_cfg or {}).get("isolation") or "sandbox").strip().lower()
     return raw if raw in ("sandbox", "host") else "sandbox"
@@ -891,6 +894,138 @@ def _home_overlay_ops(
 #: Caller ops a host-confined run accepts (per-run trace dirs).
 _HOST_EXTRA_OPS = frozenset({"--bind", "--ro-bind"})
 
+#: Rootless daemon for host-mode builders (TASK-2026-00985): a user of its
+#: own, so containers reach neither production nor the Owner's home.
+AGENT_DOCKER_USER = "openceo-docker"
+#: Production daemon socket (``/var/run`` links to ``/run``).
+_HOST_DOCKER_SOCKET = Path("/run/docker.sock")
+#: Owner credential stores no builder needs: dirs become an empty tmpfs and
+#: files read empty. Only existing paths are masked: on the shared root,
+#: bwrap would create a missing target on the real filesystem.
+_HOST_SECRET_HOME_DIRS = (
+    ".ssh", ".gnupg", ".aws", ".azure", ".kube", ".config/gcloud",
+    ".config/gh", ".local/share/keyrings", ".password-store", ".mongodb",
+    ".codex/worktrees",
+)
+_HOST_SECRET_HOME_FILES = (
+    ".git-credentials", ".netrc", ".pgpass", ".pypirc", ".vault-token",
+    ".Xauthority", ".docker/config.json", ".bash_history", ".zsh_history",
+    ".python_history", ".psql_history", ".mysql_history", ".dbshell",
+)
+
+
+def agent_docker_socket() -> Path | None:
+    """Socket of the agents' rootless Docker daemon, ``None`` if absent."""
+    try:
+        uid = pwd.getpwnam(AGENT_DOCKER_USER).pw_uid
+    except KeyError:
+        return None
+    socket_path = Path(f"/run/user/{uid}/docker.sock")
+    return socket_path if socket_path.is_socket() else None
+
+
+def _host_code_root(workdir: Path, home: Path) -> Path | None:
+    """Top-level home folder holding the checkout (``~/development``).
+
+    The other checkouts, the vault and their secrets sit beside the
+    builder's repo there. ``None`` for a workspace outside the home,
+    directly in it or under a dotdir (motor and toolchain state).
+    """
+    try:
+        resolved_home = home.resolve()
+        relative = workdir.resolve().relative_to(resolved_home)
+    except (OSError, ValueError):
+        return None
+    if len(relative.parts) < 2 or relative.parts[0].startswith("."):
+        return None
+    return resolved_home / relative.parts[0]
+
+
+def _host_runtime_masks(
+    empty: Path, uid: int, *, docker_socket: Path = _HOST_DOCKER_SOCKET,
+    run_user: Path = Path("/run/user"), tmp: Path = Path("/tmp"),
+) -> list[list[str]]:
+    """Sockets that would hand the run root or a process outside it.
+
+    The production Docker socket reads as an empty file; the user runtime
+    dir (session bus behind ``systemd-run --user``, keyring, gpg agent,
+    VS Code IPC), the tmux server dir and ssh-agent dirs become empty.
+    """
+    ops: list[list[str]] = []
+    if docker_socket.exists():
+        ops.append(["--ro-bind", str(empty), str(docker_socket)])
+    runtime = run_user / str(uid)
+    if runtime.is_dir():
+        ops.append(["--perms", "0700", "--tmpfs", str(runtime)])
+    hidden = [tmp / f"tmux-{uid}"]
+    try:
+        hidden.extend(sorted(tmp.glob("ssh-*")))
+    except OSError:
+        pass
+    for path in hidden:
+        try:
+            if path.is_dir() and not path.is_symlink() \
+                    and path.stat().st_uid == uid:
+                ops.append(["--tmpfs", str(path)])
+        except OSError:
+            continue
+    return ops
+
+
+def _empty_json(empty: Path) -> Path:
+    """``{}`` beside the scratch ``empty`` file, for masked JSON configs."""
+    target = empty.with_name("empty.json")
+    target.write_text("{}\n", encoding="utf-8")
+    os.chmod(target, 0o600)
+    return target
+
+
+def _host_secret_ops(
+    workdir: Path, home: Path, empty: Path,
+    read_roots: Sequence[str | Path], write_roots: Sequence[str | Path],
+) -> list[list[str]]:
+    """Hide what a host-mode builder must not read (TASK-2026-00985).
+
+    Its code root goes behind a tmpfs with only the workspace (plus a
+    linked worktree's git dir) and the declared roots rebound; service
+    env files and ``.runtime`` dirs inside them read empty, like the
+    fence; the home credential stores go empty.
+    """
+    ops: list[list[str]] = []
+    work_resolved = workdir.resolve()
+    extras = [(_checked_extra_root(raw, home, "read"), False)
+              for raw in read_roots]
+    extras += [(_checked_extra_root(raw, home, "write"), True)
+               for raw in write_roots]
+    extras.sort(key=lambda item: len(item[0].parts))
+    code_root = _host_code_root(workdir, home)
+    if code_root is not None and code_root.is_dir():
+        ops.append(["--tmpfs", str(code_root)])
+        ops.append(["--bind", str(work_resolved), str(work_resolved)])
+        common = _git_common_dir(workdir)
+        if common is not None and code_root in common.parents:
+            ops.append(["--bind", str(common), str(common)])
+    for path, writable in extras:
+        ops.append(["--bind" if writable else "--ro-bind",
+                    str(path), str(path)])
+    for root in _prune_contained([work_resolved,
+                                  *(path for path, _ in extras)]):
+        for path, is_dir in _iter_nested_secrets(root):
+            ops.append(["--tmpfs", str(path)] if is_dir
+                       else ["--ro-bind", str(empty), str(path)])
+    for relpath in _HOST_SECRET_HOME_DIRS:
+        target = home / relpath
+        if target.is_dir():
+            ops.append(["--tmpfs", str(target)])
+    empty_json = _empty_json(empty)
+    for relpath in _HOST_SECRET_HOME_FILES:
+        target = home / relpath
+        if target.is_file():
+            # Readers such as testcontainers parse ~/.docker/config.json.
+            blank = empty_json if target.suffix == ".json" else empty
+            ops.append(["--ro-bind", str(blank), str(target)])
+    return ops
+
 
 def plan_host_agent(
     *,
@@ -901,17 +1036,20 @@ def plan_host_agent(
     home: Path | None = None,
     home_file_overlays: Mapping[str, bytes | str] | None = None,
     extra_ops: Sequence[Sequence[str]] = (),
+    read_roots: Sequence[str | Path] = (),
+    write_roots: Sequence[str | Path] = (),
 ) -> IsolationPlan:
     """Host-confined run for ``dev.isolation: host`` builders.
 
-    The builder sees the whole host like a host process (toolchain,
-    Docker socket, package caches, the real home), yet keeps what the
-    fence guaranteed (TASK-2026-00483): role overlays shadow the global
-    engine config (badge-scoped MCP, skills), per-run trace binds apply,
-    the run dies with its parent, and no privilege can be gained. bwrap's
-    user namespace sets no_new_privs and maps root-owned files to the
-    overflow uid, so sudo, apt and setuid helpers refuse: nothing lands
-    on the system outside the user's own caches. Raises
+    The builder uses the host toolchain, package caches and its real home
+    (TASK-2026-00483) without seeing what it must not touch
+    (TASK-2026-00985): its own PID namespace and /proc, no other checkout
+    (only its workspace and the declared roots stay under its code root), no
+    service env files, credential stores or agent sockets, and Docker
+    through the agents' rootless daemon (``DOCKER_HOST``) instead of the
+    production socket. Role overlays shadow the global engine config,
+    per-run trace binds apply, the run dies with its parent and bwrap's
+    no_new_privs keeps sudo and setuid helpers inert. Raises
     :class:`IsolationUnavailable` without bwrap, like :func:`plan_agent`.
     """
     if not BubblewrapBackend().available:
@@ -922,8 +1060,6 @@ def plan_host_agent(
         raise ValueError(f"agent workspace is not a dir: {workdir}")
     host_home = Path(home) if home is not None else Path(
         os.path.expanduser("~"))
-    command = ["bwrap", "--die-with-parent", "--new-session",
-               "--dev-bind", "/", "/"]
     if home_file_overlays:
         for key in home_file_overlays:
             # The root is shared: bwrap would create a missing bind
@@ -931,30 +1067,50 @@ def plan_host_agent(
             if not (host_home / _overlay_relpath(key)).exists():
                 raise ValueError(
                     f"overlay target missing on the host: {key!r}")
-        for op in _home_overlay_ops(ensure_sandbox_scratch(workdir),
-                                    host_home, home_file_overlays):
-            command.extend(op)
+    caller_ops: list[list[str]] = []
     for op in extra_ops:
         parts = [str(token) for token in op]
         if not parts or parts[0] not in _HOST_EXTRA_OPS:
             raise ValueError(f"unsupported host-mode op: {parts[:1]!r}")
-        command.extend(parts)
+        caller_ops.append(parts)
+    scratch = ensure_sandbox_scratch(workdir)
+    empty = scratch / "empty"
+    command = ["bwrap", "--die-with-parent", "--new-session",
+               "--unshare-pid", "--dev-bind", "/", "/", "--proc", "/proc"]
+    for op in _host_secret_ops(workdir, host_home, empty, read_roots,
+                               write_roots):
+        command.extend(op)
+    for op in _host_runtime_masks(empty, os.getuid()):
+        command.extend(op)
+    if home_file_overlays:
+        for op in _home_overlay_ops(scratch, host_home, home_file_overlays):
+            command.extend(op)
+    for op in caller_ops:
+        command.extend(op)
     command.extend(["--chdir", str(workdir), "--",
                     *[str(token) for token in argv]])
+    env = sandbox_env(base, overlay)
+    notes = [
+        "Host toolchain, caches and home are visible; other checkouts, "
+        "service env files, credential stores and agent sockets are not.",
+        "no_new_privs in a user namespace: sudo, apt and setuid helpers "
+        "cannot gain privileges.",
+    ]
+    docker_socket = agent_docker_socket()
+    if docker_socket is not None:
+        env["DOCKER_HOST"] = f"unix://{docker_socket}"
+    else:
+        env.pop("DOCKER_HOST", None)
+        notes.append("No agent Docker daemon: Docker is unavailable.")
     return IsolationPlan(
         backend="bwrap-host",
         argv=command,
-        env=sandbox_env(base, overlay),
+        env=env,
         cwd=str(workdir),
         network="unrestricted",
         filesystem_isolated=False,
         egress_restricted=False,
-        notes=[
-            "Host filesystem, toolchain and Docker are visible; role "
-            "overlays and trace dirs bind per run.",
-            "no_new_privs in a user namespace: sudo, apt and setuid "
-            "helpers cannot gain privileges.",
-        ],
+        notes=notes,
     )
 
 

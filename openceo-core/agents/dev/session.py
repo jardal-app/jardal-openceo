@@ -3753,7 +3753,8 @@ class DevSessionManager:
                     argv=[str(token) for token in command],
                     workspace=cwd or os.getcwd(),
                     base=os.environ, overlay=env,
-                    home_file_overlays=home_file_overlays)
+                    home_file_overlays=home_file_overlays,
+                    read_roots=extra_read_roots)
         except (IsolationUnavailable, ValueError, OSError) as exc:
             return ProcessRunResult(
                 False, "", f"sandbox refused: {exc}", None)
