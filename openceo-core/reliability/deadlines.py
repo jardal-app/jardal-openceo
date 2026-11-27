@@ -100,7 +100,17 @@ def attempt_deadline_for(
     timeout_seconds: int | float,
     cfg: dict[str, Any] | None = None,
 ) -> datetime:
-    """Attempt deadline: start + timeout + max(grace_min, ratio * timeout)."""
+    """Attempt deadline: start + timeout + max(grace_min, ratio * timeout).
+
+    Invariant (ticket #1034): «el plazo cubre todo lo que el intento
+    puede durar legítimamente» — the ``timeout_seconds`` passed here
+    must cover the whole attempt the deadline watches, not a single
+    phase or builder turn. Tier S passes the sum of its phase timeouts;
+    simple tiers A/B/C pass the total session budget (builder turns +
+    review + gates/oracle + merge slack). Arming a multi-phase attempt
+    with one turn's timeout fires ``deadline_missed`` on healthy
+    sessions that legitimately outlive that turn.
+    """
     block = deadlines_config(cfg)
     try:
         timeout = max(0.0, float(timeout_seconds))
@@ -198,6 +208,50 @@ async def mark_attempt_start(
         return deadline
     except Exception:
         logger.warning("deadline mark start failed (fail-open)", exc_info=True)
+        return None
+
+
+async def extend_attempt_deadline(
+    patch_task: Callable[..., Any] | None,
+    *,
+    task_id: str,
+    timeout_seconds: int | float,
+    started_at: datetime | None = None,
+    cfg: dict[str, Any] | None = None,
+    notify: Callable[[], Any] | None = None,
+) -> datetime | None:
+    """Rearm attempt_deadline_at from a phase boundary. Fail-open, never raises.
+
+    Same math as :func:`attempt_deadline_for` (timeout + grace) measured
+    from ``started_at`` (now when omitted), patching only
+    ``attempt_deadline_at`` so the live ``attempt_id`` is untouched and
+    callers need no attempt tracking. Phase-boundary rearming is the
+    equivalent alternative to arming the total session budget up front
+    (ticket #1034): either way the invariant holds — the deadline
+    covers everything the attempt may legitimately last.
+
+    ``notify`` runs after a successful write so the watch re-arms its
+    timer, like in :func:`mark_attempt_start`.
+    """
+    try:
+        if patch_task is None or not callable(patch_task):
+            return None
+        clean_id = str(task_id or "").strip()
+        if not clean_id:
+            return None
+        deadline = attempt_deadline_for(started_at, timeout_seconds, cfg)
+        await _maybe_await(patch_task(clean_id, {
+            ATTEMPT_DEADLINE_FIELD: deadline,
+        }))
+        if notify is not None:
+            try:
+                await _maybe_await(notify())
+            except Exception:
+                logger.warning("deadline notify failed (fail-open)",
+                               exc_info=True)
+        return deadline
+    except Exception:
+        logger.warning("deadline extend failed (fail-open)", exc_info=True)
         return None
 
 

@@ -28,6 +28,7 @@ from .routing import (ROUTING_MISSING_REASON, TIER_C_CHAIN, RoutingDecision,
                       resolve_coding_tool, select_tier_c_link)
 from .production_deploy import normalize_deploy, run_production_step
 from .tier_oracle import (
+    DEFAULT_ORACLE_TIMEOUT_MINUTES,
     demoted_ui_refs,
     freeze_oracle,
     oracle_run_plan,
@@ -258,6 +259,101 @@ SIMPLE_REVIEW_MAX_NO_QUORUM_WAITS = 3
 
 #: Builder fix turns before unaddressed findings park for the owner.
 SIMPLE_REVIEW_MAX_FIX_TURNS = 2
+
+#: Squash + merge + git bookkeeping slack in the attempt budget (#1034).
+SIMPLE_MERGE_SLACK_SECONDS = 600
+
+#: Builder/follow-up turn timeout: the live `_run_process` budget (#1034).
+#: Single source for the turns and the attempt budget, so the two units
+#: cannot diverge.
+SIMPLE_BUILDER_TURN_TIMEOUT_SECONDS = 1800
+
+
+def simple_attempt_timeout_s(
+    dev_turn_seconds: Any,
+    project_config: Mapping[str, Any] | None,
+) -> int:
+    """Total A/B/C session budget for the attempt deadline (#1034).
+
+    Tier S pattern (sum of phase budgets, not one turn): the attempt
+    watched by ``attempt_deadline_at`` covers the whole
+    :meth:`DevSessionManager._run_simple_tool` session — build turn,
+    one blocked-continuation turn, review-fix turns, gate-fix turns
+    (two gate loops × ``gate_retries``), one provider-retry slack, one
+    review round (``SIMPLE_REVIEW_COUNT`` × ``reviewer_timeout_minutes``),
+    gates + oracle execution (two loops, nominal one run each) and merge
+    slack. Fail-open: unreadable config falls back to defaults and the
+    result never drops below one builder turn.
+    """
+    try:
+        dev_turn = int(dev_turn_seconds
+                       or SIMPLE_BUILDER_TURN_TIMEOUT_SECONDS)
+    except (TypeError, ValueError):
+        dev_turn = SIMPLE_BUILDER_TURN_TIMEOUT_SECONDS
+    if dev_turn <= 0:
+        dev_turn = SIMPLE_BUILDER_TURN_TIMEOUT_SECONDS
+    try:
+        provider_slack = int(sum(PROVIDER_RETRY_DELAYS))
+    except (TypeError, ValueError):
+        provider_slack = 0
+    if provider_slack < 0:
+        provider_slack = 0
+    dev_cfg: Mapping[str, Any] = {}
+    review_cfg: Mapping[str, Any] = {}
+    budgets: Mapping[str, Any] = {}
+    if isinstance(project_config, Mapping):
+        raw_dev = project_config.get("dev")
+        if isinstance(raw_dev, Mapping):
+            dev_cfg = raw_dev
+            raw_budgets = raw_dev.get("tier_s")
+            if isinstance(raw_budgets, Mapping):
+                inner = raw_budgets.get("budgets")
+                if isinstance(inner, Mapping):
+                    budgets = inner
+        raw_review = project_config.get("review")
+        if isinstance(raw_review, Mapping):
+            inner_review = raw_review.get("review")
+            if isinstance(inner_review, Mapping):
+                review_cfg = inner_review
+    try:
+        gate_retries = int(budgets.get("gate_retries", 2) or 0)
+    except (TypeError, ValueError):
+        gate_retries = 2
+    if gate_retries < 0:
+        gate_retries = 0
+    try:
+        reviewer_min = int(review_cfg.get("reviewer_timeout_minutes", 15)
+                           or 15)
+    except (TypeError, ValueError):
+        reviewer_min = 15
+    if reviewer_min <= 0:
+        reviewer_min = 15
+    try:
+        specs = load_gates(dev_cfg)
+        gates_sum = sum(int(spec.timeout_minutes) * 60 for spec in specs)
+    except (TypeError, ValueError):
+        gates_sum = 0
+    raw_oracle = dev_cfg.get("oracle_timeout_minutes")
+    if (isinstance(raw_oracle, int) and not isinstance(raw_oracle, bool)
+            and raw_oracle > 0):
+        oracle_min = raw_oracle
+    else:
+        try:
+            oracle_min = int(DEFAULT_ORACLE_TIMEOUT_MINUTES)
+        except (TypeError, ValueError):
+            oracle_min = 10
+        if oracle_min <= 0:
+            oracle_min = 10
+    # The branch is not opened yet at mark time, so the frozen oracle is
+    # unknown: always budget the oracle timeout as a conservative upper
+    # bound. Gates run twice (initial + final), one nominal run each.
+    gates_exec = (max(0, gates_sum) + oracle_min * 60) * 2
+    builder_turns = 2 + SIMPLE_REVIEW_MAX_FIX_TURNS  # build + continuation
+    gate_fix_turns = 2 * gate_retries  # two gate loops
+    total = ((builder_turns + gate_fix_turns) * dev_turn + provider_slack
+             + SIMPLE_REVIEW_COUNT * reviewer_min * 60 + gates_exec
+             + SIMPLE_MERGE_SLACK_SECONDS)
+    return max(dev_turn, int(total))
 
 #: Effective builder family per simple tier/link (self-review rule).
 #: Tier C links resolve through the recorded executor link; unknown
@@ -495,7 +591,8 @@ class DevSessionManager:
                     params=stamp_effective_review(
                         task.get("params"), review_decision),
                 )
-        deadline_armed = await self._deadline_mark_start(task, decision.tool)
+        deadline_armed = await self._deadline_mark_start(
+            task, decision.tool, project_config)
         try:
             if decision.tool == CodingTool.TIER_S:
                 output = await self._run_tier_s(task, project_config, qa_cfg)
@@ -1305,13 +1402,18 @@ class DevSessionManager:
 
     async def _deadline_mark_start(
         self, task: dict[str, Any], tool: Any,
+        project_config: Mapping[str, Any] | None = None,
     ) -> bool:
         """Write attempt_id + attempt_deadline_at (TASK-2026-00383, §7).
 
-        Tier S owns its own write inside the cycle; this covers A/B/C.
-        Fail-open: without a task service patcher nothing is written.
-        After a successful write the dispatcher is woken so its next
-        cycle re-arms the watch to the new deadline (registration, §7).
+        Tier S owns its own write inside the cycle; this covers A/B/C
+        with the total session budget (ticket #1034, Tier S sum
+        pattern): the attempt spans the whole ``_run_simple_tool``
+        session, so one builder turn's timeout would fire on healthy
+        build + review + fix sessions. Fail-open: without a task
+        service patcher nothing is written. After a successful write
+        the dispatcher is woken so its next cycle re-arms the watch to
+        the new deadline (registration, §7).
         """
         try:
             if tool is not None and tool is CodingTool.TIER_S:
@@ -1327,8 +1429,17 @@ class DevSessionManager:
             params = task.get("params")
             attempt_id = module.next_attempt_id(
                 task_id, params if isinstance(params, dict) else {})
-            timeout_s = getattr(
-                self._settings, "DEV_TURN_TIMEOUT_SECONDS", 1800) or 1800
+            dev_turn = SIMPLE_BUILDER_TURN_TIMEOUT_SECONDS
+            try:
+                timeout_s = simple_attempt_timeout_s(dev_turn, project_config)
+            except Exception:
+                logger.warning("simple attempt budget failed, using one turn",
+                               exc_info=True)
+                try:
+                    timeout_s = int(dev_turn
+                                    or SIMPLE_BUILDER_TURN_TIMEOUT_SECONDS)
+                except (TypeError, ValueError):
+                    timeout_s = SIMPLE_BUILDER_TURN_TIMEOUT_SECONDS
             wake = getattr(self._task_service, "wake_dispatcher", None)
             wrote = await deadline_mod.mark_attempt_start(
                 patch, task_id=task_id, attempt_id=attempt_id,
@@ -2468,7 +2579,8 @@ class DevSessionManager:
         run_env = {**(executor.env or {}), **extra_env} or None
         try:
             ok, output, err = await self._run_process(
-                command, stdin_payload=stdin_payload, timeout=1800,
+                command, stdin_payload=stdin_payload,
+                timeout=SIMPLE_BUILDER_TURN_TIMEOUT_SECONDS,
                 cwd=str(repo), env=run_env,
                 config_argv=list(executor.argv),
                 home_file_overlays=overlays,
@@ -3228,7 +3340,8 @@ class DevSessionManager:
         run_env = {**(executor.env or {}), **extra_env} or None
         try:
             ok, output, err = await self._run_process(
-                command, stdin_payload=stdin_payload, timeout=1800,
+                command, stdin_payload=stdin_payload,
+                timeout=SIMPLE_BUILDER_TURN_TIMEOUT_SECONDS,
                 cwd=executor.cwd, env=run_env,
                 sandbox=executor.sandbox,
                 config_argv=list(executor.argv),
