@@ -85,6 +85,22 @@ class TestHostModeView:
         assert (layout.repo / "out.txt").read_text().strip() == "built"
         assert layout.sibling.read_text().strip() == "client data"
 
+    def test_repos_named_by_the_argv_stay_readable_without_secrets(
+            self, layout: SimpleNamespace) -> None:
+        tool = layout.repo.parent / "orchestrator"
+        schema = _write(tool / "schemas" / "result.json", '{"type": "object"}')
+        _write(tool / "core" / ".env", "SERVICE_KEY=1")
+        plan = plan_host_agent(
+            argv=["/bin/sh", "-c",
+                  f"cat {schema}; wc -c < {tool}/core/.env; ls {layout.repo.parent};"
+                  f" touch {tool}/w 2>/dev/null && echo writable || echo ro"],
+            workspace=layout.repo, base=BASE_ENV, home=layout.home,
+            config_args=["/bin/sh", "--output-schema", str(schema)])
+        result = _run(plan)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ['{"type":', '"object"}', "0",
+                                         "orchestrator", "repo", "ro"]
+
     def test_env_files_runtime_and_home_credentials_read_empty(
             self, layout: SimpleNamespace) -> None:
         home, repo = layout.home, layout.repo
@@ -186,9 +202,12 @@ class TestHostModeWiring:
                    return_value=plan) as planned:
             result = asyncio.run(_manager()._run_process_detailed(
                 ["/bin/echo"], cwd=str(tmp_path), sandbox=False,
+                config_argv=["musej", "--output-schema", "/s.json"],
                 extra_read_roots=["/vault/projects/p"]))
         assert result.ok is True
         assert planned.call_args.kwargs["read_roots"] == ["/vault/projects/p"]
+        assert planned.call_args.kwargs["config_args"] == [
+            "musej", "--output-schema", "/s.json"]
 
     def test_live_builder_forwards_its_declared_roots(
             self, tmp_path: Path) -> None:
@@ -204,3 +223,4 @@ class TestHostModeWiring:
         assert result.returncode == 0
         assert planned.call_args.kwargs["read_roots"] == ["/vault/p"]
         assert planned.call_args.kwargs["write_roots"] == ()
+        assert planned.call_args.kwargs["config_args"] == ["/bin/echo"]
